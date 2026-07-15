@@ -1,0 +1,126 @@
+name: python-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / python-${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.11.3
+
+      - name: Install dependencies
+        run: uv sync --project sdk/python --frozen --extra dev
+
+      - name: Test
+        run: uv run --project sdk/python --frozen pytest
+
+      - name: Lint
+        run: uv run --project sdk/python --frozen ruff check sdk/python
+
+      - name: Check formatting
+        run: uv run --project sdk/python --frozen ruff format --check sdk/python
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22"
+
+      - name: Build package
+        run: |
+          python -m pip install build twine
+          python -m build --wheel --sdist --outdir dist sdk/python
+          python -m twine check --strict dist/*
+
+      - name: Verify wheel
+        run: |
+          python -m venv /tmp/codex-security-wheel
+          /tmp/codex-security-wheel/bin/pip install dist/*.whl
+          /tmp/codex-security-wheel/bin/codex-security --version
+          /tmp/codex-security-wheel/bin/codex-security --help >/dev/null
+          /tmp/codex-security-wheel/bin/python - <<'PY'
+          import json
+          import pathlib
+          import openai_codex_security
+
+          plugin = pathlib.Path(openai_codex_security.__file__).parent / "_bundled_plugin"
+          source_plugin = pathlib.Path(
+              "sdk/python/src/openai_codex_security/_bundled_plugin"
+          )
+          expected_plugin_files = {
+              path.relative_to(source_plugin).as_posix()
+              for path in source_plugin.rglob("*")
+              if path.is_file()
+          }
+          installed_plugin_files = {
+              path.relative_to(plugin).as_posix()
+              for path in plugin.rglob("*")
+              if path.is_file()
+          }
+          assert installed_plugin_files == expected_plugin_files, (
+              f"installed plugin mismatch: missing={sorted(expected_plugin_files - installed_plugin_files)} "
+              f"extra={sorted(installed_plugin_files - expected_plugin_files)}"
+          )
+          manifest = plugin.joinpath(".codex-plugin/plugin.json")
+          metadata = json.loads(manifest.read_text())
+          assert metadata["version"]
+          assert metadata["license"] == "Apache-2.0"
+          for relative in (
+              "scripts/deep_scan_config.py",
+              "scripts/deep_scan_workbench.py",
+              "scripts/validate_scan_contract.py",
+          ):
+              assert plugin.joinpath(relative).is_file(), relative
+          PY

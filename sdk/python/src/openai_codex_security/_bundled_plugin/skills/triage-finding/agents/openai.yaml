@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triage Finding"
+  short_description: "Import security or vulnerability tickets from Jira/Linear, scanners, advisories, or GitHub"
+  default_prompt: "Use $triage-finding to triage supplied or imported security findings against <repo/path>. For Jira, use Atlassian Rovo only as an intake connector to import Jira issues matching <JQL or project/search>; for Linear, use Linear only as an intake connector for supplied issue URLs/IDs or search results. Return one static-evidence verdict per finding: confirmed, not_actionable, or needs_review. Finding(s) or source: <paste SARIF, CVE/GHSA/advisory text, scanner ticket, Jira/Linear security or vulnerability tickets, bug bounty report, Codex Security artifact, or GitHub finding source here>."

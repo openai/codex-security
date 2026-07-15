@@ -1,0 +1,4 @@
+interface:
+  display_name: "Propose Security Hardening"
+  short_description: "Design evidence-backed security hardening options"
+  default_prompt: "Use $propose-security-hardening to develop and compare structural security hardening options from these disclosures, findings, or scan results."

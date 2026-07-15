@@ -1,0 +1,4 @@
+interface:
+  display_name: "Validation"
+  short_description: "Validate a security finding"
+  default_prompt: "Use $validation to determine whether a given security finding is valid."

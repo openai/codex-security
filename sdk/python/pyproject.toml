@@ -1,0 +1,97 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openai-codex-security"
+version = "0.0.0-dev"
+description = "Python SDK for Codex Security"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "OpenAI" }]
+keywords = ["codex", "security", "sdk", "appsec"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "jsonschema>=4.23",
+  "openai-codex==0.1.0b3",
+  "openai-codex-cli-bin==0.137.0a4",
+  "pydantic>=2.12",
+  "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.urls]
+Homepage = "https://developers.openai.com/codex/security"
+Documentation = "https://github.com/openai/codex-security/tree/main/sdk/python"
+Repository = "https://github.com/openai/codex-security"
+Issues = "https://github.com/openai/codex-security/issues"
+
+[project.scripts]
+codex-security = "openai_codex_security.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.15.8"]
+
+[tool.hatch.build]
+exclude = [
+  ".venv/**",
+  ".pytest_cache/**",
+  "dist/**",
+  "build/**",
+]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openai_codex_security"]
+include = ["src/openai_codex_security/py.typed"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/openai_codex_security/**",
+  "tests/**",
+  "LICENSE",
+  "README.md",
+  "hatch_build.py",
+  "pyproject.toml",
+  "scripts/stage_release.py",
+  "uv.lock",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+"uv.lock" = "uv.lock"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+required-version = ">=0.15.8"
+line-length = 100
+
+[tool.ruff.lint]
+exclude = ["src/openai_codex_security/_bundled_plugin/**"]
+select = ["E", "F", "I", "B", "C4"]
+ignore = ["E501"]
+preview = true
+extend-safe-fixes = ["ALL"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+detect-same-package = false
+known-first-party = ["openai_codex_security"]
+
+[tool.ruff.format]
+exclude = ["src/openai_codex_security/_bundled_plugin/**"]

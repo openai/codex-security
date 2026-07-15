@@ -1,0 +1,4 @@
+interface:
+  display_name: "Security Scan"
+  short_description: "Run repository or scoped-path security scan"
+  default_prompt: "Run a Codex Security scan on this repository or scoped path using subagents. Cover all in-scope files and complete the required scan phases."
