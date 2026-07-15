@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -84,7 +85,8 @@ def test_file_auth_is_imported_with_private_permissions(tmp_path: Path) -> None:
     assert import_ambient_auth(ambient, isolated) is True
     auth = isolated / "auth.json"
     assert auth.read_text(encoding="utf-8") == '{"token":"test"}\n'
-    assert auth.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert auth.stat().st_mode & 0o777 == 0o600
 
 
 def test_bootstrap_uses_supported_plugin_commands(
@@ -104,7 +106,7 @@ def test_bootstrap_uses_supported_plugin_commands(
             with (home / "config.toml").open("a", encoding="utf-8") as config:
                 config.write(
                     '\n[marketplaces.codex-security-sdk]\nsource_type = "local"\n'
-                    f'source = "{home / "sdk-marketplace"}"\n'
+                    f"source = {json.dumps(str(home / 'sdk-marketplace'), ensure_ascii=False)}\n"
                 )
         elif args[:2] == ["plugin", "add"]:
             with (home / "config.toml").open("a", encoding="utf-8") as config:

@@ -87,7 +87,7 @@ jobs:
       - name: Verify wheel
         run: |
           python -m venv /tmp/codex-security-wheel
-          /tmp/codex-security-wheel/bin/pip install dist/*.whl
+          /tmp/codex-security-wheel/bin/pip install --no-compile dist/*.whl
           /tmp/codex-security-wheel/bin/codex-security --version
           /tmp/codex-security-wheel/bin/codex-security --help >/dev/null
           /tmp/codex-security-wheel/bin/python - <<'PY'

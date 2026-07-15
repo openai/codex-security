@@ -234,7 +234,7 @@ def test_cli_reports_progress_without_corrupting_json(
 
     assert main(["scan", ".", "--json"]) == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.out)["scanDir"] == "/tmp/scan"
+    assert json.loads(captured.out)["scanDir"] == str(result.scan_dir)
     assert events == ["turn", "run"]
     progress_lines = captured.err.splitlines()
     assert all(line.startswith("[") and "] " in line for line in progress_lines)
