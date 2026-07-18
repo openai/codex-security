@@ -62,6 +62,7 @@ if (args.join(" ") === "login --with-api-key") {
   console.error("Open \\u001b[32mhttps://127.auth.example.test/device\\u001b[0m");
   console.error("Enter this one-time code");
   console.error("\\u001b[36m8356-V2EGR\\u001b[0m");
+  process.exit(0);
 } else {
   console.error("unexpected args: " + args.join(" "));
   process.exitCode = 3;
