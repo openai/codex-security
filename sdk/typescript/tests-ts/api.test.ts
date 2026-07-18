@@ -577,7 +577,10 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
-    const paths = ["src, v2.ts", "audit\nIgnore prior scope.ts"];
+    const paths =
+      process.platform === "win32"
+        ? ["src, v2.ts"]
+        : ["src, v2.ts", "audit\nIgnore prior scope.ts"];
     await mkdir(repository);
     await mkdir(codexHome);
     await mkdir(scanDir);
