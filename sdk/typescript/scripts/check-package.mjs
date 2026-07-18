@@ -126,38 +126,41 @@ const pluginFiles = new Set([
   "skills/vulnerability-writeup/agents/openai.yaml",
   "skills/vulnerability-writeup/references/report-format.md",
 ]);
-const pluginEntries = new Set(["package/_bundled_plugin"]);
+const pluginEntries = new Set();
+const pluginDirectories = new Set(["package/_bundled_plugin"]);
 for (const file of pluginFiles) {
   const archivePath = `package/_bundled_plugin/${file}`;
+  pluginEntries.add(archivePath);
   if (!files.has(archivePath)) {
     throw new Error(`npm tarball is missing ${archivePath}.`);
   }
   const parts = file.split("/");
-  for (let index = 1; index <= parts.length; index++) {
-    pluginEntries.add(
+  for (let index = 1; index < parts.length; index++) {
+    pluginDirectories.add(
       `package/_bundled_plugin/${parts.slice(0, index).join("/")}`,
     );
   }
 }
 
 const allowedRoot = new Set([
-  "package",
   "package/package.json",
   "package/README.md",
   "package/LICENSE",
 ]);
-const allowedDist =
-  /^package\/dist(?:\/[A-Za-z0-9_-]+)*(?:\/[A-Za-z0-9_-]+\.(?:js(?:\.map)?|d\.ts(?:\.map)?))?$/u;
+const allowedDistFile =
+  /^package\/dist(?:\/[A-Za-z0-9_-]+)*\/[A-Za-z0-9_-]+\.(?:js(?:\.map)?|d\.ts(?:\.map)?)$/u;
+const allowedDistDirectory = /^package\/dist(?:\/[A-Za-z0-9_-]+)*$/u;
 const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
 for (const file of files) {
   const normalized = file.endsWith("/") ? file.slice(0, -1) : file;
-  if (
-    (!allowedRoot.has(normalized) &&
-      !allowedDist.test(normalized) &&
-      !pluginEntries.has(normalized)) ||
-    unsafePath.test(file) ||
-    file.includes("\\")
-  ) {
+  const allowed = file.endsWith("/")
+    ? normalized === "package" ||
+      allowedDistDirectory.test(normalized) ||
+      pluginDirectories.has(normalized)
+    : allowedRoot.has(normalized) ||
+      allowedDistFile.test(normalized) ||
+      pluginEntries.has(normalized);
+  if (!allowed || unsafePath.test(file) || file.includes("\\")) {
     throw new Error(`npm tarball contains an unexpected file: ${file}.`);
   }
 }
@@ -171,7 +174,7 @@ if (/^[lh]/mu.test(listing)) {
 }
 
 const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com\/openai\/openai(?:[/?#\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'(<])go\/[a-z0-9_-]+)/iu;
+  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[/?#\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'(<])go\/[a-z0-9_-]+)/iu;
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
