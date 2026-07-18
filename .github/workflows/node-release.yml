@@ -85,5 +85,17 @@ jobs:
         shell: bash
         run: pnpm run check:package ../../dist/*.tgz
 
+      - name: Smoke test package
+        shell: bash
+        run: |
+          set -euo pipefail
+          consumer="$(mktemp -d)"
+          trap 'rm -rf "$consumer"' EXIT
+          printf '%s\n' '{"name":"codex-security-smoke","private":true,"type":"module"}' > "$consumer/package.json"
+          npm install --prefix "$consumer" --include=optional --no-audit --no-fund dist/*.tgz
+          (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("@openai/codex-security"); if (typeof sdk.CodexSecurity !== "function") process.exit(1);')
+          "$consumer/node_modules/.bin/codex-security" --version
+          "$consumer/node_modules/.bin/codex-security" --help
+
       - name: Publish to npm
         run: npm publish dist/*.tgz --provenance --access public --tag beta
