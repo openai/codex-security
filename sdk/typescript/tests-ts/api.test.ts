@@ -1039,6 +1039,7 @@ if (args === "login --with-api-key") {
             version: "0.1.0",
           },
           environment: {
+            ...process.env,
             CODEX_HOME: codexHome,
             OPENAI_API_KEY: "ambient-key",
             CODEX_API_KEY: "secondary-ambient-key",
