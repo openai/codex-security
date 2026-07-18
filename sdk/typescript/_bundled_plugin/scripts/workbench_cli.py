@@ -135,6 +135,8 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan.add_argument("--scan-id", required=True)
     get_scan.add_argument("--occurrence-id")
 
+    subparsers.add_parser("list-scans")
+
     list_findings = subparsers.add_parser("list-findings")
     list_findings.add_argument("--scan-id", required=True)
     list_findings.add_argument("--offset", type=non_negative_int, default=0)

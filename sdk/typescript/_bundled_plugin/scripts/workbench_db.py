@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_progress as progress
 import workbench_remediation as remediation
+import workbench_scan_history as scan_history
 from filesystem_identity import serialize_filesystem_identity as serialize_filesystem_identity
 from filesystem_identity import stored_filesystem_identity_matches
 from finalize_scan_contract import (
@@ -960,52 +961,6 @@ def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     if row is None:
         raise SystemExit("Codex Security scan not found.")
     return row
-
-
-def list_workspace_scans(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    workspace = require_workspace(connection, args.workspace_id)
-    total = connection.execute(
-        "SELECT COUNT(*) FROM scans WHERE workspace_id = ?", (workspace["id"],)
-    ).fetchone()[0]
-    rows = connection.execute(
-        """
-        SELECT id, mode, status, phase, scope, target_revision,
-            seal_manifest_digest, started_at, completed_at, canceled_at,
-            updated_at, failure_message
-        FROM scans
-        WHERE workspace_id = ?
-        ORDER BY created_at DESC, id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (workspace["id"], args.limit, args.offset),
-    ).fetchall()
-    next_offset = args.offset + len(rows)
-    return {
-        "limit": args.limit,
-        "nextOffset": next_offset if next_offset < total else None,
-        "offset": args.offset,
-        "scans": [
-            {
-                "canceledAt": row["canceled_at"],
-                "completedAt": row["completed_at"],
-                "failureMessage": row["failure_message"],
-                "mode": row["mode"],
-                "phase": row["phase"],
-                "scanId": row["id"],
-                "scope": row["scope"],
-                "sealed": row["seal_manifest_digest"] is not None,
-                "startedAt": row["started_at"],
-                "status": "canceled" if row["canceled_at"] else row["status"],
-                "targetRevision": row["target_revision"],
-                "updatedAt": row["updated_at"],
-            }
-            for row in rows
-        ],
-        "total": total,
-        "workspaceId": workspace["id"],
-    }
 
 
 def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3582,7 +3537,9 @@ def main() -> None:
         elif args.command == "get-latest-workspace":
             result = latest_workspace(connection, args.thread_id)
         elif args.command == "list-workspace-scans":
-            result = list_workspace_scans(connection, args)
+            result = scan_history.list_workspace_scans(
+                connection, args, require_workspace=require_workspace
+            )
         elif args.command == "begin-diff-resolution":
             result = begin_diff_resolution(connection, args)
         elif args.command == "cancel-diff-resolution":
@@ -3613,6 +3570,8 @@ def main() -> None:
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "list-scans":
+            result = scan_history.list_scans(connection)
         elif args.command == "list-findings":
             result = list_findings(connection, args)
         elif args.command == "update-progress":

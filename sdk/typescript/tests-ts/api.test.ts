@@ -1040,14 +1040,13 @@ if (args === "login --with-api-key") {
           },
           environment: {
             CODEX_HOME: codexHome,
-            PATH: process.env["PATH"],
             OPENAI_API_KEY: "ambient-key",
             CODEX_API_KEY: "secondary-ambient-key",
           },
           credentialsAvailable: false,
         }),
         resolveCodexCommand: () => ({
-          command: process.platform === "win32" ? "node" : process.execPath,
+          command: process.execPath,
           prefixArgs: [fakeCodex],
         }),
         resolvePluginPython: async () => "/managed/python",

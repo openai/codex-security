@@ -69,10 +69,7 @@ if (args.join(" ") === "login --with-api-key") {
 }
 `,
   );
-  return {
-    command: process.platform === "win32" ? "node" : process.execPath,
-    prefixArgs: [script],
-  };
+  return { command: process.execPath, prefixArgs: [script] };
 }
 
 describe("Codex authentication process boundary", () => {
