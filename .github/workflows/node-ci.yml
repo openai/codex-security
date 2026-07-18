@@ -12,8 +12,6 @@ jobs:
   test:
     name: ${{ matrix.os }} / node-22
     runs-on: ${{ matrix.os }}
-    env:
-      TMPDIR: ${{ runner.temp }}
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +44,8 @@ jobs:
         run: pnpm --dir sdk/typescript run types
 
       - name: Test
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: pnpm --dir sdk/typescript run test
 
       - name: Check formatting
