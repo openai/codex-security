@@ -913,7 +913,7 @@ function targetInstruction(target: NormalizedTarget): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths")
-    return `Scan target paths: ${target.paths.join(", ")}`;
+    return `Scan target paths (JSON array): ${JSON.stringify(target.paths)}`;
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.baseRef} to ${target.headRef}.`;
   }
