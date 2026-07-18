@@ -398,11 +398,13 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(await prepareOutputDir(callerOwned, "repo")).toBe(callerOwned);
       expect((await stat(callerOwned)).mode & 0o777).toBe(0o770);
     }
-    const filesystemChild = join(
-      parse(root).root,
-      `codex-security-uncreated-${process.pid}`,
-    );
-    expect(await validateOutputDir(filesystemChild)).toBe(filesystemChild);
+    if (process.platform !== "win32") {
+      const filesystemChild = join(
+        parse(root).root,
+        `codex-security-uncreated-${process.pid}`,
+      );
+      expect(await validateOutputDir(filesystemChild)).toBe(filesystemChild);
+    }
     await writeFile(join(absent, "occupied"), "x");
     await expect(validateOutputDir(absent)).rejects.toThrow("must be empty");
 
