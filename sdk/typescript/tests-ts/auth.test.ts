@@ -131,6 +131,33 @@ describe("Codex authentication process boundary", () => {
     expect(succeeded).toBe(true);
   });
 
+  test.skipIf(process.platform === "win32")(
+    "drains inherited stderr before resolving interactive login",
+    async () => {
+      const handle = new CodexLoginHandle(
+        {
+          command: "/bin/sh",
+          prefixArgs: [
+            "-c",
+            "(sleep 0.05; printf '%s\\n' 'network timeout while authenticating' >&2) & exit 1",
+            "--",
+          ],
+        },
+        ["login"],
+        process.env,
+        () => {},
+      );
+      await expect(handle.waitForInstructions()).rejects.toThrow(
+        "network timeout while authenticating",
+      );
+      await expect(handle.wait()).resolves.toMatchObject({
+        success: false,
+        exitCode: 1,
+        stderr: expect.stringContaining("network timeout while authenticating"),
+      });
+    },
+  );
+
   test("does not report a canceled interactive login as successful", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-cancel-"));
     temporaryDirectories.push(root);

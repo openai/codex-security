@@ -30,9 +30,15 @@ for (const file of required) {
 const allowed =
   /^package(?:\/(?:package\.json|README\.md|LICENSE|dist(?:\/.*)?|_bundled_plugin(?:\/.*)?))?\/?$/u;
 const forbiddenPath =
-  /(?:^|\/)(?:\.internal|buildkite|mcp-app|private_release|evals|tests?)(?:\/|$)/u;
+  /(?:^|\/)(?:\.internal|buildkite|mcp-app|private_release|evals|tests?(?:-ts)?|__tests?__)(?:\/|$)/iu;
+const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
 for (const file of files) {
-  if (!allowed.test(file) || forbiddenPath.test(file)) {
+  if (
+    !allowed.test(file) ||
+    forbiddenPath.test(file) ||
+    unsafePath.test(file) ||
+    file.includes("\\")
+  ) {
     throw new Error(`npm tarball contains an unexpected file: ${file}.`);
   }
 }
@@ -43,10 +49,10 @@ const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
 const payloads = [gunzipSync(readFileSync(archive)).toString("utf8")];
-const compressedFiles = [...files].filter((file) => file.endsWith(".br"));
+const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
 const compressedParts = new Map();
 for (const file of files) {
-  const match = /^(.*\.br)\.part-([0-9]+)$/u.exec(file);
+  const match = /^(.*\.br)\.part-([0-9]+)$/iu.exec(file);
   if (match === null) continue;
   const [, name, part] = match;
   const parts = compressedParts.get(name) ?? [];
@@ -54,11 +60,17 @@ for (const file of files) {
   compressedParts.set(name, parts);
 }
 
+function brotliPayload(bytes, file) {
+  const result = brotliDecompressSync(bytes, { info: true });
+  if (result.engine.bytesWritten !== bytes.length) {
+    throw new Error(`npm tarball contains trailing Brotli data: ${file}.`);
+  }
+  return result.buffer.toString("utf8");
+}
+
 for (const file of compressedFiles) {
   payloads.push(
-    brotliDecompressSync(execFileSync("tar", ["-xOf", archive, file])).toString(
-      "utf8",
-    ),
+    brotliPayload(execFileSync("tar", ["-xOf", archive, file]), file),
   );
 }
 for (const parts of compressedParts.values()) {
@@ -66,7 +78,7 @@ for (const parts of compressedParts.values()) {
   const bytes = Buffer.concat(
     parts.map(({ file }) => execFileSync("tar", ["-xOf", archive, file])),
   );
-  payloads.push(brotliDecompressSync(bytes).toString("utf8"));
+  payloads.push(brotliPayload(bytes, parts[0].file));
 }
 
 for (const contents of payloads) {
