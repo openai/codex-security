@@ -2,7 +2,7 @@
 
 import { realpathSync, writeSync } from "node:fs";
 import { cwd } from "node:process";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
@@ -12,6 +12,24 @@ import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
+const MAX_CODEX_OVERRIDE_KEY_LENGTH = 1_024;
+const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
+const MAX_CODEX_OVERRIDE_DEPTH = 64;
+const ROOT_LONG_OPTIONS = ["--help", "--version"];
+const SCAN_LONG_OPTIONS = [
+  "--help",
+  "--path",
+  "--codex",
+  "--diff",
+  "--head",
+  "--base",
+  "--output-dir",
+  "--plugin-path",
+  "--python",
+  "--mode",
+  "--working-tree",
+  "--json",
+];
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 
@@ -130,13 +148,20 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") {
+  const rootOption =
+    argv[0] === undefined ? undefined : normalizeRootOption(argv[0]);
+  const [rootFlag, rootInline] = splitOption(rootOption ?? "");
+  if (
+    argv.length === 0 ||
+    (rootFlag.startsWith("-h") &&
+      !rootFlag.startsWith("-h-") &&
+      (rootFlag !== "-h" || rootInline === undefined)) ||
+    rootOption === "--help"
+  ) {
     output.write(`${rootHelp()}\n`);
     return 0;
   }
-  if (argv[0] === "--version") {
-    if (argv.length !== 1)
-      return usageError("unrecognized arguments", rootHelp(), errorOutput);
+  if (rootOption === "--version") {
     output.write(`${versionText()}\n`);
     return 0;
   }
@@ -145,13 +170,36 @@ export async function main(
   }
   const scanTokens = argv.slice(1);
   const optionTerminator = scanTokens.indexOf("--");
-  const helpIndex = scanTokens.findIndex(
-    (value) => value === "-h" || value === "--help",
-  );
+  const optionTokens =
+    optionTerminator < 0 ? scanTokens : scanTokens.slice(0, optionTerminator);
+  const helpIndex = optionTokens.findIndex((value) => {
+    const [option, inline] = splitOption(value);
+    const matches = SCAN_LONG_OPTIONS.filter((candidate) =>
+      candidate.startsWith(option),
+    );
+    return (
+      (option.startsWith("-h") &&
+        !option.startsWith("-h-") &&
+        (option !== "-h" || inline === undefined)) ||
+      (inline === undefined &&
+        (option === "--help" ||
+          (option.startsWith("--") &&
+            matches.length === 1 &&
+            matches[0] === "--help")))
+    );
+  });
   if (
     helpIndex >= 0 &&
     (optionTerminator < 0 || helpIndex < optionTerminator)
   ) {
+    try {
+      parseScanArguments(scanTokens.slice(0, helpIndex), ".", true, true);
+    } catch (error) {
+      if (error instanceof CliUsageError) {
+        return usageError(error.message, scanHelp(), errorOutput);
+      }
+      throw error;
+    }
     output.write(`${scanHelp()}\n`);
     return 0;
   }
@@ -250,7 +298,12 @@ async function runScan(
     failure = error;
   } finally {
     progress?.stopTimer();
-    await security?.close().catch(() => undefined);
+    await security?.close().catch((error: unknown) => {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
+    });
     removeSignalListeners();
   }
 
@@ -265,6 +318,11 @@ async function runScan(
     const message =
       failure instanceof Error ? failure.message : String(failure);
     errorOutput.write(`codex-security: ${message}\n`);
+    if (scanDir !== null) {
+      errorOutput.write(
+        `codex-security: Partial output was kept at ${scanDir}.\n`,
+      );
+    }
     return 1;
   }
   if (result === null) {
@@ -286,6 +344,8 @@ async function runScan(
 export function parseScanArguments(
   values: readonly string[],
   currentDirectory = cwd(),
+  ignoreUnrecognized = false,
+  allowEmptyRevisions = false,
 ): ParsedScanArguments {
   const parsed: ParsedScanArguments = {
     repository: currentDirectory,
@@ -297,14 +357,20 @@ export function parseScanArguments(
   };
   let repositorySeen = false;
   let optionsEnabled = true;
+  let optionAfterRepository = false;
   for (let index = 0; index < values.length; index += 1) {
     const token = values[index]!;
     if (optionsEnabled && token === "--") {
+      if (repositorySeen && optionAfterRepository) {
+        throw new CliUsageError("unrecognized argument: --");
+      }
       optionsEnabled = false;
       continue;
     }
-    if (optionsEnabled && token.startsWith("-")) {
-      const [option, inline] = splitOption(token);
+    if (optionsEnabled && token.startsWith("-") && !isPositionalValue(token)) {
+      optionAfterRepository ||= repositorySeen;
+      const [rawOption, inline] = splitOption(token);
+      const option = normalizeScanOption(rawOption);
       if (option === "-h" || option === "--help") {
         throw new CliUsageError("--help must be used immediately after scan");
       }
@@ -346,14 +412,28 @@ export function parseScanArguments(
         }
         parsed.mode = mode;
       } else {
+        if (ignoreUnrecognized && !option.startsWith("-h-")) continue;
         throw new CliUsageError(`unrecognized argument: ${token}`);
       }
       continue;
     }
-    if (repositorySeen)
+    if (repositorySeen) {
+      if (ignoreUnrecognized) continue;
       throw new CliUsageError(`unrecognized argument: ${token}`);
+    }
     parsed.repository = token;
     repositorySeen = true;
+  }
+  if (!allowEmptyRevisions) {
+    for (const [option, value] of [
+      ["--diff", parsed.diff],
+      ["--head", parsed.head],
+      ["--base", parsed.base],
+    ] as const) {
+      if (value?.length === 0) {
+        throw new CliUsageError(`argument ${option}: expected one argument`);
+      }
+    }
   }
   const targetCount =
     Number(parsed.paths.length > 0) +
@@ -401,19 +481,15 @@ export function parseCodexOverrides(values: readonly string[]): JsonObject {
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE.");
     }
-    let parsed: JsonValue;
-    try {
-      parsed = parseToml(`value = ${literal}`)["value"] as JsonValue;
-    } catch (error) {
-      throw new CodexSecurityError(
-        `Invalid --codex TOML value for ${key}: ${String(error)}`,
-        {
-          cause: error,
-        },
-      );
+    if (
+      Buffer.byteLength(key, "utf8") > MAX_CODEX_OVERRIDE_KEY_LENGTH ||
+      Buffer.byteLength(literal, "utf8") > MAX_CODEX_OVERRIDE_VALUE_LENGTH
+    ) {
+      throw new CodexSecurityError("--codex key or value exceeds the limit.");
     }
     const parts = key.split(".");
     if (
+      parts.length > MAX_CODEX_OVERRIDE_DEPTH ||
       parts.some(
         (part) =>
           part.length === 0 ||
@@ -422,7 +498,13 @@ export function parseCodexOverrides(values: readonly string[]): JsonObject {
           part === "constructor",
       )
     ) {
-      throw new CodexSecurityError(`Invalid --codex key: ${key}`);
+      throw new CodexSecurityError("Invalid --codex key.");
+    }
+    let parsed: JsonValue;
+    try {
+      parsed = parseToml(`value = ${literal}`)["value"] as JsonValue;
+    } catch {
+      throw new CodexSecurityError("Invalid --codex TOML value.");
     }
     let cursor = result;
     for (const part of parts.slice(0, -1)) {
@@ -434,12 +516,12 @@ export function parseCodexOverrides(values: readonly string[]): JsonObject {
       } else if (isJsonObject(existing)) {
         cursor = existing;
       } else {
-        throw new CodexSecurityError(`Conflicting --codex key: ${key}`);
+        throw new CodexSecurityError("Conflicting --codex key.");
       }
     }
     const final = parts.at(-1)!;
     if (Object.hasOwn(cursor, final)) {
-      throw new CodexSecurityError(`Duplicate --codex key: ${key}`);
+      throw new CodexSecurityError("Duplicate --codex key.");
     }
     cursor[final] = parsed;
   }
@@ -557,15 +639,57 @@ function optionValue(
 ): string {
   if (inline !== undefined) return inline;
   const value = values[index + 1];
-  if (value === undefined || value.startsWith("-")) {
+  if (
+    value === undefined ||
+    (value.startsWith("-") && !isPositionalValue(value))
+  ) {
     throw new CliUsageError(`argument ${option}: expected one argument`);
   }
   return value;
 }
 
+function isPositionalValue(value: string): boolean {
+  const [option] = splitOption(value);
+  const isScanOption =
+    option.startsWith("-h") ||
+    (option.startsWith("--") &&
+      SCAN_LONG_OPTIONS.some((candidate) => candidate.startsWith(option)));
+  return (
+    value === "-" ||
+    (!isScanOption && value.includes(" ")) ||
+    /^-(?:\p{Decimal_Number}+|\p{Decimal_Number}*\.\p{Decimal_Number}+)$/u.test(
+      value,
+    )
+  );
+}
+
 function rejectInline(option: string, inline: string | undefined): void {
   if (inline !== undefined)
     throw new CliUsageError(`argument ${option}: ignored explicit argument`);
+}
+
+function normalizeScanOption(option: string): string {
+  if (!option.startsWith("--") || SCAN_LONG_OPTIONS.includes(option)) {
+    return option;
+  }
+  const matches = SCAN_LONG_OPTIONS.filter((candidate) =>
+    candidate.startsWith(option),
+  );
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    throw new CliUsageError(`ambiguous option: ${option}`);
+  }
+  return option;
+}
+
+function normalizeRootOption(option: string): string {
+  if (!option.startsWith("--") || ROOT_LONG_OPTIONS.includes(option)) {
+    return option;
+  }
+  const matches = ROOT_LONG_OPTIONS.filter((candidate) =>
+    candidate.startsWith(option),
+  );
+  return matches.length === 1 ? matches[0]! : option;
 }
 
 function usageError(message: string, help: string, errorOutput: Writable): 2 {
@@ -595,7 +719,18 @@ function isJsonObject(value: JsonValue): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-if (isMainModule()) {
+function invokedAsMain(): boolean {
+  const entrypoint = process.argv[1];
+  if (entrypoint === undefined) return false;
+  if (import.meta.url === pathToFileURL(entrypoint).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entrypoint)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   void main().then(
     (exitCode) => {
       process.exitCode = exitCode;
@@ -607,13 +742,4 @@ if (isMainModule()) {
       process.exitCode = 1;
     },
   );
-}
-
-function isMainModule(): boolean {
-  if (process.argv[1] === undefined) return false;
-  try {
-    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
-  } catch {
-    return false;
-  }
 }

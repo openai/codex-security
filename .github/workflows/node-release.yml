@@ -82,6 +82,7 @@ jobs:
 
       - name: Inspect package
         working-directory: sdk/typescript
+        shell: bash
         run: pnpm run check:package ../../dist/*.tgz
 
       - name: Publish to npm

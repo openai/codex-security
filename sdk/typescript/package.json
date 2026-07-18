@@ -26,9 +26,10 @@
     }
   },
   "bin": {
-    "codex-security": "./dist/cli.js"
+    "codex-security": "./bin/codex-security.mjs"
   },
   "files": [
+    "bin",
     "dist",
     "_bundled_plugin",
     "LICENSE",

@@ -35,6 +35,7 @@ const required = [
   "package/package.json",
   "package/README.md",
   "package/LICENSE",
+  "package/bin/codex-security.mjs",
   "package/dist/index.js",
   "package/dist/index.d.ts",
   "package/dist/cli.js",
@@ -161,6 +162,7 @@ const allowedRoot = new Set([
   "package/package.json",
   "package/README.md",
   "package/LICENSE",
+  "package/bin/codex-security.mjs",
 ]);
 const distFiles = new Set(
   [
@@ -190,6 +192,7 @@ for (const file of files) {
   const normalized = file.endsWith("/") ? file.slice(0, -1) : file;
   const allowed = file.endsWith("/")
     ? normalized === "package" ||
+      normalized === "package/bin" ||
       normalized === "package/dist" ||
       pluginDirectories.has(normalized)
     : allowedRoot.has(normalized) ||
