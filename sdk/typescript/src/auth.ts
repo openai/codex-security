@@ -74,7 +74,7 @@ export class CodexLoginHandle {
         });
         reject(error);
       });
-      this.#child.once("close", (exitCode) => {
+      this.#child.once("exit", (exitCode) => {
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
