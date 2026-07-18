@@ -147,18 +147,38 @@ const allowedRoot = new Set([
   "package/README.md",
   "package/LICENSE",
 ]);
-const allowedDistFile =
-  /^package\/dist(?:\/[A-Za-z0-9_-]+)*\/[A-Za-z0-9_-]+\.(?:js(?:\.map)?|d\.ts(?:\.map)?)$/u;
-const allowedDistDirectory = /^package\/dist(?:\/[A-Za-z0-9_-]+)*$/u;
+const distFiles = new Set(
+  [
+    "api",
+    "auth",
+    "cli",
+    "config",
+    "contract",
+    "errors",
+    "index",
+    "models",
+    "result",
+    "runtime",
+    "targets",
+    "version",
+  ].flatMap((module) =>
+    ["js", "js.map", "d.ts", "d.ts.map"].map(
+      (extension) => `package/dist/${module}.${extension}`,
+    ),
+  ),
+);
+for (const file of distFiles) {
+  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+}
 const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
 for (const file of files) {
   const normalized = file.endsWith("/") ? file.slice(0, -1) : file;
   const allowed = file.endsWith("/")
     ? normalized === "package" ||
-      allowedDistDirectory.test(normalized) ||
+      normalized === "package/dist" ||
       pluginDirectories.has(normalized)
     : allowedRoot.has(normalized) ||
-      allowedDistFile.test(normalized) ||
+      distFiles.has(normalized) ||
       pluginEntries.has(normalized);
   if (!allowed || unsafePath.test(file) || file.includes("\\")) {
     throw new Error(`npm tarball contains an unexpected file: ${file}.`);
@@ -174,7 +194,7 @@ if (/^[lh]/mu.test(listing)) {
 }
 
 const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[/?#\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'(<])go\/[a-z0-9_-]+)/iu;
+  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[/?#\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'`(<])go\/[a-z0-9_-]+)/iu;
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
