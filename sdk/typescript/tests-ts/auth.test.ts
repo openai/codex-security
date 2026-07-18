@@ -158,6 +158,30 @@ describe("Codex authentication process boundary", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "releases inherited login pipes when the Windows fallback fires",
+    async () => {
+      const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { value: "win32" });
+      try {
+        const started = Date.now();
+        const handle = new CodexLoginHandle(
+          {
+            command: "/bin/sh",
+            prefixArgs: ["-c", "(sleep 3) & exit 0", "--"],
+          },
+          ["login"],
+          process.env,
+          () => {},
+        );
+        await expect(handle.wait()).resolves.toMatchObject({ success: true });
+        expect(Date.now() - started).toBeLessThan(2_500);
+      } finally {
+        Object.defineProperty(process, "platform", descriptor!);
+      }
+    },
+  );
+
   test("does not report a canceled interactive login as successful", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-cancel-"));
     temporaryDirectories.push(root);

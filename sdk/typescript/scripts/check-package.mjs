@@ -9,7 +9,10 @@ if (archive === undefined || args.length !== 1) {
   throw new Error("Usage: node scripts/check-package.mjs <npm-tarball>");
 }
 
+const archiveBytes = gunzipSync(readFileSync(archive));
+const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
 const entries = execFileSync("tar", ["-tzf", archive], {
+  ...tarOptions,
   encoding: "utf8",
 }).split(/\r?\n/u);
 const files = new Set(entries.filter(Boolean));
@@ -27,15 +30,131 @@ for (const file of required) {
   if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
 }
 
-const allowed =
-  /^package(?:\/(?:package\.json|README\.md|LICENSE|dist(?:\/.*)?|_bundled_plugin(?:\/.*)?))?\/?$/u;
-const forbiddenPath =
-  /(?:^|\/)(?:\.internal|buildkite|mcp-app|private_release|evals|tests?(?:-ts)?|__tests?__)(?:\/|$)/iu;
+const pluginFiles = new Set([
+  ".app.json",
+  ".codex-plugin/plugin.json",
+  ".mcp.json",
+  "assets/logo.png",
+  "examples/completed-scan/coverage.json",
+  "examples/completed-scan/findings.json",
+  "examples/completed-scan/scan-manifest.json",
+  "mcp/mcp-app.html.br",
+  "mcp/server.mjs",
+  "mcp/server.mjs.br.part-000",
+  "mcp/server.mjs.br.part-001",
+  "preflight/capability-profiles.toml",
+  "references/config-preflight.md",
+  "references/final-report.md",
+  "references/finding-detail-fields.md",
+  "references/sarif-adapter.md",
+  "references/scan-artifacts.md",
+  "references/scan-contract.md",
+  "references/security-guidance.md",
+  "references/shared-hard-rules.md",
+  "references/static-finding-assessment.md",
+  "schemas/coverage.schema.json",
+  "schemas/findings.schema.json",
+  "schemas/scan-manifest.schema.json",
+  "scripts/config_preflight.py",
+  "scripts/deep_scan_config.py",
+  "scripts/deep_scan_workbench.py",
+  "scripts/filesystem_identity.py",
+  "scripts/finalize_scan_contract.py",
+  "scripts/finding_preview.py",
+  "scripts/generate_rank_input.py",
+  "scripts/rank_preview.py",
+  "scripts/report_projection.py",
+  "scripts/resolve_security_md.py",
+  "scripts/snapshot_sqlite.py",
+  "scripts/validate_report_format.py",
+  "scripts/validate_scan_contract.py",
+  "scripts/validate_tracking_source.py",
+  "scripts/windows_scan_local_files.py",
+  "scripts/workbench/__init__.py",
+  "scripts/workbench/handoff.py",
+  "scripts/workbench_cli.py",
+  "scripts/workbench_constants.py",
+  "scripts/workbench_db.py",
+  "scripts/workbench_progress.py",
+  "scripts/workbench_remediation.py",
+  "scripts/workbench_scan_history.py",
+  "scripts/workbench_scan_start.py",
+  "scripts/workbench_schema.py",
+  "scripts/workbench_source_excerpt.py",
+  "scripts/workbench_target.py",
+  "scripts/workbench_target_state.py",
+  "scripts/workbench_validation.py",
+  "skills/attack-path-analysis/SKILL.md",
+  "skills/attack-path-analysis/agents/openai.yaml",
+  "skills/attack-path-analysis/references/attack-path-facts.md",
+  "skills/attack-path-analysis/references/severity-policy.md",
+  "skills/deep-security-scan/SKILL.md",
+  "skills/deep-security-scan/agents/openai.yaml",
+  "skills/finding-discovery/SKILL.md",
+  "skills/finding-discovery/agents/openai.yaml",
+  "skills/fix-finding/SKILL.md",
+  "skills/fix-finding/agents/openai.yaml",
+  "skills/propose-security-hardening/SKILL.md",
+  "skills/propose-security-hardening/agents/openai.yaml",
+  "skills/propose-security-hardening/references/proposal-format.md",
+  "skills/security-diff-scan/SKILL.md",
+  "skills/security-diff-scan/agents/openai.yaml",
+  "skills/security-scan/SKILL.md",
+  "skills/security-scan/agents/openai.yaml",
+  "skills/security-scan/references/repo-wide-artifacts-and-ledger.md",
+  "skills/security-scan/references/repo-wide-high-impact-families.md",
+  "skills/security-scan/references/repo-wide-instance-expansion.md",
+  "skills/security-scan/references/repo-wide-validation-closure.md",
+  "skills/security-scan/references/repository-wide-scan.md",
+  "skills/security-scan/references/scan-artifacts-and-ledger.md",
+  "skills/threat-model/SKILL.md",
+  "skills/threat-model/agents/openai.yaml",
+  "skills/threat-model/references/threat-model-guidance.md",
+  "skills/track-findings/SKILL.md",
+  "skills/track-findings/agents/openai.yaml",
+  "skills/track-findings/references/github-security-advisories.md",
+  "skills/track-findings/references/jira.md",
+  "skills/triage-finding/SKILL.md",
+  "skills/triage-finding/agents/openai.yaml",
+  "skills/triage-finding/references/github-rest-intake.md",
+  "skills/triage-finding/references/ticket-intake.md",
+  "skills/triage-finding/references/triage-result-contract.md",
+  "skills/validation/SKILL.md",
+  "skills/validation/agents/openai.yaml",
+  "skills/validation/references/validation-guidance.md",
+  "skills/vulnerability-writeup/SKILL.md",
+  "skills/vulnerability-writeup/agents/openai.yaml",
+  "skills/vulnerability-writeup/references/report-format.md",
+]);
+const pluginEntries = new Set(["package/_bundled_plugin"]);
+for (const file of pluginFiles) {
+  const archivePath = `package/_bundled_plugin/${file}`;
+  if (!files.has(archivePath)) {
+    throw new Error(`npm tarball is missing ${archivePath}.`);
+  }
+  const parts = file.split("/");
+  for (let index = 1; index <= parts.length; index++) {
+    pluginEntries.add(
+      `package/_bundled_plugin/${parts.slice(0, index).join("/")}`,
+    );
+  }
+}
+
+const allowedRoot = new Set([
+  "package",
+  "package/package.json",
+  "package/README.md",
+  "package/LICENSE",
+]);
+const allowedDist =
+  /^package\/dist(?:\/[A-Za-z0-9_-]+)*(?:\/[A-Za-z0-9_-]+\.(?:js(?:\.map)?|d\.ts(?:\.map)?))?$/u;
 const unsafePath = /(?:^|\/)\.{1,2}(?:\/|$)/u;
 for (const file of files) {
+  const normalized = file.endsWith("/") ? file.slice(0, -1) : file;
   if (
-    !allowed.test(file) ||
-    forbiddenPath.test(file) ||
+    (!allowedRoot.has(normalized) &&
+      !allowedDist.test(normalized) &&
+      !pluginEntries.has(normalized)) ||
     unsafePath.test(file) ||
     file.includes("\\")
   ) {
@@ -43,12 +162,20 @@ for (const file of files) {
   }
 }
 
+const listing = execFileSync("tar", ["-tvzf", archive], {
+  ...tarOptions,
+  encoding: "utf8",
+});
+if (/^[lh]/mu.test(listing)) {
+  throw new Error("npm tarball contains a symbolic or hard link.");
+}
+
 const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com\/openai\/openai|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\s"'(<])go\/[a-z0-9_-]+)/iu;
+  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com\/openai\/openai(?:[/?#\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'(<])go\/[a-z0-9_-]+)/iu;
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
-const payloads = [gunzipSync(readFileSync(archive)).toString("utf8")];
+const payloads = [archiveBytes.toString("utf8")];
 const compressedFiles = [...files].filter((file) => /\.br$/iu.test(file));
 const compressedParts = new Map();
 for (const file of files) {
@@ -70,13 +197,18 @@ function brotliPayload(bytes, file) {
 
 for (const file of compressedFiles) {
   payloads.push(
-    brotliPayload(execFileSync("tar", ["-xOf", archive, file]), file),
+    brotliPayload(
+      execFileSync("tar", ["-xOf", archive, file], tarOptions),
+      file,
+    ),
   );
 }
 for (const parts of compressedParts.values()) {
   parts.sort((left, right) => left.part - right.part);
   const bytes = Buffer.concat(
-    parts.map(({ file }) => execFileSync("tar", ["-xOf", archive, file])),
+    parts.map(({ file }) =>
+      execFileSync("tar", ["-xOf", archive, file], tarOptions),
+    ),
   );
   payloads.push(brotliPayload(bytes, parts[0].file));
 }
