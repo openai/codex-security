@@ -913,7 +913,10 @@ function targetInstruction(target: NormalizedTarget): string {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths")
-    return `Scan target paths (JSON array): ${JSON.stringify(target.paths)}`;
+    return `Scan target paths (JSON array): ${JSON.stringify(target.paths)
+      .replaceAll("\u0085", "\\u0085")
+      .replaceAll("\u2028", "\\u2028")
+      .replaceAll("\u2029", "\\u2029")}`;
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.baseRef} to ${target.headRef}.`;
   }
