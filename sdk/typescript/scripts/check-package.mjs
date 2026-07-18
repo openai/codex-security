@@ -14,8 +14,13 @@ const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
 const entries = execFileSync("tar", ["-tzf", archive], {
   ...tarOptions,
   encoding: "utf8",
-}).split(/\r?\n/u);
-const files = new Set(entries.filter(Boolean));
+})
+  .split(/\r?\n/u)
+  .filter(Boolean);
+const files = new Set(entries);
+if (files.size !== entries.length) {
+  throw new Error("npm tarball contains duplicate paths.");
+}
 const required = [
   "package/package.json",
   "package/README.md",
@@ -189,12 +194,14 @@ const listing = execFileSync("tar", ["-tvzf", archive], {
   ...tarOptions,
   encoding: "utf8",
 });
-if (/^[lh]/mu.test(listing)) {
-  throw new Error("npm tarball contains a symbolic or hard link.");
+if (/^[^d-]/mu.test(listing)) {
+  throw new Error(
+    "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
+  );
 }
 
 const internalMarker =
-  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[/?#\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'`(<])go\/[a-z0-9_-]+)/iu;
+  /(?:internal\.api\.openai\.org|gateway\.[a-z0-9.-]*internal|\.openai\.org|openai\.firewall\.socket\.dev|socket-firewall-registry|openai\.(?:enterprise\.)?slack\.com|(?:app\.notion\.com\/p|notion\.so)\/openai|github\.com[:/]openai\/openai(?:\.git)?(?:[/?#@%\s()<>]|$)|LicenseRef-Proprietary|\/Users\/|\/home\/dev-user|(?:^|[\0\s"'`(</])go\/[a-z0-9_-]+)/iu;
 const obsoletePythonMarker =
   /(?:sdk\/python|openai_codex_security|pip install(?: --pre)? openai-codex-security|python-(?:ci|release))/iu;
 
