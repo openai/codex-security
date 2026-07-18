@@ -1,0 +1,488 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { describe, expect, test } from "bun:test";
+import type { CodexSecurity, CodexSecurityConfig } from "../src/index.js";
+import {
+  CodexSecurityError,
+  DiffTarget,
+  ScanResult,
+  VERSION,
+} from "../src/index.js";
+import type {
+  CoverageDocument,
+  FindingsDocument,
+  ScanManifest,
+} from "../src/index.js";
+import {
+  main,
+  parseCodexOverrides,
+  parseScanArguments,
+  resultJson,
+  rootHelp,
+  scanHelp,
+  targetFromArguments,
+  versionText,
+} from "../src/cli.js";
+
+type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
+
+function capture(isTTY = false): {
+  stream: Pick<NodeJS.WriteStream, "write"> &
+    Partial<Pick<NodeJS.WriteStream, "isTTY">>;
+  text(): string;
+} {
+  let value = "";
+  return {
+    stream: {
+      isTTY,
+      write(chunk: string | Uint8Array): boolean {
+        value += chunk.toString();
+        return true;
+      },
+    },
+    text: () => value,
+  };
+}
+
+function fakeResult(): ScanResult {
+  const manifest = {
+    documentType: "codex-security.scan-manifest",
+    schemaVersion: "1.0",
+    scan: {
+      id: "scan",
+      producer: { name: "codex-security-plugin", version: "1.2.3" },
+      status: "completed",
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:00:01Z",
+      sealedAt: "2026-01-01T00:00:01Z",
+      target: {
+        kind: "directory_snapshot",
+        targetId: "id",
+        displayName: "repo",
+      },
+      scope: { includePaths: ["."], excludePaths: [] },
+      coverageRef: "coverage.json",
+      findingsRef: "findings.json",
+      artifacts: [],
+    },
+  } satisfies ScanManifest;
+  const findings = {
+    documentType: "codex-security.findings",
+    schemaVersion: "1.0",
+    scanId: "scan",
+    findings: [],
+  } satisfies FindingsDocument;
+  const coverage = {
+    documentType: "codex-security.coverage",
+    schemaVersion: "1.0",
+    scanId: "scan",
+    mode: "repository",
+    completeness: "complete",
+    inventoryStrategy: "repository",
+    includePaths: ["."],
+    excludePaths: [],
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
+  } satisfies CoverageDocument;
+  return new ScanResult({
+    manifest,
+    findings,
+    coverage,
+    scanDir: "/tmp/scan",
+    threadId: "thread-1",
+    turnResult: {
+      status: "completed",
+      finalResponse: "done",
+      usage: null,
+    },
+  });
+}
+
+class FakeSignals {
+  readonly listeners = new Map<string, Set<() => void>>();
+
+  public add(signal: string, listener: () => void): void {
+    const listeners = this.listeners.get(signal) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(signal, listeners);
+  }
+
+  public remove(signal: string, listener: () => void): void {
+    this.listeners.get(signal)?.delete(listener);
+  }
+
+  public emit(signal: string): void {
+    for (const listener of this.listeners.get(signal) ?? []) listener();
+  }
+}
+
+function dependencies(
+  options: {
+    onConfig?: (config: CodexSecurityConfig) => void;
+    onTurn?: (repository: string, options: unknown) => void;
+    onRun?: () => void;
+    onInterrupt?: () => void;
+    onClose?: () => void;
+    signals?: FakeSignals;
+    result?: ScanResult;
+  } = {},
+): MainDependencies {
+  const signals = options.signals ?? new FakeSignals();
+  const result = options.result ?? fakeResult();
+  const security = {
+    run: async (repository: string, runOptions: unknown) => {
+      options.onTurn?.(repository, runOptions);
+      const signal = (runOptions as { signal?: AbortSignal }).signal;
+      signal?.addEventListener("abort", () => options.onInterrupt?.(), {
+        once: true,
+      });
+      options.onRun?.();
+      return result;
+    },
+    close: async () => options.onClose?.(),
+  } as Pick<CodexSecurity, "run" | "close">;
+  return {
+    createSecurity: (config) => {
+      options.onConfig?.(config);
+      return security;
+    },
+    currentDirectory: () => "/current/repository",
+    now: () => 0,
+    setInterval: () => ({}) as NodeJS.Timeout,
+    clearInterval: () => {},
+    addSignalListener: (signal, listener) => signals.add(signal, listener),
+    removeSignalListener: (signal, listener) =>
+      signals.remove(signal, listener),
+    writeSynchronously: (stream, value) => stream.write(value),
+    forceExit: () => {},
+  };
+}
+
+describe("CLI compatibility contract", () => {
+  test("matches the documented CLI help and version contracts", async () => {
+    const goldenRoot = await readFile(
+      join(import.meta.dir, "../compatibility/golden/root-help.txt"),
+      "utf8",
+    );
+    const goldenVersion = await readFile(
+      join(import.meta.dir, "../compatibility/golden/version.txt"),
+      "utf8",
+    );
+    const goldenScan = await readFile(
+      join(import.meta.dir, "../compatibility/golden/scan-help.txt"),
+      "utf8",
+    );
+    expect(`${rootHelp()}\n`).toBe(goldenRoot);
+    expect(
+      `${versionText().replace(
+        `codex-security ${VERSION}`,
+        "codex-security 0.1.0b3",
+      )}\n`,
+    ).toBe(goldenVersion);
+    expect(`${scanHelp()}\n`).toBe(goldenScan);
+  });
+
+  test("parses every target and repeatable option", () => {
+    const pathArguments = parseScanArguments([
+      "repo",
+      "--path",
+      "src",
+      "--path=tests",
+      "--mode",
+      "deep",
+      "--plugin-path",
+      "plugin.zip",
+      "--python=/managed/python",
+      "--codex",
+      "features.goals=true",
+      "--json",
+    ]);
+    expect(pathArguments).toMatchObject({
+      repository: "repo",
+      paths: ["src", "tests"],
+      mode: "deep",
+      pluginPath: "plugin.zip",
+      pythonPath: "/managed/python",
+      codex: ["features.goals=true"],
+      json: true,
+    });
+    expect(targetFromArguments(pathArguments)).toEqual(["src", "tests"]);
+
+    expect(
+      targetFromArguments(
+        parseScanArguments(["--diff", "origin/main", "--head", "HEAD"]),
+      ),
+    ).toEqual(DiffTarget.refs({ base: "origin/main", head: "HEAD" }));
+    expect(
+      targetFromArguments(
+        parseScanArguments(["--working-tree", "--base", "origin/main"]),
+      ),
+    ).toEqual(DiffTarget.workingTree({ base: "origin/main" }));
+  });
+
+  test("parses TOML override literals and rejects conflicts", () => {
+    expect(
+      parseCodexOverrides([
+        "agents.max_threads=4",
+        'model_reasoning_effort="high"',
+        "features.goals=true",
+      ]),
+    ).toEqual({
+      agents: { max_threads: 4 },
+      model_reasoning_effort: "high",
+      features: { goals: true },
+    });
+    expect(() =>
+      parseCodexOverrides(["agents.max_threads=4", "agents.max_threads=8"]),
+    ).toThrow("Duplicate --codex key");
+    expect(() =>
+      parseCodexOverrides(["agents=4", "agents.max_threads=8"]),
+    ).toThrow("Conflicting --codex key");
+  });
+
+  test("rejects prototype-bearing override paths", () => {
+    for (const key of ["__proto__", "constructor", "prototype"]) {
+      expect(() => parseCodexOverrides([`${key}.polluted=true`])).toThrow(
+        "Invalid --codex key",
+      );
+    }
+    expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
+  });
+
+  test("returns parser exit 2 without starting the SDK", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", ".", "--path", "src", "--diff", "HEAD"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("mutually exclusive");
+  });
+
+  test("maps configuration and emits JSON only on stdout", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const captured: { config?: CodexSecurityConfig } = {};
+    let repository = "";
+    const exit = await main(
+      [
+        "scan",
+        "repo",
+        "--plugin-path",
+        "plugin.zip",
+        "--python",
+        "/managed/python",
+        "--codex",
+        "features.goals=true",
+        "--json",
+      ],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        onConfig: (value) => {
+          captured.config = value;
+        },
+        onTurn: (value) => {
+          repository = value;
+        },
+      }),
+    );
+    expect(exit).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(resultJson(fakeResult()));
+    expect(stderr.text()).toContain("Preparing scan");
+    expect(stderr.text()).toContain("Running scan");
+    expect(stderr.text()).toContain("Scan complete");
+    expect(captured.config).toEqual({
+      pluginPath: "plugin.zip",
+      pythonPath: "/managed/python",
+      codexOverrides: { features: { goals: true } },
+    });
+    expect(repository).toBe("repo");
+  });
+
+  test("emits the human result summary", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(["scan"], stdout.stream, stderr.stream, dependencies()),
+    ).toBe(0);
+    expect(stdout.text()).toBe(
+      "Scan: /tmp/scan\n" +
+        "Report: /tmp/scan/report.md\n" +
+        "Plugin: 1.2.3\n" +
+        "Findings: 0\n",
+    );
+  });
+
+  test("maps Ctrl-C and SIGTERM to conventional exits and preserves partial output", async () => {
+    for (const [signal, expectedExit, phrase] of [
+      ["SIGINT", 130, "Scan canceled by Ctrl-C."],
+      ["SIGTERM", 143, "Scan terminated by SIGTERM."],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const signals = new FakeSignals();
+      let interrupted = false;
+      const exit = await main(
+        ["scan", "."],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          signals,
+          onRun: () => signals.emit(signal),
+          onInterrupt: () => {
+            interrupted = true;
+          },
+        }),
+      );
+      expect(exit).toBe(expectedExit);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(phrase);
+      expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
+      expect(interrupted).toBe(true);
+      expect(signals.listeners.get(signal)?.size).toBe(0);
+    }
+  });
+
+  test("cancels runtime preparation when a signal arrives", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        signals.emit("SIGINT");
+        const signal = (options as { signal?: AbortSignal }).signal;
+        expect(signal?.aborted).toBe(true);
+        throw new DOMException("aborted", "AbortError");
+      },
+      close: async () => {},
+    });
+    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
+      130,
+    );
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Scan canceled by Ctrl-C.");
+    expect(stderr.text()).toContain("No partial output was kept.");
+  });
+
+  test("preserves signals received during client cleanup", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const signals = new FakeSignals();
+    const exit = await main(
+      ["scan", "."],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        signals,
+        onClose: () => signals.emit("SIGTERM"),
+      }),
+    );
+    expect(exit).toBe(143);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Scan terminated by SIGTERM.");
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+  });
+
+  test("lets a later repeated signal escape cleanup while suppressing delivery duplicates", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const signals = new FakeSignals();
+    const forced: string[] = [];
+    const synchronousWrites: string[] = [];
+    let now = 0;
+    const deps = dependencies({ signals });
+    deps.now = () => now;
+    deps.writeSynchronously = (_stream, value) => synchronousWrites.push(value);
+    deps.forceExit = (signal) => forced.push(signal);
+    deps.createSecurity = () => ({
+      run: async () => {
+        signals.emit("SIGINT");
+        signals.emit("SIGINT");
+        expect(forced).toEqual([]);
+        now = 1_000;
+        signals.emit("SIGINT");
+        return fakeResult();
+      },
+      close: async () => {},
+    });
+
+    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
+      130,
+    );
+    expect(forced).toEqual(["SIGINT"]);
+    expect(synchronousWrites).toEqual(["\u001B[?25h"]);
+    expect(stderr.text()).toContain("\u001B[?25h");
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+  });
+
+  test("does not debounce a different termination signal", async () => {
+    const signals = new FakeSignals();
+    const forced: string[] = [];
+    let now = 0;
+    const deps = dependencies({ signals });
+    deps.now = () => now;
+    deps.forceExit = (signal) => forced.push(signal);
+    deps.createSecurity = () => ({
+      run: async () => {
+        signals.emit("SIGINT");
+        now = 100;
+        signals.emit("SIGTERM");
+        return fakeResult();
+      },
+      close: async () => {},
+    });
+
+    await main(["scan", "."], capture().stream, capture().stream, deps);
+    expect(forced).toEqual(["SIGTERM"]);
+  });
+
+  test("forces exit when synchronous terminal restoration fails", async () => {
+    const signals = new FakeSignals();
+    const forced: string[] = [];
+    let now = 0;
+    const deps = dependencies({ signals });
+    deps.now = () => now;
+    deps.writeSynchronously = () => {
+      throw new Error("terminal unavailable");
+    };
+    deps.forceExit = (signal) => forced.push(signal);
+    deps.createSecurity = () => ({
+      run: async () => {
+        signals.emit("SIGINT");
+        now = 1_000;
+        signals.emit("SIGINT");
+        return fakeResult();
+      },
+      close: async () => {},
+    });
+
+    await main(["scan", "."], capture().stream, capture(true).stream, deps);
+    expect(forced).toEqual(["SIGINT"]);
+  });
+
+  test("reports SDK errors without a stack trace", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const failing = dependencies();
+    failing.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError("invalid scan request");
+      },
+      close: async () => {},
+    });
+    expect(
+      await main(["scan", "."], stdout.stream, stderr.stream, failing),
+    ).toBe(1);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("codex-security: invalid scan request\n");
+    expect(stderr.text()).not.toContain("CodexSecurityError");
+  });
+});

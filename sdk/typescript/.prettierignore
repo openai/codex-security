@@ -1,0 +1,5 @@
+dist/
+_bundled_plugin/
+.pytest_cache/
+private_release/dist/
+public-repo/

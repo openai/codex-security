@@ -1,7 +1,4 @@
-.venv/
-__pycache__/
-*.py[culu]
-build/
+node_modules/
 dist/
-.pytest_cache/
-.ruff_cache/
+.env
+.DS_Store

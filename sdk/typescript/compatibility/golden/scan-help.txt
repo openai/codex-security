@@ -1,0 +1,31 @@
+usage: codex-security scan [-h] [--path PATH | --diff BASE | --working-tree]
+                           [--head HEAD] [--base BASE]
+                           [--mode {standard,deep}] [--output-dir DIR]
+                           [--plugin-path PATH] [--python PATH]
+                           [--codex KEY=VALUE] [--json] [repository]
+
+positional arguments:
+  repository            Repository root to scan (default: current directory).
+
+options:
+  -h, --help            show this help message and exit
+  --path PATH           Scan only PATH relative to the repository; repeat for
+                        multiple paths.
+  --diff BASE           Scan Git changes from BASE to --head (default: HEAD).
+  --working-tree        Scan staged and unstaged changes against --base
+                        (default: HEAD).
+  --head HEAD           Git head ref for --diff (default: HEAD).
+  --base BASE           Git base ref for --working-tree (default: HEAD).
+  --mode {standard,deep}
+                        Scan mode; deep mode supports repository and path
+                        targets only.
+  --output-dir DIR      Write scan artifacts to an empty DIR outside the
+                        repository (default: a temporary directory); SARIF,
+                        when produced, is written to <scan-dir>/exports/results.sarif.
+  --plugin-path PATH    Use a Codex Security plugin directory or ZIP instead
+                        of the bundled plugin.
+  --python PATH         Python interpreter for the unchanged plugin runtime.
+  --codex KEY=VALUE     Override isolated Codex config with a TOML KEY=VALUE;
+                        repeat as needed.
+  --json                Print manifest, findings, coverage, output paths, and
+                        turn metadata as JSON instead of the human summary.

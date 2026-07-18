@@ -1,0 +1,9 @@
+usage: codex-security [-h] [--version] {scan} ...
+
+positional arguments:
+  {scan}
+    scan      Run a Codex Security scan.
+
+options:
+  -h, --help  show this help message and exit
+  --version   Print the SDK and bundled plugin versions, then exit.
