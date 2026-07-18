@@ -268,7 +268,14 @@ export async function runCodex(
       // A short-lived command can close stdin before Node flushes the input.
       // Its exit status remains authoritative; the stream error must not escape
       // as an uncaught exception.
-      if (error.code !== "EPIPE") processError ??= error;
+      if (
+        error.code !== "EPIPE" &&
+        error.code !== "ECONNRESET" &&
+        error.code !== "EOF" &&
+        error.code !== "ERR_STREAM_DESTROYED"
+      ) {
+        processError ??= error;
+      }
     });
     child.once("close", (exitCode) => {
       if (processError !== null) {

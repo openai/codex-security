@@ -126,7 +126,10 @@ export async function validateOutputDir(
     while (true) {
       try {
         if ((await stat(parent)).isDirectory()) {
-          return resolve(await realpath(parent), relative(parent, path));
+          return resolve(
+            await realpath(parent),
+            path.slice(parent.length).replace(/^[/\\]+/, ""),
+          );
         }
         break;
       } catch (error) {

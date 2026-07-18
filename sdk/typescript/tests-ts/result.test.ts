@@ -59,8 +59,8 @@ describe("ScanResult", () => {
       turnResult: { id: "turn", status: "completed" },
     });
     expect(result.pluginVersion).toBe("0.1.14");
-    expect(result.manifestPath).toBe("/scan/scan-manifest.json");
-    expect(result.artifactsDir).toBe("/scan/artifacts");
+    expect(result.manifestPath).toBe(join("/scan", "scan-manifest.json"));
+    expect(result.artifactsDir).toBe(join("/scan", "artifacts"));
     expect(result.toJSON()).toMatchObject({
       scanDir: "/scan",
       threadId: "thread",

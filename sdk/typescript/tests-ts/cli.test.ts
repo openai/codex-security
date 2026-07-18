@@ -314,7 +314,7 @@ describe("CLI compatibility contract", () => {
     ).toBe(0);
     expect(stdout.text()).toBe(
       "Scan: /tmp/scan\n" +
-        "Report: /tmp/scan/report.md\n" +
+        `Report: ${join("/tmp/scan", "report.md")}\n` +
         "Plugin: 1.2.3\n" +
         "Findings: 0\n",
     );

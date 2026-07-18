@@ -222,10 +222,13 @@ describe("scan target normalization", () => {
         script,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
       ],
-      { encoding: "utf8", env: { ...process.env, HOME: root } },
+      {
+        encoding: "utf8",
+        env: { ...process.env, HOME: root, USERPROFILE: root },
+      },
     );
     expect(result.status).toBe(0);
-    expect(result.stdout.trim().split("\n")).toEqual([
+    expect(result.stdout.trim().split(/\r?\n/)).toEqual([
       project,
       project,
       project,

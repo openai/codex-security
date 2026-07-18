@@ -528,62 +528,65 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
-  test("uses configured, inherited, then managed Python and forwards PYTHON", async () => {
-    const root = await temporaryDirectory();
-    const configured = join(root, "configured-python");
-    await writeFile(
-      configured,
-      '#!/bin/sh\n[ "$1" = "-c" ] || exit 1\ncase "$2" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$2" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(configured, 0o700);
-    const canonicalConfigured = await realpath(configured);
-    expect(
-      await resolvePluginPython({
-        configuredPath: relative(process.cwd(), configured),
-        environment: { PATH: "", PYTHONOPTIMIZE: "1" },
-      }),
-    ).toBe(canonicalConfigured);
-    expect(
-      await resolvePluginPython({
-        environment: { PYTHON: configured, PATH: "" },
-      }),
-    ).toBe(canonicalConfigured);
-
-    const managedRoot = join(root, "codex-primary-runtime");
-    const managed = join(
-      managedRoot,
-      "dependencies",
-      "python",
-      "bin",
-      "python3",
-    );
-    await mkdir(join(managedRoot, "dependencies", "python", "bin"), {
-      recursive: true,
-    });
-    await writeFile(
-      managed,
-      '#!/bin/sh\n[ "$1" = "-c" ] || exit 1\ncase "$2" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$2" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
-    );
-    await chmod(managed, 0o700);
-    expect(
-      await resolvePluginPython({
-        environment: { PATH: "" },
-        managedRuntimeRoots: [managedRoot],
-      }),
-    ).toBe(managed);
-    expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
-      TEST: "1",
-      PYTHON: managed,
-    });
-    if (process.platform !== "win32") {
-      await expect(
-        resolvePluginPython({
-          configuredPath: "/bin/true",
-          environment: { PATH: "" },
+  test.skipIf(process.platform === "win32")(
+    "uses configured, inherited, then managed Python and forwards PYTHON",
+    async () => {
+      const root = await temporaryDirectory();
+      const configured = join(root, "configured-python");
+      await writeFile(
+        configured,
+        '#!/bin/sh\n[ "$1" = "-c" ] || exit 1\ncase "$2" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$2" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+      );
+      await chmod(configured, 0o700);
+      const canonicalConfigured = await realpath(configured);
+      expect(
+        await resolvePluginPython({
+          configuredPath: relative(process.cwd(), configured),
+          environment: { PATH: "", PYTHONOPTIMIZE: "1" },
         }),
-      ).rejects.toThrow(PluginPythonUnavailableError);
-    }
-  });
+      ).toBe(canonicalConfigured);
+      expect(
+        await resolvePluginPython({
+          environment: { PYTHON: configured, PATH: "" },
+        }),
+      ).toBe(canonicalConfigured);
+
+      const managedRoot = join(root, "codex-primary-runtime");
+      const managed = join(
+        managedRoot,
+        "dependencies",
+        "python",
+        "bin",
+        "python3",
+      );
+      await mkdir(join(managedRoot, "dependencies", "python", "bin"), {
+        recursive: true,
+      });
+      await writeFile(
+        managed,
+        '#!/bin/sh\n[ "$1" = "-c" ] || exit 1\ncase "$2" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$2" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+      );
+      await chmod(managed, 0o700);
+      expect(
+        await resolvePluginPython({
+          environment: { PATH: "" },
+          managedRuntimeRoots: [managedRoot],
+        }),
+      ).toBe(managed);
+      expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
+        TEST: "1",
+        PYTHON: managed,
+      });
+      if (process.platform !== "win32") {
+        await expect(
+          resolvePluginPython({
+            configuredPath: "/bin/true",
+            environment: { PATH: "" },
+          }),
+        ).rejects.toThrow(PluginPythonUnavailableError);
+      }
+    },
+  );
 
   test("recognizes Python paths using either platform separator", () => {
     expect(isPythonPathCandidate("runtime/python3")).toBe(true);
