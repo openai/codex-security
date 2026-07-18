@@ -43,9 +43,13 @@ Run `npx codex-security scan --help` for the complete CLI reference.
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
 
-await using security = new CodexSecurity();
-const result = await security.run("/path/to/repository");
-console.log(result.reportPath);
+const security = new CodexSecurity();
+try {
+  const result = await security.run("/path/to/repository");
+  console.log(result.reportPath);
+} finally {
+  await security.close();
+}
 ```
 
 The SDK also supports scoped and diff targets, streaming, cancellation, API-key

@@ -38,9 +38,13 @@ target, output, and runtime options.
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
 
-await using security = new CodexSecurity();
-const result = await security.run("/path/to/repo");
-console.log(result.reportPath);
+const security = new CodexSecurity();
+try {
+  const result = await security.run("/path/to/repo");
+  console.log(result.reportPath);
+} finally {
+  await security.close();
+}
 ```
 
 See the [TypeScript SDK and CLI reference](sdk/typescript/README.md) for
