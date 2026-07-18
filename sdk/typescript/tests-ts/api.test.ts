@@ -287,8 +287,9 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const temporaryRoot = join(repository, "tmp");
     await mkdir(temporaryRoot, { recursive: true });
-    const previous = process.env["TMPDIR"];
-    process.env["TMPDIR"] = temporaryRoot;
+    const temporaryVariable = process.platform === "win32" ? "TEMP" : "TMPDIR";
+    const previous = process.env[temporaryVariable];
+    process.env[temporaryVariable] = temporaryRoot;
     let runtimeStarted = false;
     const client = new TestClient(
       {},
@@ -307,8 +308,8 @@ describe("CodexSecurity orchestration", () => {
       );
       expect(runtimeStarted).toBe(false);
     } finally {
-      if (previous === undefined) delete process.env["TMPDIR"];
-      else process.env["TMPDIR"] = previous;
+      if (previous === undefined) delete process.env[temporaryVariable];
+      else process.env[temporaryVariable] = previous;
       await client.close();
     }
   });
@@ -1037,6 +1038,7 @@ if (args === "login --with-api-key") {
             version: "0.1.0",
           },
           environment: {
+            CODEX_HOME: codexHome,
             OPENAI_API_KEY: "ambient-key",
             CODEX_API_KEY: "secondary-ambient-key",
           },

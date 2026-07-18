@@ -45,6 +45,8 @@ jobs:
 
       - name: Test
         env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
         run: pnpm --dir sdk/typescript run test
 
