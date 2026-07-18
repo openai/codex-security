@@ -1065,10 +1065,15 @@ if (args === "login --with-api-key") {
         },
       },
     );
+    console.error("windows-login-debug: before api-key login");
     await client.loginApiKey("secret-key");
+    console.error("windows-login-debug: after api-key login");
     const login = await client.loginChatGPT();
+    console.error("windows-login-debug: after chatgpt login start");
     await expect(login.wait()).resolves.toMatchObject({ success: true });
+    console.error("windows-login-debug: after chatgpt login completion");
     await client.run(repository);
+    console.error("windows-login-debug: after scan");
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect(
       (codexOptions as CodexOptions | null)?.env?.["OPENAI_API_KEY"],
