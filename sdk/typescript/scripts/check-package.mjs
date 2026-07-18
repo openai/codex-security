@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
@@ -11,12 +11,22 @@ if (archive === undefined || args.length !== 1) {
 
 const archiveBytes = gunzipSync(readFileSync(archive));
 const tarOptions = { maxBuffer: archiveBytes.byteLength + 1024 };
-const entries = execFileSync("tar", ["-tzf", archive], {
-  ...tarOptions,
-  encoding: "utf8",
-})
-  .split(/\r?\n/u)
-  .filter(Boolean);
+function tar(args, encoding = "buffer") {
+  const result = spawnSync("tar", ["--ignore-zeros", ...args], {
+    ...tarOptions,
+    encoding,
+  });
+  if (result.error !== undefined) throw result.error;
+  if (result.status !== 0 || result.stderr.length !== 0) {
+    const stderr = result.stderr.toString().trim();
+    throw new Error(
+      `npm tarball contains an invalid tar entry${stderr === "" ? "." : `: ${stderr}`}`,
+    );
+  }
+  return result.stdout;
+}
+
+const entries = tar(["-tzf", archive], "utf8").split(/\r?\n/u).filter(Boolean);
 const files = new Set(entries);
 if (files.size !== entries.length) {
   throw new Error("npm tarball contains duplicate paths.");
@@ -190,10 +200,7 @@ for (const file of files) {
   }
 }
 
-const listing = execFileSync("tar", ["-tvzf", archive], {
-  ...tarOptions,
-  encoding: "utf8",
-});
+const listing = tar(["-tvzf", archive], "utf8");
 if (/^[^d-]/mu.test(listing)) {
   throw new Error(
     "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
@@ -226,19 +233,12 @@ function brotliPayload(bytes, file) {
 }
 
 for (const file of compressedFiles) {
-  payloads.push(
-    brotliPayload(
-      execFileSync("tar", ["-xOf", archive, file], tarOptions),
-      file,
-    ),
-  );
+  payloads.push(brotliPayload(tar(["-xOf", archive, file]), file));
 }
 for (const parts of compressedParts.values()) {
   parts.sort((left, right) => left.part - right.part);
   const bytes = Buffer.concat(
-    parts.map(({ file }) =>
-      execFileSync("tar", ["-xOf", archive, file], tarOptions),
-    ),
+    parts.map(({ file }) => tar(["-xOf", archive, file])),
   );
   payloads.push(brotliPayload(bytes, parts[0].file));
 }
