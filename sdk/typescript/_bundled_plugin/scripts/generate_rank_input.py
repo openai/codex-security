@@ -417,9 +417,10 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
         candidates = (scope_abs,) if scope_abs.is_file() else scope_abs.rglob("*")
         for path in candidates:
             try:
-                if not path.is_file():
+                if path.is_symlink() or not path.is_file():
                     continue
-            except OSError:
+                path.resolve(strict=True).relative_to(repo)
+            except (OSError, ValueError):
                 continue
             rel = path.relative_to(repo)
             directly_requested = path in directly_requested_files
