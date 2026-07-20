@@ -25,7 +25,9 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })),
+    temporaryDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
   );
 });
 
@@ -48,6 +50,11 @@ function git(repo: string, ...args: string[]): string {
 }
 
 describe("scan target normalization", () => {
+  test("tolerates a temporary repository removed before cleanup", async () => {
+    const repo = await repository();
+    await rm(join(repo, ".."), { recursive: true });
+  });
+
   test("normalizes repository and path targets", async () => {
     const repo = await repository();
     expect(await normalizeTarget(repo, "repository")).toEqual({

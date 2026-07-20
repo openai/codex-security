@@ -44,7 +44,9 @@ const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })),
+    temporaryDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
   );
 });
 
