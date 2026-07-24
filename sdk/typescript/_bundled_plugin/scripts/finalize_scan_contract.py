@@ -24,6 +24,7 @@ from typing import Any, BinaryIO, TextIO
 from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = "1.0"
+PRODUCER_NAME = "codex-security-plugin"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
 SARIF_SCHEMA = "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json"
 SEVERITIES = {"critical", "high", "medium", "low", "informational"}
@@ -807,6 +808,7 @@ def _populate_unsealed_manifest_envelope(
     scan["id"] = completion_binding["scanId"]
     scan["startedAt"] = completion_binding["startedAt"]
     scan["completedAt"] = completion_binding["completedAt"]
+    scan["producer"] = copy.deepcopy(completion_binding["producer"])
 
     target = scan.get("target")
     if isinstance(target, dict):
@@ -924,6 +926,8 @@ def _validate_completion_binding(
         raise ContractError("manifest.scan.startedAt: must match the workbench scan")
     if scan.get("completedAt") != completion_binding["completedAt"]:
         raise ContractError("manifest.scan.completedAt: must match the workbench completion")
+    if scan.get("producer") != completion_binding["producer"]:
+        raise ContractError("manifest.scan.producer: must match the workbench producer")
     target = _require_dict(scan, "target", "manifest.scan")
     allowed_target_kinds = completion_binding["allowedTargetKinds"]
     if target.get("kind") not in allowed_target_kinds:

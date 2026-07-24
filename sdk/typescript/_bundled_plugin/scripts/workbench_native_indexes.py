@@ -23,9 +23,28 @@ def list_global_findings(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     limit = min(args.limit, FINDINGS_PAGE_MAX)
-    rows = list(
-        islice(_active_findings(connection, read_coverage), args.offset, args.offset + limit + 1)
+    query = args.query.strip().casefold() if args.query else ""
+    findings = (
+        row
+        for row in _active_findings(connection, read_coverage)
+        if (args.target_id is None or row["target_id"] == args.target_id)
+        and (args.severity is None or row["severity"] == args.severity)
+        and (args.status is None or row["status"] == args.status)
+        and (
+            not query
+            or any(
+                query in value.casefold()
+                for value in (
+                    row["title"],
+                    row["summary"],
+                    row["target_path"],
+                    row["location_path"],
+                )
+                if value is not None
+            )
+        )
     )
+    rows = list(islice(findings, args.offset, args.offset + limit + 1))
     has_more = len(rows) > limit
     return {
         "findings": [
@@ -153,6 +172,7 @@ def _active_findings(
 
 def list_repositories(
     connection: sqlite3.Connection,
+    args: argparse.Namespace | None = None,
     *,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
@@ -175,20 +195,46 @@ def list_repositories(
         if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
+    repositories = [
+        {
+            "checkoutAvailable": Path(target["current_path"]).is_dir(),
+            "displayName": target["display_name"],
+            "latestScan": latest_scan,
+            "openFindingsCount": open_findings_by_target.get(target_id, 0),
+            "scanCount": scan_count_by_target[target_id],
+            "targetId": target_id,
+            "targetPath": target["current_path"],
+        }
+        for target_id, latest_scan in latest_scan_by_target.items()
+        if (target := targets.get(target_id)) is not None
+    ]
+    if args is None:
+        return {"repositories": repositories}
+
+    query = args.query.strip().casefold() if args.query else ""
+    repositories = [
+        repository
+        for repository in repositories
+        if (args.target_id is None or repository["targetId"] == args.target_id)
+        and args.status != "not_scanned"
+        and (args.status != "open_findings" or repository["openFindingsCount"] > 0)
+        and (
+            not query
+            or query in repository["displayName"].casefold()
+            or query in repository["targetPath"].casefold()
+        )
+    ]
+    if args.limit is None and args.offset == 0:
+        return {"repositories": repositories}
+
+    limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+    page = repositories[args.offset : args.offset + limit]
+    next_offset = args.offset + len(page)
     return {
-        "repositories": [
-            {
-                "checkoutAvailable": Path(target["current_path"]).is_dir(),
-                "displayName": target["display_name"],
-                "latestScan": latest_scan,
-                "openFindingsCount": open_findings_by_target.get(target_id, 0),
-                "scanCount": scan_count_by_target[target_id],
-                "targetId": target_id,
-                "targetPath": target["current_path"],
-            }
-            for target_id, latest_scan in latest_scan_by_target.items()
-            if (target := targets.get(target_id)) is not None
-        ]
+        "repositories": page,
+        "limit": limit,
+        "nextOffset": next_offset if next_offset < len(repositories) else None,
+        "offset": args.offset,
     }
 
 

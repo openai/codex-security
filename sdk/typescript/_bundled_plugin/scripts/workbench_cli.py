@@ -14,6 +14,7 @@ from workbench_constants import (
     DIFF_TARGET_KINDS,
     EXPORT_FORMATS,
     FINDING_CLOSE_REASONS,
+    FINDING_SEVERITIES,
     FINDING_STATUSES,
     FINDINGS_PAGE_MAX,
     MODES,
@@ -136,8 +137,14 @@ def parse_args(description: str) -> argparse.Namespace:
     get_scan.add_argument("--occurrence-id")
 
     list_scans = subparsers.add_parser("list-scans")
+    list_scans.add_argument("--query")
+    list_scans.add_argument("--target-id")
+    list_scans.add_argument("--status", choices=("running", "complete", "failed", "canceled"))
+    list_scans.add_argument("--mode", choices=MODES)
     list_scans.add_argument("--repository")
     list_scans.add_argument("--scan-root")
+    list_scans.add_argument("--offset", type=non_negative_int, default=0)
+    list_scans.add_argument("--limit", type=positive_int)
 
     register_cli_scan = subparsers.add_parser("register-cli-scan")
     register_cli_scan.add_argument("--scan-dir", required=True)
@@ -152,12 +159,24 @@ def parse_args(description: str) -> argparse.Namespace:
     compare_scans.add_argument("--before-scan-id", required=True)
     compare_scans.add_argument("--after-scan-id", required=True)
     list_global_findings = subparsers.add_parser("list-global-findings")
+    list_global_findings.add_argument("--query")
+    list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
+    list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
+    list_global_findings.add_argument("--target-id")
     list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
-    subparsers.add_parser("list-repositories")
+    list_repositories = subparsers.add_parser("list-repositories")
+    list_repositories.add_argument("--query")
+    list_repositories.add_argument("--target-id")
+    list_repositories.add_argument("--status", choices=("scanned", "not_scanned", "open_findings"))
+    list_repositories.add_argument("--offset", type=non_negative_int, default=0)
+    list_repositories.add_argument("--limit", type=positive_int)
 
     list_findings = subparsers.add_parser("list-findings")
     list_findings.add_argument("--scan-id", required=True)
+    list_findings.add_argument("--query")
+    list_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
+    list_findings.add_argument("--status", choices=FINDING_STATUSES)
     list_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
 

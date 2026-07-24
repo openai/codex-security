@@ -15,7 +15,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -176,6 +176,42 @@ describe("one-shot scan events", () => {
       status: "completed",
       finalResponse: "scan complete",
     });
+  });
+
+  test("lets the workbench seal artifacts before validating completed scans", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    const events = completedEvents();
+    let finalized = false;
+
+    const result = await runScanEvents({
+      thread: {
+        id: null,
+        async runStreamed() {
+          return { events };
+        },
+      },
+      events,
+      signal: new AbortController().signal,
+      scanDir,
+      pluginRoot: PLUGIN_ROOT,
+      expectation: {
+        repository: "/repository",
+        repositoryRevision: "deadbeef",
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
+      },
+      onFinalize: async () => {
+        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
+        await copyCompletedScan(root);
+        finalized = true;
+      },
+    });
+
+    expect(finalized).toBe(true);
+    expect(result.threadId).toBe("thread-1");
+    expect(result.turnResult.status).toBe("completed");
   });
 
   test("reports a scan as started only after the thread starts", async () => {
@@ -1419,6 +1455,7 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_REPOSITORY: repository,
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+      CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
     });
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
       default_permissions: "codex_security_scan",
@@ -1439,6 +1476,8 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
+    expect(prompt).toContain("$CODEX_SECURITY_TARGET_DISPLAY_NAME");
+    expect(prompt).toContain("codex-security-plugin");
     expect(prompt).not.toContain("CODEX_SECURITY_KNOWLEDGE_BASE");
     expect(
       JSON.parse(commands[0]![commands[0]!.indexOf("--recipe-json") + 1]!),
@@ -2037,6 +2076,7 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_REPOSITORY: repository,
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
+      CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
     });
     expect(environment).not.toHaveProperty("CODEX_SECURITY_TARGET_PATHS_JSON");
     const targetPathsFile = environment?.["CODEX_SECURITY_TARGET_PATHS_FILE"];

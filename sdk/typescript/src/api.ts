@@ -488,6 +488,7 @@ export class CodexSecurity {
         CODEX_SECURITY_STATE_DIR: stateDirectory,
         CODEX_SECURITY_SCAN_ID: scanId,
         CODEX_SECURITY_TARGET_ID: targetId,
+        CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
         ...(knowledgeBase === null
           ? {}
           : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
@@ -547,13 +548,19 @@ export class CodexSecurity {
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
+        onFinalize: async () => {
+          await workbench(workbenchOptions, [
+            "complete-scan",
+            "--scan-id",
+            scanId,
+          ]);
+          activeScan = null;
+        },
         onScanStarted: options.onScanStarted,
         onReconnect: options.onReconnect,
         onWorkerStatus: options.onWorkerStatus,
         onObserverError: options.onObserverError,
       });
-      await workbench(workbenchOptions, ["complete-scan", "--scan-id", scanId]);
-      activeScan = null;
       checkOpen();
       return result;
     } catch (error) {
@@ -929,6 +936,7 @@ interface ScanEventRunOptions {
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
+  onFinalize?: () => Promise<void>;
   onScanStarted?: () => void;
   onReconnect?: (attempt: number, maxAttempts: number) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
@@ -1015,6 +1023,7 @@ export async function runScanEvents(
         "Codex Security did not report a thread ID.",
       );
     }
+    await options.onFinalize?.();
     const result = await collectResult(
       { status, finalResponse, usage },
       threadId,
@@ -1071,6 +1080,8 @@ async function scanPrompt(
     'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
     'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
     'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
+    'Use exactly "$CODEX_SECURITY_TARGET_DISPLAY_NAME" as scan.target.displayName; do not infer a display name from the Git remote.',
+    'Use exactly "codex-security-plugin" as scan.producer.name.',
     ...(hasConfigPath
       ? [
           'For normal config-preflight helper calls, append --config "$CODEX_SECURITY_CONFIG_PATH" so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.',
@@ -1089,7 +1100,7 @@ async function scanPrompt(
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target),
-    "Complete and seal the canonical JSON contract before returning.",
+    "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
   ].join("\n");
 }
 

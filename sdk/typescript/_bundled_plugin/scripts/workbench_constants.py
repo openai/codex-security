@@ -13,6 +13,7 @@ PHASE_PROGRESS_UNITS = (
     "validated_findings",
     "report_artifacts",
 )
+FINDING_SEVERITIES = ("critical", "high", "medium", "low", "informational")
 FINDING_STATUSES = ("open", "closed")
 FINDING_CLOSE_REASONS = ("already_fixed", "wont_fix", "false_positive")
 REMEDIATION_STATES = (

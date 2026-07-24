@@ -7,6 +7,8 @@ import sqlite3
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
+from workbench_constants import FINDINGS_PAGE_MAX
+
 
 def list_workspace_scans(
     connection: sqlite3.Connection,
@@ -74,7 +76,34 @@ def list_scans(
         prefix = scan_root.rstrip(os.sep) + os.sep
         clauses.append("(scans.scan_dir = ? OR substr(scans.scan_dir, 1, ?) = ?)")
         values.extend((scan_root, len(prefix), prefix))
+    if args is not None and args.target_id:
+        clauses.append("scans.target_id = ?")
+        values.append(args.target_id)
+    if args is not None and args.mode:
+        clauses.append("scans.mode = ?")
+        values.append(args.mode)
+    if args is not None and args.status:
+        if args.status == "canceled":
+            clauses.append("scans.canceled_at IS NOT NULL")
+        else:
+            clauses.append("scans.status = ? AND scans.canceled_at IS NULL")
+            values.append(args.status)
+    if args is not None and args.query:
+        query = args.query.strip().casefold()
+        if query:
+            clauses.append(
+                "(instr(lower(scans.target_path), ?) > 0 "
+                "OR instr(lower(COALESCE(scans.target_summary, '')), ?) > 0 "
+                "OR instr(lower(scans.scope), ?) > 0 "
+                "OR instr(lower(scans.mode), ?) > 0)"
+            )
+            values.extend((query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    paginated = args is not None and (args.limit is not None or args.offset != 0)
+    limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX) if paginated else None
+    pagination = "LIMIT ? OFFSET ?" if paginated else ""
+    if limit is not None:
+        values.extend((limit + 1, args.offset))
     rows = connection.execute(
         f"""
         SELECT
@@ -97,10 +126,11 @@ def list_scans(
             MAX(scans.updated_at, progress.updated_at) DESC,
             scans.started_at DESC,
             scans.id
+        {pagination}
         """,
         values,
     ).fetchall()
-    return {
+    result = {
         "scans": [
             {
                 "completedAt": row["completed_at"],
@@ -131,9 +161,18 @@ def list_scans(
                 "targetSummary": row["target_summary"],
                 "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
             }
-            for row in rows
+            for row in rows[:limit]
         ]
     }
+    if limit is not None:
+        result.update(
+            {
+                "limit": limit,
+                "nextOffset": args.offset + limit if len(rows) > limit else None,
+                "offset": args.offset,
+            }
+        )
+    return result
 
 
 def compare_scans(

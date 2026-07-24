@@ -42,6 +42,7 @@ import workbench_scan_history as scan_history
 from filesystem_identity import serialize_filesystem_identity as serialize_filesystem_identity
 from filesystem_identity import stored_filesystem_identity_matches
 from finalize_scan_contract import (
+    PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
@@ -621,6 +622,12 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
 
     contract = scan_contract(scan)
     target_contract = contract["target"]
+    plugin_manifest = read_json_object(
+        Path(__file__).resolve().parent.parent / ".codex-plugin" / "plugin.json"
+    )
+    plugin_version = plugin_manifest.get("version")
+    if not isinstance(plugin_version, str) or not plugin_version:
+        raise SystemExit("plugin.json: expected a nonempty Codex Security plugin version.")
     target: dict[str, Any] = {
         "targetId": target_contract["targetId"],
         "displayName": target_contract["displayName"],
@@ -633,8 +640,8 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
-        if scan["target_snapshot_digest"]:
-            target["snapshotDigest"] = scan["target_snapshot_digest"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
 
     scope: dict[str, Any] = {
         "includePaths": requested_scan_paths(scan),
@@ -645,6 +652,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "scanId": scan["id"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
+        "producer": {"name": PRODUCER_NAME, "version": plugin_version},
         "target": target,
         "allowedTargetKinds": target_contract["allowedKinds"],
         "scope": scope,
@@ -2880,9 +2888,26 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
     limit = min(args.limit, FINDINGS_PAGE_MAX)
-    rows = finding_occurrence_rows(connection, scan["id"], offset=args.offset, limit=limit)
+    rows = finding_occurrence_rows(
+        connection,
+        scan["id"],
+        offset=args.offset,
+        limit=limit,
+        query=args.query,
+        severity=args.severity,
+        status=args.status,
+    )
+    conditions, values = finding_occurrence_conditions(
+        scan["id"], query=args.query, severity=args.severity, status=args.status
+    )
     total = connection.execute(
-        "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
+        f"""
+        SELECT COUNT(*)
+        FROM finding_occurrences AS occurrences
+        LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE {conditions}
+        """,
+        values,
     ).fetchone()[0]
     next_offset = args.offset + len(rows)
     return {
@@ -3031,15 +3056,35 @@ def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:
 
 
 def finding_occurrence_rows(
-    connection: sqlite3.Connection, scan_id: str, *, offset: int, limit: int
+    connection: sqlite3.Connection,
+    scan_id: str,
+    *,
+    offset: int,
+    limit: int,
+    query: str | None = None,
+    severity: str | None = None,
+    status: str | None = None,
 ) -> list[sqlite3.Row]:
+    conditions, values = finding_occurrence_conditions(
+        scan_id, query=query, severity=severity, status=status
+    )
     return connection.execute(
-        """
-        SELECT id, finding_id, title, summary, severity, confidence, remediation, details_json, created_at
-        FROM finding_occurrences
-        WHERE scan_id = ?
+        f"""
+        SELECT
+            occurrences.id,
+            occurrences.finding_id,
+            occurrences.title,
+            occurrences.summary,
+            occurrences.severity,
+            occurrences.confidence,
+            occurrences.remediation,
+            occurrences.details_json,
+            occurrences.created_at
+        FROM finding_occurrences AS occurrences
+        LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE {conditions}
         ORDER BY
-            CASE severity
+            CASE occurrences.severity
                 WHEN 'critical' THEN 0
                 WHEN 'high' THEN 1
                 WHEN 'medium' THEN 2
@@ -3047,12 +3092,42 @@ def finding_occurrence_rows(
                 WHEN 'informational' THEN 4
                 ELSE 5
             END,
-            created_at,
-            id
+            occurrences.created_at,
+            occurrences.id
         LIMIT ? OFFSET ?
         """,
-        (scan_id, limit, offset),
+        (*values, limit, offset),
     ).fetchall()
+
+
+def finding_occurrence_conditions(
+    scan_id: str,
+    *,
+    query: str | None,
+    severity: str | None,
+    status: str | None,
+) -> tuple[str, list[str]]:
+    conditions = ["occurrences.scan_id = ?"]
+    values = [scan_id]
+    if severity is not None:
+        conditions.append("occurrences.severity = ?")
+        values.append(severity)
+    if status is not None:
+        conditions.append("COALESCE(triage.status, 'open') = ?")
+        values.append(status)
+    if query:
+        search = query.strip().casefold()
+        if search:
+            conditions.append(
+                "(instr(lower(occurrences.title), ?) > 0 "
+                "OR instr(lower(occurrences.summary), ?) > 0 "
+                "OR EXISTS ("
+                "SELECT 1 FROM finding_locations AS locations "
+                "WHERE locations.occurrence_id = occurrences.id "
+                "AND instr(lower(locations.relative_path), ?) > 0))"
+            )
+            values.extend((search, search, search))
+    return " AND ".join(conditions), values
 
 
 def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
@@ -3583,7 +3658,7 @@ def main() -> None:
             )
         elif args.command == "list-repositories":
             result = native_indexes.list_repositories(
-                connection, read_coverage=coverage_for_comparison
+                connection, args, read_coverage=coverage_for_comparison
             )
         elif args.command == "list-findings":
             result = list_findings(connection, args)
