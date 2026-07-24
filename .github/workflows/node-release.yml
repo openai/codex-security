@@ -56,11 +56,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#npm-v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
-            echo "npm release tags must identify a beta release, such as npm-v0.1.0-beta.4." >&2
+          if [[ ! "$GITHUB_REF_NAME" =~ ^npm-v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "npm release tags must identify a stable 0.x.y release, such as npm-v0.1.0." >&2
             exit 1
           fi
+          version="${GITHUB_REF_NAME#npm-v}"
           git fetch origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "npm release tags must point to a commit on main." >&2
@@ -105,4 +105,4 @@ jobs:
           "$consumer/node_modules/.bin/codex-security" --help
 
       - name: Publish to npm
-        run: npm publish dist/*.tgz --provenance --access public --tag beta
+        run: npm publish dist/*.tgz --provenance --access public --tag latest
