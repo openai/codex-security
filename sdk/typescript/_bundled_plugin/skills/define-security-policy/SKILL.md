@@ -12,10 +12,10 @@ A useful `SECURITY.md` tells Codex Security what matters in a repository: the sy
 Confirm the repository or component the user wants to cover. Inventory policy paths, including hidden directories, before reading them:
 
 ```bash
-find <repo_root> \( -type f -o -type l \) -name SECURITY.md -not -path '*/.git/*' -print
+<python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --list
 ```
 
-Resolve each candidate within the repository and check the resolved regular file's byte size. Do not pass policies larger than 1 MiB to the resolver; report them so the user can decide how to proceed. The resolver enforces the same limit for regular files and repository-local symbolic links.
+The command runs on Windows, macOS, and Linux. It emits a sorted JSON array of repository-relative policy paths, escapes control characters unambiguously, includes linked policies without following directory links, and prunes Git metadata. Resolve each candidate within the repository and check the resolved regular file's byte size. Do not pass policies larger than 1 MiB to the resolver; report them so the user can decide how to proceed. The resolver enforces the same limit for regular files and repository-local symbolic links.
 
 Read `../../references/security-guidance.md`, then resolve the policy chain for the file or directory being reviewed:
 
