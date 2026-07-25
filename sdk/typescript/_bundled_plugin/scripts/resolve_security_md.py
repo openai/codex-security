@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -44,7 +45,18 @@ def list_security_md(repo: Path) -> list[str]:
     for directory, subdirectories, filenames in os.walk(
         root, onerror=raise_walk_error, followlinks=False
     ):
-        subdirectories[:] = sorted(name for name in subdirectories if name != ".git")
+        safe_subdirectories: list[str] = []
+        for name in sorted(subdirectories):
+            if name == ".git":
+                continue
+            directory_stat = (Path(directory) / name).stat(follow_symlinks=False)
+            if not stat.S_ISDIR(directory_stat.st_mode):
+                continue
+            reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if getattr(directory_stat, "st_file_attributes", 0) & reparse_point:
+                continue
+            safe_subdirectories.append(name)
+        subdirectories[:] = safe_subdirectories
         if "SECURITY.md" not in filenames:
             continue
         policy = Path(directory) / "SECURITY.md"
@@ -132,7 +144,7 @@ def main() -> int:
             else resolve_security_md(args.repo, args.scope)
         )
         if args.out == Path("-"):
-            sys.stdout.write(guidance)
+            sys.stdout.buffer.write(guidance.encode("utf-8"))
         else:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(guidance, encoding="utf-8")
