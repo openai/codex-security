@@ -1,0 +1,4 @@
+interface:
+  display_name: "Define Security Policy"
+  short_description: "Define scoped SECURITY.md scan guidance"
+  default_prompt: "Define or update this repository's SECURITY.md and show the proposed diff."
