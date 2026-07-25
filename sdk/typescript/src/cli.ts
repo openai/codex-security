@@ -18,6 +18,7 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import { cwd } from "node:process";
 import { createInterface } from "node:readline";
@@ -62,6 +63,10 @@ import {
   runWorkbench,
   type CodexCommand,
 } from "./runtime.js";
+import {
+  matchScanFindings,
+  type ScanComparisonInput,
+} from "./scan-comparison.js";
 import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
@@ -77,6 +82,9 @@ const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
 const MAX_CODEX_OVERRIDE_DEPTH = 64;
 const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
 const MAX_SKILL_INPUT_COUNT = 64;
+const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
+const WINDOWS_LOCAL_DEVICE_ROOT =
+  /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 
@@ -161,6 +169,20 @@ interface ExportArguments {
   pythonPath?: string;
 }
 
+interface MatchingBatch {
+  afterScanId: string;
+  afterFindings: ScanComparisonInput["after"];
+  beforeScans: { scanId: string; findings: ScanComparisonInput["before"] }[];
+}
+
+type MatchingPlan = JsonObject & {
+  repository: string;
+  scanCount: number;
+  unavailableScans: number;
+  skippedPairs: number;
+  batches: (JsonObject & MatchingBatch)[];
+};
+
 interface SkillCommandOutput {
   readonly command: "validate" | "patch";
   readonly stdout: Writable;
@@ -190,6 +212,7 @@ interface CliDependencies {
   ): Promise<number>;
   bulkScan?: BulkScanDiscoveryDependencies;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
+  matchFindings: typeof matchScanFindings;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -289,6 +312,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       args,
     );
   },
+  matchFindings: matchScanFindings,
 };
 
 export async function runCodexSkillCommand(
@@ -471,7 +495,7 @@ export async function main(
   };
   const scanHistory = Cli.create("scans", {
     description:
-      "List, inspect, rerun, and compare saved Codex Security scans.",
+      "List, inspect, rerun, match, and compare saved Codex Security scans.",
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
@@ -565,8 +589,72 @@ export async function main(
         return outcome.data;
       },
     })
+    .command("match", {
+      description: "Match findings by root cause across saved scans.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        beforeId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Earlier saved scan identifier."),
+        afterId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Later saved scan identifier."),
+      }),
+      options: z.object({
+        all: z
+          .boolean()
+          .default(false)
+          .describe("Match all completed scans of the current repository."),
+        force: z
+          .boolean()
+          .default(false)
+          .describe("Recompute an existing semantic finding comparison."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        try {
+          if (options.all) {
+            return await matchAllScans(dependencies, options.force);
+          }
+          const comparison = await history([
+            "compare-scans",
+            "--before-scan-id",
+            args.beforeId!,
+            "--after-scan-id",
+            args.afterId!,
+            "--include-matching-inputs",
+          ]);
+          if (comparison === undefined) return undefined;
+          const { matchingCached, matchingInputs, ...visibleComparison } =
+            comparison;
+          if (matchingCached && !options.force) return visibleComparison;
+
+          const matching = await dependencies.matchFindings(
+            matchingInputs as JsonObject & ScanComparisonInput,
+          );
+          return await history([
+            "save-scan-comparison",
+            "--before-scan-id",
+            args.beforeId!,
+            "--after-scan-id",
+            args.afterId!,
+            "--matches-json",
+            JSON.stringify(matching),
+          ]);
+        } catch (error) {
+          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+          exitCode = 2;
+          return undefined;
+        }
+      },
+    })
     .command("compare", {
-      description: "Compare findings and coverage between two saved scans.",
+      description: "Compare findings and coverage using saved matches.",
       mcp: false,
       args: z.object({
         beforeId: z.string().min(1).describe("Earlier saved scan identifier."),
@@ -580,6 +668,7 @@ export async function main(
           args.beforeId,
           "--after-scan-id",
           args.afterId,
+          "--require-matches",
         ]);
       },
     });
@@ -1350,17 +1439,123 @@ function validateCliArguments(
     index += 1;
   }
   if (
+    subcommand === "match" &&
+    !argv.some((value) => ["--schema", "--llms", "--llms-full"].includes(value))
+  ) {
+    if (argv.includes("--all") && positionals.length > 0) {
+      return "scans match --all does not accept scan identifiers.";
+    }
+    if (!argv.includes("--all") && positionals.length !== 2) {
+      return "scans match requires two scan identifiers or --all.";
+    }
+  }
+  if (
     command !== "validate" &&
     command !== "patch" &&
     positionals.length >
       (command === "logout" || command === "info"
         ? 0
-        : subcommand === "compare"
+        : subcommand === "compare" || subcommand === "match"
           ? 2
           : 1)
   ) {
     return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
   }
+}
+
+async function matchAllScans(
+  dependencies: CliDependencies,
+  force: boolean,
+): Promise<JsonObject> {
+  const result = (await dependencies.runWorkbench([
+    "list-unmatched-scan-pairs",
+    "--repository",
+    dependencies.currentDirectory(),
+    ...(force ? ["--force"] : []),
+  ])) as MatchingPlan;
+  const { repository, scanCount, unavailableScans, skippedPairs, batches } =
+    result;
+
+  let matchedPairs = 0;
+  let findingMatches = 0;
+  for (const { afterScanId, afterFindings, beforeScans } of batches) {
+    const before = beforeScans.flatMap(({ findings }) => findings);
+    const matching =
+      before.length === 0 || afterFindings.length === 0
+        ? { matches: [], uncertain: [] }
+        : await dependencies.matchFindings(
+            { before, after: afterFindings },
+            { allowHistoricalUncertainty: true },
+          );
+    const comparisons = beforeScans.map(({ scanId, findings }) => {
+      const beforeIds = new Set(
+        findings.map(({ occurrenceId }) => occurrenceId),
+      );
+      const matches = matching.matches.flatMap((match) => {
+        const beforeOccurrenceIds = match.beforeOccurrenceIds.filter((id) =>
+          beforeIds.has(id),
+        );
+        return beforeOccurrenceIds.length === 0
+          ? []
+          : [{ ...match, beforeOccurrenceIds }];
+      });
+      const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
+        beforeIds.has(beforeOccurrenceId),
+      );
+      const matchedAfter = new Set(
+        matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
+      );
+      if (
+        uncertain.some(({ afterOccurrenceId }) =>
+          matchedAfter.has(afterOccurrenceId),
+        )
+      ) {
+        throw new CodexSecurityError(
+          "Scan matching returned conflicting confirmed and uncertain findings.",
+        );
+      }
+      return { scanId, matches, uncertain };
+    });
+    for (const { scanId, matches, uncertain } of comparisons) {
+      await dependencies.runWorkbench([
+        "save-scan-comparison",
+        "--before-scan-id",
+        scanId,
+        "--after-scan-id",
+        afterScanId,
+        "--matches-json",
+        JSON.stringify({ matches, uncertain }),
+      ]);
+      matchedPairs += 1;
+      findingMatches += matches.reduce(
+        (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
+          count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
+        0,
+      );
+    }
+  }
+  return {
+    repository,
+    scanCount,
+    unavailableScans,
+    matchedPairs,
+    skippedPairs,
+    findingMatches,
+  };
+}
+
+function staysWithinWindowsDeviceRoot(input: string, root: string): boolean {
+  let depth = 0;
+  for (const segment of input.slice(root.length).split(/[\\/]+/u)) {
+    if (segment.length === 0 || segment === ".") continue;
+    if (segment === "..") {
+      if (depth === 0) return false;
+      depth -= 1;
+      continue;
+    }
+    depth += 1;
+  }
+  return true;
 }
 
 async function runSkill(
@@ -1399,44 +1594,62 @@ async function runSkill(
     if (Buffer.byteLength(input, "utf8") > MAX_SKILL_INPUT_BYTES) {
       throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
-    const path = resolve(directory, input);
-    const metadata = await stat(path).catch((error: unknown) => {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        (error.code === "ENOENT" ||
-          error.code === "ENOTDIR" ||
-          error.code === "ENAMETOOLONG" ||
-          error.code === "EINVAL")
-      ) {
-        return undefined;
-      }
-      throw new CodexSecurityError(
-        "Could not read the finding or issue input.",
-      );
-    });
     let contentsOrLiteral = input;
-    if (metadata !== undefined) {
-      if (!metadata.isFile()) {
-        throw new CodexSecurityError(
-          "Finding and issue inputs must be files or literal text.",
-        );
-      }
-      if (metadata.size > MAX_SKILL_INPUT_BYTES) {
-        throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
-      }
-      try {
-        contentsOrLiteral = await readFile(path, "utf8");
-      } catch {
+    const windowsNamespace =
+      process.platform === "win32" || input.startsWith("\\");
+    const rawDeviceRoot = WINDOWS_LOCAL_DEVICE_ROOT.exec(input)?.[0];
+    const localDeviceRoot = rawDeviceRoot?.replaceAll("/", "\\").toLowerCase();
+    const normalizedDeviceRoot =
+      localDeviceRoot === undefined
+        ? undefined
+        : WINDOWS_LOCAL_DEVICE_ROOT.exec(win32.resolve(input))?.[0]
+            .replaceAll("/", "\\")
+            .toLowerCase();
+    const windowsNetworkPath =
+      windowsNamespace &&
+      WINDOWS_NETWORK_PATH.test(input) &&
+      (rawDeviceRoot === undefined ||
+        !staysWithinWindowsDeviceRoot(input, rawDeviceRoot) ||
+        localDeviceRoot !== normalizedDeviceRoot);
+    if (!windowsNetworkPath) {
+      const path = resolve(directory, input);
+      const metadata = await stat(path).catch((error: unknown) => {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          (error.code === "ENOENT" ||
+            error.code === "ENOTDIR" ||
+            error.code === "ENAMETOOLONG" ||
+            error.code === "EINVAL")
+        ) {
+          return undefined;
+        }
         throw new CodexSecurityError(
           "Could not read the finding or issue input.",
         );
-      }
-      if (contentsOrLiteral.trim().length === 0) {
-        throw new CodexSecurityError(
-          "Finding or issue inputs must not be empty.",
-        );
+      });
+      if (metadata !== undefined) {
+        if (!metadata.isFile()) {
+          throw new CodexSecurityError(
+            "Finding and issue inputs must be files or literal text.",
+          );
+        }
+        if (metadata.size > MAX_SKILL_INPUT_BYTES) {
+          throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
+        }
+        try {
+          contentsOrLiteral = await readFile(path, "utf8");
+        } catch {
+          throw new CodexSecurityError(
+            "Could not read the finding or issue input.",
+          );
+        }
+        if (contentsOrLiteral.trim().length === 0) {
+          throw new CodexSecurityError(
+            "Finding or issue inputs must not be empty.",
+          );
+        }
       }
     }
     totalBytes += Buffer.byteLength(contentsOrLiteral, "utf8");

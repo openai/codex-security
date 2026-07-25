@@ -95,8 +95,14 @@ if (
 ) {
   throw new Error("Plugin projection contract contains invalid paths.");
 }
+const publicManifest = ".codex-plugin/plugin.json";
+if (!externalOwnedExact.includes(publicManifest)) {
+  throw new Error(
+    "Plugin projection contract must declare the public manifest as externally owned.",
+  );
+}
 const pluginPaths = [
-  ...externalOwnedExact,
+  publicManifest,
   ...shippedExact.filter((path) => !path.startsWith("sdk/")),
 ];
 const pluginFiles = new Set(pluginPaths);
@@ -141,6 +147,7 @@ const distFiles = new Set(
     "multiscan",
     "result",
     "runtime",
+    "scan-comparison",
     "targets",
     "trusted-executable",
     "version",

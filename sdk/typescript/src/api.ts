@@ -152,12 +152,13 @@ export interface ScanPreflight {
   knowledgeBasePaths?: string[];
   outputDir: string | null;
   archiveDir?: string;
+  authentication: ScanAuthentication;
   model: string;
   reasoningEffort: string;
 }
 
 interface LocalScanInputs
-  extends Omit<ScanPreflight, "model" | "reasoningEffort"> {
+  extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
 }
 
@@ -253,6 +254,7 @@ export class CodexSecurity {
         : {}),
       outputDir: inputs.outputDir,
       ...(archiveDir === null ? {} : { archiveDir }),
+      authentication: scanAuthentication(this.#dependencies.environment),
       ...scanModelConfiguration(configuration),
     };
   }

@@ -28,6 +28,7 @@ import {
   InvalidTargetError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
+  type ScanAuthentication,
   type ScanOptions,
   ScanInterruptedError,
   type ScanWorkerStatus,
@@ -873,6 +874,11 @@ describe("CodexSecurity orchestration", () => {
       target: { kind: "paths", paths: ["src"] },
       mode: "deep",
       outputDir: output,
+      authentication: {
+        method: "api_key",
+        source: "OPENAI_API_KEY",
+        verified: false,
+      },
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
     });
@@ -976,6 +982,44 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.preflight(repository)).rejects.toThrow(
         /model|reasoning effort/u,
       );
+      await client.close();
+    }
+  });
+
+  test("reports selected credentials without checking them during preflight", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+
+    for (const [environment, expected] of [
+      [
+        { OPENAI_API_KEY: "synthetic-openai-key", CODEX_API_KEY: "other-key" },
+        { method: "api_key", source: "OPENAI_API_KEY", verified: false },
+      ],
+      [
+        { openai_api_key: "   ", Codex_Api_Key: "synthetic-codex-key" },
+        { method: "api_key", source: "CODEX_API_KEY", verified: false },
+      ],
+      [{}, { method: "stored_credentials", verified: false }],
+    ] as const) {
+      let runtimeStarted = false;
+      const client = new TestClient(
+        {},
+        {
+          environment,
+          prepareRuntime: async () => {
+            runtimeStarted = true;
+            throw new Error("runtime should not initialize");
+          },
+        },
+      );
+
+      const preflight = await client.preflight(repository);
+      const authentication: ScanAuthentication = preflight.authentication;
+
+      expect(authentication).toEqual(expected);
+      expect(JSON.stringify(preflight)).not.toContain("synthetic-");
+      expect(runtimeStarted).toBe(false);
       await client.close();
     }
   });

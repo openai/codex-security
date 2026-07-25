@@ -2,3 +2,11 @@ node_modules/
 dist/
 .env
 .DS_Store
+/*.csv
+/repositories.csv
+/results/
+/security-scans/
+/state/
+/codex-security.json
+/findings.json
+/*.sarif

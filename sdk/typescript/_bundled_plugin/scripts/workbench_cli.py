@@ -146,6 +146,10 @@ def parse_args(description: str) -> argparse.Namespace:
     list_scans.add_argument("--offset", type=non_negative_int, default=0)
     list_scans.add_argument("--limit", type=positive_int)
 
+    list_unmatched_scan_pairs = subparsers.add_parser("list-unmatched-scan-pairs")
+    list_unmatched_scan_pairs.add_argument("--repository", required=True)
+    list_unmatched_scan_pairs.add_argument("--force", action="store_true")
+
     register_cli_scan = subparsers.add_parser("register-cli-scan")
     register_cli_scan.add_argument("--scan-dir", required=True)
     register_cli_scan.add_argument("--repository", required=True)
@@ -158,6 +162,14 @@ def parse_args(description: str) -> argparse.Namespace:
     compare_scans = subparsers.add_parser("compare-scans")
     compare_scans.add_argument("--before-scan-id", required=True)
     compare_scans.add_argument("--after-scan-id", required=True)
+    compare_scans.add_argument("--include-matching-inputs", action="store_true")
+    compare_scans.add_argument("--require-matches", action="store_true")
+
+    save_scan_comparison = subparsers.add_parser("save-scan-comparison")
+    save_scan_comparison.add_argument("--before-scan-id", required=True)
+    save_scan_comparison.add_argument("--after-scan-id", required=True)
+    save_scan_comparison.add_argument("--matches-json", required=True)
+
     list_global_findings = subparsers.add_parser("list-global-findings")
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
