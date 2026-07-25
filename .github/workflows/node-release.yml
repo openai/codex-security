@@ -10,14 +10,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  verify:
     if: github.repository == 'openai/codex-security'
-    name: publish
+    name: verify
     runs-on: ubuntu-latest
-    environment: npm
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
 
     steps:
       - name: Checkout repository
@@ -30,17 +30,7 @@ jobs:
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-
-      # Socket Firewall installed by security
-      # https://app.notion.com/p/openai/Socket-Firewall-33c8e50b62b0802a82cee42fd51e2c01?source=copy_link#3768e50b62b0806097edebce817e14a5
-      # Slack: #socket-firewall
-      - name: Activate Socket Firewall
-        uses: openai/socket-firewall@40af4b6b4b00fb88c59af22858dc9f15e077617d # v0.1.0
-        with:
-          disabled-until: ${{ vars.SOCKET_FIREWALL_DISABLED_UNTIL }}
-      - name: Set up npm trusted publishing
-        run: npm install --global npm@11.15.0
+          package-manager-cache: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -99,10 +89,45 @@ jobs:
           consumer="$(mktemp -d)"
           trap 'rm -rf "$consumer"' EXIT
           printf '%s\n' '{"name":"codex-security-smoke","private":true,"type":"module"}' > "$consumer/package.json"
-          npm install --prefix "$consumer" --include=optional --no-audit --no-fund ./dist/*.tgz
+          npm install --ignore-scripts --prefix "$consumer" --include=optional --no-audit --no-fund ./dist/*.tgz
           (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("@openai/codex-security"); if (typeof sdk.CodexSecurity !== "function") process.exit(1);')
           "$consumer/node_modules/.bin/codex-security" --version
           "$consumer/node_modules/.bin/codex-security" --help
 
+      - name: Upload verified package
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-release-tarball
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    if: github.repository == 'openai/codex-security'
+    name: publish
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Download verified package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact-id }}
+          path: dist
+          digest-mismatch: error
+
       - name: Publish to npm
-        run: npm publish dist/*.tgz --provenance --access public --tag latest
+        run: npm publish ./dist/*.tgz --provenance --access public --tag latest

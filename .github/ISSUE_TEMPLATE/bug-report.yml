@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a problem with the Codex Security CLI or TypeScript SDK.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before opening a new report. Remove API keys, access tokens,
+        private source code, security findings, and other sensitive information.
+        Report vulnerabilities in Codex Security privately using the security policy.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did the problem occur?
+      options:
+        - CLI
+        - TypeScript SDK
+        - Bulk scan
+        - CI integration
+        - Docker deployment
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Codex Security version
+      description: Run npx codex-security --version.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and Node.js version
+      description: Include your operating system and the output of node --version.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Share a minimal reproduction without credentials or private repository contents.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include relevant errors after removing secrets and security findings.
+    validations:
+      required: true

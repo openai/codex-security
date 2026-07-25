@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://bugcrowd.com/engagements/openai
+    about: Report vulnerabilities in Codex Security privately through OpenAI's Bugcrowd program.
