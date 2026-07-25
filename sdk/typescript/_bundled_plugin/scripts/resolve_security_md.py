@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+MAX_SECURITY_MD_BYTES = 1024 * 1024
+
 
 class ResolutionError(ValueError):
     """Raised when a SECURITY.md chain cannot be resolved."""
@@ -54,7 +56,11 @@ def resolve_security_md(repo: Path, scope: Path) -> str:
         resolved_policy = policy.resolve(strict=True)
         _inside(resolved_policy, root, "SECURITY.md")
         try:
-            content = policy.read_bytes().decode("utf-8")
+            with resolved_policy.open("rb") as policy_file:
+                policy_bytes = policy_file.read(MAX_SECURITY_MD_BYTES + 1)
+            if len(policy_bytes) > MAX_SECURITY_MD_BYTES:
+                raise ResolutionError(f"SECURITY.md exceeds 1 MiB: {policy}")
+            content = policy_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ResolutionError(f"SECURITY.md is not valid UTF-8: {policy}") from exc
         if not content.strip():
