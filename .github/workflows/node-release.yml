@@ -56,11 +56,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$GITHUB_REF_NAME" =~ ^npm-v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "npm release tags must identify a stable 0.x.y release, such as npm-v0.1.0." >&2
+          if [[ ! "$GITHUB_REF_NAME" =~ ^npm-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "npm release tags must identify a stable release, such as npm-v0.1.0." >&2
             exit 1
           fi
           version="${GITHUB_REF_NAME#npm-v}"
+          package_version="$(node -p 'require("./sdk/typescript/package.json").version')"
+          if [[ "$version" != "$package_version" ]]; then
+            echo "npm release tag $version must match package version $package_version." >&2
+            exit 1
+          fi
           git fetch origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "npm release tags must point to a commit on main." >&2
@@ -70,11 +75,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm --dir sdk/typescript install --frozen-lockfile
-
-      - name: Set package version
-        env:
-          SDK_VERSION: ${{ steps.release.outputs.version }}
-        run: pnpm --dir sdk/typescript version "$SDK_VERSION" --no-git-tag-version
 
       - name: Verify
         run: |
