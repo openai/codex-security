@@ -32,6 +32,14 @@ jobs:
           node-version: "22"
           package-manager-cache: false
 
+      # Socket Firewall installed by security
+      # https://app.notion.com/p/openai/Socket-Firewall-33c8e50b62b0802a82cee42fd51e2c01?source=copy_link#3768e50b62b0806097edebce817e14a5
+      # Slack: #socket-firewall
+      - name: Activate Socket Firewall
+        uses: openai/socket-firewall@40af4b6b4b00fb88c59af22858dc9f15e077617d # v0.1.0
+        with:
+          disabled-until: ${{ vars.SOCKET_FIREWALL_DISABLED_UNTIL }}
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -101,7 +109,7 @@ jobs:
           name: npm-release-tarball
           path: dist/*.tgz
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
           compression-level: 0
 
   publish:
