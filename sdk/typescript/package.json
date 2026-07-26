@@ -46,7 +46,7 @@
     "generate:models": "node scripts/generate-models.cjs",
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",
-    "test": "bun test --timeout 30000 tests-ts/api.test.ts tests-ts/auth.test.ts tests-ts/bulk-scan-discovery.test.ts tests-ts/cli.test.ts tests-ts/config.test.ts tests-ts/contract.test.ts tests-ts/knowledge-base.test.ts tests-ts/multiscan.test.ts tests-ts/result.test.ts tests-ts/runtime.test.ts tests-ts/scan-comparison.test.ts tests-ts/skeleton.test.ts tests-ts/targets.test.ts tests-ts/trusted-executable.test.ts tests-ts/worker-progress.test.ts",
+    "test": "bun test --timeout 30000 tests-ts/api.test.ts tests-ts/auth.test.ts tests-ts/bulk-scan-discovery.test.ts tests-ts/cli-export.test.ts tests-ts/cli.test.ts tests-ts/config.test.ts tests-ts/contract.test.ts tests-ts/knowledge-base.test.ts tests-ts/multiscan.test.ts tests-ts/result.test.ts tests-ts/runtime.test.ts tests-ts/scan-comparison.test.ts tests-ts/scan-history-renderer.test.ts tests-ts/skeleton.test.ts tests-ts/targets.test.ts tests-ts/trusted-executable.test.ts tests-ts/worker-progress.test.ts",
     "types": "pnpm run generate:models:check && tsc --noEmit"
   },
   "dependencies": {

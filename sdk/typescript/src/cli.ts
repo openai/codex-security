@@ -68,6 +68,10 @@ import {
   matchScanFindings,
   type ScanComparisonInput,
 } from "./scan-comparison.js";
+import {
+  renderScanHistory,
+  type HistoryCommand,
+} from "./scan-history-renderer.js";
 import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
@@ -86,12 +90,15 @@ const MAX_SKILL_INPUT_COUNT = 64;
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
+const SCAN_HISTORY_OUTPUT_OPTION =
+  /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
   readonly isTTY?: boolean;
   readonly fd?: number;
+  readonly columns?: number;
 };
 type SignalName = "SIGINT" | "SIGTERM";
 type FailureSeverity = Exclude<SeverityLevel, "informational">;
@@ -101,6 +108,10 @@ const REPORTABLE_SEVERITIES: readonly FailureSeverity[] = [
   "high",
   "medium",
   "low",
+];
+const DISPLAY_SEVERITIES: readonly SeverityLevel[] = [
+  ...REPORTABLE_SEVERITIES,
+  "informational",
 ];
 const EXPORT_DEFAULT_OUTPUTS = {
   csv: "findings.csv",
@@ -114,6 +125,7 @@ const VALUE_OPTIONS = new Set([
   "--head",
   "--base",
   "--mode",
+  "--model",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -144,6 +156,7 @@ interface ScanArguments {
   head?: string;
   base?: string;
   mode: ScanMode;
+  model?: string;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -482,6 +495,7 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
+  let renderedHistory: string | undefined;
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject = (value) => value,
@@ -493,6 +507,36 @@ export async function main(
       exitCode = 2;
       return undefined;
     }
+  };
+  const presentHistory = (
+    result: JsonObject | undefined,
+    command: HistoryCommand,
+    format: string,
+    settings: {
+      repository?: string;
+      scanRoot?: string;
+      showLinkedFindings?: boolean;
+    } = {},
+  ): JsonObject | undefined => {
+    if (
+      result === undefined ||
+      format !== "toon" ||
+      output.isTTY !== true ||
+      argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+    ) {
+      return result;
+    }
+    renderedHistory = renderScanHistory(result, command, {
+      columns: output.columns,
+      color:
+        dependencies.environment["NO_COLOR"] === undefined &&
+        dependencies.environment["TERM"] !== "dumb",
+      now: dependencies.now(),
+      repository: settings.repository,
+      scanRoot: settings.scanRoot,
+      showLinkedFindings: settings.showLinkedFindings,
+    });
+    return result;
   };
   const scanHistory = Cli.create("scans", {
     description:
@@ -514,40 +558,61 @@ export async function main(
           .describe("Include scans whose output is under ROOT."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, options }) {
+      async run({ args, format, options }) {
         const directory = dependencies.currentDirectory();
-        return await history([
-          "list-scans",
-          ...(options.scanRoot !== undefined && args.repository === undefined
-            ? []
-            : [
-                "--repository",
-                resolve(directory, args.repository ?? directory),
-              ]),
-          ...(options.scanRoot === undefined
-            ? []
-            : ["--scan-root", resolve(directory, options.scanRoot)]),
-        ]);
+        const repository =
+          options.scanRoot !== undefined && args.repository === undefined
+            ? undefined
+            : resolve(directory, args.repository ?? directory);
+        return presentHistory(
+          await history([
+            "list-scans",
+            ...(repository === undefined ? [] : ["--repository", repository]),
+            ...(options.scanRoot === undefined
+              ? []
+              : ["--scan-root", resolve(directory, options.scanRoot)]),
+          ]),
+          "list",
+          format,
+          {
+            repository,
+            scanRoot:
+              options.scanRoot === undefined
+                ? undefined
+                : resolve(directory, options.scanRoot),
+          },
+        );
       },
     })
     .command("show", {
       description: "Show the results and saved configuration for a scan.",
       mcp: false,
       args: z.object({
-        scanId: z.string().min(1).describe("Saved scan identifier."),
+        scanId: z
+          .string()
+          .min(1)
+          .describe("Saved scan identifier or unique prefix."),
+      }),
+      options: z.object({
+        showLinkedFindings: z
+          .boolean()
+          .default(false)
+          .describe("Show findings linked across previous scans."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args }) {
-        return await history(
-          ["get-scan", "--scan-id", args.scanId],
-          (value) => {
+      async run({ args, format, options }) {
+        return presentHistory(
+          await history(["get-scan", "--scan-id", args.scanId], (value) => {
             const { scan, recipe, parentScanId } = value;
             return {
               ...(scan as JsonObject),
               ...(recipe === undefined ? {} : { recipe }),
               ...(parentScanId === undefined ? {} : { parentScanId }),
             };
-          },
+          }),
+          "show",
+          format,
+          { showLinkedFindings: options.showLinkedFindings },
         );
       },
     })
@@ -617,10 +682,14 @@ export async function main(
           .describe("Recompute an existing semantic finding comparison."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, options }) {
+      async run({ args, format, options }) {
         try {
           if (options.all) {
-            return await matchAllScans(dependencies, options.force);
+            return presentHistory(
+              await matchAllScans(dependencies, options.force),
+              "match-all",
+              format,
+            );
           }
           const comparison = await history([
             "compare-scans",
@@ -633,20 +702,26 @@ export async function main(
           if (comparison === undefined) return undefined;
           const { matchingCached, matchingInputs, ...visibleComparison } =
             comparison;
-          if (matchingCached && !options.force) return visibleComparison;
+          if (matchingCached && !options.force) {
+            return presentHistory(visibleComparison, "compare", format);
+          }
 
           const matching = await dependencies.matchFindings(
             matchingInputs as JsonObject & ScanComparisonInput,
           );
-          return await history([
-            "save-scan-comparison",
-            "--before-scan-id",
-            args.beforeId!,
-            "--after-scan-id",
-            args.afterId!,
-            "--matches-json",
-            JSON.stringify(matching),
-          ]);
+          return presentHistory(
+            await history([
+              "save-scan-comparison",
+              "--before-scan-id",
+              args.beforeId!,
+              "--after-scan-id",
+              args.afterId!,
+              "--matches-json",
+              JSON.stringify(matching),
+            ]),
+            "compare",
+            format,
+          );
         } catch (error) {
           errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
           exitCode = 2;
@@ -662,15 +737,19 @@ export async function main(
         afterId: z.string().min(1).describe("Later saved scan identifier."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args }) {
-        return await history([
-          "compare-scans",
-          "--before-scan-id",
-          args.beforeId,
-          "--after-scan-id",
-          args.afterId,
-          "--require-matches",
-        ]);
+      async run({ args, format }) {
+        return presentHistory(
+          await history([
+            "compare-scans",
+            "--before-scan-id",
+            args.beforeId,
+            "--after-scan-id",
+            args.afterId,
+            "--require-matches",
+          ]),
+          "compare",
+          format,
+        );
       },
     });
   const cli = Cli.create("codex-security", {
@@ -719,6 +798,9 @@ export async function main(
             .enum(["standard", "deep"])
             .default("standard")
             .describe("Scan mode."),
+          model: optionValue("--model")
+            .optional()
+            .describe("Model to use for the scan."),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe("Write scan artifacts to DIR."),
@@ -775,6 +857,7 @@ export async function main(
         ),
       examples: [
         { args: { repository: "." } },
+        { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
         { args: { repository: "." }, options: { path: ["src", "tests"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
       ],
@@ -797,6 +880,7 @@ export async function main(
             head: options.head,
             base: options.base,
             mode: options.mode,
+            model: options.model,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -841,6 +925,9 @@ export async function main(
           .describe("Directory for scan artifacts and resumable results."),
         workers: z.number().int().positive().default(4),
         mode: z.enum(["standard", "deep"]).default("standard"),
+        model: optionValue("--model")
+          .optional()
+          .describe("Model to use for each repository."),
         maxAttempts: z
           .number()
           .int()
@@ -870,9 +957,16 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            if (argv.length !== 1 || argv[0] !== "bulk-scan") {
+            if (
+              argv[0] !== "bulk-scan" ||
+              !(
+                argv.length === 1 ||
+                (argv.length === 3 && argv[1] === "--model") ||
+                (argv.length === 2 && argv[1] === `--model=${options.model}`)
+              )
+            ) {
               throw new Error(
-                "Run 'codex-security bulk-scan' without options to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--model MODEL]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -907,7 +1001,7 @@ export async function main(
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
-              codexOverrides: parseCodexOverrides(options.codex),
+              codexOverrides: parseCodexOverrides(options.codex, options.model),
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
@@ -1174,7 +1268,7 @@ export async function main(
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
-    await writeCliOutput(output, frameworkOutput);
+    await writeCliOutput(output, renderedHistory ?? frameworkOutput);
     return exitCode;
   } catch (error) {
     errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
@@ -1944,7 +2038,8 @@ async function runScan(
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
       codexOverrides:
-        arguments_.codexOverrides ?? parseCodexOverrides(arguments_.codex),
+        arguments_.codexOverrides ??
+        parseCodexOverrides(arguments_.codex, arguments_.model),
     };
     progress = new Progress(errorOutput, dependencies, interactive);
     const scope = scanScope(arguments_);
@@ -2183,11 +2278,10 @@ function printScanSummary(
       (severities.get(finding.severity.level) ?? 0) + 1,
     );
   }
-  const severitySummary = [...REPORTABLE_SEVERITIES, "informational" as const]
-    .map((severity) => {
-      const count = severities.get(severity);
-      return count === undefined ? null : `${count} ${severity}`;
-    })
+  const severitySummary = DISPLAY_SEVERITIES.map((severity) => {
+    const count = severities.get(severity);
+    return count === undefined ? null : `${count} ${severity}`;
+  })
     .filter((value): value is string => value !== null)
     .join(", ");
   errorOutput.write(
@@ -2326,8 +2420,12 @@ function targetFromArguments(arguments_: ScanArguments): ScanTarget {
   return "repository";
 }
 
-export function parseCodexOverrides(values: readonly string[]): JsonObject {
+export function parseCodexOverrides(
+  values: readonly string[],
+  model?: string,
+): JsonObject {
   const result = Object.create(null) as JsonObject;
+  if (model !== undefined) result["model"] = model;
   for (const value of values) {
     const separator = value.indexOf("=");
     const key = separator < 0 ? "" : value.slice(0, separator);
@@ -2375,7 +2473,11 @@ export function parseCodexOverrides(values: readonly string[]): JsonObject {
     }
     const final = parts.at(-1)!;
     if (Object.hasOwn(cursor, final)) {
-      throw new CodexSecurityError("Duplicate --codex key");
+      throw new CodexSecurityError(
+        model !== undefined && key === "model"
+          ? "--model conflicts with --codex model"
+          : "Duplicate --codex key",
+      );
     }
     cursor[final] = parsed;
   }

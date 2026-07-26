@@ -96,6 +96,7 @@ stored sign-in exists.
 
 ```bash
 npx codex-security scan /path/to/repository
+npx codex-security scan /path/to/repository --model gpt-5.6-terra
 npx codex-security scan /path/to/repository --path src --path tests
 npx codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx codex-security scan /path/to/repository --diff origin/main --json
@@ -150,9 +151,10 @@ for a passing policy. Incomplete scans still write the available human or JSON
 result to stdout and a coverage warning to stderr, including in report-only
 mode.
 
-Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Override
-either setting with repeatable `--codex KEY=VALUE` options, for example
-`--codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'`.
+Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Use
+`--model gpt-5.6-terra` to switch models. Use repeatable `--codex KEY=VALUE`
+options for other Codex settings, such as
+`--codex 'model_reasoning_effort="high"'`.
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
@@ -189,6 +191,9 @@ Results remain under `--output-dir`; rerun the same command to resume.
 repository path to inspect another checkout, `--scan-root DIR` to list scans
 whose artifacts are under a particular root. `scans show SCAN_ID` includes the
 scan configuration, results, coverage, and artifact locations.
+
+Every scan history command accepts a full scan ID or a unique prefix of at
+least eight characters.
 
 Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set

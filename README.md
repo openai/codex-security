@@ -58,6 +58,7 @@ value, including when no stored sign-in exists.
 Scan a subset of a repository or write machine-readable results:
 
 ```bash
+npx codex-security scan /path/to/repo --model gpt-5.6-terra
 npx codex-security scan /path/to/repo --path src --path tests
 npx codex-security scan /path/to/repo --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx codex-security scan /path/to/repo --diff origin/main --json
@@ -148,11 +149,11 @@ JSON scans remain noninteractive, including when stderr is a terminal. Commands
 that run Codex interactively (`validate`, `patch`, `login`, and `logout`) reject
 `--json`. Write CSV exports to a file when JSON output is selected.
 
-Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. To override
-either setting, pass valid TOML values (including quotes for strings):
+Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Switch
+models with `--model`. Use `--codex` for other Codex settings:
 
 ```bash
-npx codex-security scan . --codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'
+npx codex-security scan . --model gpt-5.6-terra --codex 'model_reasoning_effort="high"'
 ```
 
 Scans report their requested paths and actual ranking, file-review, validation,

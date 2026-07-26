@@ -1,11 +1,9 @@
 import { spawnSync } from "node:child_process";
 import {
   copyFile,
-  lstat,
   mkdir,
   mkdtemp,
   readFile,
-  realpath,
   rm,
   stat,
   symlink,
@@ -15,11 +13,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import type {
-  CodexSecurity,
   CodexSecurityConfig,
   JsonObject,
+  ScanPreflight,
 } from "../src/index.js";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -27,222 +26,25 @@ import {
   DiffTarget,
   OutputInsideProtectedRootError,
   ScanInterruptedError,
-  ScanResult,
   VERSION,
-} from "../src/index.js";
-import type {
-  CoverageDocument,
-  FindingsDocument,
-  ScanManifest,
-  ScanPreflight,
-  SeverityLevel,
 } from "../src/index.js";
 import {
   main,
-  exportEnvironment,
   parseCodexOverrides,
   Progress,
   readSkillCommandOutput,
   runCodexSkillCommand,
   skillCommandFailure,
 } from "../src/cli.js";
-
-type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
-
-const SYNTHETIC_CREDENTIALS = [
-  "sk-proj-SYNTHETIC_KEY_123",
-  "Bearer SYNTHETIC_TOKEN_123",
-  "Authorization: Basic SYNTHETIC_BASIC_123",
-  "Authorization: Token SYNTHETIC_HEADER_TOKEN_123",
-  "Authorization: Bearer%20SYNTHETIC%2FENCODED%2BTOKEN_123",
-  "Authorization%3A%20Bearer%20SYNTHETIC_FULLY_ENCODED_TOKEN_123",
-  "https://SYNTHETIC_USER:SYNTHETIC_PASSWORD@example.test/private",
-  "ssh://SYNTHETIC_USER:SYNTHETIC_SSH_PASSWORD@example.test/private",
-  "git+ssh://SYNTHETIC_USER:SYNTHETIC_GIT_PASSWORD@example.test/private",
-  "github_pat_SYNTHETIC_GITHUB_PAT_123",
-  "ghs_SYNTHETIC_GITHUB_TOKEN_123",
-  "OPENAI_API_KEY=SYNTHETIC_OPENAI_VALUE_123",
-  "CODEX_API_KEY=SYNTHETIC_CODEX_VALUE_123",
-  "CODEX_ACCESS_TOKEN=SYNTHETIC_CODEX_ACCESS_TOKEN_123",
-  "GITHUB_TOKEN=SYNTHETIC_GITHUB_VALUE_123",
-  "GH_TOKEN=SYNTHETIC_GH_VALUE_123",
-  '{"OPENAI_API_KEY":"SYNTHETIC_JSON_OPENAI_123","CODEX_API_KEY":"SYNTHETIC_JSON_CODEX_123"}',
-  '{\\"OPENAI_API_KEY\\":\\"SYNTHETIC_ESCAPED_OPENAI_123\\",\\"CODEX_API_KEY\\":\\"SYNTHETIC_ESCAPED_CODEX_123\\"}',
-  '{"refresh_token":"SYNTHETIC_REFRESH_TOKEN_123","id_token":"SYNTHETIC_ID_TOKEN_123","clientSecret":"SYNTHETIC_CLIENT_SECRET_123","dbPassword":"SYNTHETIC_PASSWORD_123","passwd":"SYNTHETIC_PASSWD_123"}',
-  '{\\"refreshToken\\":\\"SYNTHETIC_ESCAPED_REFRESH_123\\",\\"idToken\\":\\"SYNTHETIC_ESCAPED_ID_123\\",\\"clientSecret\\":\\"SYNTHETIC_ESCAPED_SECRET_123\\",\\"password\\":\\"SYNTHETIC_ESCAPED_PASSWORD_123\\"}',
-  "AWS_SECRET_ACCESS_KEY=SYNTHETIC_AWS_SECRET_123",
-  "AWS_ACCESS_KEY_ID=SYNTHETIC_AWS_ID_123",
-  "AWS_SESSION_TOKEN=SYNTHETIC_AWS_SESSION_123",
-  "NODE_AUTH_TOKEN=SYNTHETIC_NODE_AUTH_123",
-  "NPM_TOKEN=SYNTHETIC_NPM_TOKEN_123",
-  "OPENAI_API_KEY=sk-proj-SYNTHETIC_NAMED_OPENAI_123",
-  "GITHUB_TOKEN=ghs_SYNTHETIC_NAMED_GITHUB_123",
-  "NPM_TOKEN=npm_SYNTHETIC_NAMED_NPM_123",
-  "ACTIONS_ID_TOKEN_REQUEST_TOKEN=SYNTHETIC_ACTIONS_TOKEN_123",
-  "ACTIONS_RUNTIME_TOKEN=SYNTHETIC_ACTIONS_RUNTIME_123",
-  "GITLAB_TOKEN=SYNTHETIC_GITLAB_TOKEN_123",
-  "HF_TOKEN=SYNTHETIC_HF_TOKEN_123",
-  "SLACK_BOT_TOKEN=SYNTHETIC_SLACK_TOKEN_123",
-  "//registry.npmjs.org/:_authToken=SYNTHETIC_NPMRC_TOKEN_123",
-  "x-api-key: SYNTHETIC_HEADER_KEY_123",
-  "access_token=SYNTHETIC_ACCESS_TOKEN_123",
-  "npm_SYNTHETIC_BARE_TOKEN_123",
-  "https://example.test/?token=SYNTHETIC_QUERY_123&safe=1",
-  "https://example.test/?credential=SYNTHETIC_CREDENTIAL_123&safe=1",
-  "https://example.test/?AWS_ACCESS_KEY_ID=SYNTHETIC_QUERY_AWS_ID_123&safe=1",
-  "https://example.test/?AWS%5FACCESS%5FKEY%5FID=SYNTHETIC_ENCODED_AWS_ID_123&AWS%2DACCESS%2DKEY%2DID=SYNTHETIC_ENCODED_AWS_DASH_ID_123&safe=1",
-  "https://example.test/?service-api-key=SYNTHETIC_QUERY_API_KEY_123&service-access-token=SYNTHETIC_QUERY_ACCESS_TOKEN_123&service-token=SYNTHETIC_QUERY_TOKEN_123&service-secret=SYNTHETIC_QUERY_SECRET_123&signature=SYNTHETIC_SIGNATURE_123&safe=1",
-  "https://example.test/?X-Amz-Signature=SYNTHETIC_AMZ_SIGNATURE_123&X-Amz-Credential=SYNTHETIC_AMZ_CREDENTIAL_123&X-Amz-Security-Token=SYNTHETIC_AMZ_TOKEN_123&safe=1",
-  "https://example.test/?X-Goog-Signature=SYNTHETIC_GOOG_SIGNATURE_123&X-Goog-Credential=SYNTHETIC_GOOG_CREDENTIAL_123&safe=1",
-  "https://example.test/?sv=2026-01-01&sig=SYNTHETIC_AZURE_SIG_123&safe=1",
-  "https://example.test/?password=SYNTHETIC_QUERY_PASSWORD_123&passwd=SYNTHETIC_QUERY_PASSWD_123&safe=1",
-  "https://example.test/?oauth.refreshToken=SYNTHETIC_DOTTED_TOKEN_123&auth[token]=SYNTHETIC_BRACKET_TOKEN_123&auth%5BclientSecret%5D=SYNTHETIC_ENCODED_SECRET_123&safe=1",
-  "https://example.test/?access_token%3DSYNTHETIC_ENCODED_ACCESS_123&client_secret%3DSYNTHETIC_ENCODED_CLIENT_123&safe=1",
-  "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3DSYNTHETIC_NESTED_REFRESH_123%26password%3DSYNTHETIC_NESTED_PASSWORD_123%26safe%3D1",
-].join(" ");
-
-const REDACTED_CREDENTIALS = [
-  "[redacted]",
-  "Bearer [redacted]",
-  "Authorization: Basic [redacted]",
-  "Authorization: Token [redacted]",
-  "Authorization: Bearer%20[redacted]",
-  "Authorization%3A%20Bearer%20[redacted]",
-  "https://[redacted]@example.test/private",
-  "ssh://[redacted]@example.test/private",
-  "git+ssh://[redacted]@example.test/private",
-  "[redacted]",
-  "[redacted]",
-  "OPENAI_API_KEY=[redacted]",
-  "CODEX_API_KEY=[redacted]",
-  "CODEX_ACCESS_TOKEN=[redacted]",
-  "GITHUB_TOKEN=[redacted]",
-  "GH_TOKEN=[redacted]",
-  '{"OPENAI_API_KEY":"[redacted]","CODEX_API_KEY":"[redacted]"}',
-  '{\\"OPENAI_API_KEY\\":\\"[redacted]\\",\\"CODEX_API_KEY\\":\\"[redacted]\\"}',
-  '{"refresh_token":"[redacted]","id_token":"[redacted]","clientSecret":"[redacted]","dbPassword":"[redacted]","passwd":"[redacted]"}',
-  '{\\"refreshToken\\":\\"[redacted]\\",\\"idToken\\":\\"[redacted]\\",\\"clientSecret\\":\\"[redacted]\\",\\"password\\":\\"[redacted]\\"}',
-  "AWS_SECRET_ACCESS_KEY=[redacted]",
-  "AWS_ACCESS_KEY_ID=[redacted]",
-  "AWS_SESSION_TOKEN=[redacted]",
-  "NODE_AUTH_TOKEN=[redacted]",
-  "NPM_TOKEN=[redacted]",
-  "OPENAI_API_KEY=[redacted]",
-  "GITHUB_TOKEN=[redacted]",
-  "NPM_TOKEN=[redacted]",
-  "ACTIONS_ID_TOKEN_REQUEST_TOKEN=[redacted]",
-  "ACTIONS_RUNTIME_TOKEN=[redacted]",
-  "GITLAB_TOKEN=[redacted]",
-  "HF_TOKEN=[redacted]",
-  "SLACK_BOT_TOKEN=[redacted]",
-  "//registry.npmjs.org/:_authToken=[redacted]",
-  "x-api-key: [redacted]",
-  "access_token=[redacted]",
-  "[redacted]",
-  "https://example.test/?token=[redacted]&safe=1",
-  "https://example.test/?credential=[redacted]&safe=1",
-  "https://example.test/?AWS_ACCESS_KEY_ID=[redacted]&safe=1",
-  "https://example.test/?AWS%5FACCESS%5FKEY%5FID=[redacted]&AWS%2DACCESS%2DKEY%2DID=[redacted]&safe=1",
-  "https://example.test/?service-api-key=[redacted]&service-access-token=[redacted]&service-token=[redacted]&service-secret=[redacted]&signature=[redacted]&safe=1",
-  "https://example.test/?X-Amz-Signature=[redacted]&X-Amz-Credential=[redacted]&X-Amz-Security-Token=[redacted]&safe=1",
-  "https://example.test/?X-Goog-Signature=[redacted]&X-Goog-Credential=[redacted]&safe=1",
-  "https://example.test/?sv=2026-01-01&sig=[redacted]&safe=1",
-  "https://example.test/?password=[redacted]&passwd=[redacted]&safe=1",
-  "https://example.test/?oauth.refreshToken=[redacted]&auth[token]=[redacted]&auth%5BclientSecret%5D=[redacted]&safe=1",
-  "https://example.test/?access_token%3D[redacted]&client_secret%3D[redacted]&safe=1",
-  "https://example.test/?redirect_uri=https%3A%2F%2Finner.test%2Fcb%3Frefresh_token%3D[redacted]%26password%3D[redacted]%26safe%3D1",
-].join(" ");
-
-function capture(isTTY = false): {
-  stream: Pick<NodeJS.WriteStream, "write"> &
-    Partial<Pick<NodeJS.WriteStream, "isTTY">>;
-  text(): string;
-} {
-  let value = "";
-  return {
-    stream: {
-      isTTY,
-      write(chunk: string | Uint8Array): boolean {
-        value += chunk.toString();
-        return true;
-      },
-    },
-    text: () => value,
-  };
-}
-
-function fakePreflight(repository = "/current/repository"): ScanPreflight {
-  return {
-    repository,
-    target: { kind: "repository", paths: [] },
-    mode: "standard",
-    outputDir: null,
-    authentication: { method: "stored_credentials", verified: false },
-    model: "gpt-5.6-sol",
-    reasoningEffort: "xhigh",
-  };
-}
-
-function fakeResult(
-  severityLevels: readonly SeverityLevel[] = [],
-  completeness: CoverageDocument["completeness"] = "complete",
-  usage: unknown = null,
-): ScanResult {
-  const manifest = {
-    documentType: "codex-security.scan-manifest",
-    schemaVersion: "1.0",
-    scan: {
-      id: "scan",
-      producer: { name: "codex-security-plugin", version: "1.2.3" },
-      status: "completed",
-      startedAt: "2026-01-01T00:00:00Z",
-      completedAt: "2026-01-01T00:00:01Z",
-      sealedAt: "2026-01-01T00:00:01Z",
-      target: {
-        kind: "directory_snapshot",
-        targetId: "id",
-        displayName: "repo",
-      },
-      scope: { includePaths: ["."], excludePaths: [] },
-      coverageRef: "coverage.json",
-      findingsRef: "findings.json",
-      artifacts: [],
-    },
-  } satisfies ScanManifest;
-  const findings = {
-    documentType: "codex-security.findings",
-    schemaVersion: "1.0",
-    scanId: "scan",
-    findings: severityLevels.map((level) => ({
-      severity: { level },
-    })) as FindingsDocument["findings"],
-  } satisfies FindingsDocument;
-  const coverage = {
-    documentType: "codex-security.coverage",
-    schemaVersion: "1.0",
-    scanId: "scan",
-    mode: "repository",
-    completeness,
-    inventoryStrategy: "repository",
-    includePaths: ["."],
-    excludePaths: [],
-    surfaces: [],
-    explicitExclusions: [],
-    deferred: [],
-  } satisfies CoverageDocument;
-  return new ScanResult({
-    manifest,
-    findings,
-    coverage,
-    scanDir: "/tmp/scan",
-    threadId: "thread-1",
-    turnResult: {
-      status: "completed",
-      finalResponse: "done",
-      usage,
-    },
-  });
-}
+import {
+  FakeSignals,
+  REDACTED_CREDENTIALS,
+  SYNTHETIC_CREDENTIALS,
+  capture,
+  dependencies,
+  fakePreflight,
+  fakeResult,
+} from "./cli-fixtures.js";
 
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
@@ -274,115 +76,6 @@ async function multiscanInventory(root: string): Promise<void> {
   );
 }
 
-class FakeSignals {
-  readonly listeners = new Map<string, Set<() => void>>();
-
-  public add(signal: string, listener: () => void): void {
-    const listeners = this.listeners.get(signal) ?? new Set();
-    listeners.add(listener);
-    this.listeners.set(signal, listeners);
-  }
-
-  public remove(signal: string, listener: () => void): void {
-    this.listeners.get(signal)?.delete(listener);
-  }
-
-  public emit(signal: string): void {
-    for (const listener of this.listeners.get(signal) ?? []) listener();
-  }
-}
-
-function dependencies(
-  options: {
-    onConfig?: (config: CodexSecurityConfig) => void;
-    onTurn?: (repository: string, options: unknown) => void;
-    onRun?: () => void;
-    onInterrupt?: () => void;
-    onClose?: () => void | Promise<void>;
-    onCodex?: (args: readonly string[]) => number;
-    bulkScan?: MainDependencies["bulkScan"];
-    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
-    onMatch?: MainDependencies["matchFindings"];
-    currentDirectory?: string;
-    preflight?: ScanPreflight;
-    environment?: NodeJS.ProcessEnv;
-    signals?: FakeSignals;
-    result?: ScanResult;
-    workerStatuses?: import("../src/index.js").ScanWorkerStatus[];
-  } = {},
-): MainDependencies {
-  const signals = options.signals ?? new FakeSignals();
-  const result = options.result ?? fakeResult();
-  const security = {
-    run: async (repository: string, runOptions: unknown) => {
-      options.onTurn?.(repository, runOptions);
-      const signal = (runOptions as { signal?: AbortSignal }).signal;
-      signal?.addEventListener("abort", () => options.onInterrupt?.(), {
-        once: true,
-      });
-      options.onRun?.();
-      if (!signal?.aborted) {
-        (runOptions as { onScanStarted?: () => void }).onScanStarted?.();
-        for (const status of options.workerStatuses ?? []) {
-          (
-            runOptions as {
-              onWorkerStatus?: (
-                status: import("../src/index.js").ScanWorkerStatus,
-              ) => void;
-            }
-          ).onWorkerStatus?.(status);
-        }
-      }
-      return result;
-    },
-    preflight: async (repository: string) =>
-      options.preflight ?? fakePreflight(repository),
-    close: async () => await options.onClose?.(),
-  } as Pick<CodexSecurity, "run" | "preflight" | "close">;
-  return {
-    createSecurity: (config) => {
-      options.onConfig?.(config);
-      return security;
-    },
-    environment: options.environment ?? {},
-    currentDirectory: () => options.currentDirectory ?? "/current/repository",
-    now: () => 0,
-    setInterval: () => ({}) as NodeJS.Timeout,
-    clearInterval: () => {},
-    addSignalListener: (signal, listener) => signals.add(signal, listener),
-    removeSignalListener: (signal, listener) =>
-      signals.remove(signal, listener),
-    writeSynchronously: (stream, value) => stream.write(value),
-    forceExit: () => {},
-    runCodex: async (args) => options.onCodex?.(args) ?? 0,
-    ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
-    runWorkbench: async (args) =>
-      (await options.onWorkbench?.(args)) ?? { scans: [] },
-    matchFindings: async (input) =>
-      (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
-    exportFindings: async (arguments_) => {
-      const contents = new TextEncoder().encode(
-        arguments_.format === "csv"
-          ? "occurrence_id,finding_id\n"
-          : arguments_.format === "json"
-            ? '{"documentType":"codex-security.findings"}\n'
-            : '{"version":"2.1.0"}\n',
-      );
-      if (arguments_.output !== "-") {
-        const metadata = await lstat(arguments_.output).catch(() => undefined);
-        if (metadata?.isSymbolicLink()) {
-          throw new CodexSecurityError(
-            "results.sarif: expected a regular non-symlink file",
-          );
-        }
-        await mkdir(join(arguments_.output, ".."), { recursive: true });
-        await writeFile(arguments_.output, contents, { mode: 0o600 });
-      }
-      return contents;
-    },
-  };
-}
-
 describe("CLI", () => {
   test("exposes Incur help, schemas, manifests, and completions", async () => {
     const root = capture();
@@ -411,6 +104,7 @@ describe("CLI", () => {
         properties: {
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
+          model: { type: "string" },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
@@ -479,6 +173,8 @@ describe("CLI", () => {
             "results",
             "--mode",
             "deep",
+            "--model",
+            "gpt-5.6-terra",
             "--codex",
             "features.goals=true",
             "--json",
@@ -500,7 +196,10 @@ describe("CLI", () => {
         resultsPath: join(root, "results", "results.jsonl"),
       });
       expect(config).toMatchObject({
-        codexOverrides: { features: { goals: true } },
+        codexOverrides: {
+          features: { goals: true },
+          model: "gpt-5.6-terra",
+        },
       });
       expect(scanOptions).toMatchObject({ mode: "deep" });
       expect(stderr.text()).toContain("sample started (attempt 1)");
@@ -551,22 +250,28 @@ describe("CLI", () => {
     }
   });
 
-  test("requires a terminal for a bulk scan without a repository list", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    let started = false;
+  test("requires a terminal for interactive bulk scans", async () => {
+    for (const argv of [
+      ["bulk-scan"],
+      ["bulk-scan", "--model", "gpt-5.6-terra"],
+      ["bulk-scan", "--model=gpt-5.6-terra"],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      let started = false;
 
-    expect(
-      await main(
-        ["bulk-scan"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({ onRun: () => (started = true) }),
-      ),
-    ).toBe(2);
-    expect(started).toBe(false);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("requires a terminal");
+      expect(
+        await main(
+          argv,
+          stdout.stream,
+          stderr.stream,
+          dependencies({ onRun: () => (started = true) }),
+        ),
+      ).toBe(2);
+      expect(started).toBe(false);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("requires a terminal");
+    }
   });
 
   test("requires an output directory for a supplied bulk scan CSV", async () => {
@@ -685,6 +390,279 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({ repository: "scans" });
   });
 
+  test("presents interactive scan history and hides abandoned running scans", async () => {
+    const stdout = capture(true);
+    const scan = {
+      mode: "standard",
+      targetPath: "/demo/juice-shop",
+      scanDir: "/private/tmp/results",
+      targetId: "target-internal-id",
+    };
+    const deps = dependencies({
+      currentDirectory: "/demo/juice-shop",
+      onWorkbench: () => ({
+        scans: [
+          {
+            ...scan,
+            scanId: "failed-scan",
+            progress: { status: "failed" },
+            findingCount: 0,
+            startedAt: "2026-07-24T12:00:00Z",
+            updatedAt: "2026-07-24T12:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "abandoned-scan",
+            progress: { status: "running" },
+            findingCount: 0,
+            startedAt: "2026-07-20T12:00:00Z",
+            updatedAt: "2026-07-20T12:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "active-scan",
+            progress: { status: "running" },
+            findingCount: 2,
+            startedAt: "2026-07-24T11:00:00Z",
+            updatedAt: "2026-07-24T11:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "completed-scan",
+            progress: { status: "complete" },
+            findingCount: 8,
+            targetPath: "/demo/juice-shop-remediated",
+            startedAt: "2026-07-23T12:00:00Z",
+            updatedAt: "2026-07-23T12:00:00Z",
+          },
+        ],
+      }),
+    });
+    deps.now = () => Date.parse("2026-07-24T12:00:00Z");
+
+    expect(
+      await main(
+        ["scans", "list", "/demo/juice-shop"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    const text = stdout.text();
+    expect(text).toContain("CODEX SECURITY");
+    expect(text).toContain("SCAN HISTORY");
+    expect(text).toContain("juice-shop");
+    for (const heading of ["DATE", "STATUS", "FINDINGS", "MODE", "SCAN"]) {
+      expect(text).toContain(heading);
+    }
+    expect(text).toContain("failed-scan");
+    expect(text).toContain("FAILED");
+    expect(text).toContain("latest: 8 findings");
+    expect(text).not.toContain("latest: 0 findings");
+    expect(text).toContain("active-scan");
+    expect(text).toContain("completed-scan");
+    expect(text).not.toContain("abandoned-scan");
+    expect(text).not.toContain("juice-shop-remediated");
+    expect(text).not.toContain("/private/tmp");
+    expect(text).not.toContain("target-internal-id");
+  });
+
+  test("shows finding history and optionally reveals linked findings", async () => {
+    const findings: JsonObject[] = [
+      {
+        findingId: "internal-finding-id",
+        occurrenceId: "internal-occurrence-id",
+        severity: { level: "critical" },
+        title: "Login SQL injection bypasses authentication",
+        locations: [{ path: "routes/login.ts", startLine: 34 }],
+        knownSince: "2026-06-15T12:00:00Z",
+        knownScanIds: [
+          "12345678-abcd-4567-abcd-1234567890ab",
+          "87654321-abcd-4567-abcd-1234567890ab",
+        ],
+        matches: [
+          {
+            scanId: "12345678-abcd-4567-abcd-1234567890ab",
+            title:
+              "Earlier authentication bypass; deadbeef: forged linked finding",
+            reason: "The same login query interpolates email.",
+          },
+          {
+            scanId: "87654321-abcd-4567-abcd-1234567890ab",
+            title: "Historic login injection",
+            reason: "The same login query interpolates email.",
+          },
+        ],
+      },
+      {
+        severity: { level: "high" },
+        title: "New basket authorization bypass",
+        locations: [{ path: "routes/basket.ts", startLine: 19 }],
+      },
+    ];
+
+    for (const showLinkedFindings of [false, true]) {
+      const stdout = capture(true);
+      expect(
+        await main(
+          [
+            "scans",
+            "show",
+            "scan-1",
+            ...(showLinkedFindings ? ["--show-linked-findings"] : []),
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: () => ({
+              scan: {
+                scanId: "scan-1",
+                targetPath: "/demo/juice-shop",
+                mode: "standard",
+                progress: { status: "complete" },
+                severityCounts: { critical: 1, high: 1 },
+                findings,
+              },
+              recipe: { knowledgeBasePaths: ["/demo/threat-models"] },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      const text = stripVTControlCharacters(stdout.text());
+      expect(text).toContain("CODEX SECURITY");
+      expect(text).toContain("SCAN DETAILS");
+      expect(text).toContain("juice-shop");
+      expect(text).toContain("scan-1");
+      expect(text).toContain("CRITICAL");
+      expect(text).toContain("routes/login.ts:34");
+      expect(text).toContain("Known since Jun 15, 2026 in 12345678 … 87654321");
+      expect(text.match(/Known since/g)).toHaveLength(1);
+      expect(text).toContain("New basket authorization bypass");
+      expect(text).toContain("/demo/threat-models");
+      expect(text).not.toContain("internal-finding-id");
+      expect(text).not.toContain("internal-occurrence-id");
+      if (showLinkedFindings) {
+        expect(text).toContain("LINKED FINDINGS");
+        expect(text).toContain("MATCHED SCAN");
+        expect(text).toContain("12345678");
+        expect(text).toContain("Earlier authentication bypass");
+        expect(text).toContain("87654321");
+        expect(text).toContain("Historic login injection");
+        expect(text).toContain("SAME ROOT CAUSE");
+        expect(text).toContain("The same login query interpolates email.");
+        expect(text.match(/MATCHED SCAN/g)).toHaveLength(2);
+        expect(text).not.toContain("MATCHED SCAN deadbeef");
+      } else {
+        expect(text).not.toContain("LINKED FINDINGS");
+        expect(text).not.toContain("MATCHED SCAN");
+        expect(text).not.toContain("SAME ROOT CAUSE");
+      }
+    }
+  });
+
+  test("sanitizes interactive finding text and respects NO_COLOR", async () => {
+    const stdout = capture(true);
+    expect(
+      await main(
+        ["scans", "show", "scan-1"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          environment: { NO_COLOR: "1" },
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan-1",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findings: [
+                {
+                  severity: { level: "high" },
+                  title: "Safe title\u001b[31mINJECTED\nFORGED ROW",
+                  locations: [{ path: "routes/login.ts", startLine: 34 }],
+                },
+              ],
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("Safe titleINJECTED FORGED ROW");
+    expect(stdout.text()).not.toContain("\u001b");
+    expect(stdout.text()).not.toContain("\nFORGED ROW");
+  });
+
+  test("preserves structured and noninteractive scan-history output", async () => {
+    const response: JsonObject = {
+      beforeScanId: "before-scan",
+      afterScanId: "after-scan",
+      coverage: { afterCompleteness: "complete" },
+      summary: { persisting: 1, resolved: 0, unknown: 1 },
+      findings: [
+        {
+          findingId: "internal-finding-id",
+          beforeOccurrenceId: "internal-occurrence-id",
+          status: "persisting",
+          severity: "high",
+          title: "Basket ownership check is missing",
+          path: "routes/basket.ts",
+        },
+        {
+          status: "unknown",
+          severity: "high",
+          title: "Complaint upload can overwrite trusted files",
+          path: "routes/fileUpload.ts",
+          reason: "The affected path was excluded or outside the later scope.",
+        },
+      ],
+    };
+    for (const argv of [
+      ["scans", "compare", "before", "after", "--json"],
+      ["scans", "compare", "before", "after", "--format", "yaml"],
+    ]) {
+      const stdout = capture(true);
+      expect(
+        await main(
+          argv,
+          stdout.stream,
+          capture().stream,
+          dependencies({ onWorkbench: () => response }),
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toContain("internal-finding-id");
+      expect(stdout.text()).toContain("internal-occurrence-id");
+      if (argv.includes("--json")) {
+        expect(JSON.parse(stdout.text())).toEqual(response);
+      }
+    }
+
+    const redirected = capture();
+    expect(
+      await main(
+        ["scans", "compare", "before", "after"],
+        redirected.stream,
+        capture().stream,
+        dependencies({ onWorkbench: () => response }),
+      ),
+    ).toBe(0);
+    expect(redirected.text()).toContain("internal-finding-id");
+    expect(redirected.text()).toContain("status: unknown");
+    expect(redirected.text()).not.toContain("CODEX SECURITY");
+
+    const filtered = capture(true);
+    expect(
+      await main(
+        ["scans", "compare", "before", "after", "--filter-output", "summary"],
+        filtered.stream,
+        capture().stream,
+        dependencies({ onWorkbench: () => response }),
+      ),
+    ).toBe(0);
+    expect(filtered.text()).toContain("persisting: 1");
+    expect(filtered.text()).not.toContain("internal-finding-id");
+    expect(filtered.text()).not.toContain("CODEX SECURITY");
+  });
+
   test("shows scans and returns cached comparisons with one workbench call", async () => {
     const cases: Array<[string[], string[], JsonObject, JsonObject]> = [
       [
@@ -701,6 +679,38 @@ describe("CLI", () => {
           findingCount: 2,
           recipe: { repository: "/repo" },
           parentScanId: "scan-0",
+        },
+      ],
+      [
+        ["scans", "show", "14b85b21", "--json"],
+        ["get-scan", "--scan-id", "14b85b21"],
+        { scan: { scanId: "14b85b21-a276-48d7-9f0d-1ebd048fe2a3" } },
+        { scanId: "14b85b21-a276-48d7-9f0d-1ebd048fe2a3" },
+      ],
+      [
+        ["scans", "show", "scan-1", "--show-linked-findings", "--json"],
+        ["get-scan", "--scan-id", "scan-1"],
+        {
+          scan: {
+            scanId: "scan-1",
+            findings: [
+              {
+                knownSince: "2026-06-15T12:00:00Z",
+                knownScanIds: ["12345678-abcd-4567-abcd-1234567890ab"],
+                matches: [{ scanId: "scan-0" }],
+              },
+            ],
+          },
+        },
+        {
+          scanId: "scan-1",
+          findings: [
+            {
+              knownSince: "2026-06-15T12:00:00Z",
+              knownScanIds: ["12345678-abcd-4567-abcd-1234567890ab"],
+              matches: [{ scanId: "scan-0" }],
+            },
+          ],
         },
       ],
       [
@@ -2061,588 +2071,6 @@ describe("CLI", () => {
     }
   }, 30_000);
 
-  test("does not pass credentials or Python startup paths to the exporter", () => {
-    expect(
-      exportEnvironment({
-        Path: "C:\\Python;C:\\Windows\\System32",
-        PYTHON: "/managed/python",
-        TMPDIR: "/tmp",
-        OPENAI_API_KEY: "openai-secret",
-        CODEX_API_KEY: "codex-secret",
-        GITHUB_TOKEN: "github-secret",
-        PYTHONPATH: ".",
-      }),
-    ).toEqual({
-      Path: "C:\\Python;C:\\Windows\\System32",
-      PYTHON: "/managed/python",
-      TMPDIR: "/tmp",
-    });
-  });
-
-  test("exports findings to stdout without initializing Codex", async () => {
-    for (const [format, expected] of [
-      ["csv", "occurrence_id,finding_id\n"],
-      ["json", '{"documentType":"codex-security.findings"}\n'],
-      ["sarif", '{"version":"2.1.0"}\n'],
-    ] as const) {
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies();
-      deps.createSecurity = () => {
-        throw new Error("must not initialize Codex");
-      };
-      expect(
-        await main(
-          ["export", "scan", "--export-format", format, "--output", "-"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(0);
-      expect(stdout.text()).toBe(expected);
-      expect(stderr.text()).toBe("");
-    }
-  });
-
-  test("waits for delayed stdout writes without closing the destination", async () => {
-    let contents = "";
-    const stdout = new Writable({
-      write(chunk, _encoding, callback) {
-        setTimeout(() => {
-          contents += chunk.toString();
-          callback();
-        }, 20);
-      },
-    });
-
-    try {
-      expect(
-        await main(
-          ["export", "scan", "--export-format", "json", "--output", "-"],
-          stdout,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
-      expect(contents).toBe('{"documentType":"codex-security.findings"}\n');
-      expect(stdout.writableEnded).toBe(false);
-    } finally {
-      stdout.destroy();
-    }
-  });
-
-  test.skipIf(process.platform === "win32")(
-    "streams a large stdout export through a slow destination without buffering or status noise",
-    async () => {
-      const root = await mkdtemp(
-        join(tmpdir(), "codex-security-export-stream-"),
-      );
-      const fakePython = join(root, "fake-python");
-      const expectedBytes = 2 * 1024 * 1024;
-      await writeFile(
-        fakePython,
-        [
-          "#!/bin/sh",
-          'if test "$1" = "-I" && test "$2" = "-c"; then printf "codex-security-python-ok\\n"; exit 0; fi',
-          `exec ${JSON.stringify(process.execPath)} -e 'const chunk=Buffer.alloc(64*1024,97);let left=${expectedBytes};const write=()=>{while(left>0){const size=Math.min(left,chunk.length);left-=size;if(!process.stdout.write(chunk.subarray(0,size))){process.stdout.once("drain",write);return;}}};write();'`,
-          "",
-        ].join("\n"),
-        { mode: 0o700 },
-      );
-      let bytes = 0;
-      let writes = 0;
-      let drains = 0;
-      let emptyWrites = 0;
-      const stdout = new Writable({
-        highWaterMark: 32 * 1024,
-        write(chunk, _encoding, callback) {
-          if (chunk.length === 0) emptyWrites += 1;
-          bytes += chunk.length;
-          writes += 1;
-          setTimeout(callback, 1);
-        },
-      });
-      stdout.on("drain", () => {
-        drains += 1;
-      });
-      const stderr = capture();
-
-      try {
-        expect(
-          await main(
-            [
-              "export",
-              "scan",
-              "--export-format",
-              "json",
-              "--output",
-              "-",
-              "--python",
-              fakePython,
-            ],
-            stdout,
-            stderr.stream,
-          ),
-        ).toBe(0);
-        expect(bytes).toBe(expectedBytes);
-        expect(writes).toBeGreaterThan(1);
-        expect(drains).toBeGreaterThan(0);
-        expect(emptyWrites).toBe(0);
-        expect(stderr.text()).toBe("");
-
-        const lightweight = capture();
-        expect(
-          await main(
-            [
-              "export",
-              "scan",
-              "--export-format",
-              "json",
-              "--output",
-              "-",
-              "--python",
-              fakePython,
-            ],
-            lightweight.stream,
-            capture().stream,
-          ),
-        ).toBe(0);
-        expect(lightweight.text()).toHaveLength(expectedBytes);
-      } finally {
-        stdout.destroy();
-        await rm(root, { recursive: true, force: true });
-      }
-    },
-    30_000,
-  );
-
-  for (const [failure, diagnostic] of [
-    ["an asynchronous write fails", "SYNTHETIC_ASYNC_EPIPE"],
-    [
-      "the destination cannot report backpressure",
-      "cannot report backpressure safely",
-    ],
-  ] as const) {
-    test.skipIf(process.platform === "win32")(
-      `terminates a stdout exporter promptly when ${failure}`,
-      async () => {
-        const root = await mkdtemp(
-          join(tmpdir(), "codex-security-export-fail-"),
-        );
-        const fakePython = join(root, "fake-python");
-        await writeFile(
-          fakePython,
-          [
-            "#!/bin/sh",
-            'if test "$1" = "-I" && test "$2" = "-c"; then printf "codex-security-python-ok\\n"; exit 0; fi',
-            'printf "small export\\n"; sleep 8',
-            "",
-          ].join("\n"),
-          { mode: 0o700 },
-        );
-        let writes = 0;
-        const stdout =
-          failure === "an asynchronous write fails"
-            ? new Writable({
-                highWaterMark: 1024 * 1024,
-                write(_chunk, _encoding, callback) {
-                  writes += 1;
-                  setTimeout(() => callback(new Error(diagnostic)), 30);
-                },
-              })
-            : { write: () => false };
-        const stderr = capture();
-
-        try {
-          const result = await Promise.race([
-            main(
-              [
-                "export",
-                "scan",
-                "--export-format",
-                "json",
-                "--output",
-                "-",
-                "--python",
-                fakePython,
-              ],
-              stdout,
-              stderr.stream,
-            ),
-            new Promise<"timeout">((resolve) =>
-              setTimeout(() => resolve("timeout"), 3_000),
-            ),
-          ]);
-          expect(result).toBe(2);
-          if (stdout instanceof Writable) expect(writes).toBe(1);
-          expect(stderr.text()).toContain(diagnostic);
-          expect(stderr.text()).not.toContain("JSON: -");
-        } finally {
-          if (stdout instanceof Writable) stdout.destroy();
-          await rm(root, { recursive: true, force: true });
-        }
-      },
-      30_000,
-    );
-  }
-
-  test.skipIf(process.platform === "win32")(
-    "terminates a stdout exporter promptly when the destination fails under backpressure",
-    async () => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-export-fail-"));
-      const fakePython = join(root, "fake-python");
-      await writeFile(
-        fakePython,
-        [
-          "#!/bin/sh",
-          'if test "$1" = "-I" && test "$2" = "-c"; then printf "codex-security-python-ok\\n"; exit 0; fi',
-          `exec ${JSON.stringify(process.execPath)} -e 'const chunk=Buffer.alloc(64*1024,97);let left=4*1024*1024;const write=()=>{while(left>0){left-=chunk.length;if(!process.stdout.write(chunk)){process.stdout.once("drain",write);return;}}};write();'`,
-          "",
-        ].join("\n"),
-        { mode: 0o700 },
-      );
-      let writes = 0;
-      const stdout = new Writable({
-        highWaterMark: 32 * 1024,
-        write(_chunk, _encoding, callback) {
-          writes += 1;
-          callback(new Error("SYNTHETIC_STDOUT_WRITE_FAILED"));
-        },
-      });
-      const stderr = capture();
-
-      try {
-        const result = await Promise.race([
-          main(
-            [
-              "export",
-              "scan",
-              "--export-format",
-              "json",
-              "--output",
-              "-",
-              "--python",
-              fakePython,
-            ],
-            stdout,
-            stderr.stream,
-          ),
-          new Promise<"timeout">((resolve) =>
-            setTimeout(() => resolve("timeout"), 3_000),
-          ),
-        ]);
-        expect(result).toBe(2);
-        expect(writes).toBe(1);
-        expect(stderr.text()).toContain("SYNTHETIC_STDOUT_WRITE_FAILED");
-        expect(stderr.text()).not.toContain("JSON: -");
-      } finally {
-        stdout.destroy();
-        await rm(root, { recursive: true, force: true });
-      }
-    },
-    30_000,
-  );
-
-  test("writes exported findings to the requested file", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
-    try {
-      for (const [format, filename, expected] of [
-        ["csv", "findings.csv", "occurrence_id,finding_id\n"],
-        [
-          "json",
-          "findings.json",
-          '{"documentType":"codex-security.findings"}\n',
-        ],
-        ["sarif", "results.sarif", '{"version":"2.1.0"}\n'],
-      ] as const) {
-        const stdout = capture();
-        const stderr = capture();
-        const output = join(directory, filename);
-        expect(
-          await main(
-            ["export", "scan", "--export-format", format, "--output", output],
-            stdout.stream,
-            stderr.stream,
-            dependencies(),
-          ),
-        ).toBe(0);
-        expect(await readFile(output, "utf8")).toBe(expected);
-        if (process.platform !== "win32")
-          expect((await stat(output)).mode & 0o777).toBe(0o600);
-        expect(stdout.text()).toBe("");
-        expect(stderr.text()).toBe(`${format.toUpperCase()}: ${output}\n`);
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("explains a missing export-output directory", async () => {
-    const root = await mkdtemp(
-      join(tmpdir(), "codex-security-export-missing-"),
-    );
-    try {
-      const output = join(root, "reports", "results.sarif");
-      const stderr = capture();
-      expect(
-        await main(
-          ["export", "scan", "--output", output],
-          capture().stream,
-          stderr.stream,
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(stderr.text()).toContain(
-        `Export output directory does not exist: ${join(root, "reports")}`,
-      );
-      expect(stderr.text()).toContain("Create the directory and retry");
-      expect(stderr.text()).not.toContain("ENOENT");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects a repository-controlled output symlink without following it", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
-    try {
-      const outside = join(directory, "outside.txt");
-      const output = join(directory, "results.sarif");
-      await writeFile(outside, "unchanged\n");
-      await symlink(outside, output);
-      const stderr = capture();
-      expect(
-        await main(
-          ["export", "scan", "--output", output],
-          capture().stream,
-          stderr.stream,
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(await readFile(outside, "utf8")).toBe("unchanged\n");
-      expect((await lstat(output)).isSymbolicLink()).toBe(true);
-      expect(stderr.text()).toBe(
-        "codex-security: results.sarif: expected a regular non-symlink file\n",
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("passes the canonical scan directory to the exporter", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
-    try {
-      const actual = join(directory, "actual");
-      const linked = join(directory, "linked");
-      const scan = join(actual, "scan");
-      await mkdir(scan, { recursive: true });
-      await symlink(actual, linked, "dir");
-      for (const output of ["-", join(directory, "results.sarif")] as const) {
-        const deps = dependencies();
-        let received = "";
-        deps.exportFindings = async (arguments_) => {
-          received = arguments_.scanDir;
-          return new TextEncoder().encode('{"version":"2.1.0"}\n');
-        };
-        expect(
-          await main(
-            ["export", join(linked, "scan"), "--output", output],
-            capture().stream,
-            capture().stream,
-            deps,
-          ),
-        ).toBe(0);
-        expect(received).toBe(await realpath(scan));
-      }
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("creates the optional scan-local exports directory", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
-    try {
-      const scan = join(directory, "scan");
-      const output = join(scan, "exports", "results.sarif");
-      await mkdir(scan);
-      expect(
-        await main(
-          ["export", scan, "--output", output],
-          capture().stream,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
-      expect(await readFile(output, "utf8")).toBe('{"version":"2.1.0"}\n');
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("exports through a symlinked output parent", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
-    try {
-      const scan = join(directory, "scan");
-      const actualOutput = join(directory, "actual-output");
-      const linkedOutput = join(directory, "linked-output");
-      const output = join(linkedOutput, "results.json");
-      await mkdir(scan);
-      await mkdir(actualOutput);
-      await writeFile(join(actualOutput, "results.json"), "old\n");
-      await symlink(
-        actualOutput,
-        linkedOutput,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const stdout = capture();
-      const stderr = capture();
-
-      expect(
-        await main(
-          ["export", scan, "--export-format", "json", "--output", output],
-          stdout.stream,
-          stderr.stream,
-          dependencies(),
-        ),
-      ).toBe(0);
-      expect(
-        JSON.parse(await readFile(join(actualOutput, "results.json"), "utf8")),
-      ).toMatchObject({ documentType: "codex-security.findings" });
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toBe(`JSON: ${output}\n`);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects a symlinked output parent inside the scan directory", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
-    try {
-      const scan = join(directory, "scan");
-      const outside = join(directory, "outside");
-      const linked = join(scan, "reports");
-      await mkdir(scan);
-      await mkdir(outside);
-      await writeFile(join(outside, "results.json"), "unchanged\n");
-      await symlink(
-        outside,
-        linked,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const stderr = capture();
-
-      expect(
-        await main(
-          [
-            "export",
-            scan,
-            "--export-format",
-            "json",
-            "--output",
-            join(linked, "results.json"),
-          ],
-          capture().stream,
-          stderr.stream,
-          dependencies(),
-        ),
-      ).toBe(2);
-      expect(await readFile(join(outside, "results.json"), "utf8")).toBe(
-        "unchanged\n",
-      );
-      expect(stderr.text()).toContain(
-        "The export output path cannot overwrite a scan artifact",
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects a repository-controlled output-directory symlink", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
-    try {
-      const scan = join(directory, "scan");
-      const repository = join(directory, "repo");
-      const outside = join(directory, "outside");
-      await mkdir(scan);
-      await mkdir(repository);
-      await mkdir(outside);
-      await symlink(
-        outside,
-        join(repository, "reports"),
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const stderr = capture();
-      const deps = dependencies();
-      deps.currentDirectory = () => repository;
-      deps.exportFindings = async () => {
-        throw new Error("must not export before rejecting the output path");
-      };
-
-      expect(
-        await main(
-          [
-            "export",
-            scan,
-            "--output",
-            join(repository, "reports", "results.sarif"),
-          ],
-          capture().stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(2);
-      expect(stderr.text()).toBe(
-        "codex-security: The export output path cannot traverse a repository symlink.\n",
-      );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("reports strict export failures without a stack trace", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.exportFindings = async () => {
-      throw new CodexSecurityError(
-        "manifest.scan: SARIF projection requires a sealed scan",
-      );
-    };
-    expect(
-      await main(
-        ["export", "scan", "--output", "-"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe(
-      "codex-security: manifest.scan: SARIF projection requires a sealed scan\n",
-    );
-  });
-
-  test("redacts credentials from caught export failures", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.exportFindings = async () => {
-      throw new CodexSecurityError(`export failed ${SYNTHETIC_CREDENTIALS}`);
-    };
-
-    expect(
-      await main(
-        ["export", "scan", "--output", "-"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe(
-      `codex-security: export failed ${REDACTED_CREDENTIALS}\n`,
-    );
-  });
-
   test("runs through an installed npm-style bin symlink", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-bin-"));
     try {
@@ -2826,7 +2254,34 @@ describe("CLI", () => {
     ).toBe(0);
     expect(help.text()).toContain("Usage: codex-security scan [repository]");
     expect(help.text()).toContain("--path <array>");
+    expect(help.text()).toContain("--model <string>");
+    expect(help.text()).toContain(
+      "codex-security scan . --model gpt-5.6-terra",
+    );
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
+  });
+
+  test("selects scan models without TOML quoting", async () => {
+    for (const [options, expected] of [
+      [["--model", "gpt-5.6-terra"], { model: "gpt-5.6-terra" }],
+      [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
+      [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [
+        ["--model", "gpt-5.6-terra", "--codex", "features.goals=true"],
+        { model: "gpt-5.6-terra", features: { goals: true } },
+      ],
+    ] as const) {
+      let config: CodexSecurityConfig | undefined;
+      expect(
+        await main(
+          ["scan", ".", ...options],
+          capture().stream,
+          capture().stream,
+          dependencies({ onConfig: (value) => (config = value) }),
+        ),
+      ).toBe(0);
+      expect(config?.codexOverrides).toEqual(expected);
+    }
   });
 
   test("parses repeatable options and every scan target through Incur", async () => {
@@ -2918,6 +2373,9 @@ describe("CLI", () => {
     expect(() =>
       parseCodexOverrides(["agents=4", "agents.max_threads=8"]),
     ).toThrow("Conflicting --codex key");
+    expect(() =>
+      parseCodexOverrides(['model="gpt-5.6-sol"'], "gpt-5.6-terra"),
+    ).toThrow("--model conflicts with --codex model");
   });
 
   test("redacts malformed and bounded --codex overrides", () => {
@@ -2965,9 +2423,11 @@ describe("CLI", () => {
       [["scan", ".", "--base", "HEAD"], "--base requires --working-tree"],
       [["scan", ".", "--archive-existing"], "requires --output-dir"],
       [["scan", ".", "--path="], "--path must not be empty"],
+      [["scan", ".", "--model="], "--model must not be empty"],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],
+      [["scan", ".", "--model", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
       [["scan", ".", "--format", "md"], "Markdown output is not supported"],
@@ -2984,6 +2444,17 @@ describe("CLI", () => {
       [
         ["scan", ".", "--codex", "not-an-override"],
         "--codex expects KEY=VALUE",
+      ],
+      [
+        [
+          "scan",
+          ".",
+          "--model",
+          "gpt-5.6-terra",
+          "--codex",
+          'model="gpt-5.6-sol"',
+        ],
+        "--model conflicts with --codex model",
       ],
       [["export"], "scanDir"],
       [["export", "scan", "--unknown"], "Unknown flag: --unknown"],
