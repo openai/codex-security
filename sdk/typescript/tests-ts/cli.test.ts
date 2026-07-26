@@ -3121,6 +3121,147 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Running scan");
   });
 
+  test("reports selected scan credentials without contaminating JSON output", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "api_key",
+          source: "OPENAI_API_KEY",
+          verified: false,
+        });
+        options?.onScanStarted?.();
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "Authentication: API key from OPENAI_API_KEY.",
+    );
+    expect(stderr.text()).toContain(
+      process.platform === "win32"
+        ? "unset OPENAI_API_KEY and CODEX_API_KEY, then retry the scan"
+        : "env -u OPENAI_API_KEY -u CODEX_API_KEY codex-security scan ...",
+    );
+  });
+
+  test("renders bounded rate-limit retry details without leaking provider context", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onScanStarted?.();
+        options?.onReconnect?.(2, 5, {
+          reason: "rate_limit",
+          retryAfterSeconds: 1.2,
+        });
+        options?.onReconnect?.(3, 5, { reason: "rate_limit" });
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "Rate limit reached; retrying in 1.2s (2/5).",
+    );
+    expect(stderr.text()).toContain("Rate limit reached; retrying (3/5).");
+  });
+
+  test("renders safe reconnect causes without forwarding provider messages", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onReconnect?.(1, 5, { reason: "network" });
+        options?.onReconnect?.(2, 5, { reason: "authentication" });
+        options?.onReconnect?.(3, 5, { reason: "authorization" });
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(stderr.text()).toContain("Network connection interrupted; retrying");
+    expect(stderr.text()).toContain("Authentication interrupted; retrying");
+    expect(stderr.text()).toContain("Model access interrupted; retrying");
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+  });
+
+  test("turns provider-specific scan failures into actionable safe messages", async () => {
+    for (const [message, expected] of [
+      ["401 invalid API key for org-private", "provide a valid API key"],
+      ["403 model access denied for org-private", "model access"],
+      ["429 rate limit reached for org-private", "rate limit"],
+      ["network failure ECONNRESET for org-private", "network connection"],
+      ["request timed out for org-private", "connection timed out"],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw new CodexSecurityError(message);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(2);
+      expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).not.toContain("org-private");
+    }
+  });
+
+  test("reports stored and secondary-key scan authentication on stderr", async () => {
+    for (const [authentication, expected] of [
+      [
+        { method: "stored_credentials", verified: false },
+        "Authentication: stored Codex credentials.",
+      ],
+      [
+        { method: "api_key", source: "CODEX_API_KEY", verified: false },
+        "Authentication: API key from CODEX_API_KEY.",
+      ],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onAuthentication?.(authentication);
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).not.toContain("env -u");
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    }
+  });
+
   test("renders scan output with the Incur default format", async () => {
     const stdout = capture();
     const stderr = capture();

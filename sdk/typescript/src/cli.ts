@@ -28,6 +28,7 @@ import { pathToFileURL } from "node:url";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
+  classifyConnectionFailure,
   CodexSecurity,
   scanAuthentication,
   type ScanOptions,
@@ -1976,15 +1977,45 @@ async function runScan(
       onOutputDirReady: (path) => {
         scanDir = path;
       },
+      onAuthentication: (authentication) => {
+        progress?.stopTimer();
+        if (authentication.method === "api_key") {
+          progress?.stage(
+            `Authentication: API key from ${authentication.source}.`,
+          );
+          if (errorOutput.isTTY === true) {
+            progress?.stage(
+              process.platform === "win32"
+                ? "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY, then retry the scan."
+                : "Retry with ChatGPT: env -u OPENAI_API_KEY -u CODEX_API_KEY codex-security scan ...",
+            );
+          }
+        } else {
+          progress?.stage("Authentication: stored Codex credentials.");
+        }
+        progress?.startTimer("Preparing scan");
+      },
       onScanStarted: () => {
         progress?.stopTimer();
         progress?.startTimer(runningMessage());
       },
-      onReconnect: (attempt, maxAttempts) => {
+      onReconnect: (attempt, maxAttempts, details) => {
         progress?.stopTimer();
-        progress?.stage(
-          `Codex connection interrupted; retrying (${attempt}/${maxAttempts})`,
-        );
+        const message =
+          details?.reason === "rate_limit"
+            ? `Rate limit reached; retrying${
+                details.retryAfterSeconds === undefined
+                  ? ""
+                  : ` in ${details.retryAfterSeconds}s`
+              } (${attempt}/${maxAttempts}).`
+            : details?.reason === "network"
+              ? `Network connection interrupted; retrying (${attempt}/${maxAttempts}).`
+              : details?.reason === "authentication"
+                ? `Authentication interrupted; retrying (${attempt}/${maxAttempts}).`
+                : details?.reason === "authorization"
+                  ? `Model access interrupted; retrying (${attempt}/${maxAttempts}).`
+                  : `Codex connection interrupted; retrying (${attempt}/${maxAttempts})`;
+        progress?.stage(message);
         progress?.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
@@ -2044,7 +2075,7 @@ async function runScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? cliErrorMessage(protectedRootErrorMessage(failure))
-        : cliErrorMessage(failure);
+        : scanFailureMessage(failure);
     if (failure instanceof OutputInsideProtectedRootError) {
       errorOutput.write(`${message}\n`);
     } else {
@@ -2092,6 +2123,23 @@ async function runScan(
     return { exitCode: 2, data: result.toJSON() };
   }
   return { exitCode: blockingCount > 0 ? 1 : 0, data: result.toJSON() };
+}
+
+function scanFailureMessage(error: unknown): string {
+  switch (classifyConnectionFailure(error)) {
+    case "unauthorized":
+      return "Authentication failed. Sign in again or provide a valid API key.";
+    case "forbidden":
+      return "The selected credentials cannot access the configured model. Use an account or API key with model access.";
+    case "rate_limited":
+      return "The configured account reached its rate limit. Wait and retry.";
+    case "network_error":
+      return "The model service could not be reached. Check your network connection and try again.";
+    case "timeout":
+      return "The connection timed out. Check your network connection and try again.";
+    case "unknown":
+      return cliErrorMessage(error);
+  }
 }
 
 function scanScope(arguments_: ScanArguments): string | null {

@@ -4,6 +4,7 @@ export type {
   ScanAuthentication,
   ScanOptions,
   ScanPreflight,
+  ScanReconnectDetails,
 } from "./api.js";
 export type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 export { CodexLoginHandle } from "./auth.js";

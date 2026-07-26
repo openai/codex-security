@@ -31,6 +31,7 @@ import {
   type ScanAuthentication,
   type ScanOptions,
   ScanInterruptedError,
+  type ScanReconnectDetails,
   type ScanWorkerStatus,
 } from "../src/index.js";
 import {
@@ -121,7 +122,11 @@ function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
   abortController = new AbortController(),
-  onReconnect?: (attempt: number, maxAttempts: number) => void,
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void,
   onWorkerStatus?: (status: ScanWorkerStatus) => void,
   onScanStarted?: () => void,
   onObserverError?: (observer: ScanObserverName, error: unknown) => void,
@@ -453,6 +458,91 @@ describe("one-shot scan events", () => {
       name: CodexSecurityError.name,
       message: "retry budget exhausted",
     });
+  });
+
+  test("extracts bounded rate-limit context from reconnect notifications", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const reconnects: Array<{
+      attempt: number;
+      maxAttempts: number;
+      details?: ScanReconnectDetails;
+    }> = [];
+
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 2/5 (Rate limit reached for org-private. Please try again in 1.2s.)",
+      };
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
+      };
+      yield { type: "error", message: "Reconnecting... 4/5" };
+      yield* completedEvents();
+    }
+
+    await runEvents(
+      scanDir,
+      events(),
+      new AbortController(),
+      (attempt, maxAttempts, details) => {
+        reconnects.push({
+          attempt,
+          maxAttempts,
+          ...(details ? { details } : {}),
+        });
+      },
+    );
+
+    expect(reconnects).toEqual([
+      {
+        attempt: 2,
+        maxAttempts: 5,
+        details: { reason: "rate_limit", retryAfterSeconds: 1.2 },
+      },
+      { attempt: 3, maxAttempts: 5, details: { reason: "rate_limit" } },
+      { attempt: 4, maxAttempts: 5 },
+    ]);
+    expect(JSON.stringify(reconnects)).not.toContain("org-private");
+  });
+
+  test("classifies reconnect causes without exposing provider details", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const reconnects: ScanReconnectDetails[] = [];
+
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message: "Reconnecting... 1/5 (ECONNRESET org-private)",
+      };
+      yield {
+        type: "error",
+        message: "Reconnecting... 2/5 (401 invalid API key org-private)",
+      };
+      yield {
+        type: "error",
+        message: "Reconnecting... 3/5 (403 model access denied org-private)",
+      };
+      yield* completedEvents();
+    }
+
+    await runEvents(
+      scanDir,
+      events(),
+      new AbortController(),
+      (_a, _m, detail) => {
+        if (detail !== undefined) reconnects.push(detail);
+      },
+    );
+
+    expect(reconnects).toEqual([
+      { reason: "network" },
+      { reason: "authentication" },
+      { reason: "authorization" },
+    ]);
+    expect(JSON.stringify(reconnects)).not.toContain("org-private");
   });
 
   test("uses the last reconnect error when Codex ends without a terminal event", async () => {
@@ -1022,6 +1112,48 @@ describe("CodexSecurity orchestration", () => {
       expect(runtimeStarted).toBe(false);
       await client.close();
     }
+  });
+
+  test("isolates authentication observer failures from scan startup", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    const observerErrors: Array<[ScanObserverName, string]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("scan did not start");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        outputDir: join(root, "scan"),
+        onAuthentication: () => {
+          throw new Error("authentication observer exploded");
+        },
+        onObserverError: (observer, error) => {
+          observerErrors.push([observer, (error as Error).message]);
+        },
+      }),
+    ).rejects.toThrow("scan did not start");
+    expect(observerErrors).toEqual([
+      ["onAuthentication", "authentication observer exploded"],
+    ]);
+    await client.close();
   });
 
   test("previews an existing output archive without changing files", async () => {
@@ -2437,6 +2569,7 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
 `,
     );
     let codexOptions: CodexOptions | null = null;
+    let selectedAuthentication: unknown;
     let pythonEnvironment: Record<string, string | undefined> | undefined;
     let pythonProtectedRoot: string | undefined;
     const client = new TestClient(
@@ -2493,7 +2626,16 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
       },
     );
 
-    await client.run(repository);
+    await client.run(repository, {
+      onAuthentication: (authentication) => {
+        selectedAuthentication = authentication;
+      },
+    });
+    expect(selectedAuthentication).toEqual({
+      method: "api_key",
+      source: "OPENAI_API_KEY",
+      verified: false,
+    });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect(
       (codexOptions as CodexOptions | null)?.codexPathOverride,
