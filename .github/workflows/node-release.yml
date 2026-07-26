@@ -32,9 +32,6 @@ jobs:
           node-version: "22"
           package-manager-cache: false
 
-      # Socket Firewall installed by security
-      # https://app.notion.com/p/openai/Socket-Firewall-33c8e50b62b0802a82cee42fd51e2c01?source=copy_link#3768e50b62b0806097edebce817e14a5
-      # Slack: #socket-firewall
       - name: Activate Socket Firewall
         uses: openai/socket-firewall@40af4b6b4b00fb88c59af22858dc9f15e077617d # v0.1.0
         with:
