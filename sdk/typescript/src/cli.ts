@@ -47,6 +47,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./config.js";
+import { formatUsd } from "./cost.js";
 import {
   CodexSecurityError,
   OutputInsideProtectedRootError,
@@ -131,6 +132,7 @@ const VALUE_OPTIONS = new Set([
   "--python",
   "--codex",
   "--fail-on-severity",
+  "--max-cost",
   "--workers",
   "--max-attempts",
   "--export-format",
@@ -164,6 +166,7 @@ interface ScanArguments {
   codex: string[];
   codexOverrides?: JsonObject;
   failOnSeverity?: FailureSeverity;
+  maxCostUsd?: number;
   dryRun: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
@@ -824,6 +827,11 @@ export async function main(
             .enum(REPORTABLE_SEVERITIES)
             .optional()
             .describe("Exit 1 for findings at or above LEVEL."),
+          maxCost: z
+            .number()
+            .positive()
+            .optional()
+            .describe("Stop the scan if estimated USD cost exceeds AMOUNT."),
           dryRun: z
             .boolean()
             .default(false)
@@ -887,6 +895,7 @@ export async function main(
             pythonPath: options.python,
             codex: options.codex,
             failOnSeverity: options.failOnSeverity,
+            maxCostUsd: options.maxCost,
             dryRun: options.dryRun,
           },
           errorOutput,
@@ -1387,6 +1396,17 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains an invalid severity policy.",
     );
   }
+  const maxCostUsd = recipe["maxCostUsd"];
+  if (
+    maxCostUsd !== undefined &&
+    (typeof maxCostUsd !== "number" ||
+      !Number.isFinite(maxCostUsd) ||
+      maxCostUsd <= 0)
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid cost limit.",
+    );
+  }
   return {
     repository,
     paths,
@@ -1400,6 +1420,7 @@ function scanArgumentsFromRecipe(
     codex: [],
     codexOverrides: config,
     failOnSeverity: threshold as FailureSeverity | undefined,
+    maxCostUsd,
     dryRun: false,
     parentScanId,
     expectedPluginVersion:
@@ -2062,6 +2083,17 @@ async function runScan(
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
       failureSeverity: arguments_.failOnSeverity,
+      maxCostUsd: arguments_.maxCostUsd,
+      onCost: (cost) => {
+        if (arguments_.maxCostUsd === undefined) return;
+        progress?.stopTimer();
+        progress?.stage(
+          `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
+        );
+        if (cost.estimatedUsd <= arguments_.maxCostUsd) {
+          progress?.startTimer(runningMessage());
+        }
+      },
       onOutputArchived: (archiveDir) => {
         progress?.stopTimer();
         errorOutput.write(
@@ -2303,6 +2335,11 @@ function printScanSummary(
   const tokenSummary = formatTokenUsage(result.turnResult.usage);
   if (tokenSummary !== null) {
     errorOutput.write(`codex-security: Tokens: ${tokenSummary}.\n`);
+  }
+  if (result.cost !== null) {
+    errorOutput.write(
+      `codex-security: Estimated cost: ${formatUsd(result.cost.estimatedUsd)} USD.\n`,
+    );
   }
   const scanDir = cliErrorMessage(result.scanDir);
   errorOutput.write(`codex-security: Results: ${scanDir}\n`);

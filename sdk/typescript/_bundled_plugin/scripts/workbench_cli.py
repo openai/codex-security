@@ -208,6 +208,7 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan = subparsers.add_parser("complete-scan")
     complete_scan.add_argument("--scan-id", required=True)
     complete_scan.add_argument("--claim-token")
+    complete_scan.add_argument("--cost-json")
 
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
@@ -217,6 +218,7 @@ def parse_args(description: str) -> argparse.Namespace:
     fail_scan.add_argument("--scan-id", required=True)
     fail_scan.add_argument("--message", required=True)
     fail_scan.add_argument("--claim-token")
+    fail_scan.add_argument("--cost-json")
 
     mark_handoff_delivered = subparsers.add_parser("mark-handoff-delivered")
     mark_handoff_delivered.add_argument("--scan-id", required=True)

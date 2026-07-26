@@ -595,6 +595,13 @@ MIGRATIONS = (
         ON scan_comparison_matches(after_occurrence_id);
         """,
     ),
+    (
+        24,
+        "persist scan cost estimates",
+        """
+        ALTER TABLE scans ADD COLUMN cost_json TEXT;
+        """,
+    ),
 )
 
 

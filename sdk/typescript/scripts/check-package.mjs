@@ -140,6 +140,7 @@ const distFiles = new Set(
     "cli",
     "config",
     "contract",
+    "cost",
     "errors",
     "index",
     "knowledge-base",

@@ -25,6 +25,7 @@ import {
   CodexSecurityError,
   DiffTarget,
   OutputInsideProtectedRootError,
+  ScanCostLimitExceededError,
   ScanInterruptedError,
   VERSION,
 } from "../src/index.js";
@@ -2254,6 +2255,7 @@ describe("CLI", () => {
     ).toBe(0);
     expect(help.text()).toContain("Usage: codex-security scan [repository]");
     expect(help.text()).toContain("--path <array>");
+    expect(help.text()).toContain("--max-cost <number>");
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra",
@@ -2422,6 +2424,7 @@ describe("CLI", () => {
       [["scan", ".", "--head", "HEAD"], "--head requires --diff"],
       [["scan", ".", "--base", "HEAD"], "--base requires --working-tree"],
       [["scan", ".", "--archive-existing"], "requires --output-dir"],
+      [["scan", ".", "--max-cost=0"], "expected number to be >0"],
       [["scan", ".", "--path="], "--path must not be empty"],
       [["scan", ".", "--model="], "--model must not be empty"],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
@@ -2429,6 +2432,7 @@ describe("CLI", () => {
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--model", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
+      [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
       [["scan", ".", "--format", "md"], "Markdown output is not supported"],
       [["scan", ".", "--format=md"], "Markdown output is not supported"],
@@ -2893,10 +2897,78 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Tokens: 1,250 input, 200 cached, 30 output.",
     );
+    expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
     expect(stderr.text()).toContain("Results: /tmp/scan");
     expect(stderr.text()).toContain(
       "Next: codex-security export /tmp/scan --export-format sarif",
     );
+  });
+
+  test("reports the running cost against the scan budget", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--json", "--max-cost", "0.01"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result, costUpdates: [result.cost!] }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain("Estimated cost: $0.00625 of $0.01 limit");
+  });
+
+  test("reports a scan stopped when its live cost exceeds the limit", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const cost = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    }).cost!;
+
+    expect(
+      await main(
+        ["scan", ".", "--json", "--max-cost", "0.005"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onTurn: () => {
+            throw new ScanCostLimitExceededError(0.005, cost, "/tmp/scan");
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(
+      "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
+    );
+  });
+
+  test("accepts a scan at its estimated cost limit", async () => {
+    const stdout = capture();
+    const result = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--json", "--max-cost", "0.00625"],
+        stdout.stream,
+        capture().stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   });
 
   test("keeps scan progress scope and completion paths redacted", async () => {

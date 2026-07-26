@@ -106,6 +106,7 @@ from workbench_validation import (
     capability_preflight_input,
     capability_preflight_json,
     optional_text,
+    parse_scan_cost,
     require_occurrence,
     require_uuid,
 )
@@ -1453,12 +1454,16 @@ def pin_legacy_manifest_digest(
 
 def complete_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
     with scan_completion_lock(scan_id):
-        return complete_scan_locked(connection, scan_id, args.claim_token)
+        return complete_scan_locked(connection, scan_id, args.claim_token, cost_json)
 
 
 def complete_scan_locked(
-    connection: sqlite3.Connection, scan_id: str, claim_token: str | None
+    connection: sqlite3.Connection,
+    scan_id: str,
+    claim_token: str | None,
+    cost_json: str | None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1551,10 +1556,10 @@ def complete_scan_locked(
             """
             UPDATE scans
             SET status = 'complete', phase = 'reporting', completed_at = ?, updated_at = ?,
-                seal_manifest_digest = ?
+                seal_manifest_digest = ?, cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, manifest_digest, scan["id"]),
+            (timestamp, timestamp, manifest_digest, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be completed.")
@@ -1750,6 +1755,7 @@ def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
 
 def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()
@@ -1767,10 +1773,17 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
+                cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (optional_text(args.message, maximum=2400), timestamp, timestamp, scan["id"]),
+            (
+                optional_text(args.message, maximum=2400),
+                timestamp,
+                timestamp,
+                cost_json,
+                scan["id"],
+            ),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
@@ -3025,6 +3038,11 @@ def scan_result(
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
+        **(
+            {"cost": json.loads(scan["cost_json"], parse_constant=reject_non_finite_json)}
+            if scan["cost_json"] is not None
+            else {}
+        ),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],

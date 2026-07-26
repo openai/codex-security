@@ -1,3 +1,5 @@
+import { formatUsd, type ScanCost } from "./cost.js";
+
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
   public constructor(message: string, options?: ErrorOptions) {
@@ -33,5 +35,23 @@ export class ScanInterruptedError extends CodexSecurityError {
   public constructor(message: string, scanDir: string, options?: ErrorOptions) {
     super(message, options);
     this.scanDir = scanDir;
+  }
+}
+
+export class ScanCostLimitExceededError extends ScanInterruptedError {
+  public readonly maxCostUsd: number;
+  public readonly cost: Readonly<ScanCost>;
+
+  public constructor(
+    maxCostUsd: number,
+    cost: Readonly<ScanCost>,
+    scanDir: string,
+  ) {
+    super(
+      `Scan stopped: estimated cost ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; partial output remains at ${scanDir}.`,
+      scanDir,
+    );
+    this.maxCostUsd = maxCostUsd;
+    this.cost = cost;
   }
 }

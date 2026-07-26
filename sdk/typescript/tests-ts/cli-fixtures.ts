@@ -7,6 +7,7 @@ import type {
   CoverageDocument,
   FindingsDocument,
   JsonObject,
+  ScanCost,
   ScanManifest,
   ScanPreflight,
   SeverityLevel,
@@ -206,6 +207,7 @@ export function fakeResult(
     threadId: "thread-1",
     turnResult: {
       status: "completed",
+      model: "gpt-5.6-sol",
       finalResponse: "done",
       usage,
     },
@@ -246,6 +248,7 @@ export function dependencies(
     environment?: NodeJS.ProcessEnv;
     signals?: FakeSignals;
     result?: ScanResult;
+    costUpdates?: ScanCost[];
     workerStatuses?: import("../src/index.js").ScanWorkerStatus[];
   } = {},
 ): MainDependencies {
@@ -261,6 +264,11 @@ export function dependencies(
       options.onRun?.();
       if (!signal?.aborted) {
         (runOptions as { onScanStarted?: () => void }).onScanStarted?.();
+        for (const cost of options.costUpdates ?? []) {
+          (
+            runOptions as { onCost?: (cost: Readonly<ScanCost>) => void }
+          ).onCost?.(cost);
+        }
         for (const status of options.workerStatuses ?? []) {
           (
             runOptions as {

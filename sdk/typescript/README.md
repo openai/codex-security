@@ -104,6 +104,7 @@ npx codex-security scan /path/to/repository --output-dir /path/outside/repositor
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
+npx codex-security scan /path/to/repository --max-cost 5
 npx codex-security bulk-scan
 npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
 npx codex-security scans list /path/to/repository
@@ -159,8 +160,18 @@ options for other Codex settings, such as
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
 Completion summarizes findings, severity, coverage, elapsed time, available
-token and worker counts, the results directory, and the next useful command.
+token and worker counts, estimated cost, the results directory, and the next
+useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
+
+Each scan records its model, tokens, and estimated cost in its JSON result,
+scan history, and bulk-scan receipt. Estimates use
+[standard API token prices](https://developers.openai.com/api/docs/models/compare),
+including cached input and cache writes; fees and surcharges are not included.
+
+Use `--max-cost USD` to stop a scan, including its delegated workers, when its
+running cost exceeds the limit. Partial results are preserved. Requests
+already in progress can finish above the limit.
 
 Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
 for the complete CLI references.

@@ -216,6 +216,7 @@ def list_scans(
             {
                 "completedAt": row["completed_at"],
                 "continuationThreadId": row["continuation_thread_id"],
+                **({"cost": json.loads(row["cost_json"])} if row["cost_json"] else {}),
                 "findingCount": row["finding_count"],
                 "handoffStatus": row["handoff_status"],
                 "mode": row["mode"],
