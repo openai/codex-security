@@ -129,38 +129,52 @@ describe("Codex authentication process boundary", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-drain-"));
     temporaryDirectories.push(root);
     const script = join(root, "inherited-stderr.mjs");
+    const ready = join(root, "grandchild-ready");
+    const release = join(root, "release-grandchild");
     const message = "network timeout while authenticating";
     const grandchildScript = `
-const flushTimeout = setTimeout(() => process.exit(1), 5_000);
-process.once("disconnect", () => {
-  process.stderr.write(${JSON.stringify(`${message}\n`)}, (error) => {
-    clearTimeout(flushTimeout);
-    process.exit(error ? 1 : 0);
-  });
-});
-process.send("ready");
+import { existsSync, writeFileSync, writeSync } from "node:fs";
+
+const ready = process.argv[1];
+const release = process.argv[2];
+const timeout = setTimeout(() => process.exit(1), 10_000);
+const watcher = setInterval(() => {
+  if (!existsSync(release)) return;
+  clearInterval(watcher);
+  clearTimeout(timeout);
+  writeSync(2, ${JSON.stringify(`${message}\n`)});
+  process.exit(0);
+}, 25);
+writeFileSync(ready, "ready");
 `;
     await writeFile(
       script,
       `
 import { spawn } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
 
-const grandchild = spawn(process.execPath, ["-e", ${JSON.stringify(grandchildScript)}], {
-  stdio: ["ignore", "ignore", "inherit", "ipc"],
-  windowsHide: true,
-});
+const ready = ${JSON.stringify(ready)};
+const release = ${JSON.stringify(release)};
+const grandchild = spawn(
+  process.execPath,
+  ["-e", ${JSON.stringify(grandchildScript)}, ready, release],
+  { stdio: ["ignore", "ignore", "inherit"], windowsHide: true },
+);
 const readyTimeout = setTimeout(() => {
+  clearInterval(readyWatcher);
   grandchild.kill();
   console.error("Timed out waiting for the login grandchild.");
   process.exit(1);
 }, 10_000);
-grandchild.once("message", (message) => {
-  if (message === "ready") {
-    clearTimeout(readyTimeout);
-    process.exit(1);
-  }
-});
+const readyWatcher = setInterval(() => {
+  if (!existsSync(ready)) return;
+  clearInterval(readyWatcher);
+  clearTimeout(readyTimeout);
+  writeFileSync(release, "released");
+  process.exit(1);
+}, 25);
 grandchild.once("error", (error) => {
+  clearInterval(readyWatcher);
   clearTimeout(readyTimeout);
   console.error(error.message);
   process.exit(1);
@@ -208,7 +222,6 @@ const watcher = setInterval(() => {
   }
 }, 25);
 writeFileSync(join(root, "grandchild-ready"), "ready");
-process.send("ready");
 if (existsSync(release)) {
   clearInterval(watcher);
   writeFileSync(join(root, "grandchild-done"), "done");
@@ -219,24 +232,27 @@ if (existsSync(release)) {
       script,
       `
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 const grandchild = spawn(
   process.execPath,
   ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(root)}],
-  { stdio: ["ignore", "ignore", "inherit", "ipc"], windowsHide: true },
+  { stdio: ["ignore", "ignore", "inherit"], windowsHide: true },
 );
 const readyTimeout = setTimeout(() => {
+  clearInterval(readyWatcher);
   grandchild.kill();
   console.error("Timed out waiting for the Windows login grandchild.");
   process.exit(1);
 }, 10_000);
-grandchild.once("message", (message) => {
-  if (message === "ready") {
-    clearTimeout(readyTimeout);
-    process.exit(0);
-  }
-});
+const readyWatcher = setInterval(() => {
+  if (!existsSync(${JSON.stringify(ready)})) return;
+  clearInterval(readyWatcher);
+  clearTimeout(readyTimeout);
+  process.exit(0);
+}, 25);
 grandchild.once("error", (error) => {
+  clearInterval(readyWatcher);
   clearTimeout(readyTimeout);
   console.error(error.message);
   process.exit(1);
