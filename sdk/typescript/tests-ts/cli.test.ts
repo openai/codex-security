@@ -208,10 +208,12 @@ describe("CLI", () => {
           deps,
         ),
       ).toBe(0);
-      expect(JSON.parse(migratedHook.text())).toEqual({
-        hook,
-        failOnSeverity: "medium",
-      });
+      const migrated = JSON.parse(migratedHook.text()) as {
+        hook: string;
+        failOnSeverity: string;
+      };
+      expect(normalize(migrated.hook)).toBe(hook);
+      expect(migrated.failOnSeverity).toBe("medium");
       expect(await readFile(hook, "utf8")).toBe(trustedHook);
 
       const existingHook = capture();

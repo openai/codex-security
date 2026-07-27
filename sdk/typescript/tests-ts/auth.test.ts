@@ -131,9 +131,14 @@ describe("Codex authentication process boundary", () => {
     const script = join(root, "inherited-stderr.mjs");
     const message = "network timeout while authenticating";
     const grandchildScript = `
-process.stderr.write(${JSON.stringify(`${message}\n`)}, () => {
-  process.send("ready");
+const flushTimeout = setTimeout(() => process.exit(1), 5_000);
+process.once("disconnect", () => {
+  process.stderr.write(${JSON.stringify(`${message}\n`)}, (error) => {
+    clearTimeout(flushTimeout);
+    process.exit(error ? 1 : 0);
+  });
 });
+process.send("ready");
 `;
     await writeFile(
       script,
