@@ -1,8 +1,9 @@
+import { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   accountStatus,
   CodexLoginHandle,
@@ -241,8 +242,6 @@ grandchild.once("error", (error) => {
       const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pipes-"));
       temporaryDirectories.push(root);
       const ready = join(root, "grandchild-ready");
-      const probe = join(root, "probe-inherited-pipes");
-      const probed = join(root, "inherited-pipes-probed");
       const release = join(root, "release-grandchild");
       const done = join(root, "grandchild-done");
       const script = join(root, "login-pipes.mjs");
@@ -250,40 +249,15 @@ grandchild.once("error", (error) => {
 import { existsSync, writeFileSync } from "node:fs";
 
 const ready = process.argv[1];
-const probe = process.argv[2];
-const probed = process.argv[3];
-const release = process.argv[4];
-const done = process.argv[5];
-const probeStream = (stream) => new Promise((resolve) => {
-  let settled = false;
-  const settle = (error) => {
-    if (settled) return;
-    settled = true;
-    resolve({ closed: Boolean(error), code: error?.code ?? null });
-  };
-  stream.once("error", settle);
-  try {
-    stream.write("probe\\n", settle);
-  } catch (error) {
-    settle(error);
-  }
-});
+const release = process.argv[2];
+const done = process.argv[3];
 const timeout = setTimeout(() => process.exit(1), 10_000);
-let probing = false;
 const watcher = setInterval(() => {
-  if (existsSync(release)) {
-    clearInterval(watcher);
-    clearTimeout(timeout);
-    writeFileSync(done, "done");
-    process.exit(0);
-    return;
-  }
-  if (probing || !existsSync(probe)) return;
-  probing = true;
-  void Promise.all([probeStream(process.stdout), probeStream(process.stderr)])
-    .then(([stdout, stderr]) => {
-      writeFileSync(probed, JSON.stringify({ stdout, stderr }));
-    });
+  if (!existsSync(release)) return;
+  clearInterval(watcher);
+  clearTimeout(timeout);
+  writeFileSync(done, "done");
+  process.exit(0);
 }, 25);
 writeFileSync(ready, "ready");
 `;
@@ -295,7 +269,7 @@ import { existsSync } from "node:fs";
 
 const grandchild = spawn(
   process.execPath,
-  ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(ready)}, ${JSON.stringify(probe)}, ${JSON.stringify(probed)}, ${JSON.stringify(release)}, ${JSON.stringify(done)}],
+  ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(ready)}, ${JSON.stringify(release)}, ${JSON.stringify(done)}],
   { stdio: ["ignore", "inherit", "inherit"], windowsHide: true },
 );
 const readyTimeout = setTimeout(() => {
@@ -319,12 +293,29 @@ grandchild.once("error", (error) => {
 `,
       );
 
-      const handle = new CodexLoginHandle(
-        { command: "node", prefixArgs: [script] },
-        ["login"],
-        process.env,
-        () => {},
-      );
+      const originalOnce = ChildProcess.prototype.once;
+      let loginChild: ChildProcess | undefined;
+      const processObserver = spyOn(ChildProcess.prototype, "once");
+      processObserver.mockImplementation(function (
+        this: ChildProcess,
+        event: string,
+        listener: (...eventArguments: never[]) => void,
+      ) {
+        if (event === "exit") loginChild = this;
+        return Reflect.apply(originalOnce, this, [event, listener]);
+      });
+
+      let handle: CodexLoginHandle;
+      try {
+        handle = new CodexLoginHandle(
+          { command: "node", prefixArgs: [script] },
+          ["login"],
+          process.env,
+          () => {},
+        );
+      } finally {
+        processObserver.mockRestore();
+      }
 
       const readMarker = async (path: string): Promise<string> => {
         const deadline = Date.now() + 5_000;
@@ -362,11 +353,8 @@ grandchild.once("error", (error) => {
           exitCode: 0,
         });
         await expect(readFile(ready, "utf8")).resolves.toBe("ready");
-        await writeFile(probe, "probe");
-        expect(JSON.parse(await readMarker(probed))).toMatchObject({
-          stdout: { closed: true },
-          stderr: { closed: true },
-        });
+        expect(loginChild?.stdout?.destroyed).toBe(true);
+        expect(loginChild?.stderr?.destroyed).toBe(true);
       } finally {
         await writeFile(release, "released");
         expect(await readMarker(done)).toBe("done");
