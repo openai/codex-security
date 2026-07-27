@@ -131,7 +131,9 @@ def normalize_locations(
 
 def read_scope(path: Path, repo_root: Path) -> set[str]:
     scope: set[str] = set()
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for number, line in enumerate(path.read_bytes().decode("utf-8").split("\n"), 1):
+        if sys.platform == "win32":
+            line = line.removesuffix("\r")
         if not line:
             continue
         try:

@@ -181,6 +181,18 @@ describe("plugin runtime preparation", () => {
         { path: " ", contents: "single whitespace filename\n" },
         { path: "   ", contents: "multiple whitespace filename\n" },
         { path: "C:candidate.py", contents: "literal colon\n" },
+        { path: "carriage\rreturn.py", contents: "literal carriage return\n" },
+        { path: "vertical\vtab.py", contents: "literal vertical tab\n" },
+        { path: "form\ffeed.py", contents: "literal form feed\n" },
+        { path: "next\u0085line.py", contents: "literal next line\n" },
+        {
+          path: "unicode\u2028separator.py",
+          contents: "literal line separator\n",
+        },
+        {
+          path: "paragraph\u2029separator.py",
+          contents: "literal paragraph separator\n",
+        },
       ];
       await Promise.all([
         ...cases.map((item) => writeFile(join(root, item.path), item.contents)),
