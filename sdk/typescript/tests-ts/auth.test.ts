@@ -169,7 +169,7 @@ grandchild.once("error", (error) => {
     );
 
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
+      { command: "node", prefixArgs: [script] },
       ["login"],
       process.env,
       () => {},
@@ -263,7 +263,7 @@ grandchild.once("error", (error) => {
       throw new Error("The Windows login grandchild did not exit.");
     })();
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
+      { command: "node", prefixArgs: [script] },
       ["login"],
       process.env,
       () => {},
