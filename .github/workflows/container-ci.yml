@@ -57,6 +57,7 @@ jobs:
 
           for pattern in \
             '**/.env' \
+            '**/.env.*' \
             '**/.npmrc' \
             '**/node_modules' \
             '**/*.csv' \
