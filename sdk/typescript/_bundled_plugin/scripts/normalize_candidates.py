@@ -58,11 +58,17 @@ def cwe_ids(row: dict[str, Any]) -> list[str]:
 
 
 def relative_file(value: Any, repo_root: Path) -> tuple[str, Path]:
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
+    if not isinstance(value, str) or not value or "\0" in value:
         raise ValueError("path: expected a non-empty repository-relative path")
-    raw = value.strip().replace("\\", "/")
+    raw = value
+    if sys.platform == "win32":
+        raw = raw.replace("\\", "/")
     path = PurePosixPath(raw)
-    if path.is_absolute() or ".." in path.parts or re.match(r"^[A-Za-z]:", raw):
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or (sys.platform == "win32" and re.match(r"^[A-Za-z]:", raw))
+    ):
         raise ValueError("path: expected a repository-relative path without traversal")
     resolved = (repo_root / raw).resolve(strict=True)
     try:
@@ -125,8 +131,10 @@ def normalize_locations(
 
 def read_scope(path: Path, repo_root: Path) -> set[str]:
     scope: set[str] = set()
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
+    for number, line in enumerate(path.read_bytes().decode("utf-8").split("\n"), 1):
+        if sys.platform == "win32":
+            line = line.removesuffix("\r")
+        if not line:
             continue
         try:
             relative, _ = relative_file(line, repo_root)

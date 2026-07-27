@@ -100,16 +100,28 @@ jobs:
           docker compose run --rm codex-security --version
 
       - name: Verify hardened Codex command sandbox
+        shell: bash
         run: |
-          docker run --rm \
-            --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --security-opt apparmor=unconfined \
-            --security-opt "seccomp=$GITHUB_WORKSPACE/docker/codex-security-seccomp.json" \
-            --entrypoint node \
-            codex-security:ci \
-            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js \
-            sandbox /usr/bin/true
+          set -euo pipefail
+          command=(
+            docker run --rm
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --security-opt "seccomp=$GITHUB_WORKSPACE/docker/codex-security-seccomp.json"
+            --entrypoint node
+            codex-security:ci
+            /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js
+          )
+
+          if output="$("${command[@]}" sandbox /usr/bin/true 2>&1)"; then
+            printf '%s\n' "$output"
+          elif grep -Eq 'bwrap: (Failed to make / slave: Permission denied|loopback: Failed RTM_NEW(ADDR|LINK): Operation not permitted|setting up uid map: Permission denied|No permissions to create a new namespace)' <<< "$output"; then
+            echo '::warning::This Docker host blocks nested Bubblewrap namespaces; verifying the supported Landlock fallback.'
+            "${command[@]}" sandbox --enable use_legacy_landlock /usr/bin/true
+          else
+            printf 'The hardened Codex sandbox failed unexpectedly:\n%s\n' "$output" >&2
+            exit 1
+          fi
 
       - name: Reject interactive repository discovery
         shell: bash
