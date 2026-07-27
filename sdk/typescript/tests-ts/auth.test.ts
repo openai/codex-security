@@ -339,13 +339,13 @@ grandchild.once("error", (error) => {
 
       let grandchildPid: number | undefined;
       try {
+        const startedAt = Date.now();
         const readyMarker = await readMarker(ready);
         expect(readyMarker).toMatch(/^\d+$/u);
         grandchildPid = Number(readyMarker);
         expect(Number.isSafeInteger(grandchildPid)).toBe(true);
         expect(grandchildPid).toBeGreaterThan(0);
         const timeout = AbortSignal.timeout(5_000);
-        const startedAt = Date.now();
         const completion = Promise.race([
           handle.wait(),
           new Promise<never>((_, reject) => {
