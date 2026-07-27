@@ -1,6 +1,6 @@
 # Shared Hard Rules
 
-Apply these rules for every top-level Codex Security scan workflow before the scan-mode-specific hard rules in that workflow:
+Apply these rules for diff, deep, and resumed legacy Codex Security scans before the scan-mode-specific hard rules in that workflow:
 
 - Keep the phases separate.
 - Follow the execution plan in order.

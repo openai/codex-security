@@ -1,68 +1,48 @@
-# Exhaustive Review Guidance
+# Standard Repository Or Scoped-Path Review
 
-Use this guidance when the security scan target is the entire checked-out repository or a user-specified scoped path, package, folder, or submodule-like boundary.
+Use this procedure for a standard repository or scoped-path scan. Review every file, collect candidates in one ledger, then validate and check reachability in two compact passes over that ledger. Do not use ranking or multi-stage queues from deep scans.
 
-## Required References
+## File Inventory And Progress
 
-Before exhaustive repository or scoped-path discovery or validation, read this file and all of these same-directory references in order. They are mandatory extensions of this workflow, not optional background:
+Create the file list before review:
 
-1. `scan-artifacts-and-ledger.md` for shared artifact, seed, subagent, scoped file-review, candidate-ledger, and dedupe rules.
-2. `repo-wide-artifacts-and-ledger.md` for rank input, subagent ranking, deep-review selection, and repository coverage-ledger rules.
-3. `repo-wide-high-impact-families.md` for high-impact vulnerability family heuristics and exact suppression boundaries.
-4. `repo-wide-instance-expansion.md` for child-instance splitting, wrapper/root-control preservation, and per-operation reporting.
-5. `repo-wide-validation-closure.md` for validation/report closure, deferred rows, secondary issue ordering, and false-positive controls.
+```text
+mkdir -p "<discovery_dir>"
+(cd "<repo_root>" && rg --files --hidden --glob '!.git/**' -- "<scope>" | LC_ALL=C sort) > "<discovery_dir>/in_scope_files.txt"
+```
 
-Do not treat `repository-wide-scan.md` alone as the complete exhaustive scan procedure.
+Keep repository-relative paths in artifacts. Do not skip a file just because it is educational, an example, a demo, a fixture, or a test. Include it when it contains runnable behavior such as a route, parser, or template. List binary or generated files that could not be reviewed. Because every file is reviewed, do not create ranking or deep-review worklists.
 
-## Exhaustive Mode
+For an app scan, keep `reviewItemsTotal` at zero while building the file list. Then publish the file count, review files in batches, and update `reviewItemsCompleted` after each batch.
 
-Use an exhaustive instance-finding workflow rather than the diff-scan workflow's representative-finding bias.
+## Discover And Combine Once
 
-Repository-wide and scoped-path scans must:
+Review every listed file from start to finish. Read nearby code when needed to understand it. Look for unsafe command execution, unsafe parsing, XSS, attacker-controlled network requests, unsafe file access, and missing permission checks. Do not ignore a clear bug because another issue seems more important.
 
-- Load the per-scan threat model path from `../../../references/scan-artifacts.md` as the repo-specific threat-model source of truth.
-- Build or consume an authoritative parent-provided `rank_input.jsonl` before validation so the in-scope candidate file inventory covers routes, handlers, templates, serializers, deserializers, query builders, shell/process calls, file/path APIs, network fetches/callbacks, auth/authz middleware, session/cookie config, secret/config sources, IaC or policy resources, and agent/tool boundaries.
-- Create `seed_research.md` when seed hints exist, `rank_input.jsonl`, `rank_output.jsonl` when ranking applies, `deep_review_input.jsonl`, `work_ledger.jsonl`, `raw_candidates.jsonl`, per-finding candidate ledgers, `dedupe_report.md`, `deduped_candidates.jsonl`, and `repository_coverage_ledger.md` using the artifact paths from `../../../references/scan-artifacts.md`.
-- Create a high-impact coverage ledger before deep validation. The ledger is a coverage artifact, not a list of potential findings, and must include rows without candidates as well as reportable candidates.
-- Keep every applicable high-impact, user-seeded, advisory-seeded, or tag-seeded row open until that exact area is closed as `reportable`, `suppressed`, `not_applicable`, or `deferred` with exact evidence or proof-gap reasons.
-- When seed research or the prompt provides a concrete advisory id, snapshot URL, file, line, source, sink, or missing-control hint, create an anchored ledger row for that exact tuple. Sibling findings in the same repository, CWE, or subsystem are additional rows; they do not close the anchored row unless they fix the same vulnerable control and effect.
-- Enumerate every technically distinct high-impact vulnerable instance discovered under those families, not just one representative example per class.
-- Keep file-impact families open independently from auth, secret, or config findings in the same subsystem. A reportable auth bypass, credential issue, or sensitive-data exposure does not close a separate path traversal, archive extraction, export/import, backup/restore, file copy/move, or resource-serving row unless it defeats the exact same path-control proof tuple.
-- Preserve the line where the security control actually fails, including unsafe split/parse/canonicalize/normalize/compare/regex/selection/object-binding lines that create a bypass or feed a sink.
-- Suppress a candidate only with exact counterevidence for that instance, such as a specific sanitizer, permission check, tenant filter, escaping context, safe parser/loader, path canonicalization check, egress allowlist, or deployment constraint that defeats the claimed source/sink path.
+Do not stop reviewing a file after finding one bug.
 
-## Discovery Execution
+Write raw candidates to one or more temporary JSONL files, then combine them:
 
-During finding discovery, apply this exhaustive repository or scoped-path workflow instead of the diff-centered discovery workflow. Use `../../finding-discovery/SKILL.md` for the candidate output contract and `../../../references/scan-artifacts.md` for artifact paths.
+```text
+<python_command> <plugin_dir>/scripts/normalize_candidates.py --input <candidate-source> [<candidate-source> ...] --out <discovery_dir>/candidate_ledger.jsonl --repo-root <repo_root> --in-scope-files <discovery_dir>/in_scope_files.txt
+```
 
-Run this broader but still bounded workflow:
+Each raw candidate row uses only these fields:
 
-For a durable workspace scan with a `scanId` and the Codex Security progress tool available, use `update_codex_security_scan_progress` as follows:
+- `cwe_ids`: an array of `CWE-<positive integer>` strings, which may be empty.
+- `locations`: an array of repository-relative `path`, positive `start_line`, optional `end_line`, and `role`. The role is one of `entrypoint`, `entrypoint/wrapper`, `source`, `root_control`, `sink`, `concrete_implementation`, or `evidence`. At least one location must be in `in_scope_files.txt`; supporting locations may be elsewhere in the repository.
+- `summary` and `evidence`: concise text describing the possible bug and the code path.
+- optional `context`: concise text that may help the review.
+- optional `instance`: a short label for separate bugs that share the same locations, such as different request parameters or operations.
 
-- Keep `reviewItemsTotal` at zero while ranking. Ranking rows are not completed review items.
-- After `deep_review_input.jsonl` is final, publish its row count as `reviewItemsTotal` with `reviewItemsCompleted` set to zero.
-- Dispatch file-review work in bounded batches instead of one blocking all-rows batch. After each batch, reconcile unique completed worklist receipts and publish that count as `reviewItemsCompleted` before dispatching the next batch. Do not wait for all file reviews to finish before publishing partial progress.
+The combiner validates this shape and merges rows with the same CWE ids, locations, and optional instance. It preserves their text and writes deterministic rows with a stable `candidate_id`. It does not infer a status or decide whether a candidate is a bug. `candidate_ledger.jsonl` is the sole durable candidate artifact for a standard scan. Do not create one ledger or report per candidate, validation or attack-path queues, duplicate reports, or repeated receipts.
 
-1. Read the required references listed above.
-2. Resolve `rank_input.jsonl` before subagent dispatch:
-   - if an upstream parent orchestrator explicitly provided authoritative in-scope worklists and both `<discovery_dir>/rank_input.jsonl` and `<discovery_dir>/deep_review_input.jsonl` already exist, consume that `rank_input.jsonl` as supplied
-   - otherwise generate `rank_input.jsonl` using `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-repo-rank-input --repo <repo_root> --scope <scope> --out <discovery_dir>/rank_input.jsonl`; for SDK scoped-path scans, replace `--scope <scope>` with `--scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"` so all requested files and directories share one deterministic, immutable inventory input outside the model-writable scan directory
-3. Resolve `deep_review_input.jsonl`:
-   - if an upstream parent orchestrator explicitly provided authoritative in-scope worklists and both standard worklist files already exist, consume that `deep_review_input.jsonl` as supplied without reranking or overwrite
-   - otherwise apply the `top-percent` flow from `repo-wide-artifacts-and-ledger.md`: for `top-percent` below 100, run bounded shard-based subagent ranking over `rank_input.jsonl` using the runtime-surface scoring guidance and select `deep_review_input.jsonl`; for `top-percent` 100 or higher, copy every candidate row directly into `deep_review_input.jsonl`
-4. Run advisory/seed research when the user or scan context includes CVE, GHSA, advisory, issue, release, package-version, or vulnerability-family identifiers. Save `seed_research.md` and create exact seed-target ledger rows.
-5. Build and save `repository_coverage_ledger.md` with one row per applicable boundary and serious vulnerability family before deep validation begins; include any exact anchored rows from seed research as their own rows even if another candidate in the same subsystem already exists.
-6. Run one frontier pass across every applicable high-impact shard before prolonged validation or build/debug work on any single shard.
-7. Run targeted control-hazard searches for parser/helper, deserializer, auth/token/assertion, protocol/version, and polymorphic-operation shards using `repo-wide-high-impact-families.md`.
-8. For path-sensitive filesystem review, enumerate exported or deployed static/resource handlers, download/open helpers, upload/extract/import flows, export flows, backup/restore flows, file copy/move helpers, and archive entry writers/readers before deepening any one hotspot. Give each independently reachable operation its own ledger row.
-9. Run high-impact sibling-expansion passes before any secondary review. When one vulnerable pattern is found, the file-review subagent or parent agent that owns that candidate must search sibling files, routes, templates, handlers, models, and config variants before moving on.
-10. When a high-impact instance flows through a wrapper into a shared parser, deserializer, path/archive helper, expression evaluator, or auth/authz control, record both the reachable wrapper and the underlying shared sink/control.
-11. If a filesystem/path row and an auth/authz/config row both survive in the same product area, carry both forward until the exact control for each row is closed. Do not let the louder or easier-to-explain issue replace the sibling row.
-12. Dispatch file-review subagents over `deep_review_input.jsonl` using the shared ownership rules in `scan-artifacts-and-ledger.md`. Each file-review subagent owns its assigned file or tiny shard, performs full-file review, and returns pre-dedupe finding objects with candidate-local validation evidence and attack-path facts for findings it discovered.
-13. Aggregate file-review-subagent outputs into `raw_candidates.jsonl` and append one candidate-ledger row per raw candidate finding.
-14. Do not continue until each raw candidate finding's candidate-ledger path from `../../../references/scan-artifacts.md` shows validation and attack-path coverage, or an explicit deferred reason for any missing proof.
-15. Split broad families and repeated same-family operations into child instances using `repo-wide-instance-expansion.md` before cross-file dedupe whenever the child instances are already visible in subagent output.
-16. Run cross-file dedupe into `dedupe_report.md` and `deduped_candidates.jsonl` without dropping independently reachable sibling instances, and preserve the raw candidate ids absorbed into each deduped candidate.
-17. Use post-dedupe validation and attack-path work for exhaustive-scan reconciliation, unresolved proof gaps, and final closure, not as the first review pass for raw findings. When multiple deduped candidates or coverage-ledger rows remain open and subagents are available under the resolved scan authorization, divide validation and attack-path work across candidate/row-scoped subagents using `scan-artifacts-and-ledger.md`.
-18. Treat data exposure, hardcoded secrets, weak session/cookie/security config, CSRF, rate limits, and plaintext storage as secondary. Include them only after the high-impact ledger and file list are exhausted or when they directly enable code execution, injection, privilege escalation, meaningful auth bypass, or sensitive cross-boundary impact.
-19. Preserve each validated or suppressed instance through validation, attack-path analysis, and final reporting using `repo-wide-validation-closure.md`.
+After normalization, freeze every discovery field, including `candidate_id`, `locations`, and `instance`. The two compact phase passes below may only add their nested records. Rewrite the ledger atomically and preserve its row order. Never feed an enriched ledger back through `normalize_candidates.py`; that script accepts raw discovery rows only.
+
+## Validate And Check Reachability
+
+Run `$validation` once over the complete ledger in compact standard-scan mode. It must add a `validation` record to every row and preserve separate bugs, including bugs reachable through different routes or code paths. Do not dismiss a real bug just because the code is a demo, test, or only runs locally.
+
+Then run `$attack-path-analysis` once in compact standard-scan mode over validation rows with disposition `reportable` or `deferred`. It must add an `attack_path` record to every row that enters the phase, preserve exact affected locations, and use the threat model to decide realistic reachability and severity. A neighboring finding does not close the current candidate.
+
+Build canonical findings and coverage from the file list and enriched candidate decisions using the ordered mapping in `../../../references/final-report.md`. Include all relevant code locations in each finding.

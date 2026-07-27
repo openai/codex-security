@@ -38,6 +38,19 @@ End each repository-scoped threat model with these two lines:
 
 ## Finding Discovery (Phase 2) Paths
 
+### Standard Repository Or Scoped-Path Scan
+
+- Deterministic in-scope file list: `<discovery_dir>/in_scope_files.txt`
+- Compact combined candidate ledger: `<discovery_dir>/candidate_ledger.jsonl`
+  - The combiner reads one or more temporary raw candidate sources, validates them against the in-scope file list, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values. This is the sole durable standard candidate artifact.
+  - After normalization, compact validation adds exactly one `validation` object to every row with `disposition` (`reportable`, `suppressed`, `not_applicable`, or `deferred`), `method`, `confidence` (`high`, `medium`, or `low`), `confidence_rationale`, concise `rubric` and `evidence`, `counterevidence_or_proof_gap`, `remaining_uncertainty`, and optional `artifact_paths`. Add `source`, `control`, `sink`, or `preconditions` only when they clarify or differ from the discovery fields.
+  - Compact attack-path analysis adds exactly one `attack_path` object to each validation row marked `reportable` or `deferred`, with `decision` (`reportable`, `ignore`, or `deferred`), `dataflow`, `reachability`, `counterevidence`, `impact` and `likelihood` (`high`, `medium`, `low`, `ignore`, or `unknown`), `severity` (`critical`, `high`, `medium`, `low`, `ignore`, or `unknown`), `severity_rationale`, `change_conditions`, and `proof_gap` when deferred. A `reportable` decision requires severity `critical`, `high`, `medium`, or `low`; `ignore` requires severity `ignore`; `deferred` uses a provisional reportable severity or `unknown`.
+  - Preserve all discovery fields and row order during enrichment, rewrite atomically, and do not pass the enriched ledger back to `normalize_candidates.py`.
+- Optional compact validation evidence: `<discovery_dir>/validation_artifacts/<candidate_id>/`
+  - Create this directory only for actual PoCs, crafted inputs, or logs and reference those paths from the row's `validation` object. Do not create placeholder per-candidate directories or narrative reports.
+
+The legacy ranking, raw/deduped candidate, per-finding receipt, and phase-report paths below are for diff/deep or resumed legacy workflows. A compact standard scan uses the enriched ledger instead.
+
 ### Coverage Planning
 
 - Advisory seed research: `<context_dir>/seed_research.md`
@@ -69,11 +82,15 @@ End each repository-scoped threat model with these two lines:
 
 ## Validation (Phase 3) Paths
 
+Compact standard scans use the nested `validation` record and optional compact evidence path above. Other scan modes use these paths:
+
 - Scan-level validation summary: `<findings_dir>/validation_summary.md` if applicable
 - Per-finding validation report: `<findings_dir>/<candidate_id>/validation_report.md`
 - Per-finding validation artifacts: `<findings_dir>/<candidate_id>/validation_artifacts/`
 
 ## Attack-Path Analysis (Phase 4) Paths
+
+Compact standard scans use the nested `attack_path` record above. Other scan modes use these paths:
 
 - Scan-level attack-path analysis report: `<findings_dir>/attack_path_analysis_report.md` if applicable
 - Per-finding attack-path analysis report: `<findings_dir>/<candidate_id>/attack_path_analysis_report.md`
@@ -95,5 +112,5 @@ End each repository-scoped threat model with these two lines:
 
 - Put scan phase outputs and supporting evidence under the numbered artifact subdirectories above.
 - Keep fix-finding outputs outside the numbered scan phases because fix-finding can run standalone or against an existing scan.
-- Do not author the final `report.md` directly. Put complete scan-level report semantics in the canonical JSON files and detailed per-finding prose in `findings/<slug>/<slug>.md`. Put derived design guidance under `hardening/`. Finalization deterministically writes the unsealed `report.md` projection and links any recorded write-ups and hardening portfolio. Do not add these derived documents to the sealed artifact list.
+- Do not author the final `report.md` directly. Put complete scan-level report semantics in the canonical JSON files. Detailed per-finding prose in `findings/<slug>/<slug>.md` and derived design guidance under `hardening/` are optional for a standard scan. Finalization deterministically writes the unsealed `report.md` projection and links any recorded write-ups and hardening portfolio. Do not add these derived documents to the sealed artifact list.
 - Keep the full scan bundle together under `scan_dir`.
