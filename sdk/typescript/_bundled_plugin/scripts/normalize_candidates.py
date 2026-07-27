@@ -58,7 +58,7 @@ def cwe_ids(row: dict[str, Any]) -> list[str]:
 
 
 def relative_file(value: Any, repo_root: Path) -> tuple[str, Path]:
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
+    if not isinstance(value, str) or not value or "\0" in value:
         raise ValueError("path: expected a non-empty repository-relative path")
     raw = value
     if sys.platform == "win32":
@@ -132,7 +132,7 @@ def normalize_locations(
 def read_scope(path: Path, repo_root: Path) -> set[str]:
     scope: set[str] = set()
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
+        if not line:
             continue
         try:
             relative, _ = relative_file(line, repo_root)

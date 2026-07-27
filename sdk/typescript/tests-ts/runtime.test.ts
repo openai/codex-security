@@ -178,6 +178,8 @@ describe("plugin runtime preparation", () => {
         { path: "source\\candidate.py", contents: "literal candidate\n" },
         { path: " leading.py", contents: "leading whitespace\n" },
         { path: "trailing.py ", contents: "trailing whitespace\n" },
+        { path: " ", contents: "single whitespace filename\n" },
+        { path: "   ", contents: "multiple whitespace filename\n" },
         { path: "C:candidate.py", contents: "literal colon\n" },
       ];
       await Promise.all([
