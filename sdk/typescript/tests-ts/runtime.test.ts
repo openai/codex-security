@@ -170,15 +170,26 @@ describe("plugin runtime preparation", () => {
   });
 
   testPosix(
-    "keeps literal backslashes in bundled candidate repository paths",
+    "preserves literal POSIX candidate paths in the bundled plugin",
     async () => {
       const root = await temporaryDirectory();
-      const literalPath = "source\\candidate.py";
-      await writeFile(join(root, literalPath), "literal candidate\n");
       await mkdir(join(root, "source"));
+      const cases = [
+        { path: "source\\candidate.py", contents: "literal candidate\n" },
+        { path: " leading.py", contents: "leading whitespace\n" },
+        { path: "trailing.py ", contents: "trailing whitespace\n" },
+        { path: "C:candidate.py", contents: "literal colon\n" },
+      ];
+      await Promise.all([
+        ...cases.map((item) => writeFile(join(root, item.path), item.contents)),
+        writeFile(join(root, "source", "candidate.py"), "wrong candidate\n"),
+        writeFile(join(root, "leading.py"), "wrong leading candidate\n"),
+        writeFile(join(root, "trailing.py"), "wrong trailing candidate\n"),
+      ]);
+      const scopePath = join(root, "in-scope-files.txt");
       await writeFile(
-        join(root, "source", "candidate.py"),
-        "wrong candidate\n",
+        scopePath,
+        `${cases.map((item) => item.path).join("\n")}\n`,
       );
 
       const python = Bun.which("python3") ?? Bun.which("python");
@@ -196,19 +207,24 @@ describe("plugin runtime preparation", () => {
         [
           "import json, pathlib, runpy, sys",
           "module = runpy.run_path(sys.argv[1])",
-          "path, source = module['relative_file'](sys.argv[3], pathlib.Path(sys.argv[2]))",
-          "print(json.dumps({'path': path, 'contents': source.read_text(encoding='utf-8')}))",
+          "root = pathlib.Path(sys.argv[2])",
+          "scope = module['read_scope'](pathlib.Path(sys.argv[3]), root)",
+          "results = []",
+          "for value in json.loads(sys.argv[4]):",
+          "    path, source = module['relative_file'](value, root)",
+          "    results.append({'path': path, 'contents': source.read_text(encoding='utf-8'), 'inScope': path in scope})",
+          "print(json.dumps(results))",
         ].join("\n"),
         normalizer,
         root,
-        literalPath,
+        scopePath,
+        JSON.stringify(cases.map((item) => item.path)),
       ]);
 
       expect(result.exitCode).toBe(0);
-      expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
-        path: literalPath,
-        contents: "literal candidate\n",
-      });
+      expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual(
+        cases.map((item) => ({ ...item, inScope: true })),
+      );
     },
   );
 
