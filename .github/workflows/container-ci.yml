@@ -7,6 +7,7 @@ on:
       - .dockerignore
       - .github/workflows/container-ci.yml
       - Dockerfile
+      - Dockerfile.dockerignore
       - compose.yaml
       - docker/**
       - sdk/typescript/**
@@ -15,6 +16,7 @@ on:
       - .dockerignore
       - .github/workflows/container-ci.yml
       - Dockerfile
+      - Dockerfile.dockerignore
       - compose.yaml
       - docker/**
       - sdk/typescript/**
@@ -39,6 +41,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ignore_file=.dockerignore
+          if [[ -f Dockerfile.dockerignore ]]; then
+            ignore_file=Dockerfile.dockerignore
+            if ! cmp -s .dockerignore "$ignore_file"; then
+              echo "Dockerfile-specific ignore rules must match the approved customer baseline." >&2
+              exit 1
+            fi
+          fi
+
+          if grep -Fq '!' "$ignore_file"; then
+            echo "Customer Docker ignore rules must not re-include excluded files: $ignore_file" >&2
+            exit 1
+          fi
+
           for pattern in \
             '**/.env' \
             '**/.npmrc' \
@@ -48,8 +64,8 @@ jobs:
             '**/results' \
             '**/security-scans' \
             '**/state'; do
-            if ! grep -Fxq -- "$pattern" .dockerignore; then
-              echo "Missing customer Docker build exclusion: $pattern" >&2
+            if ! grep -Fxq -- "$pattern" "$ignore_file"; then
+              echo "Missing customer Docker build exclusion in $ignore_file: $pattern" >&2
               exit 1
             fi
           done
@@ -88,6 +104,7 @@ jobs:
           docker run --rm \
             --cap-drop ALL \
             --security-opt no-new-privileges \
+            --security-opt apparmor=unconfined \
             --security-opt "seccomp=$GITHUB_WORKSPACE/docker/codex-security-seccomp.json" \
             --entrypoint node \
             codex-security:ci \
@@ -98,8 +115,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if docker run --rm codex-security:ci bulk-scan; then
+          if output="$(docker run --rm -t codex-security:ci bulk-scan 2>&1)"; then
             echo "The customer container must require a repository CSV." >&2
+            exit 1
+          else
+            status=$?
+          fi
+          if [[ "$status" -ne 2 ]]; then
+            printf 'The customer container returned unexpected exit status %s:\n%s\n' "$status" "$output" >&2
+            exit 1
+          fi
+          expected='codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.'
+          if [[ "${output//$'\r'/}" != "$expected" ]]; then
+            printf 'The customer container returned an unexpected repository discovery error:\n%s\n' "$output" >&2
             exit 1
           fi
 
@@ -111,4 +139,4 @@ jobs:
             --entrypoint /bin/sh \
             --env GH_TOKEN=SYNTHETIC_GITHUB_TOKEN \
             codex-security:ci \
-            -c 'actual="$(printf "protocol=https\nhost=github.com\n\n" | /usr/local/bin/codex-security-git-credential get)"; test "$actual" = "$(printf "username=x-access-token\npassword=SYNTHETIC_GITHUB_TOKEN")"; test -z "$(printf "protocol=https\nhost=untrusted.example\n\n" | /usr/local/bin/codex-security-git-credential get)"'
+            -ec 'actual="$(printf "protocol=https\nhost=github.com\n\n" | /usr/local/bin/codex-security-git-credential get)"; test "$actual" = "$(printf "username=x-access-token\npassword=SYNTHETIC_GITHUB_TOKEN")"; test -z "$(printf "protocol=https\nhost=untrusted.example\n\n" | /usr/local/bin/codex-security-git-credential get)"'
