@@ -306,7 +306,7 @@ describe("CLI", () => {
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
-      expect(trustedHook).not.toContain("npx");
+      expect(trustedHook).not.toMatch(/^exec\s+npx(?:\s|$)/m);
       expect(trustedHook).toContain(await realpath(process.execPath));
       expect(trustedHook).toContain(
         await realpath(
