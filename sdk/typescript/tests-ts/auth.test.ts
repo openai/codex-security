@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, watch, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -131,10 +131,9 @@ describe("Codex authentication process boundary", () => {
     const script = join(root, "inherited-stderr.mjs");
     const message = "network timeout while authenticating";
     const grandchildScript = `
-process.once("disconnect", () => {
-  process.stderr.write(${JSON.stringify(`${message}\n`)});
+process.stderr.write(${JSON.stringify(`${message}\n`)}, () => {
+  process.send("ready");
 });
-process.send("ready");
 `;
     await writeFile(
       script,
@@ -191,22 +190,22 @@ grandchild.once("error", (error) => {
     const done = join(root, "grandchild-done");
     const script = join(root, "inherited-pipes.mjs");
     const grandchildScript = `
-import { existsSync, watch, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = process.argv[1];
 const release = join(root, "release-grandchild");
-const watcher = watch(root, () => {
+const watcher = setInterval(() => {
   if (existsSync(release)) {
-    watcher.close();
+    clearInterval(watcher);
     writeFileSync(join(root, "grandchild-done"), "done");
     process.exit(0);
   }
-});
+}, 25);
 writeFileSync(join(root, "grandchild-ready"), "ready");
 process.send("ready");
 if (existsSync(release)) {
-  watcher.close();
+  clearInterval(watcher);
   writeFileSync(join(root, "grandchild-done"), "done");
   process.exit(0);
 }
@@ -242,21 +241,19 @@ grandchild.once("error", (error) => {
 
     const completionSignal = AbortSignal.timeout(20_000);
     const grandchildDone = (async () => {
-      try {
-        for await (const event of watch(root, {
-          signal: completionSignal,
-        })) {
-          if (event.filename === "grandchild-done") {
-            return await readFile(done, "utf8");
+      while (!completionSignal.aborted) {
+        try {
+          return await readFile(done, "utf8");
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "ENOENT"
+          ) {
+            throw error;
           }
         }
-      } catch (error) {
-        if (completionSignal.aborted) {
-          throw new Error("The Windows login grandchild did not exit.", {
-            cause: error,
-          });
-        }
-        throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
       }
       throw new Error("The Windows login grandchild did not exit.");
     })();
