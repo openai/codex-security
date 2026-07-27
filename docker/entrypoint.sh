@@ -11,6 +11,8 @@ if [ "${1:-}" = bulk-scan ]; then
             exit 2
             ;;
     esac
+
+    set -- "$@" --codex features.use_legacy_landlock=true
 fi
 
 if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
