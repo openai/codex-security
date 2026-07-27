@@ -1,8 +1,8 @@
-import { ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   accountStatus,
   CodexLoginHandle,
@@ -240,42 +240,64 @@ grandchild.once("error", (error) => {
     async () => {
       const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pipes-"));
       temporaryDirectories.push(root);
+      const ready = join(root, "grandchild-ready");
+      const release = join(root, "release-grandchild");
+      const done = join(root, "grandchild-done");
       const script = join(root, "login-pipes.mjs");
+      const grandchildScript = `
+import { existsSync, writeFileSync } from "node:fs";
+
+const ready = process.argv[1];
+const release = process.argv[2];
+const done = process.argv[3];
+const timeout = setTimeout(() => process.exit(1), 10_000);
+const watcher = setInterval(() => {
+  if (!existsSync(release)) return;
+  clearInterval(watcher);
+  clearTimeout(timeout);
+  writeFileSync(done, "done");
+  process.exit(0);
+}, 25);
+writeFileSync(ready, "ready");
+`;
       await writeFile(
         script,
-        'process.stdout.write("ready\\n", () => process.exit(0));\n',
+        `
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+
+const grandchild = spawn(
+  process.execPath,
+  ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(ready)}, ${JSON.stringify(release)}, ${JSON.stringify(done)}],
+  { stdio: ["ignore", "inherit", "inherit"], windowsHide: true },
+);
+const readyTimeout = setTimeout(() => {
+  clearInterval(readyWatcher);
+  grandchild.kill();
+  console.error("Timed out waiting for the Windows login grandchild.");
+  process.exit(1);
+}, 10_000);
+const readyWatcher = setInterval(() => {
+  if (!existsSync(${JSON.stringify(ready)})) return;
+  clearInterval(readyWatcher);
+  clearTimeout(readyTimeout);
+  process.stdout.write("ready\\n", (error) => process.exit(error ? 1 : 0));
+}, 25);
+grandchild.once("error", (error) => {
+  clearInterval(readyWatcher);
+  clearTimeout(readyTimeout);
+  console.error(error.message);
+  process.exit(1);
+});
+`,
       );
 
-      const originalOnce = ChildProcess.prototype.once;
-      let releaseClose: (() => void) | undefined;
-      const closeListenerMock = spyOn(ChildProcess.prototype, "once");
-      closeListenerMock.mockImplementation(function (
-        this: ChildProcess,
-        event: string,
-        listener: (...eventArguments: never[]) => void,
-      ) {
-        if (event !== "close") {
-          return Reflect.apply(originalOnce, this, [event, listener]);
-        }
-        return Reflect.apply(originalOnce, this, [
-          event,
-          (...eventArguments: unknown[]) => {
-            releaseClose = () => Reflect.apply(listener, this, eventArguments);
-          },
-        ]);
-      });
-
-      let handle: CodexLoginHandle;
-      try {
-        handle = new CodexLoginHandle(
-          { command: "node", prefixArgs: [script] },
-          ["login"],
-          process.env,
-          () => {},
-        );
-      } finally {
-        closeListenerMock.mockRestore();
-      }
+      const handle = new CodexLoginHandle(
+        { command: "node", prefixArgs: [script] },
+        ["login"],
+        process.env,
+        () => {},
+      );
 
       try {
         const timeout = AbortSignal.timeout(5_000);
@@ -293,9 +315,26 @@ grandchild.once("error", (error) => {
           success: true,
           exitCode: 0,
         });
-        expect(releaseClose).toBeFunction();
+        await expect(readFile(ready, "utf8")).resolves.toBe("ready");
       } finally {
-        releaseClose?.();
+        await writeFile(release, "released");
+        const deadline = Date.now() + 5_000;
+        while (true) {
+          try {
+            expect(await readFile(done, "utf8")).toBe("done");
+            break;
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !("code" in error) ||
+              error.code !== "ENOENT" ||
+              Date.now() >= deadline
+            ) {
+              throw error;
+            }
+            await delay(25);
+          }
+        }
       }
     },
   );
