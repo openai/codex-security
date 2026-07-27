@@ -96,6 +96,7 @@ stored sign-in exists.
 
 ```bash
 npx codex-security scan /path/to/repository
+npx codex-security scan /path/to/repository --model gpt-5.6-terra
 npx codex-security scan /path/to/repository --path src --path tests
 npx codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx codex-security scan /path/to/repository --diff origin/main --json
@@ -103,6 +104,7 @@ npx codex-security scan /path/to/repository --output-dir /path/outside/repositor
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
+npx codex-security scan /path/to/repository --max-cost 5
 npx codex-security bulk-scan
 npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
 npx codex-security scans list /path/to/repository
@@ -150,15 +152,26 @@ for a passing policy. Incomplete scans still write the available human or JSON
 result to stdout and a coverage warning to stderr, including in report-only
 mode.
 
-Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Override
-either setting with repeatable `--codex KEY=VALUE` options, for example
-`--codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'`.
+Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Use
+`--model gpt-5.6-terra` to switch models. Use repeatable `--codex KEY=VALUE`
+options for other Codex settings, such as
+`--codex 'model_reasoning_effort="high"'`.
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
 Completion summarizes findings, severity, coverage, elapsed time, available
-token and worker counts, the results directory, and the next useful command.
+token and worker counts, estimated cost, the results directory, and the next
+useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
+
+Each scan records its model, tokens, and estimated cost in its JSON result,
+scan history, and bulk-scan receipt. Estimates use
+[standard API token prices](https://developers.openai.com/api/docs/models/compare),
+including cached input and cache writes; fees and surcharges are not included.
+
+Use `--max-cost USD` to stop a scan, including its delegated workers, when its
+running cost exceeds the limit. Partial results are preserved. Requests
+already in progress can finish above the limit.
 
 Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
 for the complete CLI references.
@@ -189,6 +202,9 @@ Results remain under `--output-dir`; rerun the same command to resume.
 repository path to inspect another checkout, `--scan-root DIR` to list scans
 whose artifacts are under a particular root. `scans show SCAN_ID` includes the
 scan configuration, results, coverage, and artifact locations.
+
+Every scan history command accepts a full scan ID or a unique prefix of at
+least eight characters.
 
 Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set

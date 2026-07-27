@@ -106,6 +106,7 @@ from workbench_validation import (
     capability_preflight_input,
     capability_preflight_json,
     optional_text,
+    parse_scan_cost,
     require_occurrence,
     require_uuid,
 )
@@ -774,11 +775,30 @@ def require_workspace(connection: sqlite3.Connection, workspace_id: str) -> sqli
 
 
 def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
-    scan_id = require_uuid(scan_id, "scan-id")
+    scan_id = resolve_scan_id(connection, scan_id)
     row = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
     if row is None:
         raise SystemExit("Codex Security scan not found.")
     return row
+
+
+def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
+    try:
+        return str(uuid.UUID(scan_id))
+    except ValueError:
+        if len(scan_id) < 8:
+            raise SystemExit("Scan ID prefixes must be at least eight characters.") from None
+        matches = connection.execute(
+            "SELECT id FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
+            (len(scan_id), scan_id.lower()),
+        ).fetchall()
+        if not matches:
+            raise SystemExit("Codex Security scan not found.") from None
+        if len(matches) > 1:
+            raise SystemExit(
+                f'Scan ID prefix "{scan_id}" matches multiple scans; use a longer prefix.'
+            ) from None
+        return matches[0]["id"]
 
 
 def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -1434,12 +1454,16 @@ def pin_legacy_manifest_digest(
 
 def complete_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
     with scan_completion_lock(scan_id):
-        return complete_scan_locked(connection, scan_id, args.claim_token)
+        return complete_scan_locked(connection, scan_id, args.claim_token, cost_json)
 
 
 def complete_scan_locked(
-    connection: sqlite3.Connection, scan_id: str, claim_token: str | None
+    connection: sqlite3.Connection,
+    scan_id: str,
+    claim_token: str | None,
+    cost_json: str | None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1532,10 +1556,10 @@ def complete_scan_locked(
             """
             UPDATE scans
             SET status = 'complete', phase = 'reporting', completed_at = ?, updated_at = ?,
-                seal_manifest_digest = ?
+                seal_manifest_digest = ?, cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, manifest_digest, scan["id"]),
+            (timestamp, timestamp, manifest_digest, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be completed.")
@@ -1731,6 +1755,7 @@ def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
 
 def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()
@@ -1748,10 +1773,17 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
+                cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (optional_text(args.message, maximum=2400), timestamp, timestamp, scan["id"]),
+            (
+                optional_text(args.message, maximum=2400),
+                timestamp,
+                timestamp,
+                cost_json,
+                scan["id"],
+            ),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
@@ -3006,6 +3038,11 @@ def scan_result(
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
+        **(
+            {"cost": json.loads(scan["cost_json"], parse_constant=reject_non_finite_json)}
+            if scan["cost_json"] is not None
+            else {}
+        ),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
@@ -3208,9 +3245,13 @@ def finding_result(
         "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
         "triage": finding_triage_result(connection, occurrence["id"]),
     }
-    matches = scan_history.finding_matches(connection, occurrence["id"])
+    matches, known_since, known_scan_ids = scan_history.finding_matches(
+        connection, occurrence["id"], scan["id"], scan["started_at"]
+    )
     if matches:
         result["matches"] = matches
+        result["knownSince"] = known_since
+        result["knownScanIds"] = known_scan_ids
     result.pop("artifactPaths", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:

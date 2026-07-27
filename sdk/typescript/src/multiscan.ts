@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
+import type { ScanCost } from "./cost.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -39,6 +40,7 @@ interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "failed";
   attempt: number;
   outputDir: string;
+  cost?: ScanCost;
   error?: string;
 }
 
@@ -154,6 +156,7 @@ async function runCampaign(
         const progress = { repository: task.id, attempt };
         options.onProgress?.({ ...progress, status: "started" });
         let failure: string | undefined;
+        let cost: Readonly<ScanCost> | null = null;
         try {
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
           await rm(checkout, { recursive: true, force: true });
@@ -181,6 +184,7 @@ async function runCampaign(
             outputDir: scanDir,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
+          cost = result.cost;
           if (result.coverage.completeness !== "complete") {
             throw new Error("Multiscan repository coverage is incomplete.");
           }
@@ -198,6 +202,7 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
           })}\n`,
         );

@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
+import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 
 type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
@@ -201,6 +202,36 @@ describe("multiscan", () => {
     expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "payments", repository: source.path },
+    ]);
+  });
+
+  test("records each completed scan's cost in the resumable ledger", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "priced");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\npriced,${source.path},${source.revision}\n`,
+    );
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 1_250,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      estimatedUsd: 0.00625,
+    };
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) =>
+          Object.assign(await completedScan(scanOptions.outputDir!), { cost }),
+        ),
+      ),
+    );
+
+    expect(await results(summary.resultsPath)).toMatchObject([
+      { id: "priced", status: "completed", cost },
     ]);
   });
 
@@ -509,12 +540,20 @@ describe("multiscan", () => {
         options(
           paths,
           client(async (checkout, scanOptions = {}) => {
-            const credential = execFileSync(
+            const trustedGit = await resolveTrustedExecutable(
               "git",
+              { ...process.env, PATH: environment.get("PATH") ?? "" },
+              paths.root,
+            );
+            if (trustedGit === null) {
+              throw new Error("Git is not available on a trusted PATH.");
+            }
+            const credential = execFileSync(
+              trustedGit.executable,
               ["-C", checkout, "config", "--get", "multiscan.credential"],
               {
                 encoding: "utf8",
-                env: { ...process.env, PATH: environment.get("PATH") ?? "" },
+                env: trustedGit.environment,
                 stdio: ["ignore", "pipe", "pipe"],
               },
             ).trim();

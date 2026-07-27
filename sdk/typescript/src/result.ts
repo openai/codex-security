@@ -5,10 +5,12 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
+import { estimateScanCost, type ScanCost } from "./cost.js";
 
 export interface TurnResultMetadata {
   id?: string;
   status?: string;
+  model?: string;
   durationMs?: number;
   finalResponse?: string;
   usage?: unknown;
@@ -32,6 +34,7 @@ export class ScanResult {
   public readonly scanDir: string;
   public readonly threadId: string;
   public readonly turnResult: Readonly<TurnResultMetadata>;
+  public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
 
   public constructor(options: ScanResultOptions) {
@@ -41,6 +44,10 @@ export class ScanResult {
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
+    this.cost = estimateScanCost(
+      options.turnResult.model,
+      options.turnResult.usage,
+    );
     if (options.sarifPath !== undefined) {
       this.sarifPath = options.sarifPath;
     } else {
@@ -95,6 +102,7 @@ export class ScanResult {
       reportPath: this.reportPath,
       artifactsDir: this.artifactsDir,
       sarifPath: this.sarifPath,
+      cost: this.cost,
       turn: this.turnResult,
     };
   }

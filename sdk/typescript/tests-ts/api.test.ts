@@ -29,6 +29,7 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   type ScanAuthentication,
+  ScanCostLimitExceededError,
   type ScanOptions,
   ScanInterruptedError,
   type ScanReconnectDetails,
@@ -100,6 +101,38 @@ async function copyCompletedScan(root: string): Promise<string> {
   return scanDir;
 }
 
+async function writeUsageSession(
+  codexHome: string,
+  threadId: string,
+  usage: Record<string, number>,
+  parentThreadId?: string,
+): Promise<void> {
+  const directory = join(codexHome, "sessions", "2026", "07", "26");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, `rollout-${threadId}.jsonl`),
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: threadId,
+          ...(parentThreadId === undefined
+            ? {}
+            : { parent_thread_id: parentThreadId }),
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: usage },
+        },
+      }),
+      "",
+    ].join("\n"),
+  );
+}
+
 async function* completedEvents(): AsyncGenerator<ThreadEvent> {
   yield { type: "thread.started", thread_id: "thread-1" };
   yield { type: "turn.started" };
@@ -142,6 +175,7 @@ function runEvents(
     signal: abortController.signal,
     scanDir,
     pluginRoot: PLUGIN_ROOT,
+    model: "gpt-5.6-sol",
     onScanStarted,
     onReconnect,
     onWorkerStatus,
@@ -180,7 +214,16 @@ describe("one-shot scan events", () => {
     expect(result.threadId).toBe("thread-1");
     expect(result.turnResult).toMatchObject({
       status: "completed",
+      model: "gpt-5.6-sol",
       finalResponse: "scan complete",
+    });
+    expect(result.cost).toEqual({
+      model: "gpt-5.6-sol",
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      cacheWriteInputTokens: 0,
+      outputTokens: 3,
+      estimatedUsd: 0.000131,
     });
   });
 
@@ -208,7 +251,12 @@ describe("one-shot scan events", () => {
         mode: "standard",
         pluginVersion: "0.1.0",
       },
-      onFinalize: async () => {
+      onFinalize: async (usage) => {
+        expect(usage).toMatchObject({
+          input_tokens: 10,
+          cached_input_tokens: 2,
+          output_tokens: 3,
+        });
         expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
         await copyCompletedScan(root);
         finalized = true;
@@ -1022,6 +1070,43 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("validates cost limits and pricing before starting a scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { maxCostUsd: 5 }),
+    ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
+    for (const maxCostUsd of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        client.preflight(repository, { maxCostUsd }),
+      ).rejects.toThrow("cost limit must be a positive USD amount");
+    }
+
+    const unpriced = new TestClient(
+      { codexOverrides: { model: "unknown-model" } },
+      { environment: {} },
+    );
+    await expect(
+      unpriced.preflight(repository, { maxCostUsd: 5 }),
+    ).rejects.toThrow("cost limit is not available for the configured model");
+    expect(runtimeStarted).toBe(false);
+    await unpriced.close();
+    await client.close();
+  });
+
   test("validates knowledge-base documents before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1670,6 +1755,150 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       "scan_example_001",
     ]);
+    await client.close();
+  });
+
+  test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const costs: number[] = [];
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 1_250,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      estimatedUsd: 0.00625,
+    };
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          return args[0] === "register-cli-scan"
+            ? {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                scanDir,
+              }
+            : {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed(
+              _input: string,
+              options: { signal: AbortSignal },
+            ) {
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await Promise.all([
+                  writeUsageSession(codexHome, "scan-thread", {
+                    input_tokens: 500,
+                    cached_input_tokens: 100,
+                    output_tokens: 10,
+                  }),
+                  writeUsageSession(
+                    codexHome,
+                    "worker-thread",
+                    {
+                      input_tokens: 750,
+                      cached_input_tokens: 100,
+                      output_tokens: 20,
+                    },
+                    "scan-thread",
+                  ),
+                ]);
+                await new Promise<void>((resolve) => {
+                  if (options.signal.aborted) {
+                    resolve();
+                  } else {
+                    options.signal.addEventListener("abort", () => resolve(), {
+                      once: true,
+                    });
+                  }
+                });
+                throw new DOMException("aborted", "AbortError");
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        maxCostUsd: 0.005,
+        onCost: (cost) => costs.push(cost.estimatedUsd),
+        signal: AbortSignal.timeout(5_000),
+      }),
+    ).rejects.toMatchObject({
+      name: ScanCostLimitExceededError.name,
+      maxCostUsd: 0.005,
+      scanDir,
+      cost,
+    });
+    expect(costs.at(-1)).toBe(0.00625);
+    expect(commands[1]).toEqual([
+      "fail-scan",
+      "--scan-id",
+      "scan_example_001",
+      "--message",
+      `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+      "--cost-json",
+      JSON.stringify(cost),
+    ]);
+    expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
+    await expect(stat(scanDir)).resolves.toBeDefined();
+    await client.close();
+  });
+
+  test("fails a budgeted scan when token usage is unavailable", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              async function* events() {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                yield { type: "turn.completed", usage: null };
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository, { maxCostUsd: 1 })).rejects.toThrow(
+      "Cannot evaluate the cost limit",
+    );
     await client.close();
   });
 

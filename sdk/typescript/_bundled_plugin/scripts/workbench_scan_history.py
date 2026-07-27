@@ -14,7 +14,12 @@ from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_target import git_output
 
 
-def _same_repository(before: sqlite3.Row, after: sqlite3.Row) -> bool:
+def _same_repository(
+    before: sqlite3.Row,
+    after: sqlite3.Row,
+    *,
+    after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
+) -> bool:
     if before["target_id"] == after["target_id"]:
         return True
     before_target = Path(before["target_path"])
@@ -22,8 +27,10 @@ def _same_repository(before: sqlite3.Row, after: sqlite3.Row) -> bool:
     before_git_dir = git_output(
         before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
-    after_git_dir = git_output(
-        after_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    after_git_dir = (
+        git_output(after_target, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if after_identity is None
+        else after_identity[0]
     )
     if (
         before_git_dir is not None
@@ -32,7 +39,9 @@ def _same_repository(before: sqlite3.Row, after: sqlite3.Row) -> bool:
     ):
         return True
     before_origin = _repository_origin(before_target)
-    return before_origin is not None and before_origin == _repository_origin(after_target)
+    return before_origin is not None and before_origin == (
+        _repository_origin(after_target) if after_identity is None else after_identity[1]
+    )
 
 
 def _repository_origin(target: Path) -> tuple[str, str] | None:
@@ -117,12 +126,32 @@ def list_scans(
     clauses: list[str] = []
     values: list[Any] = []
     if args is not None and args.repository:
-        repository = str(Path(args.repository).expanduser().resolve())
-        clauses.append(
-            "(scans.target_path = ? OR scans.target_id IN "
-            "(SELECT id FROM security_targets WHERE current_path = ?))"
+        repository = Path(args.repository).expanduser().resolve()
+        requested_repository = connection.execute(
+            """
+            SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
+                ? AS target_path
+            """,
+            (str(repository), str(repository)),
+        ).fetchone()
+        requested_identity = (
+            git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+            _repository_origin(repository),
         )
-        values.extend((repository, repository))
+        related_target_ids = [
+            target["target_id"]
+            for target in connection.execute(
+                "SELECT id AS target_id, current_path AS target_path FROM security_targets"
+            )
+            if _same_repository(target, requested_repository, after_identity=requested_identity)
+        ]
+        repository_clauses = ["scans.target_path = ?"]
+        values.append(str(repository))
+        if related_target_ids:
+            placeholders = ", ".join("?" for _ in related_target_ids)
+            repository_clauses.append(f"scans.target_id IN ({placeholders})")
+            values.extend(related_target_ids)
+        clauses.append(f"({' OR '.join(repository_clauses)})")
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -187,6 +216,7 @@ def list_scans(
             {
                 "completedAt": row["completed_at"],
                 "continuationThreadId": row["continuation_thread_id"],
+                **({"cost": json.loads(row["cost_json"])} if row["cost_json"] else {}),
                 "findingCount": row["finding_count"],
                 "handoffStatus": row["handoff_status"],
                 "mode": row["mode"],
@@ -328,7 +358,18 @@ def compare_scans(
         (before["id"], after["id"]),
     ).fetchone()
     if cached is None and require_matches:
-        raise SystemExit("No saved matches for these scans. Run 'scans match BEFORE AFTER' first.")
+        reversed_comparison = connection.execute(
+            "SELECT 1 FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
+            (after["id"], before["id"]),
+        ).fetchone()
+        if reversed_comparison is not None:
+            raise SystemExit(
+                "These scans are in the wrong order. Run "
+                f"'codex-security scans compare {after['id']} {before['id']}'."
+            )
+        raise SystemExit(
+            "No saved matches for these scans. Run 'codex-security scans match BEFORE AFTER' first."
+        )
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
@@ -424,6 +465,7 @@ def compare_scans(
         "comparable": comparable,
         "coverage": {"afterCompleteness": after_coverage.get("completeness")},
         "findings": findings,
+        "repository": before["target_path"],
         "summary": summary,
     }
     if include_matching_inputs:
@@ -526,34 +568,71 @@ def save_scan_comparison(
     return compare_scans(connection, args, require_scan=require_scan, read_coverage=read_coverage)
 
 
-def finding_matches(connection: sqlite3.Connection, occurrence_id: str) -> list[dict[str, Any]]:
+def finding_matches(
+    connection: sqlite3.Connection, occurrence_id: str, scan_id: str, started_at: str
+) -> tuple[list[dict[str, Any]], str, list[str]]:
     rows = connection.execute(
         """
-        SELECT matches.after_scan_id AS scan_id, occurrences.id, occurrences.finding_id,
+        SELECT matches.after_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
         WHERE matches.before_occurrence_id = ?
         UNION
-        SELECT matches.before_scan_id AS scan_id, occurrences.id, occurrences.finding_id,
+        SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
             occurrences.title, matches.reason
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
         WHERE matches.after_occurrence_id = ?
-        ORDER BY scan_id, id
+        ORDER BY scan_id, occurrence_id
         """,
         (occurrence_id, occurrence_id),
     ).fetchall()
-    return [
-        {
-            "findingId": row["finding_id"],
-            "occurrenceId": row["id"],
-            "reason": row["reason"],
-            "scanId": row["scan_id"],
-            "title": row["title"],
-        }
-        for row in rows
-    ]
+    known_scans = [(started_at, scan_id)]
+    if rows:
+        known_scans = [
+            (row["started_at"], row["scan_id"])
+            for row in connection.execute(
+                """
+                WITH RECURSIVE linked_occurrences(occurrence_id) AS (
+                    SELECT ?
+                    UNION
+                    SELECT CASE
+                        WHEN matches.before_occurrence_id = linked.occurrence_id
+                            THEN matches.after_occurrence_id
+                        ELSE matches.before_occurrence_id
+                    END
+                    FROM scan_comparison_matches AS matches
+                    JOIN linked_occurrences AS linked
+                        ON matches.before_occurrence_id = linked.occurrence_id
+                        OR matches.after_occurrence_id = linked.occurrence_id
+                )
+                SELECT DISTINCT scans.started_at, scans.id AS scan_id
+                FROM linked_occurrences AS linked
+                JOIN finding_occurrences AS occurrences ON occurrences.id = linked.occurrence_id
+                JOIN scans ON scans.id = occurrences.scan_id
+                ORDER BY scans.started_at, scans.id
+                """,
+                (occurrence_id,),
+            )
+        ]
+    known_scan_ids = [known_scans[0][1]]
+    if len(known_scans) > 1:
+        known_scan_ids.append(known_scans[-1][1])
+    return (
+        [
+            {
+                "findingId": row["finding_id"],
+                "occurrenceId": row["occurrence_id"],
+                "reason": row["reason"],
+                "scanId": row["scan_id"],
+                "title": row["title"],
+            }
+            for row in rows
+        ],
+        known_scans[0][0],
+        known_scan_ids,
+    )
 
 
 def _finding_groups(
