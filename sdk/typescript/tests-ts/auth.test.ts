@@ -243,23 +243,20 @@ grandchild.once("error", (error) => {
       temporaryDirectories.push(root);
       const ready = join(root, "grandchild-ready");
       const release = join(root, "release-grandchild");
-      const done = join(root, "grandchild-done");
       const script = join(root, "login-pipes.mjs");
       const grandchildScript = `
 import { existsSync, writeFileSync } from "node:fs";
 
 const ready = process.argv[1];
 const release = process.argv[2];
-const done = process.argv[3];
 const timeout = setTimeout(() => process.exit(1), 10_000);
 const watcher = setInterval(() => {
   if (!existsSync(release)) return;
   clearInterval(watcher);
   clearTimeout(timeout);
-  writeFileSync(done, "done");
   process.exit(0);
 }, 25);
-writeFileSync(ready, "ready");
+writeFileSync(ready, String(process.pid));
 `;
       await writeFile(
         script,
@@ -269,8 +266,12 @@ import { existsSync } from "node:fs";
 
 const grandchild = spawn(
   process.execPath,
-  ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(ready)}, ${JSON.stringify(release)}, ${JSON.stringify(done)}],
-  { stdio: ["ignore", "inherit", "inherit"], windowsHide: true },
+  ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(ready)}, ${JSON.stringify(release)}],
+  {
+    stdio: ["ignore", "inherit", "inherit"],
+    windowsHide: true,
+    detached: true,
+  },
 );
 const readyTimeout = setTimeout(() => {
   clearInterval(readyWatcher);
@@ -336,8 +337,15 @@ grandchild.once("error", (error) => {
         }
       };
 
+      let grandchildPid: number | undefined;
       try {
+        const readyMarker = await readMarker(ready);
+        expect(readyMarker).toMatch(/^\d+$/u);
+        grandchildPid = Number(readyMarker);
+        expect(Number.isSafeInteger(grandchildPid)).toBe(true);
+        expect(grandchildPid).toBeGreaterThan(0);
         const timeout = AbortSignal.timeout(5_000);
+        const startedAt = Date.now();
         const completion = Promise.race([
           handle.wait(),
           new Promise<never>((_, reject) => {
@@ -352,12 +360,34 @@ grandchild.once("error", (error) => {
           success: true,
           exitCode: 0,
         });
-        await expect(readFile(ready, "utf8")).resolves.toBe("ready");
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
         expect(loginChild?.stdout?.destroyed).toBe(true);
         expect(loginChild?.stderr?.destroyed).toBe(true);
       } finally {
         await writeFile(release, "released");
-        expect(await readMarker(done)).toBe("done");
+        if (grandchildPid !== undefined) {
+          const deadline = Date.now() + 5_000;
+          while (true) {
+            try {
+              process.kill(grandchildPid, 0);
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                "code" in error &&
+                error.code === "ESRCH"
+              ) {
+                break;
+              }
+              throw error;
+            }
+            if (Date.now() >= deadline) {
+              throw new Error(
+                "The Windows login grandchild did not exit after pipe cleanup.",
+              );
+            }
+            await delay(25);
+          }
+        }
       }
     },
   );
