@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   accessSync,
   constants,
@@ -8,7 +8,7 @@ import {
   realpathSync,
   writeSync,
 } from "node:fs";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -24,7 +24,7 @@ import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -913,6 +913,75 @@ export async function main(
         return outcome.data;
       },
     })
+    .command("install-hook", {
+      description: "Install a Git pre-commit security scan.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe("Git repository (default: current directory)."),
+      }),
+      options: z.object({
+        failOnSeverity: z
+          .enum(REPORTABLE_SEVERITIES)
+          .default("high")
+          .describe("Block commits for findings at or above LEVEL."),
+      }),
+      output: z
+        .object({
+          hook: z.string(),
+          failOnSeverity: z.enum(REPORTABLE_SEVERITIES),
+        })
+        .optional(),
+      async run({ args, options }) {
+        try {
+          const hook = execFileSync(
+            "git",
+            [
+              "-C",
+              resolve(dependencies.currentDirectory(), args.repository ?? "."),
+              "rev-parse",
+              "--path-format=absolute",
+              "--git-path",
+              "hooks/pre-commit",
+            ],
+            { encoding: "utf8" },
+          ).trim();
+          const command = [
+            realpathSync(process.execPath),
+            realpathSync(fileURLToPath(import.meta.url)),
+          ]
+            .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
+            .join(" ");
+          const contents = `#!/bin/sh\nset -eu\nexec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const existing = await readFile(hook, "utf8").catch(() => null);
+          if (
+            existing !== null &&
+            existing !== contents &&
+            existing !== legacyContents
+          ) {
+            throw new Error(`A pre-commit hook already exists at ${hook}.`);
+          }
+          if (existing === null) {
+            await mkdir(dirname(hook), { recursive: true });
+            await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
+          } else if (existing === legacyContents) {
+            await writeFile(hook, contents, { flag: "w" });
+          }
+          return {
+            hook,
+            failOnSeverity: options.failOnSeverity,
+          };
+        } catch (error) {
+          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+          exitCode = 2;
+          return undefined;
+        }
+      },
+    })
     .command(scanHistory)
     .command("bulk-scan", {
       description:
@@ -1438,6 +1507,7 @@ function validateCliArguments(
   const commandIndex = argv.findIndex((value) =>
     [
       "scan",
+      "install-hook",
       "bulk-scan",
       "scans",
       "export",

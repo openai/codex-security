@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
 const args = process.argv.slice(2);
@@ -264,6 +265,30 @@ for (const file of files) {
 for (const contents of payloads) {
   if (internalMarker.test(contents)) {
     throw new Error("npm tarball contains an internal reference.");
+  }
+}
+
+if (args.length === 1) {
+  const smoke = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./smoke-package.mjs", import.meta.url)), archive],
+    {
+      stdio: "inherit",
+      timeout: 150_000,
+      killSignal: "SIGKILL",
+      windowsHide: true,
+    },
+  );
+  if (smoke.error?.code === "ETIMEDOUT") {
+    throw new Error("Installed npm package smoke timed out after 150000 ms.", {
+      cause: smoke.error,
+    });
+  }
+  if (smoke.error !== undefined) throw smoke.error;
+  if (smoke.status !== 0) {
+    throw new Error(
+      `Installed npm package smoke exited with status ${smoke.status ?? smoke.signal ?? "unknown"}.`,
+    );
   }
 }
 

@@ -1,6 +1,7 @@
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -108,14 +109,58 @@ describe("plugin runtime preparation", () => {
     await mkdir(workspace);
     const source = await resolvePluginPath(undefined, workspace);
     expect(source).toBe(await bundledPluginRoot());
+
+    const publicContractPath = new URL("../plugin-files.json", import.meta.url);
+    const contractPath = existsSync(publicContractPath)
+      ? publicContractPath
+      : join(
+          source,
+          ".internal",
+          "external-promotion",
+          "external-projection-contract.json",
+        );
+    const contract: { shippedExact: string[] } = JSON.parse(
+      await readFile(contractPath, "utf8"),
+    );
+    const shippedPluginPaths = contract.shippedExact.filter(
+      (path) => !path.startsWith("sdk/"),
+    );
+    expect(shippedPluginPaths.length).toBeGreaterThan(0);
+    expect(new Set(shippedPluginPaths).size).toBe(shippedPluginPaths.length);
+
     const marketplace = await createMarketplace(join(root, "home"), source);
     const projected = join(marketplace, "plugins", "codex-security");
     expect(
       await readFile(join(projected, ".codex-plugin", "plugin.json"), "utf8"),
     ).toContain('"name": "codex-security"');
-    expect(
-      await stat(join(projected, "scripts", "config_preflight.py")),
-    ).toBeDefined();
+    await Promise.all(
+      shippedPluginPaths.map(async (path) => {
+        const sourcePath = join(source, ...path.split("/"));
+        const projectedPath = join(projected, ...path.split("/"));
+        const [sourceMetadata, projectedMetadata] = await Promise.all([
+          lstat(sourcePath),
+          lstat(projectedPath),
+        ]);
+        expect({
+          path,
+          bundledIsRegularFile: sourceMetadata.isFile(),
+          projectedIsRegularFile: projectedMetadata.isFile(),
+        }).toEqual({
+          path,
+          bundledIsRegularFile: true,
+          projectedIsRegularFile: true,
+        });
+
+        const [sourceContents, projectedContents] = await Promise.all([
+          readFile(sourcePath),
+          readFile(projectedPath),
+        ]);
+        expect({
+          path,
+          unchanged: projectedContents.equals(sourceContents),
+        }).toEqual({ path, unchanged: true });
+      }),
+    );
     await expect(stat(join(projected, ".internal"))).rejects.toThrow();
     expect(
       await stat(

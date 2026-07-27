@@ -60,7 +60,7 @@ Do not put line numbers in `identity.anchor`. When two sibling vulnerabilities s
 
 Fingerprint matching is a reconciliation signal, not proof that two findings are equivalent. Treat ambiguous matches as unresolved.
 
-When a finding has multiple affected locations, label the vulnerable control location `root_control` when one is known. Adapters use the first `root_control` location as the primary annotation location and otherwise fall back to the first affected location. Preserve supporting entrypoint, wrapper, sink, and concrete-implementation locations as additional evidence.
+When a finding has multiple affected locations, label the vulnerable control location `root_control` when one is known. Adapters keep the first `root_control` location first and otherwise fall back to the first affected location, while preserving every distinct entrypoint, wrapper, sink, concrete-implementation, and code-evidence occurrence as a matchable location.
 
 ## Rule ID Policy
 

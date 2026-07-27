@@ -15,5 +15,5 @@ export const PLUGIN_ROOT = fileURLToPath(
 );
 
 export const INTEGRATION_TARGET = hasSourcePlugin
-  ? "codex/openai-codex-security/src"
+  ? "project/codex-security-sdk/src"
   : "sdk/typescript/src";

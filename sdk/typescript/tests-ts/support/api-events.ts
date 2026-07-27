@@ -1,0 +1,103 @@
+import { cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ThreadEvent } from "@openai/codex-sdk";
+import { runScanEvents } from "../../src/api.js";
+import type {
+  ScanOptions,
+  ScanReconnectDetails,
+  ScanWorkerStatus,
+} from "../../src/index.js";
+import { PLUGIN_ROOT } from "../plugin-root.js";
+
+export type ScanObserverName = Parameters<
+  NonNullable<ScanOptions["onObserverError"]>
+>[0];
+
+export function createApiTestFixtures() {
+  const temporaryDirectories: string[] = [];
+
+  return {
+    async cleanup(): Promise<void> {
+      await Promise.all(
+        temporaryDirectories
+          .splice(0)
+          .map((path) => rm(path, { recursive: true, force: true })),
+      );
+    },
+
+    async copyCompletedScan(root: string): Promise<string> {
+      const scanDir = join(root, "scan");
+      await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+        recursive: true,
+      });
+      await writeFile(join(scanDir, "report.md"), "# Scan report\n");
+      return scanDir;
+    },
+
+    async temporaryDirectory(): Promise<string> {
+      const path = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-api-")),
+      );
+      temporaryDirectories.push(path);
+      return path;
+    },
+  };
+}
+
+export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
+  yield { type: "thread.started", thread_id: "thread-1" };
+  yield { type: "turn.started" };
+  yield {
+    type: "item.completed",
+    item: { id: "message-1", type: "agent_message", text: "scan complete" },
+  };
+  yield {
+    type: "turn.completed",
+    usage: {
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      output_tokens: 3,
+      reasoning_output_tokens: 1,
+    },
+  };
+}
+
+export function runEvents(
+  scanDir: string,
+  events: AsyncGenerator<ThreadEvent>,
+  abortController = new AbortController(),
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void,
+  onWorkerStatus?: (status: ScanWorkerStatus) => void,
+  onScanStarted?: () => void,
+  onObserverError?: (observer: ScanObserverName, error: unknown) => void,
+): ReturnType<typeof runScanEvents> {
+  return runScanEvents({
+    thread: {
+      id: null,
+      async runStreamed() {
+        return { events };
+      },
+    },
+    events,
+    signal: abortController.signal,
+    scanDir,
+    pluginRoot: PLUGIN_ROOT,
+    model: "gpt-5.6-sol",
+    onScanStarted,
+    onReconnect,
+    onWorkerStatus,
+    onObserverError,
+    expectation: {
+      repository: "/repository",
+      repositoryRevision: "deadbeef",
+      target: { kind: "repository", paths: [] },
+      mode: "standard",
+      pluginVersion: "0.1.0",
+    },
+  });
+}

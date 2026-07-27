@@ -46,7 +46,8 @@
     "generate:models": "node scripts/generate-models.cjs",
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",
-    "test": "bun test --timeout 30000 tests-ts/api.test.ts tests-ts/auth.test.ts tests-ts/bulk-scan-discovery.test.ts tests-ts/cli-export.test.ts tests-ts/cli.test.ts tests-ts/config.test.ts tests-ts/contract.test.ts tests-ts/cost.test.ts tests-ts/knowledge-base.test.ts tests-ts/multiscan.test.ts tests-ts/result.test.ts tests-ts/runtime.test.ts tests-ts/scan-comparison.test.ts tests-ts/scan-history-renderer.test.ts tests-ts/skeleton.test.ts tests-ts/targets.test.ts tests-ts/trusted-executable.test.ts tests-ts/worker-progress.test.ts",
+    "test": "bun test --timeout 30000 ./tests-ts",
+    "test:package": "node scripts/smoke-package.mjs",
     "types": "pnpm run generate:models:check && tsc --noEmit"
   },
   "dependencies": {
@@ -56,6 +57,7 @@
     "@openai/codex-sdk": "0.144.6",
     "ajv": "8.20.0",
     "extract-zip": "2.0.1",
+    "fast-uri": "3.1.4",
     "fflate": "0.8.2",
     "incur": "0.4.13",
     "papaparse": "5.5.3",
