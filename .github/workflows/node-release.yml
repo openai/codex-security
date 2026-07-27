@@ -33,9 +33,34 @@ jobs:
           package-manager-cache: false
 
       - name: Activate Socket Firewall
-        uses: openai/socket-firewall@40af4b6b4b00fb88c59af22858dc9f15e077617d # v0.1.0
-        with:
-          disabled-until: ${{ vars.SOCKET_FIREWALL_DISABLED_UNTIL }}
+        shell: bash
+        env:
+          SOCKET_FIREWALL_DISABLED_UNTIL: ${{ vars.SOCKET_FIREWALL_DISABLED_UNTIL }}
+        run: |
+          set -euo pipefail
+
+          disabled_until="${SOCKET_FIREWALL_DISABLED_UNTIL:-}"
+          if [[ -n "$disabled_until" ]] &&
+             [[ "$disabled_until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] &&
+             [[ "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" < "$disabled_until" ]]; then
+            echo "Socket Firewall registry defaults disabled until $disabled_until."
+            exit 0
+          fi
+
+          npm_registry="https://openai.firewall.socket.dev/npm/"
+          pypi_registry="https://openai.firewall.socket.dev/pypi/simple/"
+          {
+            printf 'NPM_CONFIG_REGISTRY=%s\n' "$npm_registry"
+            printf 'npm_config_registry=%s\n' "$npm_registry"
+            printf 'PNPM_CONFIG_REGISTRY=%s\n' "$npm_registry"
+            printf 'pnpm_config_registry=%s\n' "$npm_registry"
+            printf 'COREPACK_NPM_REGISTRY=%s\n' "$npm_registry"
+            printf 'YARN_NPM_REGISTRY_SERVER=%s\n' "$npm_registry"
+            printf 'BUN_CONFIG_REGISTRY=%s\n' "$npm_registry"
+            printf 'UV_DEFAULT_INDEX=%s\n' "$pypi_registry"
+            printf 'UV_INDEX_URL=%s\n' "$pypi_registry"
+            printf 'PIP_INDEX_URL=%s\n' "$pypi_registry"
+          } >> "$GITHUB_ENV"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
