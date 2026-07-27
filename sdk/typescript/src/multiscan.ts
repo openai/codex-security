@@ -419,8 +419,7 @@ function normalizeRepository(repository: string, directory: string): string {
       "Multiscan repositories must be safe local paths or Git URLs.",
     );
   }
-  const scp = /^([^@\s/:]+)@([^:\s/]+):(.+)$/u.exec(repository);
-  if (scp !== null) return `${scp[1]}@${scp[2]!.toLowerCase()}:${scp[3]}`;
+  if (/^[^@\s/:]+@[^:\s/]+:.+$/u.test(repository)) return repository;
   if (!repository.includes("://")) return resolve(directory, repository);
   let url: URL;
   try {

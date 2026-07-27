@@ -12,7 +12,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
@@ -179,47 +178,6 @@ describe("multiscan", () => {
     );
 
     expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
-  });
-
-  test("normalizes mixed-case SCP hosts before applying Git URL rewrites", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "mixed-case-repository");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nmixed,git@GitHub.COM:mixed-case-repository,${source.revision}\n`,
-    );
-    const environment = new Map(
-      ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"].map(
-        (name) => [name, process.env[name]] as const,
-      ),
-    );
-
-    try {
-      process.env["GIT_CONFIG_COUNT"] = "1";
-      process.env["GIT_CONFIG_KEY_0"] =
-        `url.${pathToFileURL(`${paths.root}/`).href}.insteadOf`;
-      process.env["GIT_CONFIG_VALUE_0"] = "git@github.com:";
-
-      const summary = await runMultiscan(
-        options(
-          paths,
-          client(
-            async (_checkout, scanOptions = {}) =>
-              await completedScan(scanOptions.outputDir!),
-          ),
-        ),
-      );
-
-      expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
-      expect(await results(summary.resultsPath)).toMatchObject([
-        { id: "mixed", repository: "git@github.com:mixed-case-repository" },
-      ]);
-    } finally {
-      for (const [name, value] of environment) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-    }
   });
 
   test("parses quoted CSV fields, embedded delimiters, and Windows line endings", async () => {

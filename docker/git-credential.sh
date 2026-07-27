@@ -17,16 +17,8 @@ while IFS= read -r line; do
     esac
 done
 
-if [ "$protocol" != https ]; then
-    exit 0
-fi
-
-normalized_host=$(printf '%s' "$host" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-configured_host=$(printf '%s' "${CODEX_SECURITY_GIT_HOST:-github.com}" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-normalized_host=${normalized_host%:443}
-configured_host=${configured_host%:443}
-
-if [ "$normalized_host" != "$configured_host" ]; then
+if [ "$protocol" != https ] \
+    || [ "$host" != "${CODEX_SECURITY_GIT_HOST:-github.com}" ]; then
     exit 0
 fi
 

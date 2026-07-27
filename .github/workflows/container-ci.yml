@@ -43,6 +43,7 @@ jobs:
             '**/.env' \
             '**/.npmrc' \
             '**/node_modules' \
+            '**/*.csv' \
             '**/repositories.csv' \
             '**/results' \
             '**/security-scans' \

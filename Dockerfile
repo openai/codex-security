@@ -46,8 +46,7 @@ COPY --chmod=0555 docker/git-credential.sh /usr/local/bin/codex-security-git-cre
 RUN groupadd --gid 10001 codex-security \
     && useradd --uid 10001 --gid 10001 --no-create-home codex-security \
     && mkdir -p /input /output /state \
-    && printf '[features]\nuse_legacy_landlock = true\n' > /state/config.toml \
-    && chown 10001:10001 /output /state /state/config.toml
+    && chown 10001:10001 /output /state
 
 ENV CODEX_HOME=/state \
     CODEX_SECURITY_STATE_DIR=/output/.codex-security-state \

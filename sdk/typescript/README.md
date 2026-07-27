@@ -105,6 +105,7 @@ npx codex-security scan /path/to/repository --output-dir /path/outside/repositor
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
 npx codex-security scan /path/to/repository --max-cost 5
+npx codex-security install-hook
 npx codex-security bulk-scan
 npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
 npx codex-security scans list /path/to/repository
@@ -126,6 +127,10 @@ Run `npx codex-security --version` for the installed CLI version or
 default model, reasoning effort, and first-scan command. A scan with `--dry-run`
 also reports its effective model and reasoning effort, including `--codex`
 overrides, without starting Codex or contacting the network.
+
+`install-hook` scans staged and unstaged changes before each commit. It respects
+`core.hooksPath`, does not replace an existing hook, and blocks high-severity
+findings or failed scans. Set `--fail-on-severity` to change the threshold.
 
 `--path` scopes a scan to one or more paths, `--diff` scans committed changes,
 and `--working-tree` scans staged and unstaged changes. Deep scans support

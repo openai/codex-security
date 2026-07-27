@@ -8,9 +8,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
+import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -30,11 +31,22 @@ async function temporaryDirectory(): Promise<string> {
   return path;
 }
 
-function resolveWindowsExecutable(
+async function resolveWindowsExecutable(
   candidate: string,
   path: string,
   protectedRoot: string,
-): { executable: string; environment: Record<string, string> } | null {
+): Promise<{
+  executable: string;
+  environment: Record<string, string | undefined>;
+} | null> {
+  if (process.platform === "win32") {
+    return await resolveTrustedExecutable(
+      candidate,
+      { Path: path, KEEP: "ok" },
+      protectedRoot,
+    );
+  }
+
   const script = `
     Object.defineProperty(process, "platform", { value: "win32" });
     const { resolveTrustedExecutable } = await import(process.argv[1]);
@@ -59,7 +71,7 @@ function resolveWindowsExecutable(
   expect(result.status).toBe(0);
   return JSON.parse(result.stdout) as {
     executable: string;
-    environment: Record<string, string>;
+    environment: Record<string, string | undefined>;
   } | null;
 }
 
@@ -79,7 +91,7 @@ describe("trusted executable resolution", () => {
     ]);
 
     expect(
-      resolveWindowsExecutable(
+      await resolveWindowsExecutable(
         "git",
         [first, second].join(delimiter),
         repository,
@@ -103,11 +115,13 @@ describe("trusted executable resolution", () => {
       writeFile(join(batch, "python3.bat"), "batch"),
     ]);
 
-    expect(resolveWindowsExecutable("python3", com, repository)).toEqual({
+    expect(await resolveWindowsExecutable("python3", com, repository)).toEqual({
       executable: join(com, "python3.com"),
       environment: { KEEP: "ok", PATH: com },
     });
-    expect(resolveWindowsExecutable("python3", batch, repository)).toBeNull();
+    expect(
+      await resolveWindowsExecutable("python3", batch, repository),
+    ).toBeNull();
   });
 
   test("resolves already-suffixed Windows executables without adding another extension", async () => {
@@ -126,7 +140,7 @@ describe("trusted executable resolution", () => {
 
     for (const candidate of ["python.exe", "git.exe", "tool.com"]) {
       expect(
-        resolveWindowsExecutable(
+        await resolveWindowsExecutable(
           candidate,
           [first, trusted].join(delimiter),
           repository,
@@ -137,7 +151,7 @@ describe("trusted executable resolution", () => {
       });
     }
     expect(
-      resolveWindowsExecutable("script.cmd", trusted, repository),
+      await resolveWindowsExecutable("script.cmd", trusted, repository),
     ).toBeNull();
   });
 
@@ -147,23 +161,20 @@ describe("trusted executable resolution", () => {
     const unsafe = join(repository, "node_modules", ".bin");
     const linked = join(root, "linked");
     const trusted = join(root, "trusted");
-    await Promise.all([
-      mkdir(unsafe, { recursive: true }),
-      mkdir(linked),
-      mkdir(trusted),
-    ]);
+    await Promise.all([mkdir(unsafe, { recursive: true }), mkdir(trusted)]);
     await Promise.all([
       writeFile(join(unsafe, "git.cmd"), "batch"),
       writeFile(join(unsafe, "git"), "extensionless"),
       writeFile(join(trusted, "git.exe"), "executable"),
     ]);
-    await Promise.all([
-      symlink(join(unsafe, "git.cmd"), join(linked, "git.cmd")),
-      symlink(join(unsafe, "git"), join(linked, "git")),
-    ]);
+    await symlink(
+      unsafe,
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
 
     expect(
-      resolveWindowsExecutable(
+      await resolveWindowsExecutable(
         "git",
         [unsafe, linked, trusted].join(delimiter),
         repository,
@@ -173,4 +184,45 @@ describe("trusted executable resolution", () => {
       environment: { KEEP: "ok", PATH: trusted },
     });
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "resolves a real Windows executable without trusting PATHEXT, repository junctions, or PATH casing",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const unsafe = join(repository, "node_modules", ".bin");
+      const linked = join(root, "linked");
+      const executable = await realpath(process.execPath);
+      const trusted = await realpath(dirname(executable));
+      const candidate = basename(executable);
+      const stem = candidate.replace(/\.(?:exe|com)$/iu, "");
+      const pathExtensions = ".CMD;.BAT;.COM;.EXE";
+      await mkdir(unsafe, { recursive: true });
+      await Promise.all([
+        writeFile(join(unsafe, candidate), "untrusted executable fixture\n"),
+        writeFile(join(unsafe, `${stem}.cmd`), "@echo off\r\nexit /b 1\r\n"),
+        writeFile(join(unsafe, `${stem}.bat`), "@echo off\r\nexit /b 1\r\n"),
+      ]);
+      await symlink(unsafe, linked, "junction");
+
+      await expect(
+        resolveTrustedExecutable(
+          candidate,
+          {
+            pAtH: [unsafe, linked, trusted].join(delimiter),
+            PATHEXT: pathExtensions,
+            KEEP: "ok",
+          },
+          repository,
+        ),
+      ).resolves.toEqual({
+        executable,
+        environment: {
+          PATHEXT: pathExtensions,
+          KEEP: "ok",
+          PATH: trusted,
+        },
+      });
+    },
+  );
 });
