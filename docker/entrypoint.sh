@@ -2,15 +2,44 @@
 
 set -eu
 
+has_bulk_scan_input() {
+    shift
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h|--schema|--llms|--llms-full)
+                return 0
+                ;;
+            --workers|--max-attempts|--mode|--model|--output-dir|--plugin-path|--python|--codex|--format|--filter-output|--token-limit|--token-offset)
+                if [ "$#" -lt 2 ]; then
+                    return 1
+                fi
+                shift 2
+                ;;
+            --)
+                shift
+                if [ "$#" -gt 0 ]; then
+                    return 0
+                fi
+                return 1
+                ;;
+            --*=*|--full-output|--token-count|-*)
+                shift
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
 if [ "${1:-}" = bulk-scan ]; then
-    case "${2:-}" in
-        --help|-h)
-            ;;
-        ""|-*)
-            printf '%s\n' 'codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.' >&2
-            exit 2
-            ;;
-    esac
+    if ! has_bulk_scan_input "$@"; then
+        printf '%s\n' 'codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.' >&2
+        exit 2
+    fi
 
     set -- "$@" --codex features.use_legacy_landlock=true
 fi
