@@ -137,9 +137,20 @@ import { existsSync, writeFileSync, writeSync } from "node:fs";
 
 const ready = process.argv[1];
 const release = process.argv[2];
+const parentPid = Number(process.argv[3]);
 const timeout = setTimeout(() => process.exit(1), 10_000);
 const watcher = setInterval(() => {
   if (!existsSync(release)) return;
+  try {
+    process.kill(parentPid, 0);
+    return;
+  } catch (error) {
+    if (error?.code !== "ESRCH") {
+      clearInterval(watcher);
+      clearTimeout(timeout);
+      process.exit(1);
+    }
+  }
   clearInterval(watcher);
   clearTimeout(timeout);
   writeSync(2, ${JSON.stringify(`${message}\n`)});
@@ -157,7 +168,7 @@ const ready = ${JSON.stringify(ready)};
 const release = ${JSON.stringify(release)};
 const grandchild = spawn(
   process.execPath,
-  ["-e", ${JSON.stringify(grandchildScript)}, ready, release],
+  ["-e", ${JSON.stringify(grandchildScript)}, ready, release, String(process.pid)],
   { stdio: ["ignore", "ignore", "inherit"], windowsHide: true },
 );
 const readyTimeout = setTimeout(() => {
