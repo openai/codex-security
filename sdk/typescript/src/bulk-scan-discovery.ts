@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
 import { promisify } from "node:util";
-import { confirm, input, select } from "@inquirer/prompts";
+import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -142,34 +142,21 @@ export async function runBulkScanWizard(
   const githubHost = dependencies.githubHost ?? "github.com";
   const github = await dependencies.createGitHub(githubHost, signal);
   const owner = await selectGitHubOwner(github, prompt, signal);
-  const names = await prompt.input(
-    "Repository name contains (comma-separated; leave blank for all)",
-  );
-  const keywords = names
-    .split(",")
-    .map((name) => name.trim().toLowerCase())
-    .filter(Boolean);
   prompt.write("\nFinding active repositories...\n");
-  const repositories = await discoverGitHubRepositories(
+  const discovered = await discoverGitHubRepositories(
     github,
     githubHost,
     owner,
-    keywords,
     dependencies.now() - 90 * 86_400_000,
     signal,
   );
-  if (repositories.length === 0) {
+  if (discovered.length === 0) {
     prompt.write("\nNo repositories matched your selection.\n");
     return null;
   }
 
-  prompt.write(`\nFound ${repositories.length} repositories:\n`);
-  for (const { fullName } of repositories.slice(0, 10)) {
-    prompt.write(`  ${fullName}\n`);
-  }
-  if (repositories.length > 10) {
-    prompt.write(`  and ${repositories.length - 10} more\n`);
-  }
+  prompt.write(`\nFound ${discovered.length} repositories.\n`);
+  const repositories = await selectGitHubRepositories(discovered, prompt);
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
@@ -228,11 +215,38 @@ async function selectGitHubOwner(
   return owner;
 }
 
+async function selectGitHubRepositories(
+  repositories: GitHubRepository[],
+  prompt: BulkScanPrompt,
+): Promise<GitHubRepository[]> {
+  const selected = new Set<string>();
+  while (selected.size < repositories.length) {
+    const choice = await prompt.select(
+      "Select repositories to scan (type to filter)",
+      [
+        {
+          label: selected.size
+            ? `Done (${selected.size} selected)`
+            : `All ${repositories.length} repositories`,
+          value: "",
+        },
+        ...repositories
+          .filter(({ fullName }) => !selected.has(fullName))
+          .map(({ fullName }) => ({ label: fullName, value: fullName })),
+      ],
+    );
+    if (!choice) break;
+    selected.add(choice);
+  }
+  return selected.size
+    ? repositories.filter(({ fullName }) => selected.has(fullName))
+    : repositories;
+}
+
 async function discoverGitHubRepositories(
   github: Octokit,
   host: string,
   owner: string,
-  keywords: string[],
   cutoff: number,
   signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
@@ -252,14 +266,7 @@ async function discoverGitHubRepositories(
 
     for (const repository of connection.nodes) {
       if (Date.parse(repository.pushedAt) < cutoff) return repositories;
-      const name = repository.nameWithOwner.split("/").at(-1)!;
-      if (
-        repository.defaultBranchRef === null ||
-        (keywords.length > 0 &&
-          !keywords.some((keyword) => name.toLowerCase().includes(keyword)))
-      ) {
-        continue;
-      }
+      if (repository.defaultBranchRef === null) continue;
       repositories.push({
         fullName: repository.nameWithOwner,
         url: `https://${host}/${repository.nameWithOwner}.git`,
@@ -327,10 +334,15 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
     input: (message, defaultValue) =>
       input({ message, default: defaultValue }, context()),
     select: (message, options) =>
-      select(
+      search(
         {
           message,
-          choices: options.map(({ label, value }) => ({ name: label, value })),
+          source: (term) =>
+            options
+              .filter(({ label }) =>
+                label.toLowerCase().includes(term?.toLowerCase() ?? ""),
+              )
+              .map(({ label, value }) => ({ name: label, value })),
         },
         context(),
       ),

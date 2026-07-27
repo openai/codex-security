@@ -1,23 +1,56 @@
 # `@openai/codex-security`
 
-TypeScript SDK and CLI for running the Codex Security plugin. The package is
-ESM-only, includes TypeScript declarations, and installs the `codex-security`
-executable with the aligned `@openai/codex` runtime dependency.
+Open-source TypeScript SDK and CLI for running Codex Security scans. The
+ESM-only package includes TypeScript declarations, the `codex-security`
+executable, and the matching Codex runtime.
 
-> [!WARNING]
-> Codex Security is in beta. APIs, CLI options, and output formats may change.
+> [!NOTE]
+> This package follows semantic versioning. Its public API may change between
+> minor versions before `1.0.0`.
 
 ## Install
 
 ```bash
-npm install @openai/codex-security@beta
+npm install @openai/codex-security
 npx codex-security --version
 ```
 
-Node.js 22 or later is required. Running a scan or exporting findings also requires
-Python 3.10 or later for the bundled plugin; Python 3.10 additionally requires
-`tomli`. Configure the interpreter with `--python`, `pythonPath`, or `PYTHON`
-when automatic discovery is not appropriate.
+The package supports macOS, Linux, and Windows and requires Node.js 22 or
+later. Scanning and exporting findings also require Python 3.10 or later. If
+you use Python 3.10, install the `tomli` package. Select another interpreter
+with `--python`, `pythonPath`, or `PYTHON` when needed.
+
+## Run a scan from TypeScript
+
+Sign in with `npx codex-security login` or set `OPENAI_API_KEY` or
+`CODEX_API_KEY`. Then create a client and scan a repository you own or have
+permission to assess:
+
+```ts
+import { CodexSecurity } from "@openai/codex-security";
+
+const security = new CodexSecurity();
+
+try {
+  const result = await security.run("/path/to/repository", {
+    outputDir: "/path/outside/repository/results",
+  });
+
+  console.log(result.reportPath);
+  console.log(result.findings.findings.length);
+} finally {
+  await security.close();
+}
+```
+
+The SDK supports repository, path, committed-diff, and working-tree targets.
+Use `security.preflight()` to validate local inputs, `onWorkerStatus` and
+`onReconnect` to observe long-running scans, and an `AbortSignal` to cancel a
+scan.
+
+Results can contain source excerpts, vulnerability details, and reproduction
+steps. Keep result directories and saved reports outside the repository and
+limit access to authorized reviewers.
 
 ## Authentication
 
@@ -34,12 +67,18 @@ On a remote or headless machine, use device authentication:
 npx codex-security login --device-auth
 ```
 
-For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To store an API key or
-enterprise access token instead, pass it on stdin:
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To store an API key instead,
+pass it on stdin:
 
 ```bash
 printenv OPENAI_API_KEY | npx codex-security login --with-api-key
-printenv CODEX_ACCESS_TOKEN | npx codex-security login --with-access-token
+```
+
+On Windows, set the API key in PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY = "<your-api-key>"
+npx codex-security scan C:\code\repository
 ```
 
 Check or remove the stored sign-in with `npx codex-security login status` and
@@ -57,6 +96,7 @@ stored sign-in exists.
 
 ```bash
 npx codex-security scan /path/to/repository
+npx codex-security scan /path/to/repository --model gpt-5.6-terra
 npx codex-security scan /path/to/repository --path src --path tests
 npx codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx codex-security scan /path/to/repository --diff origin/main --json
@@ -64,18 +104,21 @@ npx codex-security scan /path/to/repository --output-dir /path/outside/repositor
 npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx codex-security scan /path/to/repository --dry-run
 npx codex-security scan /path/to/repository --fail-on-severity high
+npx codex-security scan /path/to/repository --max-cost 5
 npx codex-security bulk-scan
-npx codex-security bulk-scan repositories.csv --output-dir /tmp/security-scans --workers 4
+npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
 npx codex-security scans list /path/to/repository
 npx codex-security scans list --scan-root /path/outside/repository/results
 npx codex-security scans show SCAN_ID
 npx codex-security scans rerun SCAN_ID
+npx codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx codex-security scans match --all
 npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx codex-security export /path/outside/repository/results --export-format sarif --output results.sarif
-npx codex-security export /path/outside/repository/results --export-format csv --output findings.csv
-npx codex-security export /path/outside/repository/results --export-format json --output findings.json
-npx codex-security validate findings.json "Possible SQL injection in src/query.ts:42"
-npx codex-security patch findings.json "Missing authorization check in src/routes.ts:18"
+npx codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
+npx codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
+npx codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
+npx codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 ```
 
 Run `npx codex-security --version` for the installed CLI version or
@@ -109,23 +152,34 @@ for a passing policy. Incomplete scans still write the available human or JSON
 result to stdout and a coverage warning to stderr, including in report-only
 mode.
 
-Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Override
-either setting with repeatable `--codex KEY=VALUE` options, for example
-`--codex 'model="gpt-5.6-sol"' --codex 'model_reasoning_effort="high"'`.
+Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Use
+`--model gpt-5.6-terra` to switch models. Use repeatable `--codex KEY=VALUE`
+options for other Codex settings, such as
+`--codex 'model_reasoning_effort="high"'`.
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
 Completion summarizes findings, severity, coverage, elapsed time, available
-token and worker counts, the results directory, and the next useful command.
+token and worker counts, estimated cost, the results directory, and the next
+useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
+
+Each scan records its model, tokens, and estimated cost in its JSON result,
+scan history, and bulk-scan receipt. Estimates use
+[standard API token prices](https://developers.openai.com/api/docs/models/compare),
+including cached input and cache writes; fees and surcharges are not included.
+
+Use `--max-cost USD` to stop a scan, including its delegated workers, when its
+running cost exceeds the limit. Partial results are preserved. Requests
+already in progress can finish above the limit.
 
 Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
 for the complete CLI references.
 
 Sign in with `gh auth login`, then run `npx codex-security bulk-scan` to discover
 GitHub repositories pushed in the last 90 days. Archived
-repositories and forks are excluded. Optionally filter by comma-separated
-repository-name keywords, review the matches, and confirm before scanning.
+repositories and forks are excluded. Search the repository list, select the
+repositories to scan, and confirm before scanning.
 Private checkouts reuse your GitHub CLI sign-in without changing your global Git
 configuration. The selected repositories are saved to
 `<output-dir>/repositories.csv` for review or resumption.
@@ -149,6 +203,9 @@ repository path to inspect another checkout, `--scan-root DIR` to list scans
 whose artifacts are under a particular root. `scans show SCAN_ID` includes the
 scan configuration, results, coverage, and artifact locations.
 
+Every scan history command accepts a full scan ID or a unique prefix of at
+least eight characters.
+
 Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
@@ -157,10 +214,15 @@ are never stored in the scan configuration.
 `scans rerun SCAN_ID` repeats the original configuration against the current
 checkout so a fixed vulnerability can be checked again.
 
-`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` reconciles stable vulnerability
-identities across both scans. Findings are reported as new, persisting,
-reopened, resolved, or unknown. Missing findings are not treated as resolved
-when the later scan is incomplete or does not cover their original scope.
+`scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
+cause; `scans match --all` matches all completed scans of the current repository,
+including other worktrees and clones. Saved matches appear in `scans show` and
+are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
+
+`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` reads saved matches and reports
+findings as new, persisting, reopened, resolved, or unknown. Missing findings
+are not treated as resolved when the later scan is incomplete or does not cover
+their original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
@@ -173,11 +235,17 @@ read-only metadata command; scans, bulk repository scans,
 authentication, exports, validation, and patching remain CLI-only because the
 MCP transport cannot cancel active scans.
 
-For CI, keep machine-readable output on stdout and apply a severity policy;
-incomplete coverage and runtime errors still exit nonzero:
+For CI, save machine-readable output outside the checked-out repository and
+apply a severity policy. Incomplete coverage and runtime errors still exit
+nonzero:
 
 ```bash
-npx codex-security scan . --diff origin/main --json --fail-on-severity high > codex-security.json
+SCAN_ROOT="$(mktemp -d)"
+npx codex-security scan . \
+  --diff origin/main \
+  --output-dir "$SCAN_ROOT/results" \
+  --json \
+  --fail-on-severity high > "$SCAN_ROOT/findings.json"
 ```
 
 JSON scans never use interactive terminal controls, even when stderr is a TTY.
@@ -213,28 +281,21 @@ a runtime/export error, `130` for interruption, and `143` for termination.
 Use `--dry-run` or `await security.preflight(...)` to validate the repository,
 target, mode, output location, and Codex overrides without initializing the
 runtime or loading credentials. Dry runs do not inspect the plugin or probe its
-Python interpreter.
+Python interpreter. The preflight result includes the selected authentication
+method and, for an environment API key, its variable name. Authentication and
+model access remain unverified until a real scan starts.
 
-## SDK
+Scan progress identifies the selected credential source before Codex starts.
+Interactive terminals also show how to retry with ChatGPT when an environment
+API key overrides the stored sign-in. Progress remains on stderr so JSON output
+stays machine readable. Recoverable failures include safe retry causes and,
+when available, the server-provided retry delay.
 
-```ts
-import { CodexSecurity } from "@openai/codex-security";
+## Documentation and security
 
-const security = new CodexSecurity();
-try {
-  const result = await security.run("/path/to/repository", {
-    knowledgeBasePaths: ["/path/to/threat-models", "/path/to/architecture.pdf"],
-  });
-  console.log(result.reportPath);
-} finally {
-  await security.close();
-}
-```
-
-The SDK also supports scoped and diff targets, streaming, cancellation, API-key
-and Codex sign-in flows, and typed scan results.
-
-Product documentation is available in the
-[Codex Security guide](https://developers.openai.com/codex/security). Please
-report bugs using [GitHub issues](https://github.com/openai/codex-security/issues)
-and vulnerabilities using the repository security policy.
+- [CLI quickstart](https://developers.openai.com/codex/security/cli)
+- [TypeScript SDK guide](https://developers.openai.com/codex/security/sdk)
+- [GitHub issues](https://github.com/openai/codex-security/issues) for bugs and
+  feature requests
+- [Security policy](https://github.com/openai/codex-security/blob/main/SECURITY.md)
+  for private vulnerability reporting and safe operation

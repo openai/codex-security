@@ -19,6 +19,7 @@ import {
   type JsonObject,
   writeCodexConfig,
 } from "./config.js";
+import { estimateScanCost, ScanCostTracker, type ScanCost } from "./cost.js";
 import {
   loadContract,
   requireScanFile,
@@ -31,6 +32,7 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   type ProtectedScanPathKind,
+  ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
 import {
@@ -118,10 +120,17 @@ export interface ScanOptions {
   parentScanId?: string;
   expectedPluginVersion?: string;
   failureSeverity?: SeverityLevel;
+  maxCostUsd?: number;
+  onCost?: (cost: Readonly<ScanCost>) => void;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  onAuthentication?: (authentication: ScanAuthentication) => void;
   onScanStarted?: () => void;
-  onReconnect?: (attempt: number, maxAttempts: number) => void;
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
@@ -138,7 +147,14 @@ export type ScanAuthentication =
       verified: false;
     };
 
+export interface ScanReconnectDetails {
+  reason: "rate_limit" | "network" | "authentication" | "authorization";
+  retryAfterSeconds?: number;
+}
+
 type ScanObserverName =
+  | "onAuthentication"
+  | "onCost"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanStarted"
@@ -152,12 +168,14 @@ export interface ScanPreflight {
   knowledgeBasePaths?: string[];
   outputDir: string | null;
   archiveDir?: string;
+  authentication: ScanAuthentication;
   model: string;
   reasoningEffort: string;
+  maxCostUsd?: number;
 }
 
 interface LocalScanInputs
-  extends Omit<ScanPreflight, "model" | "reasoningEffort"> {
+  extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
 }
 
@@ -239,6 +257,8 @@ export class CodexSecurity {
       "temporary",
     );
     const configuration = await mergedCodexConfig(this.config);
+    const model = scanModelConfiguration(configuration);
+    validateScanCostLimit(options.maxCostUsd, model.model);
     const archiveDir =
       options.archiveExisting === true
         ? await planOutputArchive(inputs.outputDir)
@@ -253,19 +273,26 @@ export class CodexSecurity {
         : {}),
       outputDir: inputs.outputDir,
       ...(archiveDir === null ? {} : { archiveDir }),
-      ...scanModelConfiguration(configuration),
+      authentication: scanAuthentication(this.#dependencies.environment),
+      ...model,
+      ...(options.maxCostUsd === undefined
+        ? {}
+        : { maxCostUsd: options.maxCostUsd }),
     };
   }
 
   async #run(repository: string, options: ScanOptions): Promise<ScanResult> {
     this.#requireOpen();
-    const signal =
-      options.signal === undefined
-        ? this.#abortController.signal
-        : AbortSignal.any([this.#abortController.signal, options.signal]);
+    const costAbortController = new AbortController();
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      costAbortController.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ]);
     let scanDir = "";
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
+    let costTracker: ScanCostTracker | null = null;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -351,6 +378,12 @@ export class CodexSecurity {
             "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
+      notifyObserver(
+        "onAuthentication",
+        options.onAuthentication,
+        options.onObserverError,
+        scanAuthentication(this.#dependencies.environment),
+      );
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
@@ -427,6 +460,31 @@ export class CodexSecurity {
       };
       const effectiveConfig =
         runtime.effectiveConfig ?? (await mergedCodexConfig(this.config));
+      const { model } = scanModelConfiguration(effectiveConfig);
+      validateScanCostLimit(options.maxCostUsd, model);
+      const tracker = new ScanCostTracker({
+        codexHome: runtime.codexHome,
+        model,
+        maxCostUsd: options.maxCostUsd,
+        onCost: (cost) => {
+          notifyObserver(
+            "onCost",
+            options.onCost,
+            options.onObserverError,
+            cost,
+          );
+          if (
+            options.maxCostUsd !== undefined &&
+            cost.estimatedUsd > options.maxCostUsd
+          ) {
+            costAbortController.abort(
+              new ScanCostLimitExceededError(options.maxCostUsd, cost, scanDir),
+            );
+          }
+        },
+        onError: (error) => costAbortController.abort(error),
+      });
+      costTracker = tracker;
       const recipe = scanRecipe(
         repo,
         normalized,
@@ -436,6 +494,7 @@ export class CodexSecurity {
         effectiveConfig,
         options.failureSeverity,
         knowledgeBase?.sources,
+        options.maxCostUsd,
       );
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
@@ -548,13 +607,25 @@ export class CodexSecurity {
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
-        onFinalize: async () => {
+        model,
+        onThreadStarted: (threadId) => tracker.start(threadId),
+        onFinalize: async (usage) => {
+          const snapshot = await tracker.stop(usage);
+          throwIfAborted(signal, scanDir);
+          if (options.maxCostUsd !== undefined && snapshot.cost === null) {
+            throw new CodexSecurityError(
+              "Cannot evaluate the cost limit: model pricing or token usage is unavailable.",
+            );
+          }
+          const cost = snapshot.cost;
           await workbench(workbenchOptions, [
             "complete-scan",
             "--scan-id",
             scanId,
+            ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
           ]);
           activeScan = null;
+          return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
         onReconnect: options.onReconnect,
@@ -564,6 +635,11 @@ export class CodexSecurity {
       checkOpen();
       return result;
     } catch (error) {
+      const snapshot = await costTracker?.stop().catch(() => null);
+      const failure =
+        signal.reason instanceof ScanCostLimitExceededError
+          ? signal.reason
+          : error;
       if (activeScan !== null) {
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
@@ -571,18 +647,21 @@ export class CodexSecurity {
             "--scan-id",
             activeScan.id,
             "--message",
-            (error instanceof Error ? error.message : String(error)).slice(
-              0,
-              2400,
-            ),
+            (failure instanceof Error
+              ? failure.message
+              : String(failure)
+            ).slice(0, 2400),
+            ...(snapshot?.cost
+              ? ["--cost-json", JSON.stringify(snapshot.cost)]
+              : []),
           ]);
         } catch {}
       }
       if (this.#closed) this.#requireOpen();
-      if (signal.aborted && !(error instanceof ScanInterruptedError)) {
+      if (signal.aborted && !(failure instanceof ScanInterruptedError)) {
         throwIfAborted(signal, scanDir);
       }
-      throw error;
+      throw failure;
     } finally {
       await Promise.all([
         knowledgeBase?.cleanup(),
@@ -796,6 +875,14 @@ export class CodexSecurity {
     options: ScanOptions,
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
+    if (
+      options.maxCostUsd !== undefined &&
+      (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)
+    ) {
+      throw new CodexSecurityError(
+        "The scan cost limit must be a positive USD amount.",
+      );
+    }
     const repositoryPath = resolveRepositoryPath(repository);
     const repo = await normalizeRepository(repositoryPath, signal);
     throwIfAborted(signal);
@@ -936,9 +1023,15 @@ interface ScanEventRunOptions {
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
-  onFinalize?: () => Promise<void>;
+  model?: string;
+  onFinalize?: (usage: unknown) => Promise<unknown>;
+  onThreadStarted?: (threadId: string) => void;
   onScanStarted?: () => void;
-  onReconnect?: (attempt: number, maxAttempts: number) => void;
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
@@ -965,7 +1058,10 @@ export async function runScanEvents(
       }
       if (event.type === "thread.started") {
         const startedThreadId = event["thread_id"];
-        if (typeof startedThreadId === "string") threadId = startedThreadId;
+        if (typeof startedThreadId === "string") {
+          threadId = startedThreadId;
+          options.onThreadStarted?.(startedThreadId);
+        }
         if (!scanStarted) {
           scanStarted = true;
           notifyObserver(
@@ -1003,6 +1099,7 @@ export async function runScanEvents(
           options.onReconnect,
           options.onObserverError,
           ...reconnect,
+          reconnectDetails(message),
         );
       }
     }
@@ -1023,9 +1120,16 @@ export async function runScanEvents(
         "Codex Security did not report a thread ID.",
       );
     }
-    await options.onFinalize?.();
+    if (options.onFinalize !== undefined) {
+      usage = (await options.onFinalize(usage)) ?? usage;
+    }
     const result = await collectResult(
-      { status, finalResponse, usage },
+      {
+        status,
+        finalResponse,
+        usage,
+        ...(options.model === undefined ? {} : { model: options.model }),
+      },
       threadId,
       options.scanDir,
       options.pluginRoot,
@@ -1040,6 +1144,9 @@ export async function runScanEvents(
     }
     return result;
   } catch (error) {
+    if (options.signal.reason instanceof ScanCostLimitExceededError) {
+      throw options.signal.reason;
+    }
     if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
       throw new ScanInterruptedError(
         `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
@@ -1130,6 +1237,7 @@ function scanRecipe(
   effectiveConfig: JsonObject,
   failOnSeverity?: SeverityLevel,
   knowledgeBasePaths?: string[],
+  maxCostUsd?: number,
 ): JsonObject {
   return {
     repository,
@@ -1147,7 +1255,20 @@ function scanRecipe(
     config: scanPreflightCodexConfig(effectiveConfig),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
+    ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
   };
+}
+
+function validateScanCostLimit(
+  maxCostUsd: number | undefined,
+  model: string,
+): void {
+  if (maxCostUsd === undefined) return;
+  if (estimateScanCost(model, { input_tokens: 0, output_tokens: 0 }) === null) {
+    throw new CodexSecurityError(
+      `A scan cost limit is not available for the configured model: ${model}.`,
+    );
+  }
 }
 
 async function collectResult(
@@ -1260,6 +1381,71 @@ function reconnectAttempt(message: string): [number, number] | null {
   const attempt = Number(match[1]);
   const maxAttempts = Number(match[2]);
   return attempt <= maxAttempts ? [attempt, maxAttempts] : null;
+}
+
+function reconnectDetails(message: string): ScanReconnectDetails | undefined {
+  const classification = classifyConnectionFailure(message);
+  if (classification !== "rate_limited") {
+    if (classification === "network_error") return { reason: "network" };
+    if (classification === "unauthorized") return { reason: "authentication" };
+    if (classification === "forbidden") return { reason: "authorization" };
+    return undefined;
+  }
+  const delay =
+    /\b(?:try again|retry)\s+in\s+(\d{1,6}(?:\.\d{1,3})?)\s*(?:s\b|seconds?\b)/iu.exec(
+      message,
+    );
+  const retryAfterSeconds = delay === null ? NaN : Number(delay[1]);
+  return {
+    reason: "rate_limit",
+    ...(Number.isFinite(retryAfterSeconds) &&
+    retryAfterSeconds > 0 &&
+    retryAfterSeconds <= 3_600
+      ? { retryAfterSeconds }
+      : {}),
+  };
+}
+
+export function classifyConnectionFailure(
+  error: unknown,
+):
+  | "rate_limited"
+  | "unauthorized"
+  | "forbidden"
+  | "network_error"
+  | "timeout"
+  | "unknown" {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
+      message,
+    )
+  ) {
+    return "rate_limited";
+  }
+  if (
+    /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(
+      message,
+    )
+  ) {
+    return "unauthorized";
+  }
+  if (
+    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel[_ -]?not[_ -]?found\b/iu.test(
+      message,
+    )
+  ) {
+    return "forbidden";
+  }
+  if (
+    /\b(?:ENOTFOUND|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)\b|\b(?:network|connection|TLS|DNS)\b|\berror sending request\b/iu.test(
+      message,
+    )
+  ) {
+    return "network_error";
+  }
+  if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
+  return "unknown";
 }
 
 export function scanRuntimeCodexConfig(config: JsonObject): JsonObject {
@@ -1418,6 +1604,7 @@ function requireOutputOutsideRepository(
 
 function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
   if (!signal?.aborted) return;
+  if (signal.reason instanceof ScanCostLimitExceededError) throw signal.reason;
   const message = scanDir
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";

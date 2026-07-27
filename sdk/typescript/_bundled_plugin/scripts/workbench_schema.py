@@ -559,6 +559,49 @@ MIGRATIONS = (
         ALTER TABLE scans ADD COLUMN parent_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL;
         """,
     ),
+    (
+        23,
+        "semantic scan comparison matches",
+        """
+        CREATE TABLE scan_comparisons (
+            before_scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            after_scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (before_scan_id, after_scan_id),
+            CHECK (before_scan_id != after_scan_id)
+        );
+
+        CREATE TABLE scan_comparison_matches (
+            before_scan_id TEXT NOT NULL,
+            after_scan_id TEXT NOT NULL,
+            before_occurrence_id TEXT NOT NULL
+                REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+            after_occurrence_id TEXT NOT NULL
+                REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+            reason TEXT NOT NULL,
+            PRIMARY KEY (
+                before_scan_id, after_scan_id, before_occurrence_id, after_occurrence_id
+            ),
+            FOREIGN KEY (before_scan_id, after_scan_id)
+                REFERENCES scan_comparisons(before_scan_id, after_scan_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX scan_comparison_matches_by_before_occurrence
+        ON scan_comparison_matches(before_occurrence_id);
+
+        CREATE INDEX scan_comparison_matches_by_after_occurrence
+        ON scan_comparison_matches(after_occurrence_id);
+        """,
+    ),
+    (
+        24,
+        "persist scan cost estimates",
+        """
+        ALTER TABLE scans ADD COLUMN cost_json TEXT;
+        """,
+    ),
 )
 
 

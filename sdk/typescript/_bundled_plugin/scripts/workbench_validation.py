@@ -36,6 +36,32 @@ def reject_nonstandard_json_number(value: str) -> None:
     raise ValueError(f"invalid JSON number {value}")
 
 
+def parse_scan_cost(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value.encode("utf-8")) > 8192:
+        raise SystemExit("Scan cost must be no larger than 8 KiB.")
+    try:
+        cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise SystemExit("Scan cost must be a valid JSON object.") from exc
+    token_keys = ("inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens")
+    if (
+        not isinstance(cost, dict)
+        or not isinstance(cost.get("model"), str)
+        or not cost["model"]
+        or any(type(cost.get(key)) is not int or cost[key] < 0 for key in token_keys)
+        or cost["cachedInputTokens"] + cost["cacheWriteInputTokens"] > cost["inputTokens"]
+        or type(cost.get("estimatedUsd")) not in (int, float)
+        or not math.isfinite(cost["estimatedUsd"])
+        or cost["estimatedUsd"] < 0
+    ):
+        raise SystemExit(
+            "Scan cost must include a model, nonnegative token counts, and an estimated USD amount."
+        )
+    return json.dumps(cost, separators=(",", ":"), allow_nan=False)
+
+
 def capability_preflight_json(
     value: str | None,
     *,

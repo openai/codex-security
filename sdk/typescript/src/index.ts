@@ -1,9 +1,12 @@
 export { CodexSecurity } from "./api.js";
+export { estimateScanCost } from "./cost.js";
+export type { ScanCost } from "./cost.js";
 export type {
   CodexSecurityMetadata,
   ScanAuthentication,
   ScanOptions,
   ScanPreflight,
+  ScanReconnectDetails,
 } from "./api.js";
 export type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 export { CodexLoginHandle } from "./auth.js";
@@ -20,6 +23,7 @@ export {
   OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
 export type { ProtectedScanPathKind } from "./errors.js";

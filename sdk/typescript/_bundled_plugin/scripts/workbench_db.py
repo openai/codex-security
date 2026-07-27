@@ -106,6 +106,7 @@ from workbench_validation import (
     capability_preflight_input,
     capability_preflight_json,
     optional_text,
+    parse_scan_cost,
     require_occurrence,
     require_uuid,
 )
@@ -774,11 +775,30 @@ def require_workspace(connection: sqlite3.Connection, workspace_id: str) -> sqli
 
 
 def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
-    scan_id = require_uuid(scan_id, "scan-id")
+    scan_id = resolve_scan_id(connection, scan_id)
     row = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
     if row is None:
         raise SystemExit("Codex Security scan not found.")
     return row
+
+
+def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
+    try:
+        return str(uuid.UUID(scan_id))
+    except ValueError:
+        if len(scan_id) < 8:
+            raise SystemExit("Scan ID prefixes must be at least eight characters.") from None
+        matches = connection.execute(
+            "SELECT id FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
+            (len(scan_id), scan_id.lower()),
+        ).fetchall()
+        if not matches:
+            raise SystemExit("Codex Security scan not found.") from None
+        if len(matches) > 1:
+            raise SystemExit(
+                f'Scan ID prefix "{scan_id}" matches multiple scans; use a longer prefix.'
+            ) from None
+        return matches[0]["id"]
 
 
 def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -1434,12 +1454,16 @@ def pin_legacy_manifest_digest(
 
 def complete_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
     with scan_completion_lock(scan_id):
-        return complete_scan_locked(connection, scan_id, args.claim_token)
+        return complete_scan_locked(connection, scan_id, args.claim_token, cost_json)
 
 
 def complete_scan_locked(
-    connection: sqlite3.Connection, scan_id: str, claim_token: str | None
+    connection: sqlite3.Connection,
+    scan_id: str,
+    claim_token: str | None,
+    cost_json: str | None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1532,10 +1556,10 @@ def complete_scan_locked(
             """
             UPDATE scans
             SET status = 'complete', phase = 'reporting', completed_at = ?, updated_at = ?,
-                seal_manifest_digest = ?
+                seal_manifest_digest = ?, cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (timestamp, timestamp, manifest_digest, scan["id"]),
+            (timestamp, timestamp, manifest_digest, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be completed.")
@@ -1731,6 +1755,7 @@ def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
 
 def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()
@@ -1748,10 +1773,17 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
+            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
+                cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (optional_text(args.message, maximum=2400), timestamp, timestamp, scan["id"]),
+            (
+                optional_text(args.message, maximum=2400),
+                timestamp,
+                timestamp,
+                cost_json,
+                scan["id"],
+            ),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
@@ -2888,7 +2920,7 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
     limit = min(args.limit, FINDINGS_PAGE_MAX)
-    rows = finding_occurrence_rows(
+    rows = scan_history.finding_occurrence_rows(
         connection,
         scan["id"],
         offset=args.offset,
@@ -2897,7 +2929,7 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         severity=args.severity,
         status=args.status,
     )
-    conditions, values = finding_occurrence_conditions(
+    conditions, values = scan_history.finding_occurrence_conditions(
         scan["id"], query=args.query, severity=args.severity, status=args.status
     )
     total = connection.execute(
@@ -2947,7 +2979,7 @@ def scan_result(
     )
     if sarif_path is not None:
         artifacts["sarifReport"] = str(sarif_path)
-    occurrence_rows = finding_occurrence_rows(
+    occurrence_rows = scan_history.finding_occurrence_rows(
         connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
     )
     if occurrence_id is not None and all(row["id"] != occurrence_id for row in occurrence_rows):
@@ -3006,6 +3038,11 @@ def scan_result(
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
+        **(
+            {"cost": json.loads(scan["cost_json"], parse_constant=reject_non_finite_json)}
+            if scan["cost_json"] is not None
+            else {}
+        ),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
@@ -3053,81 +3090,6 @@ def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:
             "that was scanned. Check out the scanned revision or start a new scan."
         ),
     )
-
-
-def finding_occurrence_rows(
-    connection: sqlite3.Connection,
-    scan_id: str,
-    *,
-    offset: int,
-    limit: int,
-    query: str | None = None,
-    severity: str | None = None,
-    status: str | None = None,
-) -> list[sqlite3.Row]:
-    conditions, values = finding_occurrence_conditions(
-        scan_id, query=query, severity=severity, status=status
-    )
-    return connection.execute(
-        f"""
-        SELECT
-            occurrences.id,
-            occurrences.finding_id,
-            occurrences.title,
-            occurrences.summary,
-            occurrences.severity,
-            occurrences.confidence,
-            occurrences.remediation,
-            occurrences.details_json,
-            occurrences.created_at
-        FROM finding_occurrences AS occurrences
-        LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
-        WHERE {conditions}
-        ORDER BY
-            CASE occurrences.severity
-                WHEN 'critical' THEN 0
-                WHEN 'high' THEN 1
-                WHEN 'medium' THEN 2
-                WHEN 'low' THEN 3
-                WHEN 'informational' THEN 4
-                ELSE 5
-            END,
-            occurrences.created_at,
-            occurrences.id
-        LIMIT ? OFFSET ?
-        """,
-        (*values, limit, offset),
-    ).fetchall()
-
-
-def finding_occurrence_conditions(
-    scan_id: str,
-    *,
-    query: str | None,
-    severity: str | None,
-    status: str | None,
-) -> tuple[str, list[str]]:
-    conditions = ["occurrences.scan_id = ?"]
-    values = [scan_id]
-    if severity is not None:
-        conditions.append("occurrences.severity = ?")
-        values.append(severity)
-    if status is not None:
-        conditions.append("COALESCE(triage.status, 'open') = ?")
-        values.append(status)
-    if query:
-        search = query.strip().casefold()
-        if search:
-            conditions.append(
-                "(instr(lower(occurrences.title), ?) > 0 "
-                "OR instr(lower(occurrences.summary), ?) > 0 "
-                "OR EXISTS ("
-                "SELECT 1 FROM finding_locations AS locations "
-                "WHERE locations.occurrence_id = occurrences.id "
-                "AND instr(lower(locations.relative_path), ?) > 0))"
-            )
-            values.extend((search, search, search))
-    return " AND ".join(conditions), values
 
 
 def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
@@ -3283,6 +3245,13 @@ def finding_result(
         "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
         "triage": finding_triage_result(connection, occurrence["id"]),
     }
+    matches, known_since, known_scan_ids = scan_history.finding_matches(
+        connection, occurrence["id"], scan["id"], scan["started_at"]
+    )
+    if matches:
+        result["matches"] = matches
+        result["knownSince"] = known_since
+        result["knownScanIds"] = known_scan_ids
     result.pop("artifactPaths", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
@@ -3641,6 +3610,13 @@ def main() -> None:
             result = scan_context(connection, args.scan_id, args.occurrence_id)
         elif args.command == "list-scans":
             result = scan_history.list_scans(connection, args)
+        elif args.command == "list-unmatched-scan-pairs":
+            result = scan_history.list_unmatched_scan_pairs(
+                connection,
+                args,
+                backfill_finding_details=backfill_legacy_finding_details,
+                read_coverage=coverage_for_comparison,
+            )
         elif args.command == "register-cli-scan":
             result = register_cli_scan(connection, args)
         elif args.command == "get-scan-recipe":
@@ -3649,6 +3625,17 @@ def main() -> None:
             result = scan_history.compare_scans(
                 connection,
                 args,
+                require_scan=require_scan,
+                read_coverage=coverage_for_comparison,
+                backfill_finding_details=backfill_legacy_finding_details,
+                include_matching_inputs=args.include_matching_inputs,
+                require_matches=args.require_matches,
+            )
+        elif args.command == "save-scan-comparison":
+            result = scan_history.save_scan_comparison(
+                connection,
+                args,
+                now=now,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
             )

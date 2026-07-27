@@ -64,7 +64,29 @@ describe("ScanResult", () => {
     expect(result.toJSON()).toMatchObject({
       scanDir: "/scan",
       threadId: "thread",
+      cost: null,
     });
+  });
+
+  test("includes the model and estimated cost in machine-readable results", () => {
+    const result = new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/scan",
+      threadId: "thread",
+      turnResult: {
+        model: "gpt-5.6-sol",
+        usage: {
+          input_tokens: 1_250,
+          cached_input_tokens: 200,
+          output_tokens: 30,
+        },
+      },
+    });
+
+    expect(result.cost?.estimatedUsd).toBe(0.00625);
+    expect(result.toJSON()["cost"]).toEqual(result.cost);
   });
 
   test("discovers SARIF at its canonical scan path", async () => {

@@ -61,7 +61,7 @@ function git(repo: string, ...args: string[]): string {
 describe("scan target normalization", () => {
   test("tolerates a temporary repository removed before cleanup", async () => {
     const repo = await repository();
-    await rm(join(repo, ".."), { recursive: true });
+    await rm(join(repo, ".."), { recursive: true, force: true });
   });
 
   test("normalizes repository and path targets", async () => {

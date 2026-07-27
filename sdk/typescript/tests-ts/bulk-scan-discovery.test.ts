@@ -41,6 +41,7 @@ class FakePrompt implements BulkScanPrompt {
   public confirms: boolean[] = [];
   public inputs: string[] = [];
   public choices: string[] = [];
+  public readonly searchOptions: string[][] = [];
 
   public isInteractive(): boolean {
     return this.interactive;
@@ -65,6 +66,7 @@ class FakePrompt implements BulkScanPrompt {
     options: readonly { label: string; value: Value }[],
   ): Promise<Value> {
     this.questions.push(question);
+    this.searchOptions.push(options.map(({ label }) => label));
     const value = this.choices.shift();
     return (options.find((option) => option.value === value) ?? options[0]!)
       .value;
@@ -253,7 +255,7 @@ describe("bulk scan repository discovery", () => {
     expect(csv).not.toContain("acme--old");
   });
 
-  test("filters repository names with case-insensitive keywords", async () => {
+  test("shows all repositories and scans only the selected ones", async () => {
     const root = await temporaryDirectory();
     const { dependencies, prompt } = discoveryDependencies(root, {
       repositories: [
@@ -263,11 +265,17 @@ describe("bulk scan repository discovery", () => {
       ],
     });
     prompt.confirms = [true];
-    prompt.inputs = [" OwL, OPENAI ", "./custom-results"];
+    prompt.inputs = ["./custom-results"];
+    prompt.choices = ["acme/owl", "acme/openai", ""];
 
     const result = await runBulkScanWizard(dependencies);
 
     expect(result?.outputDir).toBe(join(root, "custom-results"));
+    expect(prompt.searchOptions).toEqual([
+      ["All 3 repositories", "acme/owl", "acme/openai", "acme/unrelated"],
+      ["Done (1 selected)", "acme/openai", "acme/unrelated"],
+      ["Done (2 selected)", "acme/unrelated"],
+    ]);
     const csv = await readFile(result!.inputPath, "utf8");
     expect(csv).toContain("acme--owl");
     expect(csv).toContain("acme--openai");
@@ -363,7 +371,7 @@ describe("bulk scan repository discovery", () => {
     await mkdir(output);
     await writeFile(inventory, "do not overwrite\n");
     const { dependencies, prompt } = discoveryDependencies(root);
-    prompt.inputs = ["", "./existing-results"];
+    prompt.inputs = ["./existing-results"];
 
     await expect(runBulkScanWizard(dependencies)).rejects.toThrow(
       "already contains a repository list or scan",

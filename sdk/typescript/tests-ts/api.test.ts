@@ -28,8 +28,11 @@ import {
   InvalidTargetError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
+  type ScanAuthentication,
+  ScanCostLimitExceededError,
   type ScanOptions,
   ScanInterruptedError,
+  type ScanReconnectDetails,
   type ScanWorkerStatus,
 } from "../src/index.js";
 import {
@@ -98,6 +101,38 @@ async function copyCompletedScan(root: string): Promise<string> {
   return scanDir;
 }
 
+async function writeUsageSession(
+  codexHome: string,
+  threadId: string,
+  usage: Record<string, number>,
+  parentThreadId?: string,
+): Promise<void> {
+  const directory = join(codexHome, "sessions", "2026", "07", "26");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, `rollout-${threadId}.jsonl`),
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: threadId,
+          ...(parentThreadId === undefined
+            ? {}
+            : { parent_thread_id: parentThreadId }),
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: usage },
+        },
+      }),
+      "",
+    ].join("\n"),
+  );
+}
+
 async function* completedEvents(): AsyncGenerator<ThreadEvent> {
   yield { type: "thread.started", thread_id: "thread-1" };
   yield { type: "turn.started" };
@@ -120,7 +155,11 @@ function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
   abortController = new AbortController(),
-  onReconnect?: (attempt: number, maxAttempts: number) => void,
+  onReconnect?: (
+    attempt: number,
+    maxAttempts: number,
+    details?: ScanReconnectDetails,
+  ) => void,
   onWorkerStatus?: (status: ScanWorkerStatus) => void,
   onScanStarted?: () => void,
   onObserverError?: (observer: ScanObserverName, error: unknown) => void,
@@ -136,6 +175,7 @@ function runEvents(
     signal: abortController.signal,
     scanDir,
     pluginRoot: PLUGIN_ROOT,
+    model: "gpt-5.6-sol",
     onScanStarted,
     onReconnect,
     onWorkerStatus,
@@ -174,7 +214,16 @@ describe("one-shot scan events", () => {
     expect(result.threadId).toBe("thread-1");
     expect(result.turnResult).toMatchObject({
       status: "completed",
+      model: "gpt-5.6-sol",
       finalResponse: "scan complete",
+    });
+    expect(result.cost).toEqual({
+      model: "gpt-5.6-sol",
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      cacheWriteInputTokens: 0,
+      outputTokens: 3,
+      estimatedUsd: 0.000131,
     });
   });
 
@@ -202,7 +251,12 @@ describe("one-shot scan events", () => {
         mode: "standard",
         pluginVersion: "0.1.0",
       },
-      onFinalize: async () => {
+      onFinalize: async (usage) => {
+        expect(usage).toMatchObject({
+          input_tokens: 10,
+          cached_input_tokens: 2,
+          output_tokens: 3,
+        });
         expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
         await copyCompletedScan(root);
         finalized = true;
@@ -452,6 +506,91 @@ describe("one-shot scan events", () => {
       name: CodexSecurityError.name,
       message: "retry budget exhausted",
     });
+  });
+
+  test("extracts bounded rate-limit context from reconnect notifications", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const reconnects: Array<{
+      attempt: number;
+      maxAttempts: number;
+      details?: ScanReconnectDetails;
+    }> = [];
+
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 2/5 (Rate limit reached for org-private. Please try again in 1.2s.)",
+      };
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
+      };
+      yield { type: "error", message: "Reconnecting... 4/5" };
+      yield* completedEvents();
+    }
+
+    await runEvents(
+      scanDir,
+      events(),
+      new AbortController(),
+      (attempt, maxAttempts, details) => {
+        reconnects.push({
+          attempt,
+          maxAttempts,
+          ...(details ? { details } : {}),
+        });
+      },
+    );
+
+    expect(reconnects).toEqual([
+      {
+        attempt: 2,
+        maxAttempts: 5,
+        details: { reason: "rate_limit", retryAfterSeconds: 1.2 },
+      },
+      { attempt: 3, maxAttempts: 5, details: { reason: "rate_limit" } },
+      { attempt: 4, maxAttempts: 5 },
+    ]);
+    expect(JSON.stringify(reconnects)).not.toContain("org-private");
+  });
+
+  test("classifies reconnect causes without exposing provider details", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const reconnects: ScanReconnectDetails[] = [];
+
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message: "Reconnecting... 1/5 (ECONNRESET org-private)",
+      };
+      yield {
+        type: "error",
+        message: "Reconnecting... 2/5 (401 invalid API key org-private)",
+      };
+      yield {
+        type: "error",
+        message: "Reconnecting... 3/5 (403 model access denied org-private)",
+      };
+      yield* completedEvents();
+    }
+
+    await runEvents(
+      scanDir,
+      events(),
+      new AbortController(),
+      (_a, _m, detail) => {
+        if (detail !== undefined) reconnects.push(detail);
+      },
+    );
+
+    expect(reconnects).toEqual([
+      { reason: "network" },
+      { reason: "authentication" },
+      { reason: "authorization" },
+    ]);
+    expect(JSON.stringify(reconnects)).not.toContain("org-private");
   });
 
   test("uses the last reconnect error when Codex ends without a terminal event", async () => {
@@ -873,6 +1012,11 @@ describe("CodexSecurity orchestration", () => {
       target: { kind: "paths", paths: ["src"] },
       mode: "deep",
       outputDir: output,
+      authentication: {
+        method: "api_key",
+        source: "OPENAI_API_KEY",
+        verified: false,
+      },
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
     });
@@ -923,6 +1067,43 @@ describe("CodexSecurity orchestration", () => {
       reasoningEffort: "high",
     });
     expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
+  test("validates cost limits and pricing before starting a scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { maxCostUsd: 5 }),
+    ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
+    for (const maxCostUsd of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        client.preflight(repository, { maxCostUsd }),
+      ).rejects.toThrow("cost limit must be a positive USD amount");
+    }
+
+    const unpriced = new TestClient(
+      { codexOverrides: { model: "unknown-model" } },
+      { environment: {} },
+    );
+    await expect(
+      unpriced.preflight(repository, { maxCostUsd: 5 }),
+    ).rejects.toThrow("cost limit is not available for the configured model");
+    expect(runtimeStarted).toBe(false);
+    await unpriced.close();
     await client.close();
   });
 
@@ -978,6 +1159,86 @@ describe("CodexSecurity orchestration", () => {
       );
       await client.close();
     }
+  });
+
+  test("reports selected credentials without checking them during preflight", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+
+    for (const [environment, expected] of [
+      [
+        { OPENAI_API_KEY: "synthetic-openai-key", CODEX_API_KEY: "other-key" },
+        { method: "api_key", source: "OPENAI_API_KEY", verified: false },
+      ],
+      [
+        { openai_api_key: "   ", Codex_Api_Key: "synthetic-codex-key" },
+        { method: "api_key", source: "CODEX_API_KEY", verified: false },
+      ],
+      [{}, { method: "stored_credentials", verified: false }],
+    ] as const) {
+      let runtimeStarted = false;
+      const client = new TestClient(
+        {},
+        {
+          environment,
+          prepareRuntime: async () => {
+            runtimeStarted = true;
+            throw new Error("runtime should not initialize");
+          },
+        },
+      );
+
+      const preflight = await client.preflight(repository);
+      const authentication: ScanAuthentication = preflight.authentication;
+
+      expect(authentication).toEqual(expected);
+      expect(JSON.stringify(preflight)).not.toContain("synthetic-");
+      expect(runtimeStarted).toBe(false);
+      await client.close();
+    }
+  });
+
+  test("isolates authentication observer failures from scan startup", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    const observerErrors: Array<[ScanObserverName, string]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("scan did not start");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        outputDir: join(root, "scan"),
+        onAuthentication: () => {
+          throw new Error("authentication observer exploded");
+        },
+        onObserverError: (observer, error) => {
+          observerErrors.push([observer, (error as Error).message]);
+        },
+      }),
+    ).rejects.toThrow("scan did not start");
+    expect(observerErrors).toEqual([
+      ["onAuthentication", "authentication observer exploded"],
+    ]);
+    await client.close();
   });
 
   test("previews an existing output archive without changing files", async () => {
@@ -1494,6 +1755,150 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       "scan_example_001",
     ]);
+    await client.close();
+  });
+
+  test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const costs: number[] = [];
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 1_250,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      estimatedUsd: 0.00625,
+    };
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          return args[0] === "register-cli-scan"
+            ? {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                scanDir,
+              }
+            : {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed(
+              _input: string,
+              options: { signal: AbortSignal },
+            ) {
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await Promise.all([
+                  writeUsageSession(codexHome, "scan-thread", {
+                    input_tokens: 500,
+                    cached_input_tokens: 100,
+                    output_tokens: 10,
+                  }),
+                  writeUsageSession(
+                    codexHome,
+                    "worker-thread",
+                    {
+                      input_tokens: 750,
+                      cached_input_tokens: 100,
+                      output_tokens: 20,
+                    },
+                    "scan-thread",
+                  ),
+                ]);
+                await new Promise<void>((resolve) => {
+                  if (options.signal.aborted) {
+                    resolve();
+                  } else {
+                    options.signal.addEventListener("abort", () => resolve(), {
+                      once: true,
+                    });
+                  }
+                });
+                throw new DOMException("aborted", "AbortError");
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        maxCostUsd: 0.005,
+        onCost: (cost) => costs.push(cost.estimatedUsd),
+        signal: AbortSignal.timeout(5_000),
+      }),
+    ).rejects.toMatchObject({
+      name: ScanCostLimitExceededError.name,
+      maxCostUsd: 0.005,
+      scanDir,
+      cost,
+    });
+    expect(costs.at(-1)).toBe(0.00625);
+    expect(commands[1]).toEqual([
+      "fail-scan",
+      "--scan-id",
+      "scan_example_001",
+      "--message",
+      `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+      "--cost-json",
+      JSON.stringify(cost),
+    ]);
+    expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
+    await expect(stat(scanDir)).resolves.toBeDefined();
+    await client.close();
+  });
+
+  test("fails a budgeted scan when token usage is unavailable", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              async function* events() {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                yield { type: "turn.completed", usage: null };
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository, { maxCostUsd: 1 })).rejects.toThrow(
+      "Cannot evaluate the cost limit",
+    );
     await client.close();
   });
 
@@ -2393,6 +2798,7 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
 `,
     );
     let codexOptions: CodexOptions | null = null;
+    let selectedAuthentication: unknown;
     let pythonEnvironment: Record<string, string | undefined> | undefined;
     let pythonProtectedRoot: string | undefined;
     const client = new TestClient(
@@ -2449,7 +2855,16 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
       },
     );
 
-    await client.run(repository);
+    await client.run(repository, {
+      onAuthentication: (authentication) => {
+        selectedAuthentication = authentication;
+      },
+    });
+    expect(selectedAuthentication).toEqual({
+      method: "api_key",
+      source: "OPENAI_API_KEY",
+      verified: false,
+    });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect(
       (codexOptions as CodexOptions | null)?.codexPathOverride,
