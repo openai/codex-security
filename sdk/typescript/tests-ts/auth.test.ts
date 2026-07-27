@@ -1,7 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { ChildProcess } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   accountStatus,
   CodexLoginHandle,
@@ -125,14 +126,40 @@ describe("Codex authentication process boundary", () => {
     expect(succeeded).toBe(true);
   });
 
-  test("drains inherited stderr before resolving interactive login", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-drain-"));
+  test("drains native login stderr before resolving authentication", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-stderr-"));
     temporaryDirectories.push(root);
-    const script = join(root, "inherited-stderr.mjs");
-    const ready = join(root, "grandchild-ready");
-    const release = join(root, "release-grandchild");
+    const script = join(root, "login-stderr.mjs");
     const message = "network timeout while authenticating";
-    const grandchildScript = `
+    await writeFile(
+      script,
+      `process.stderr.write(${JSON.stringify(`${message}\n`)}, (error) => process.exit(error ? 2 : 1));\n`,
+    );
+
+    const handle = new CodexLoginHandle(
+      { command: "node", prefixArgs: [script] },
+      ["login"],
+      process.env,
+      () => {},
+    );
+    await expect(handle.waitForInstructions()).rejects.toThrow(message);
+    await expect(handle.wait()).resolves.toMatchObject({
+      success: false,
+      exitCode: 1,
+      stderr: expect.stringContaining(message),
+    });
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "drains inherited stderr before resolving interactive login",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-drain-"));
+      temporaryDirectories.push(root);
+      const script = join(root, "inherited-stderr.mjs");
+      const ready = join(root, "grandchild-ready");
+      const release = join(root, "release-grandchild");
+      const message = "network timeout while authenticating";
+      const grandchildScript = `
 import { existsSync, writeFileSync, writeSync } from "node:fs";
 
 const ready = process.argv[1];
@@ -158,9 +185,9 @@ const watcher = setInterval(() => {
 }, 25);
 writeFileSync(ready, "ready");
 `;
-    await writeFile(
-      script,
-      `
+      await writeFile(
+        script,
+        `
 import { spawn } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 
@@ -191,121 +218,87 @@ grandchild.once("error", (error) => {
   process.exit(1);
 });
 `,
-    );
+      );
 
-    const handle = new CodexLoginHandle(
-      { command: "node", prefixArgs: [script] },
-      ["login"],
-      process.env,
-      () => {},
-    );
-    await expect(handle.waitForInstructions()).rejects.toThrow(message);
-    await expect(handle.wait()).resolves.toMatchObject({
-      success: false,
-      exitCode: 1,
-      stderr: expect.stringContaining(message),
-    });
-  });
-
-  test
-    .skipIf(process.platform !== "win32")
-    .each([
-      "releases inherited login pipes when the Windows fallback fires",
-      "releases inherited login pipes after a native Windows process exits",
-    ])("%s", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pipes-"));
-    temporaryDirectories.push(root);
-    const ready = join(root, "grandchild-ready");
-    const release = join(root, "release-grandchild");
-    const done = join(root, "grandchild-done");
-    const script = join(root, "inherited-pipes.mjs");
-    const grandchildScript = `
-import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-
-const root = process.argv[1];
-const release = join(root, "release-grandchild");
-const watcher = setInterval(() => {
-  if (existsSync(release)) {
-    clearInterval(watcher);
-    writeFileSync(join(root, "grandchild-done"), "done");
-    process.exit(0);
-  }
-}, 25);
-writeFileSync(join(root, "grandchild-ready"), "ready");
-if (existsSync(release)) {
-  clearInterval(watcher);
-  writeFileSync(join(root, "grandchild-done"), "done");
-  process.exit(0);
-}
-`;
-    await writeFile(
-      script,
-      `
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-
-const grandchild = spawn(
-  process.execPath,
-  ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(root)}],
-  { stdio: ["ignore", "ignore", "inherit"], windowsHide: true },
-);
-const readyTimeout = setTimeout(() => {
-  clearInterval(readyWatcher);
-  grandchild.kill();
-  console.error("Timed out waiting for the Windows login grandchild.");
-  process.exit(1);
-}, 10_000);
-const readyWatcher = setInterval(() => {
-  if (!existsSync(${JSON.stringify(ready)})) return;
-  clearInterval(readyWatcher);
-  clearTimeout(readyTimeout);
-  process.exit(0);
-}, 25);
-grandchild.once("error", (error) => {
-  clearInterval(readyWatcher);
-  clearTimeout(readyTimeout);
-  console.error(error.message);
-  process.exit(1);
-});
-`,
-    );
-
-    const completionSignal = AbortSignal.timeout(20_000);
-    const grandchildDone = (async () => {
-      while (!completionSignal.aborted) {
-        try {
-          return await readFile(done, "utf8");
-        } catch (error) {
-          if (
-            !(error instanceof Error) ||
-            !("code" in error) ||
-            error.code !== "ENOENT"
-          ) {
-            throw error;
-          }
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      }
-      throw new Error("The Windows login grandchild did not exit.");
-    })();
-    const handle = new CodexLoginHandle(
-      { command: "node", prefixArgs: [script] },
-      ["login"],
-      process.env,
-      () => {},
-    );
-    try {
+      const handle = new CodexLoginHandle(
+        { command: "node", prefixArgs: [script] },
+        ["login"],
+        process.env,
+        () => {},
+      );
+      await expect(handle.waitForInstructions()).rejects.toThrow(message);
       await expect(handle.wait()).resolves.toMatchObject({
-        success: true,
-        exitCode: 0,
+        success: false,
+        exitCode: 1,
+        stderr: expect.stringContaining(message),
       });
-      await expect(readFile(ready, "utf8")).resolves.toBe("ready");
-    } finally {
-      await writeFile(release, "released");
-      await expect(grandchildDone).resolves.toBe("done");
-    }
-  });
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "releases native login pipes when the Windows fallback fires",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pipes-"));
+      temporaryDirectories.push(root);
+      const script = join(root, "login-pipes.mjs");
+      await writeFile(
+        script,
+        'process.stdout.write("ready\\n", () => process.exit(0));\n',
+      );
+
+      const originalOnce = ChildProcess.prototype.once;
+      let releaseClose: (() => void) | undefined;
+      const closeListenerMock = spyOn(ChildProcess.prototype, "once");
+      closeListenerMock.mockImplementation(function (
+        this: ChildProcess,
+        event: string,
+        listener: (...eventArguments: never[]) => void,
+      ) {
+        if (event !== "close") {
+          return Reflect.apply(originalOnce, this, [event, listener]);
+        }
+        return Reflect.apply(originalOnce, this, [
+          event,
+          (...eventArguments: unknown[]) => {
+            releaseClose = () => Reflect.apply(listener, this, eventArguments);
+          },
+        ]);
+      });
+
+      let handle: CodexLoginHandle;
+      try {
+        handle = new CodexLoginHandle(
+          { command: "node", prefixArgs: [script] },
+          ["login"],
+          process.env,
+          () => {},
+        );
+      } finally {
+        closeListenerMock.mockRestore();
+      }
+
+      try {
+        const timeout = AbortSignal.timeout(5_000);
+        const completion = Promise.race([
+          handle.wait(),
+          new Promise<never>((_, reject) => {
+            timeout.addEventListener(
+              "abort",
+              () => reject(new Error("The Windows login fallback timed out.")),
+              { once: true },
+            );
+          }),
+        ]);
+        await expect(completion).resolves.toMatchObject({
+          success: true,
+          exitCode: 0,
+        });
+        expect(releaseClose).toBeFunction();
+      } finally {
+        releaseClose?.();
+      }
+    },
+  );
 
   test("does not report a canceled interactive login as successful", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-cancel-"));

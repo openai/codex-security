@@ -60,7 +60,9 @@ def cwe_ids(row: dict[str, Any]) -> list[str]:
 def relative_file(value: Any, repo_root: Path) -> tuple[str, Path]:
     if not isinstance(value, str) or not value.strip() or "\0" in value:
         raise ValueError("path: expected a non-empty repository-relative path")
-    raw = value.strip().replace("\\", "/")
+    raw = value.strip()
+    if sys.platform == "win32":
+        raw = raw.replace("\\", "/")
     path = PurePosixPath(raw)
     if path.is_absolute() or ".." in path.parts or re.match(r"^[A-Za-z]:", raw):
         raise ValueError("path: expected a repository-relative path without traversal")

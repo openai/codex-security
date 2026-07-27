@@ -169,6 +169,49 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
+  testPosix(
+    "keeps literal backslashes in bundled candidate repository paths",
+    async () => {
+      const root = await temporaryDirectory();
+      const literalPath = "source\\candidate.py";
+      await writeFile(join(root, literalPath), "literal candidate\n");
+      await mkdir(join(root, "source"));
+      await writeFile(
+        join(root, "source", "candidate.py"),
+        "wrong candidate\n",
+      );
+
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const normalizer = join(
+        await bundledPluginRoot(),
+        "scripts",
+        "normalize_candidates.py",
+      );
+      const result = Bun.spawnSync([
+        python!,
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, pathlib, runpy, sys",
+          "module = runpy.run_path(sys.argv[1])",
+          "path, source = module['relative_file'](sys.argv[3], pathlib.Path(sys.argv[2]))",
+          "print(json.dumps({'path': path, 'contents': source.read_text(encoding='utf-8')}))",
+        ].join("\n"),
+        normalizer,
+        root,
+        literalPath,
+      ]);
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+        path: literalPath,
+        contents: "literal candidate\n",
+      });
+    },
+  );
+
   test("uses a configured plugin directory directly", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, ".codex", "plugins", "cache");
