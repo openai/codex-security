@@ -66,6 +66,7 @@ npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results
 npx codex-security scan /path/to/repo --output-dir /path/outside/repo/results --archive-existing
 npx codex-security scan /path/to/repo --dry-run
 npx codex-security scan /path/to/repo --fail-on-severity high
+npx codex-security install-hook
 npx codex-security bulk-scan
 npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans
 npx codex-security scans list /path/to/repo
@@ -81,6 +82,10 @@ npx codex-security export /path/outside/repo/results --export-format json --outp
 npx codex-security validate /path/outside/repo/findings.json "Possible SQL injection in src/query.ts:42"
 npx codex-security patch /path/outside/repo/findings.json "Missing authorization check in src/routes.ts:18"
 ```
+
+`install-hook` scans staged and unstaged changes before each commit. It respects
+`core.hooksPath`, does not replace an existing hook, and blocks high-severity
+findings or failed scans. Set `--fail-on-severity` to change the threshold.
 
 Use `npx codex-security --version` for the CLI version and
 `npx codex-security info --json` for package, plugin, and runtime versions,

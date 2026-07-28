@@ -666,7 +666,10 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
-  test("accepts whitespace in schema-only minLength contract fields", async () => {
+  test.each([
+    "accepts whitespace in schema-only minLength contract fields",
+    "accepts representative schema-only minLength fields in each contract document",
+  ])("%s", async (description) => {
     const cases: Array<
       [
         string,
@@ -793,7 +796,14 @@ describe("canonical scan contract", () => {
         },
       ],
     ];
-    for (const [_name, mutate] of cases) {
+    const selectedCases =
+      description ===
+      "accepts representative schema-only minLength fields in each contract document"
+        ? cases.filter(([name]) =>
+            ["scope list", "severity vector", "surface notes"].includes(name),
+          )
+        : cases;
+    for (const [_name, mutate] of selectedCases) {
       const scanDir = await copyExample();
       const manifestPath = join(scanDir, "scan-manifest.json");
       const findingsPath = join(scanDir, "findings.json");

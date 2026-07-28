@@ -6,7 +6,7 @@
     "name": "OpenAI"
   },
   "homepage": "https://developers.openai.com/codex/security",
-  "repository": "https://github.com/openai/plugins",
+  "repository": "https://github.com/openai/codex-security",
   "license": "Apache-2.0",
   "keywords": [
     "security",

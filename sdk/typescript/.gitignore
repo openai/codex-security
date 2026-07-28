@@ -1,2 +1,4 @@
 /dist/
+/node_modules
 /private_release/dist/
+/*.tsbuildinfo

@@ -1,0 +1,15 @@
+.git
+.github
+**/.DS_Store
+**/.env
+**/.env.*
+**/.npmrc
+**/coverage
+**/dist
+**/node_modules
+**/*.csv
+**/repositories.csv
+**/results
+**/security-scans
+**/state
+**/*.log

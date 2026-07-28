@@ -1478,6 +1478,32 @@ def _sarif_primary_location(finding: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
+    primary = _sarif_primary_location(finding)
+    locations = [
+        primary,
+        *(location for location in finding["locations"] if location is not primary),
+    ]
+    locations.extend(
+        {
+            "path": evidence["path"],
+            "startLine": evidence["startLine"],
+            "endLine": evidence.get("endLine", evidence["startLine"]),
+            "role": f"evidence:{evidence['id']}",
+        }
+        for evidence in finding.get("codeEvidence", [])
+    )
+    unique: dict[tuple[str, int, int], dict[str, Any]] = {}
+    for location in locations:
+        key = (
+            location["path"],
+            location["startLine"],
+            location.get("endLine", location["startLine"]),
+        )
+        unique.setdefault(key, location)
+    return list(unique.values())
+
+
 def _github_primary_location_line_hash(
     finding: dict[str, Any],
     source_root: Path | None,
@@ -1579,23 +1605,15 @@ def _sarif_result(
     line_hash = _github_primary_location_line_hash(finding, source_root, line_hash_cache)
     if line_hash is not None:
         partial_fingerprints["primaryLocationLineHash"] = line_hash
-    primary_location = _sarif_primary_location(finding)
-    related_locations = [
-        _sarif_location(location, index)
-        for index, location in enumerate(finding["locations"])
-        if location is not primary_location
-    ]
     result = {
         "ruleId": finding["ruleId"],
         "ruleIndex": rule_index,
         "level": SARIF_LEVELS[finding["severity"]["level"]],
         "message": {"text": finding["summary"]},
-        "locations": [_sarif_location(primary_location)],
+        "locations": [_sarif_location(location) for location in _sarif_locations(finding)],
         "partialFingerprints": partial_fingerprints,
         "properties": properties,
     }
-    if related_locations:
-        result["relatedLocations"] = related_locations
     return result
 
 

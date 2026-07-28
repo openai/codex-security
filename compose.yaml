@@ -1,0 +1,40 @@
+services:
+  codex-security:
+    image: ${CODEX_SECURITY_IMAGE:-codex-security:local}
+    build:
+      context: .
+    init: true
+    user: ${CODEX_SECURITY_USER:-10001:10001}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=${CODEX_SECURITY_SECCOMP:-./docker/codex-security-seccomp.json}
+    environment:
+      CODEX_API_KEY:
+      CODEX_SECURITY_GIT_HOST:
+      GH_TOKEN:
+      GITHUB_TOKEN:
+      OPENAI_API_KEY:
+    volumes:
+      - type: bind
+        source: ${CODEX_SECURITY_CSV:-./repositories.csv}
+        target: /input/repositories.csv
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CODEX_SECURITY_RESULTS:-./results}
+        target: /output
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CODEX_SECURITY_STATE:-./state}
+        target: /state
+        bind:
+          create_host_path: false
+    command:
+      - bulk-scan
+      - /input/repositories.csv
+      - --output-dir
+      - /output

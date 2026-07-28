@@ -16,6 +16,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      NPM_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
+      npm_config_registry: https://openai.firewall.socket.dev/npm/
+      PNPM_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
+      pnpm_config_registry: https://openai.firewall.socket.dev/npm/
+      COREPACK_NPM_REGISTRY: https://openai.firewall.socket.dev/npm/
+      BUN_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
 
@@ -25,6 +32,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up Socket Firewall
+        uses: SocketDev/action@937f824ec476dfd164d4a4d9995751427b0be143 # v1
+        with:
+          mode: firewall-free
+          firewall-version: v1.15.0
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
@@ -95,7 +108,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
-        run: pnpm --dir sdk/typescript install --frozen-lockfile
+        run: sfw pnpm --dir sdk/typescript install --frozen-lockfile
 
       - name: Verify
         run: |
@@ -120,7 +133,7 @@ jobs:
           consumer="$(mktemp -d)"
           trap 'rm -rf "$consumer"' EXIT
           printf '%s\n' '{"name":"codex-security-smoke","private":true,"type":"module"}' > "$consumer/package.json"
-          npm install --ignore-scripts --prefix "$consumer" --include=optional --no-audit --no-fund ./dist/*.tgz
+          sfw npm install --ignore-scripts --prefix "$consumer" --include=optional --no-audit --no-fund ./dist/*.tgz
           (cd "$consumer" && node --input-type=module --eval 'const sdk = await import("@openai/codex-security"); if (typeof sdk.CodexSecurity !== "function") process.exit(1);')
           "$consumer/node_modules/.bin/codex-security" --version
           "$consumer/node_modules/.bin/codex-security" --help
@@ -149,7 +162,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
-          node-version: "24"
+          node-version: "24.18.0"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
@@ -158,6 +171,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           path: dist
+          merge-multiple: true
           digest-mismatch: error
 
       - name: Publish to npm
