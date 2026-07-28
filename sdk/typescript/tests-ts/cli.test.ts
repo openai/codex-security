@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, normalize } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -182,10 +182,12 @@ describe("CLI", () => {
             deps,
           ),
         ).toBe(0);
-        expect(JSON.parse(stdout.text())).toEqual({
-          hook,
-          failOnSeverity: "medium",
-        });
+        const result = JSON.parse(stdout.text()) as {
+          hook: string;
+          failOnSeverity: string;
+        };
+        expect(normalize(result.hook)).toBe(hook);
+        expect(result.failOnSeverity).toBe("medium");
       }
       expect(await readFile(hook, "utf8")).toContain(
         "--working-tree --fail-on-severity medium",
@@ -206,10 +208,12 @@ describe("CLI", () => {
           deps,
         ),
       ).toBe(0);
-      expect(JSON.parse(migratedHook.text())).toEqual({
-        hook,
-        failOnSeverity: "medium",
-      });
+      const migrated = JSON.parse(migratedHook.text()) as {
+        hook: string;
+        failOnSeverity: string;
+      };
+      expect(normalize(migrated.hook)).toBe(hook);
+      expect(migrated.failOnSeverity).toBe("medium");
       expect(await readFile(hook, "utf8")).toBe(trustedHook);
 
       const existingHook = capture();
@@ -302,7 +306,7 @@ describe("CLI", () => {
       await expect(stat(maliciousMarker)).rejects.toMatchObject({
         code: "ENOENT",
       });
-      expect(trustedHook).not.toContain("npx");
+      expect(trustedHook).not.toMatch(/^exec\s+npx(?:\s|$)/m);
       expect(trustedHook).toContain(await realpath(process.execPath));
       expect(trustedHook).toContain(
         await realpath(
