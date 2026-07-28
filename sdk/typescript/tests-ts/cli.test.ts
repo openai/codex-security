@@ -1532,6 +1532,33 @@ describe("CLI", () => {
     }
   });
 
+  test("reports database connection failures without claiming the model network failed", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError(
+          [
+            "Could not save the Codex Security scan: Traceback (most recent call last):",
+            "    with closing(connect()) as connection:",
+            "sqlite3.OperationalError: unable to open database file",
+            "token=sk-proj-SYNTHETIC_DATABASE_SECRET_123",
+          ].join("\n"),
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(await main(["scan"], stdout.stream, stderr.stream, deps)).toBe(2);
+    expect(stderr.text()).toContain("Could not save the Codex Security scan");
+    expect(stderr.text()).toContain("unable to open database file");
+    expect(stderr.text()).not.toContain("model service could not be reached");
+    expect(stderr.text()).not.toContain("Check your network connection");
+    expect(stderr.text()).not.toContain("SYNTHETIC_DATABASE_SECRET");
+  });
+
   test("renders scan output with the Incur default format", async () => {
     const stdout = capture();
     const stderr = capture();

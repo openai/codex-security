@@ -882,6 +882,47 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result).toEqual({ ok: true });
   });
 
+  test("reports an unwritable SQLite state directory without a Python traceback", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    const stateDirectory = join(root, "persistent-state");
+    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import sqlite3",
+        "def connect():",
+        "    raise sqlite3.OperationalError('unable to open database file')",
+        "connect()",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    let failure: unknown;
+    try {
+      await runWorkbench(
+        {
+          python: python!,
+          pluginRoot,
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          failureMessage: "Could not save the Codex Security scan",
+        },
+        ["register-cli-scan"],
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain("Could not save the Codex Security scan");
+    expect(message).toContain(join(stateDirectory, "workbench.sqlite3"));
+    expect(message).toContain("SQLite journal files are writable");
+    expect(message).toContain("CODEX_SECURITY_STATE_DIR");
+    expect(message).not.toContain("Traceback");
+  });
+
   testPosix("rejects private output directories owned by another user", () => {
     expect(() =>
       requirePrivateOutputDirectory(

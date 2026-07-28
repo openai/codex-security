@@ -19,6 +19,7 @@ import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
   CodexSecurity,
@@ -32,6 +33,7 @@ import {
   ScanInterruptedError,
 } from "../src/index.js";
 import {
+  classifyConnectionFailure,
   environmentValue,
   initialCredentialsAvailable,
   scanPreflightCodexConfig,
@@ -163,6 +165,23 @@ function preparedRuntime(codexHome: string): Record<string, unknown> {
 }
 
 describe("CodexSecurity orchestration", () => {
+  test("distinguishes local workbench and database errors from model transport failures", () => {
+    for (const message of [
+      "sqlite3.OperationalError: unable to open database file\nwith closing(connect()) as connection:",
+      "Could not save the Codex Security scan: database connection failed",
+      "Codex Security workbench: permission denied",
+    ]) {
+      expect(classifyConnectionFailure(message)).toBe("unknown");
+    }
+    expect(classifyConnectionFailure("ECONNRESET")).toBe("network_error");
+    expect(classifyConnectionFailure("401 invalid API key")).toBe(
+      "unauthorized",
+    );
+    expect(classifyConnectionFailure("403 model access denied")).toBe(
+      "forbidden",
+    );
+  });
+
   test("treats empty environment variables as unset and finds case variants", () => {
     expect(environmentValue({ CODEX_HOME: "" }, "CODEX_HOME")).toBeUndefined();
     expect(
@@ -179,7 +198,8 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
-  test("uses a root-read, workspace-write filesystem profile", () => {
+  test("uses a root-read filesystem profile with writable workspace and workbench state", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
@@ -193,7 +213,7 @@ describe("CodexSecurity orchestration", () => {
       },
     };
 
-    expect(scanRuntimeCodexConfig(original)).toEqual({
+    expect(scanRuntimeCodexConfig(original, stateDirectory)).toEqual({
       allow_login_shell: false,
       default_permissions: "codex_security_scan",
       permissions: {
@@ -202,6 +222,7 @@ describe("CodexSecurity orchestration", () => {
           filesystem: {
             ":root": "read",
             ":workspace_roots": "write",
+            [stateDirectory]: "write",
           },
         },
       },
@@ -654,6 +675,145 @@ describe("CodexSecurity orchestration", () => {
       expect(runtimeStarted).toBe(false);
       await client.close();
     }
+  });
+
+  test("honors explicit authentication selection without initializing the runtime", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-openai-key",
+          CODEX_API_KEY: "synthetic-codex-key",
+        },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { auth: "chatgpt" }),
+    ).resolves.toMatchObject({
+      authentication: { method: "stored_credentials", verified: false },
+    });
+    await expect(
+      client.preflight(repository, { auth: "api-key" }),
+    ).resolves.toMatchObject({
+      authentication: {
+        method: "api_key",
+        source: "OPENAI_API_KEY",
+        verified: false,
+      },
+    });
+    await expect(
+      client.preflight(repository, { auth: "auto" }),
+    ).resolves.toMatchObject({
+      authentication: {
+        method: "api_key",
+        source: "OPENAI_API_KEY",
+        verified: false,
+      },
+    });
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
+  test("rejects explicit API-key authentication without a configured key before runtime initialization", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: { OPENAI_API_KEY: "   " },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { auth: "api-key" }),
+    ).rejects.toBeInstanceOf(AuthenticationRequiredError);
+    await expect(
+      client.run(repository, { auth: "api-key" }),
+    ).rejects.toBeInstanceOf(AuthenticationRequiredError);
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
+  test("removes ambient API keys from explicitly selected ChatGPT scans", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let codexOptions: CodexOptions | null = null;
+    let pythonEnvironment: Record<string, string | undefined> | undefined;
+    let selectedAuthentication: ScanAuthentication | undefined;
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          OPENAI_API_KEY: "synthetic-openai-key",
+          Codex_Api_Key: "synthetic-codex-key",
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: {
+            CODEX_HOME: codexHome,
+            OpenAi_Api_Key: "synthetic-forwarded-openai-key",
+            codex_api_key: "synthetic-forwarded-codex-key",
+          },
+        }),
+        resolvePluginPython: async (options: {
+          environment?: Record<string, string | undefined>;
+        }) => {
+          pythonEnvironment = options.environment;
+          return "/managed/python";
+        },
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          throw new Error("ChatGPT scan reached");
+        },
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        auth: "chatgpt",
+        onAuthentication: (authentication) => {
+          selectedAuthentication = authentication;
+        },
+      }),
+    ).rejects.toThrow("ChatGPT scan reached");
+    expect(selectedAuthentication).toEqual({
+      method: "stored_credentials",
+      verified: false,
+    });
+    for (const environment of [
+      pythonEnvironment,
+      (codexOptions as CodexOptions | null)?.env,
+    ]) {
+      expect(environment).toBeDefined();
+      expect(
+        Object.keys(environment!).some((name) =>
+          ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+        ),
+      ).toBe(false);
+    }
+    await client.close();
   });
 
   test("isolates authentication observer failures from scan startup", async () => {
@@ -1681,6 +1841,22 @@ describe("CodexSecurity orchestration", () => {
               capturedConfigPath = configPath;
               capturedCodexHome = codexHome;
               expect(configPath!.startsWith(`${codexHome!}/`)).toBe(false);
+              expect(
+                parseToml(
+                  await readFile(join(codexHome!, "config.toml"), "utf8"),
+                ),
+              ).toMatchObject({
+                permissions: {
+                  codex_security_scan: {
+                    filesystem: {
+                      ":root": "read",
+                      ":workspace_roots": "write",
+                      [join(ambientHome, "state", "plugins", "codex-security")]:
+                        "write",
+                    },
+                  },
+                },
+              });
               if (process.platform !== "win32") {
                 expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
               }
@@ -2368,6 +2544,95 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
         async () => true,
       ),
     ).resolves.toBe(true);
+  });
+
+  test("restores stored ChatGPT credentials when switching from an API-key scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-home");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const fakeCodex = join(root, "codex.mjs");
+    const ambientAuthentication = '{"auth_mode":"chatgpt"}\n';
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(join(ambientHome, "auth.json"), ambientAuthentication);
+    await writeFile(
+      fakeCodex,
+      `
+import { writeFileSync } from "node:fs";
+let apiKey = "";
+for await (const chunk of process.stdin) apiKey += chunk;
+writeFileSync(${JSON.stringify(join(codexHome, "auth.json"))}, JSON.stringify({
+  auth_mode: "api-key",
+  configured: apiKey.trim().length > 0,
+}));
+`,
+    );
+    const authentications: ScanAuthentication[] = [];
+    const codexEnvironments: Array<Record<string, string> | undefined> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          CODEX_HOME: ambientHome,
+          OPENAI_API_KEY: "synthetic-openai-key",
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          credentialsAvailable: false,
+        }),
+        resolveCodexCommand: () => ({
+          command: process.execPath,
+          prefixArgs: [fakeCodex],
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => {
+          codexEnvironments.push(options.env);
+          throw new Error("scan reached");
+        },
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        onAuthentication: (authentication) => {
+          authentications.push(authentication);
+        },
+      }),
+    ).rejects.toThrow("scan reached");
+    expect(
+      JSON.parse(await readFile(join(codexHome, "auth.json"), "utf8")),
+    ).toEqual({
+      auth_mode: "api-key",
+      configured: true,
+    });
+
+    await expect(
+      client.run(repository, {
+        auth: "chatgpt",
+        onAuthentication: (authentication) => {
+          authentications.push(authentication);
+        },
+      }),
+    ).rejects.toThrow("scan reached");
+    expect(await readFile(join(codexHome, "auth.json"), "utf8")).toBe(
+      ambientAuthentication,
+    );
+    expect(authentications).toEqual([
+      { method: "api_key", source: "OPENAI_API_KEY", verified: false },
+      { method: "stored_credentials", verified: false },
+    ]);
+    expect(
+      Object.keys(codexEnvironments.at(-1) ?? {}).some((name) =>
+        ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+      ),
+    ).toBe(false);
+    await client.close();
   });
 
   test("uses a rotated environment API key on the next scan", async () => {

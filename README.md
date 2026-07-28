@@ -16,6 +16,26 @@ npx codex-security scan .
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
 
+If both a ChatGPT sign-in and an API key are available, interactive scans ask
+which credential to use. CI and other noninteractive scans keep the existing
+API-key precedence. Select a credential explicitly when needed:
+
+```bash
+npx codex-security scan . --auth chatgpt
+npx codex-security scan . --auth api-key
+```
+
+To make your ChatGPT sign-in the automatic default, unset any configured API
+keys:
+
+```bash
+unset OPENAI_API_KEY CODEX_API_KEY
+```
+
+Scan history is stored in the Codex Security workbench state directory. If that
+directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
+directory outside the repository.
+
 ## TypeScript SDK
 
 ```ts

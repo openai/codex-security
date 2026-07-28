@@ -374,7 +374,7 @@ describe("one-shot scan events", () => {
     expect(JSON.stringify(reconnects)).not.toContain("org-private");
   });
 
-  test("classifies reconnect causes without exposing provider details", async () => {
+  test("classifies retryable reconnect causes without exposing provider details", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const reconnects: ScanReconnectDetails[] = [];
 
@@ -385,11 +385,7 @@ describe("one-shot scan events", () => {
       };
       yield {
         type: "error",
-        message: "Reconnecting... 2/5 (401 invalid API key org-private)",
-      };
-      yield {
-        type: "error",
-        message: "Reconnecting... 3/5 (403 model access denied org-private)",
+        message: "Reconnecting... 2/5 (429 rate limit reached org-private)",
       };
       yield* completedEvents();
     }
@@ -405,10 +401,41 @@ describe("one-shot scan events", () => {
 
     expect(reconnects).toEqual([
       { reason: "network" },
-      { reason: "authentication" },
-      { reason: "authorization" },
+      { reason: "rate_limit" },
     ]);
     expect(JSON.stringify(reconnects)).not.toContain("org-private");
+  });
+
+  test("fails immediately on definitive authentication and authorization errors", async () => {
+    for (const message of [
+      "Reconnecting... 1/5 (401 invalid API key org-private)",
+      "Reconnecting... 1/5 (403 model access denied org-private)",
+    ]) {
+      const scanDir = join(await temporaryDirectory(), "partial-scan");
+      await mkdir(scanDir, { mode: 0o700 });
+      const reconnects: Array<[number, number]> = [];
+      let advancedPastFailure = false;
+
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        yield { type: "thread.started", thread_id: "thread-1" };
+        yield { type: "error", message };
+        advancedPastFailure = true;
+        yield { type: "error", message: "Reconnecting... 2/5" };
+      }
+
+      await expect(
+        runEvents(
+          scanDir,
+          events(),
+          new AbortController(),
+          (attempt, maxAttempts) => {
+            reconnects.push([attempt, maxAttempts]);
+          },
+        ),
+      ).rejects.toMatchObject({ name: CodexSecurityError.name, message });
+      expect(reconnects).toEqual([]);
+      expect(advancedPastFailure).toBe(false);
+    }
   });
 
   test("uses the last reconnect error when Codex ends without a terminal event", async () => {

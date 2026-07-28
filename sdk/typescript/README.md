@@ -86,11 +86,36 @@ Check or remove the stored sign-in with `npx codex-security login status` and
 sign-in. If Codex stores credentials in the system keyring, run
 `npx codex-security login` once before scanning.
 
-An environment API key takes precedence over a stored sign-in. Unset both
-`OPENAI_API_KEY` and `CODEX_API_KEY` to use your ChatGPT sign-in. When an
-environment key is configured, `codex-security login status` identifies the
-effective credential source without printing its value, including when no
-stored sign-in exists.
+An environment API key takes precedence over a stored sign-in by default.
+When both a stored ChatGPT sign-in and an environment API key are available, an
+interactive scan asks which credential to use. JSON output, dry runs, CI, and
+other noninteractive scans never prompt and retain automatic API-key
+precedence. Select the credential source explicitly with `--auth`:
+
+```bash
+npx codex-security scan . --auth chatgpt
+npx codex-security scan . --auth api-key
+```
+
+`--auth chatgpt` uses the stored sign-in and ignores `OPENAI_API_KEY` and
+`CODEX_API_KEY`. `--auth api-key` requires one of those environment variables.
+Omit `--auth`, or pass `--auth auto`, to preserve automatic API-key precedence
+for existing CI and unattended scans. The SDK accepts the same selection as
+`security.run(repository, { auth: "chatgpt" })` and
+`security.preflight(repository, { auth: "chatgpt" })`.
+
+To make the stored ChatGPT sign-in the automatic default instead, unset any
+configured API-key variables:
+
+```bash
+unset OPENAI_API_KEY CODEX_API_KEY
+```
+
+The interactive choice applies only to the current scan and is not persisted.
+
+When an environment key is configured, ChatGPT login and
+`codex-security login status` identify the effective scan credential source
+without printing its value, including when no stored sign-in exists.
 
 ## CLI
 
@@ -216,6 +241,14 @@ Scan history uses the existing Codex Security workbench database at
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
 are never stored in the scan configuration.
 
+The scan sandbox permits writes to the selected state directory so SQLite can
+maintain its database and journal files. If the host itself cannot write to the
+default directory, select a writable directory outside the scanned repository:
+
+```bash
+export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
+```
+
 `scans rerun SCAN_ID` repeats the original configuration against the current
 checkout so a fixed vulnerability can be checked again.
 
@@ -291,10 +324,11 @@ method and, for an environment API key, its variable name. Authentication and
 model access remain unverified until a real scan starts.
 
 Scan progress identifies the selected credential source before Codex starts.
-Interactive terminals also show how to retry with ChatGPT when an environment
-API key overrides the stored sign-in. Progress remains on stderr so JSON output
-stays machine readable. Recoverable failures include safe retry causes and,
-when available, the server-provided retry delay.
+Terminals and noninteractive CI logs also show how to retry with
+`--auth chatgpt` when an environment API key overrides the stored sign-in.
+Progress remains on stderr so JSON output stays machine readable. Network
+failures and rate limits remain retryable; definitive authentication and model
+authorization failures stop immediately.
 
 ## Documentation and security
 
