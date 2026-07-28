@@ -183,5 +183,19 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
 
-      - name: Publish to npm
+      - name: Publish initial npm release
+        if: github.ref_name == 'npm-v0.1.0'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "Security Products must configure NPM_FIRST_PUBLISH_TOKEN in the protected npm environment before the initial release." >&2
+            exit 1
+          fi
+          npm publish ./dist/*.tgz --provenance --access public --tag latest
+
+      - name: Publish to npm using trusted publishing
+        if: github.ref_name != 'npm-v0.1.0'
         run: npm publish ./dist/*.tgz --provenance --access public --tag latest
