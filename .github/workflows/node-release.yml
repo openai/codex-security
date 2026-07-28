@@ -131,7 +131,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
-          node-version: "24"
+          node-version: "24.18.0"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
@@ -140,6 +140,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.verify.outputs.artifact-id }}
           path: dist
+          merge-multiple: true
           digest-mismatch: error
 
       - name: Publish to npm
