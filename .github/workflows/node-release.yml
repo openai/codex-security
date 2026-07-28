@@ -153,8 +153,27 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
-      - name: Install trusted-publishing npm
-        run: npm install --global npm@11.15.0 --registry=https://openai.firewall.socket.dev/npm/
+      - name: Verify bundled trusted-publishing npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --eval '
+            const version = process.argv[1];
+            const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+            const [major, minor, patch] = match?.slice(1).map(Number) ?? [];
+            if (
+              !match ||
+              major < 11 ||
+              (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))
+            ) {
+              console.error(
+                "npm 11.5.1 or newer is required for trusted publishing; found " +
+                  version +
+                  ".",
+              );
+              process.exit(1);
+            }
+          ' "$(npm --version)"
 
       - name: Download verified package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
