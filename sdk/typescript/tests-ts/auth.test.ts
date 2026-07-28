@@ -1,7 +1,8 @@
 import { ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   accountStatus,
@@ -137,7 +138,7 @@ describe("Codex authentication process boundary", () => {
     );
 
     const handle = new CodexLoginHandle(
-      { command: "node", prefixArgs: [script] },
+      { command: process.execPath, prefixArgs: [script] },
       ["login"],
       process.env,
       () => {},
@@ -221,7 +222,7 @@ grandchild.once("error", (error) => {
       );
 
       const handle = new CodexLoginHandle(
-        { command: "node", prefixArgs: [script] },
+        { command: process.execPath, prefixArgs: [script] },
         ["login"],
         process.env,
         () => {},
@@ -240,15 +241,61 @@ grandchild.once("error", (error) => {
     async () => {
       const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pipes-"));
       temporaryDirectories.push(root);
+      const ready = join(root, "grandchild-ready");
+      const release = join(root, "release-grandchild");
       const script = join(root, "login-pipes.mjs");
+      const grandchildScript = `
+import { existsSync, writeFileSync } from "node:fs";
+
+const ready = process.argv[1];
+const release = process.argv[2];
+const timeout = setTimeout(() => process.exit(1), 10_000);
+const watcher = setInterval(() => {
+  if (!existsSync(release)) return;
+  clearInterval(watcher);
+  clearTimeout(timeout);
+  process.exit(0);
+}, 25);
+writeFileSync(ready, String(process.pid));
+`;
       await writeFile(
         script,
-        'process.stdout.write("ready\\n", () => process.exit(0));\n',
+        `
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+
+const grandchild = spawn(
+  process.execPath,
+  ["-e", ${JSON.stringify(grandchildScript)}, ${JSON.stringify(ready)}, ${JSON.stringify(release)}],
+  {
+    stdio: ["ignore", "inherit", "inherit"],
+    windowsHide: true,
+    detached: true,
+  },
+);
+const readyTimeout = setTimeout(() => {
+  clearInterval(readyWatcher);
+  grandchild.kill();
+  console.error("Timed out waiting for the Windows login grandchild.");
+  process.exit(1);
+}, 10_000);
+const readyWatcher = setInterval(() => {
+  if (!existsSync(${JSON.stringify(ready)})) return;
+  clearInterval(readyWatcher);
+  clearTimeout(readyTimeout);
+  process.stdout.write("ready\\n", (error) => process.exit(error ? 1 : 0));
+}, 25);
+grandchild.once("error", (error) => {
+  clearInterval(readyWatcher);
+  clearTimeout(readyTimeout);
+  console.error(error.message);
+  process.exit(1);
+});
+`,
       );
 
       const originalOnce = ChildProcess.prototype.once;
       let loginChild: ChildProcess | undefined;
-      let releaseClose: (() => void) | undefined;
       const processObserver = spyOn(ChildProcess.prototype, "once");
       processObserver.mockImplementation(function (
         this: ChildProcess,
@@ -256,22 +303,13 @@ grandchild.once("error", (error) => {
         listener: (...eventArguments: never[]) => void,
       ) {
         if (event === "exit") loginChild = this;
-        if (event === "close") {
-          return Reflect.apply(originalOnce, this, [
-            event,
-            (...eventArguments: unknown[]) => {
-              releaseClose = () =>
-                Reflect.apply(listener, this, eventArguments);
-            },
-          ]);
-        }
         return Reflect.apply(originalOnce, this, [event, listener]);
       });
 
       let handle: CodexLoginHandle;
       try {
         handle = new CodexLoginHandle(
-          { command: "node", prefixArgs: [script] },
+          { command: process.execPath, prefixArgs: [script] },
           ["login"],
           process.env,
           () => {},
@@ -280,8 +318,32 @@ grandchild.once("error", (error) => {
         processObserver.mockRestore();
       }
 
+      const readMarker = async (path: string): Promise<string> => {
+        const deadline = Date.now() + 5_000;
+        while (true) {
+          try {
+            return await readFile(path, "utf8");
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !("code" in error) ||
+              error.code !== "ENOENT" ||
+              Date.now() >= deadline
+            ) {
+              throw error;
+            }
+            await delay(25);
+          }
+        }
+      };
+
+      let grandchildPid: number | undefined;
       try {
-        const startedAt = Date.now();
+        const readyMarker = await readMarker(ready);
+        expect(readyMarker).toMatch(/^\d+$/u);
+        grandchildPid = Number(readyMarker);
+        expect(Number.isSafeInteger(grandchildPid)).toBe(true);
+        expect(grandchildPid).toBeGreaterThan(0);
         const timeout = AbortSignal.timeout(5_000);
         const completion = Promise.race([
           handle.wait(),
@@ -297,12 +359,33 @@ grandchild.once("error", (error) => {
           success: true,
           exitCode: 0,
         });
-        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
-        expect(releaseClose).toBeFunction();
         expect(loginChild?.stdout?.destroyed).toBe(true);
         expect(loginChild?.stderr?.destroyed).toBe(true);
       } finally {
-        releaseClose?.();
+        await writeFile(release, "released");
+        if (grandchildPid !== undefined) {
+          const deadline = Date.now() + 5_000;
+          while (true) {
+            try {
+              process.kill(grandchildPid, 0);
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                "code" in error &&
+                error.code === "ESRCH"
+              ) {
+                break;
+              }
+              throw error;
+            }
+            if (Date.now() >= deadline) {
+              throw new Error(
+                "The Windows login grandchild did not exit after pipe cleanup.",
+              );
+            }
+            await delay(25);
+          }
+        }
       }
     },
   );
