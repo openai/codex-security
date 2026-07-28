@@ -20,6 +20,10 @@ later. Scanning and exporting findings also require Python 3.10 or later. If
 you use Python 3.10, install the `tomli` package. Select another interpreter
 with `--python`, `pythonPath`, or `PYTHON` when needed.
 
+When a newer version is available, the CLI shows the update command for your
+installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
+notice. Notices are also disabled in CI and when stderr is not a terminal.
+
 ## Run a scan from TypeScript
 
 Sign in with `npx codex-security login` or set `OPENAI_API_KEY` or
@@ -115,6 +119,7 @@ npx codex-security scans rerun SCAN_ID
 npx codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx codex-security scans match --all
 npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
 npx codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
@@ -215,6 +220,10 @@ Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
 are never stored in the scan configuration.
+
+Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as
+a false positive and explain why. Later scans dismiss a matching finding only
+when the same reason still applies.
 
 `scans rerun SCAN_ID` repeats the original configuration against the current
 checkout so a fixed vulnerability can be checked again.

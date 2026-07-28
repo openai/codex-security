@@ -48,6 +48,7 @@
     "scripts/workbench/__init__.py",
     "scripts/workbench/handoff.py",
     "scripts/workbench_db.py",
+    "scripts/workbench_feedback.py",
     "scripts/workbench_native_indexes.py",
     "scripts/workbench_progress.py",
     "scripts/workbench_remediation.py",

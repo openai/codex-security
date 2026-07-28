@@ -120,6 +120,29 @@ describe("CLI", () => {
       options: { properties: { all: { type: "boolean" } } },
     });
 
+    const falsePositiveSchema = capture();
+    expect(
+      await main(
+        ["findings", "false-positive", "--schema", "--format", "json"],
+        falsePositiveSchema.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(falsePositiveSchema.text())).toMatchObject({
+      args: {
+        properties: {
+          occurrenceId: { type: "string", minLength: 1, maxLength: 256 },
+        },
+      },
+      options: {
+        properties: {
+          reason: { type: "string", minLength: 1, maxLength: 2400 },
+        },
+        required: ["reason"],
+      },
+    });
+
     const manifest = capture();
     expect(
       await main(["--llms"], manifest.stream, capture().stream, dependencies()),
@@ -132,6 +155,9 @@ describe("CLI", () => {
     expect(manifest.text()).toContain("codex-security export <scanDir>");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
     expect(manifest.text()).toContain("codex-security patch <issues...>");
+    expect(manifest.text()).toContain(
+      "codex-security findings false-positive <occurrenceId>",
+    );
     expect(manifest.text()).toContain("codex-security scans list [repository]");
     expect(manifest.text()).toContain("codex-security scans show <scanId>");
     expect(manifest.text()).toContain("codex-security scans rerun <scanId>");
@@ -153,6 +179,126 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(completions.text()).toContain('export COMPLETE="bash"');
+  });
+
+  test("marks findings as false positives without starting Codex", async () => {
+    const reason = "  Not reachable from untrusted input.  ";
+    const expectedReason = reason.trim();
+    const response: JsonObject = {
+      scan: {
+        scanId: "scan-1",
+        findings: [
+          {
+            occurrenceId: "occurrence-1",
+            triage: {
+              status: "closed",
+              closeReason: "false_positive",
+              note: expectedReason,
+            },
+          },
+        ],
+      },
+    };
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies({
+      onWorkbench: (args) => {
+        calls.push(args);
+        return response;
+      },
+    });
+    deps.createSecurity = () => {
+      throw new Error("finding feedback must not initialize Codex");
+    };
+
+    expect(
+      await main(
+        [
+          "findings",
+          "false-positive",
+          "occurrence-1",
+          "--reason",
+          reason,
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      [
+        "set-finding-triage",
+        "--occurrence-id",
+        "occurrence-1",
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        expectedReason,
+      ],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual(response);
+    expect(stderr.text()).toBe("");
+  });
+
+  test("requires a reason before marking a finding as a false positive", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    let workbenchCalled = false;
+
+    expect(
+      await main(
+        ["findings", "false-positive", "occurrence-1", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => {
+            workbenchCalled = true;
+            return {};
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("reason");
+    expect(workbenchCalled).toBe(false);
+  });
+
+  test("redacts false-positive workbench failures", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    let started = false;
+
+    expect(
+      await main(
+        [
+          "findings",
+          "false-positive",
+          "occurrence-1",
+          "--reason",
+          "Not reachable from untrusted input.",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onRun: () => {
+            started = true;
+          },
+          onWorkbench: () => {
+            throw new Error(
+              `Could not update finding ${SYNTHETIC_CREDENTIALS}`,
+            );
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(REDACTED_CREDENTIALS);
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+    expect(started).toBe(false);
   });
 
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
@@ -1293,6 +1439,30 @@ describe("CLI", () => {
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
+      [["findings", "false-positive"], "occurrenceId"],
+      [["findings", "false-positive", "occurrence-1"], "reason"],
+      [
+        ["findings", "false-positive", "occurrence-1", "occurrence-2"],
+        "Unexpected positional",
+      ],
+      [
+        ["findings", "false-positive", "occurrence-1", "--reason"],
+        "Missing value for flag: --reason",
+      ],
+      [
+        ["findings", "false-positive", "occurrence-1", "--reason", "   "],
+        "--reason must not be empty",
+      ],
+      [
+        [
+          "findings",
+          "false-positive",
+          "occurrence-1",
+          "--reason",
+          "x".repeat(2_401),
+        ],
+        "--reason must not exceed 2400 characters",
+      ],
       [["scan", ".", "--format", "md"], "Markdown output is not supported"],
       [["scan", ".", "--format=md"], "Markdown output is not supported"],
       [["--format", "md", "scan", "."], "Markdown output is not supported"],

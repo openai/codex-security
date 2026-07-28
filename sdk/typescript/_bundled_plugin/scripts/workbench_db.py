@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persist Codex Security workbench state in a local SQLite database."""
+"""Codex Security workbench persistence."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - msvcrt is only available on Windows.
     windows_file_lock = None
 
-# Some plugin hosts launch Python with safe-path isolation enabled.
+# Plugin hosts may enable safe-path isolation.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_native_indexes as native_indexes
@@ -76,6 +76,7 @@ from workbench_constants import (
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
+from workbench_feedback import get_scan_feedback
 from workbench_scan_start import (
     compact_timestamp,
     insert_running_scan,
@@ -107,6 +108,7 @@ from workbench_validation import (
     capability_preflight_json,
     optional_text,
     parse_scan_cost,
+    require_close_reason,
     require_occurrence,
     require_uuid,
 )
@@ -190,8 +192,7 @@ def acquire_completion_file_lock(descriptor: int) -> None:
     if windows_file_lock is None:
         raise SystemExit("Scan completion requires operating-system file locking support.")
 
-    # msvcrt locks a byte range. Seed a newly-created lock file before locking its
-    # first byte, and retry if another process locks that byte between our checks.
+    # Retry seeding and locking the first byte.
     while os.fstat(descriptor).st_size == 0:
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:
@@ -1506,7 +1507,7 @@ def complete_scan_locked(
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
         )
-        # Keep the second target check between in-memory finalization and the first write.
+        # Recheck the target after finalization and before writing.
         require_unchanged_target(scan)
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
@@ -1853,8 +1854,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
     if args.status == "closed" and close_reason is None:
         raise SystemExit("Choose why this finding is being closed.")
     note = optional_text(args.note, maximum=2400)
-    if close_reason == "wont_fix" and note is None:
-        raise SystemExit("Explain why this finding will not be fixed.")
+    require_close_reason(close_reason, note)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()
@@ -3608,6 +3608,8 @@ def main() -> None:
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "get-scan-feedback":
+            result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
             result = scan_history.list_scans(connection, args)
         elif args.command == "list-unmatched-scan-pairs":

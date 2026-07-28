@@ -77,8 +77,12 @@ import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
   BUNDLED_PLUGIN_VERSION,
+  checkForUpdate,
   CODEX_EXECUTABLE_VERSION,
   CODEX_SDK_VERSION,
+  formatUpdateNotice,
+  updateNoticeEnabled,
+  type UpdateNotice,
   VERSION,
 } from "./version.js";
 
@@ -143,6 +147,7 @@ const VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
   "--scan-root",
+  "--reason",
 ]);
 
 function optionValue(flag: string) {
@@ -230,11 +235,13 @@ interface CliDependencies {
   bulkScan?: BulkScanDiscoveryDependencies;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
+  checkForUpdate(): Promise<UpdateNotice | undefined>;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) => new CodexSecurity(config),
   environment: process.env,
+  checkForUpdate: () => checkForUpdate({ environment: process.env }),
   currentDirectory: cwd,
   now: Date.now,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -495,6 +502,24 @@ export async function main(
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
+  const pendingUpdate =
+    errorOutput.isTTY === true &&
+    argv.length > 0 &&
+    argv[0] !== "completions" &&
+    !argv.some((argument) =>
+      [
+        "--help",
+        "-h",
+        "--version",
+        "--llms",
+        "--llms-full",
+        "--schema",
+        "--dry-run",
+      ].includes(argument),
+    ) &&
+    updateNoticeEnabled(dependencies.environment)
+      ? dependencies.checkForUpdate().catch(() => undefined)
+      : undefined;
   let exitCode = 0;
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
@@ -541,6 +566,43 @@ export async function main(
     });
     return result;
   };
+  const findingFeedback = Cli.create("findings", {
+    description: "Review and manage saved Codex Security findings.",
+  }).command("false-positive", {
+    description: "Mark a finding as a false positive for future scans.",
+    destructive: true,
+    mcp: false,
+    args: z.object({
+      occurrenceId: z
+        .string()
+        .trim()
+        .min(1)
+        .max(256)
+        .describe("Finding occurrence identifier."),
+    }),
+    options: z.object({
+      reason: z
+        .string()
+        .trim()
+        .min(1, "--reason must not be empty.")
+        .max(2_400, "--reason must not exceed 2400 characters.")
+        .describe("Explanation for why the finding is a false positive."),
+    }),
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, options }) {
+      return await history([
+        "set-finding-triage",
+        "--occurrence-id",
+        args.occurrenceId,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        options.reason,
+      ]);
+    },
+  });
   const scanHistory = Cli.create("scans", {
     description:
       "List, inspect, rerun, match, and compare saved Codex Security scans.",
@@ -983,6 +1045,7 @@ export async function main(
       },
     })
     .command(scanHistory)
+    .command(findingFeedback)
     .command("bulk-scan", {
       description:
         "Discover repositories and run resumable bulk security scans.",
@@ -1337,6 +1400,10 @@ export async function main(
       frameworkExit = code;
     },
   });
+  if (pendingUpdate !== undefined) {
+    const notice = await pendingUpdate;
+    if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
+  }
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
@@ -1510,6 +1577,7 @@ function validateCliArguments(
       "install-hook",
       "bulk-scan",
       "scans",
+      "findings",
       "export",
       "validate",
       "patch",
@@ -1572,7 +1640,8 @@ function validateCliArguments(
       return "Markdown output is not supported for scan results.";
     }
   }
-  const subcommand = command === "scans" ? argv[commandIndex + 1] : undefined;
+  const nestedCommand = command === "scans" || command === "findings";
+  const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
   if (command === "info") {
     const metadataFields = new Set([
       "sdkVersion",
@@ -1606,7 +1675,7 @@ function validateCliArguments(
     }
   }
   for (
-    let index = commandIndex + (command === "scans" ? 2 : 1);
+    let index = commandIndex + (nestedCommand ? 2 : 1);
     index < argv.length;
     index += 1
   ) {
