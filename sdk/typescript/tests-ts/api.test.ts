@@ -1295,24 +1295,18 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
-    // The fake Codex stream has no process handle to keep its unref'ed poll alive.
-    const keepEventLoopAlive = setTimeout(() => {}, 10_000);
-    try {
-      await expect(
-        client.run(repository, {
-          maxCostUsd: 0.005,
-          onCost: (cost) => costs.push(cost.estimatedUsd),
-          signal: AbortSignal.timeout(5_000),
-        }),
-      ).rejects.toMatchObject({
-        name: ScanCostLimitExceededError.name,
+    await expect(
+      client.run(repository, {
         maxCostUsd: 0.005,
-        scanDir,
-        cost,
-      });
-    } finally {
-      clearTimeout(keepEventLoopAlive);
-    }
+        onCost: (cost) => costs.push(cost.estimatedUsd),
+        signal: AbortSignal.timeout(5_000),
+      }),
+    ).rejects.toMatchObject({
+      name: ScanCostLimitExceededError.name,
+      maxCostUsd: 0.005,
+      scanDir,
+      cost,
+    });
     expect(costs.at(-1)).toBe(0.00625);
     expect(commands[1]).toEqual([
       "fail-scan",
