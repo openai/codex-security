@@ -47,19 +47,8 @@ jobs:
 
       - name: Activate Socket Firewall
         shell: bash
-        env:
-          SOCKET_FIREWALL_DISABLED_UNTIL: ${{ vars.SOCKET_FIREWALL_DISABLED_UNTIL }}
         run: |
           set -euo pipefail
-
-          disabled_until="${SOCKET_FIREWALL_DISABLED_UNTIL:-}"
-          if [[ -n "$disabled_until" ]] &&
-             [[ "$disabled_until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] &&
-             node --eval 'const s = process.argv[1]; const d = new Date(s); process.exit(Number.isNaN(d.valueOf()) || d.toISOString() !== s.slice(0, -1) + ".000Z" ? 1 : 0)' "$disabled_until" &&
-             [[ "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" < "$disabled_until" ]]; then
-            echo "Socket Firewall registry defaults disabled until $disabled_until."
-            exit 0
-          fi
 
           npm_registry="https://openai.firewall.socket.dev/npm/"
           pypi_registry="https://openai.firewall.socket.dev/pypi/simple/"
