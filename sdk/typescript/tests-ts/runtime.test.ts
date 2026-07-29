@@ -1368,7 +1368,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "$ErrorActionPreference = 'Stop'",
         "$path = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_TEST_ACL_PATH', 'Process')",
         "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
-        "$acl = Get-Acl -LiteralPath $path -ErrorAction Stop",
+        "$acl = [System.IO.Directory]::GetAccessControl($path)",
         "$unexpected = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $identity })",
         "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
       ].join("; ");
