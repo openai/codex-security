@@ -7,6 +7,7 @@ import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
+  type JsonObject,
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
@@ -25,6 +26,39 @@ async function temporaryDirectory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "codex-security-config-"));
   temporaryDirectories.push(path);
   return path;
+}
+
+function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
+  const node = Bun.which("node");
+  if (node === null) {
+    throw new Error("The pinned Codex CLI requires Node.js.");
+  }
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    CODEX_HOME: codexHome,
+  };
+  delete environment["OPENAI_API_KEY"];
+  delete environment["CODEX_API_KEY"];
+  return Bun.spawnSync(
+    [
+      node,
+      join(
+        import.meta.dir,
+        "..",
+        "node_modules",
+        "@openai",
+        "codex",
+        "bin",
+        "codex.js",
+      ),
+      ...arguments_,
+    ],
+    {
+      env: environment,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
 }
 
 describe("Codex configuration", () => {
@@ -60,6 +94,76 @@ describe("Codex configuration", () => {
     expect(merged).toMatchObject({
       features: { elevated_windows_sandbox: true },
       windows: { sandbox: "elevated" },
+    });
+  });
+
+  test("projects legacy elevated Windows overrides into selected profiles", async () => {
+    const merged = await mergedCodexConfig({
+      codexOverrides: {
+        profile: "elevated",
+        profiles: {
+          elevated: {
+            features: { elevated_windows_sandbox: true },
+          },
+        },
+      },
+    });
+
+    expect(merged).toMatchObject({
+      windows: { sandbox: "unelevated" },
+      profiles: {
+        elevated: {
+          features: { elevated_windows_sandbox: true },
+          windows: { sandbox: "elevated" },
+        },
+      },
+    });
+  });
+
+  test("allows selected profiles to override root elevated sandbox defaults", async () => {
+    const merged = await mergedCodexConfig({
+      codexOverrides: {
+        features: { elevated_windows_sandbox: true },
+        profile: "restricted",
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: false },
+          },
+        },
+      },
+    });
+
+    expect(merged).toMatchObject({
+      windows: { sandbox: "elevated" },
+      profiles: {
+        restricted: {
+          features: { elevated_windows_sandbox: false },
+          windows: { sandbox: "unelevated" },
+        },
+      },
+    });
+  });
+
+  test("gives profile-local Windows sandbox overrides precedence", async () => {
+    const merged = await mergedCodexConfig({
+      codexOverrides: {
+        profile: "restricted",
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: true },
+            windows: { sandbox: "unelevated" },
+          },
+        },
+      },
+    });
+
+    expect(merged).toMatchObject({
+      profiles: {
+        restricted: {
+          features: { elevated_windows_sandbox: true },
+          windows: { sandbox: "unelevated" },
+        },
+      },
     });
   });
 
@@ -105,33 +209,54 @@ describe("Codex configuration", () => {
       windows: { sandbox: "unelevated" },
     });
 
-    const node = Bun.which("node");
-    expect(node).not.toBeNull();
-    const environment: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: root };
-    delete environment["OPENAI_API_KEY"];
-    delete environment["CODEX_API_KEY"];
-    const result = Bun.spawnSync(
-      [
-        node!,
-        join(
-          import.meta.dir,
-          "..",
-          "node_modules",
-          "@openai",
-          "codex",
-          "bin",
-          "codex.js",
-        ),
-        "features",
-        "list",
-      ],
-      {
-        env: environment,
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
+    const result = runPinnedCodex(root, ["features", "list"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+  });
 
+  test("writes selected profile sandbox settings accepted by the pinned Codex CLI", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "config.toml");
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        profile: "elevated",
+        profiles: {
+          elevated: {
+            features: { elevated_windows_sandbox: true },
+          },
+        },
+      },
+    });
+    const nativeConfig = structuredClone(config);
+    delete nativeConfig["profile"];
+    delete nativeConfig["profiles"];
+    const profileConfig = (config["profiles"] as JsonObject)[
+      "elevated"
+    ] as JsonObject;
+    const profilePath = join(root, "elevated.config.toml");
+    await writeCodexConfig(path, nativeConfig);
+    await writeCodexConfig(profilePath, profileConfig);
+
+    expect(parse(await readFile(path, "utf8"))).toMatchObject({
+      windows: { sandbox: "unelevated" },
+    });
+    expect(parse(await readFile(profilePath, "utf8"))).toMatchObject({
+      features: { elevated_windows_sandbox: true },
+      windows: { sandbox: "elevated" },
+    });
+
+    const result = runPinnedCodex(root, [
+      "--profile",
+      "elevated",
+      "mcp",
+      "list",
+      "--json",
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `The pinned Codex CLI rejected the selected Windows sandbox profile: ${new TextDecoder().decode(result.stderr)}`,
+      );
+    }
     expect(result.exitCode).toBe(0);
     expect(result.stdout.length).toBeGreaterThan(0);
   });

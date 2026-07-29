@@ -72,20 +72,38 @@ export async function mergedCodexConfig(
   const overrides = cloneJson(config.codexOverrides ?? {});
   validateOverrides(overrides);
   validateNativeMultiAgentV2Overrides(overrides);
-  const features = overrides["features"];
-  const windows = overrides["windows"];
-  if (
-    isObject(features) &&
-    features["elevated_windows_sandbox"] === true &&
-    (windows === undefined ||
-      (isObject(windows) && !Object.hasOwn(windows, "sandbox")))
-  ) {
-    overrides["windows"] = {
-      ...(isObject(windows) ? windows : {}),
-      sandbox: "elevated",
-    };
+  normalizeLegacyWindowsSandboxOverride(overrides);
+  const profiles = overrides["profiles"];
+  if (isObject(profiles)) {
+    for (const profile of Object.values(profiles)) {
+      if (isObject(profile)) {
+        normalizeLegacyWindowsSandboxOverride(profile);
+      }
+    }
   }
   return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+}
+
+function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
+  const features = overrides["features"];
+  if (!isObject(features)) {
+    return;
+  }
+  const elevated = features["elevated_windows_sandbox"];
+  if (typeof elevated !== "boolean") {
+    return;
+  }
+  const windows = overrides["windows"];
+  if (
+    windows !== undefined &&
+    (!isObject(windows) || Object.hasOwn(windows, "sandbox"))
+  ) {
+    return;
+  }
+  overrides["windows"] = {
+    ...(isObject(windows) ? windows : {}),
+    sandbox: elevated ? "elevated" : "unelevated",
+  };
 }
 
 export async function writeCodexConfig(
