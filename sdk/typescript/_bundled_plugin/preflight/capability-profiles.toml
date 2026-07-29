@@ -78,7 +78,7 @@ description = "Capabilities for repository-wide or scoped-path Codex Security sc
 [[profiles.security_scan.requirements]]
 capability = "delegated_workers"
 severity = "warn"
-reason = "Exhaustive repository-wide and scoped-path scans use delegated workers for ranking, file review, validation, and attack-path work when available."
+reason = "Exhaustive repository-wide and scoped-path scans use delegated workers for file review, validation, and attack-path work when available."
 
 [[profiles.security_scan.requirements]]
 capability = "usable_worker_slots_6"
