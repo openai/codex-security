@@ -12,7 +12,7 @@ executable, and the matching Codex runtime.
 
 ```bash
 npm install @openai/codex-security
-npx codex-security --version
+npx @openai/codex-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22 or
@@ -26,7 +26,7 @@ notice. Notices are also disabled in CI and when stderr is not a terminal.
 
 ## Run a scan from TypeScript
 
-Sign in with `npx codex-security login` or set `OPENAI_API_KEY` or
+Sign in with `npx @openai/codex-security login` or set `OPENAI_API_KEY` or
 `CODEX_API_KEY`. Then create a client and scan a repository you own or have
 permission to assess:
 
@@ -61,34 +61,34 @@ limit access to authorized reviewers.
 For local use, sign in with ChatGPT:
 
 ```bash
-npx codex-security login
-npx codex-security scan .
+npx @openai/codex-security login
+npx @openai/codex-security scan .
 ```
 
 On a remote or headless machine, use device authentication:
 
 ```bash
-npx codex-security login --device-auth
+npx @openai/codex-security login --device-auth
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To store an API key instead,
 pass it on stdin:
 
 ```bash
-printenv OPENAI_API_KEY | npx codex-security login --with-api-key
+printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 ```
 
 On Windows, set the API key in PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY = "<your-api-key>"
-npx codex-security scan C:\code\repository
+npx @openai/codex-security scan C:\code\repository
 ```
 
-Check or remove the stored sign-in with `npx codex-security login status` and
-`npx codex-security logout`. Codex Security reuses an existing file-based Codex
+Check or remove the stored sign-in with `npx @openai/codex-security login status` and
+`npx @openai/codex-security logout`. Codex Security reuses an existing file-based Codex
 sign-in. If Codex stores credentials in the system keyring, run
-`npx codex-security login` once before scanning.
+`npx @openai/codex-security login` once before scanning.
 
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
@@ -97,8 +97,8 @@ other noninteractive scans never prompt and retain automatic API-key
 precedence. Select the credential source explicitly with `--auth`:
 
 ```bash
-npx codex-security scan . --auth chatgpt
-npx codex-security scan . --auth api-key
+npx @openai/codex-security scan . --auth chatgpt
+npx @openai/codex-security scan . --auth api-key
 ```
 
 `--auth chatgpt` uses the stored sign-in and ignores `OPENAI_API_KEY` and
@@ -124,36 +124,36 @@ without printing its value, including when no stored sign-in exists.
 ## CLI
 
 ```bash
-npx codex-security scan /path/to/repository
-npx codex-security scan /path/to/repository --model gpt-5.6-terra
-npx codex-security scan /path/to/repository --path src --path tests
-npx codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
-npx codex-security scan /path/to/repository --diff origin/main --json
-npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results
-npx codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
-npx codex-security scan /path/to/repository --dry-run
-npx codex-security scan /path/to/repository --fail-on-severity high
-npx codex-security scan /path/to/repository --max-cost 5
-npx codex-security install-hook
-npx codex-security bulk-scan
-npx codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
-npx codex-security scans list /path/to/repository
-npx codex-security scans list --scan-root /path/outside/repository/results
-npx codex-security scans show SCAN_ID
-npx codex-security scans rerun SCAN_ID
-npx codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx codex-security scans match --all
-npx codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
-npx codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
-npx codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
-npx codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
-npx codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
-npx codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
-npx codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
+npx @openai/codex-security scan /path/to/repository
+npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
+npx @openai/codex-security scan /path/to/repository --path src --path tests
+npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @openai/codex-security scan /path/to/repository --diff origin/main --json
+npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results
+npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
+npx @openai/codex-security scan /path/to/repository --dry-run
+npx @openai/codex-security scan /path/to/repository --fail-on-severity high
+npx @openai/codex-security scan /path/to/repository --max-cost 5
+npx @openai/codex-security install-hook
+npx @openai/codex-security bulk-scan
+npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
+npx @openai/codex-security scans list /path/to/repository
+npx @openai/codex-security scans list --scan-root /path/outside/repository/results
+npx @openai/codex-security scans show SCAN_ID
+npx @openai/codex-security scans rerun SCAN_ID
+npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security scans match --all
+npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
+npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
+npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
+npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
+npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 ```
 
-Run `npx codex-security --version` for the installed CLI version or
-`npx codex-security info --json` for the package, bundled plugin, Codex runtime,
+Run `npx @openai/codex-security --version` for the installed CLI version or
+`npx @openai/codex-security info --json` for the package, bundled plugin, Codex runtime,
 default model, reasoning effort, and first-scan command. A scan with `--dry-run`
 also reports its effective model and reasoning effort, including `--codex`
 overrides, without starting Codex or contacting the network.
@@ -208,10 +208,10 @@ Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
 already in progress can finish above the limit.
 
-Run `npx codex-security scan --help` or `npx codex-security bulk-scan --help`
+Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
 
-Sign in with `gh auth login`, then run `npx codex-security bulk-scan` to discover
+Sign in with `gh auth login`, then run `npx @openai/codex-security bulk-scan` to discover
 GitHub repositories pushed in the last 90 days. Archived
 repositories and forks are excluded. Search the repository list, select the
 repositories to scan, and confirm before scanning.
@@ -233,7 +233,7 @@ Results remain under `--output-dir`; rerun the same command to resume.
 
 ### Scan history and reruns
 
-`npx codex-security scans list` lists scans for the current repository. Pass a
+`npx @openai/codex-security scans list` lists scans for the current repository. Pass a
 repository path to inspect another checkout, `--scan-root DIR` to list scans
 whose artifacts are under a particular root. `scans show SCAN_ID` includes the
 scan configuration, results, coverage, and artifact locations.
@@ -288,7 +288,7 @@ nonzero:
 
 ```bash
 SCAN_ROOT="$(mktemp -d)"
-npx codex-security scan . \
+npx @openai/codex-security scan . \
   --diff origin/main \
   --output-dir "$SCAN_ROOT/results" \
   --json \
@@ -306,7 +306,7 @@ document. CSV uses the portable findings columns, marks findings as open, and
 does not include local workbench triage state. The exporter validates the seal
 before writing, accepts `--output -` for stdout, and can use
 `--source-root /path/to/repository` with SARIF to add source-line fingerprints.
-Run `npx codex-security export --help` for all export options.
+Run `npx @openai/codex-security export --help` for all export options.
 
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
