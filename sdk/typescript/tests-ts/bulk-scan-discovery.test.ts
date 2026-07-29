@@ -160,7 +160,7 @@ function discoveryDependencies(
 
               if (path === "/user/orgs") {
                 return Response.json(
-                  (options.organizations ?? ["acme"]).map((login) => ({
+                  (options.organizations ?? []).map((login) => ({
                     login,
                   })),
                 );
@@ -333,19 +333,20 @@ describe("bulk scan repository discovery", () => {
     expect(requests).toEqual([]);
   });
 
-  test("asks for the owner only when several organizations are available", async () => {
+  test("includes the personal account alongside organizations", async () => {
     const root = await temporaryDirectory();
-    const { dependencies, prompt } = discoveryDependencies(root, {
-      organizations: ["acme", "acme-labs"],
+    const { dependencies, prompt, requests } = discoveryDependencies(root, {
+      organizations: ["acme"],
     });
     prompt.confirms = [true];
-    prompt.choices = ["acme"];
+    prompt.choices = ["personal-account"];
 
     await runBulkScanWizard(dependencies);
 
-    expect(prompt.questions).toContain(
-      "Which account or organization should we scan?",
-    );
+    expect(prompt.searchOptions[0]).toEqual(["acme", "personal-account"]);
+    expect(
+      requests.find(({ path }) => path === "/graphql")?.variables?.owner,
+    ).toBe("personal-account");
   });
 
   test("does not write an inventory when canceled or no repositories match", async () => {

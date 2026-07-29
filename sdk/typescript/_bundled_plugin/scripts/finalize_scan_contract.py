@@ -316,7 +316,7 @@ def _require_scan_directory(scan_dir: Path) -> Path:
         resolved = scan_dir.resolve(strict=True)
     except OSError as exc:
         raise ContractError("scan directory: expected an existing non-symlink directory") from exc
-    if resolved != scan_dir:
+    if resolved.as_posix().lower() != scan_dir.as_posix().lower():
         raise ContractError("scan directory: expected a canonical non-symlink directory")
     return resolved
 
@@ -327,7 +327,7 @@ def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: 
         resolved_parent.relative_to(scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ContractError(f"{relative_path}: expected a path inside the scan directory") from exc
-    if resolved_parent != path.parent or path.is_symlink():
+    if resolved_parent.as_posix().lower() != path.parent.as_posix().lower() or path.is_symlink():
         raise ContractError(
             f"{relative_path}: expected a non-symlink path inside the scan directory"
         )

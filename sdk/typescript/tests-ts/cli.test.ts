@@ -1877,14 +1877,87 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("SYNTHETIC_DATABASE_SECRET");
   });
 
-  test("renders scan output with the Incur default format", async () => {
+  test("prints only the completion summary for default scans", async () => {
     const stdout = capture();
     const stderr = capture();
+    const result = fakeResult(["high"], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+
     expect(
-      await main(["scan"], stdout.stream, stderr.stream, dependencies()),
+      await main(
+        ["scan"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
     ).toBe(0);
-    expect(stdout.text()).toContain("scanDir: /tmp/scan");
-    expect(stdout.text()).toContain("completeness: complete");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Scan complete");
+    expect(stderr.text()).toContain(
+      "Findings: 1 (1 high). Coverage: complete.",
+    );
+    expect(stderr.text()).toContain("Elapsed: 1s.");
+    expect(stderr.text()).toContain(
+      "Tokens: 1,250 input, 200 cached, 30 output.",
+    );
+    expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
+    expect(stderr.text()).toContain(`Report: ${result.reportPath}`);
+    expect(stderr.text()).toContain("Results: /tmp/scan");
+    expect(stderr.text()).not.toContain("Next:");
+  });
+
+  test("prints complete scan results only when explicitly requested", async () => {
+    for (const [arguments_, marker] of [
+      [["--json"], '"manifest"'],
+      [["--format", "json"], '"manifest"'],
+      [["--format=json"], '"manifest"'],
+      [["--format", "jsonl"], '"manifest"'],
+      [["--format=jsonl"], '"manifest"'],
+      [["--format", "toon"], "manifest:"],
+      [["--format=toon"], "manifest:"],
+      [["--format", "yaml"], "manifest:"],
+      [["--format=yaml"], "manifest:"],
+      [["--full-output"], "manifest:"],
+    ] as const) {
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ...arguments_],
+          stdout.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toContain(marker);
+    }
+  });
+
+  test("honors explicit scan token output operations", async () => {
+    for (const arguments_ of [
+      ["--token-count"],
+      ["--token-limit", "4"],
+      ["--token-offset", "1"],
+      ["--token-offset", "1", "--token-limit", "4"],
+    ] as const) {
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ...arguments_],
+          stdout.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      if (arguments_[0] === "--token-count") {
+        expect(stdout.text().trim()).toMatch(/^\d+$/u);
+        expect(Number(stdout.text().trim())).toBeGreaterThan(0);
+      } else {
+        expect(stdout.text()).toContain("[truncated: showing tokens ");
+      }
+    }
   });
 
   test("prints scan completion warnings without failing the scan", async () => {
@@ -2057,15 +2130,14 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Findings: 4 (1 critical, 2 high, 1 informational). Coverage: complete.",
     );
-    expect(stderr.text()).toContain("Elapsed: 1s. Workers: 3/6.");
+    expect(stderr.text()).toContain("Elapsed: 1s.");
     expect(stderr.text()).toContain(
       "Tokens: 1,250 input, 200 cached, 30 output.",
     );
     expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
+    expect(stderr.text()).toContain(`Report: ${result.reportPath}`);
     expect(stderr.text()).toContain("Results: /tmp/scan");
-    expect(stderr.text()).toContain(
-      "Next: codex-security export /tmp/scan --export-format sarif",
-    );
+    expect(stderr.text()).not.toContain("Next:");
   });
 
   test("reports the running cost against the scan budget", async () => {
@@ -2194,7 +2266,8 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
-    expect(stdout.text()).toContain("completeness: complete");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Findings: 0. Coverage: complete.");
   });
 
   test("validates a dry run without starting a scan", async () => {

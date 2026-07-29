@@ -1027,6 +1027,13 @@ export async function main(
             exitCode,
           });
         }
+        if (
+          !options.dryRun &&
+          format === "toon" &&
+          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+        ) {
+          return;
+        }
         return outcome.data;
       },
     })
@@ -1426,11 +1433,7 @@ export async function main(
               "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
             );
           }
-        } else if (
-          exitCode === 0 &&
-          !options.withApiKey &&
-          !options.withAccessToken
-        ) {
+        } else if (exitCode === 0 && !options.withApiKey) {
           const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
@@ -1443,10 +1446,16 @@ export async function main(
                     name.toUpperCase() === "CODEX_API_KEY"),
               )
               .map(([name]) => name);
+            const loginWarning = options.withAccessToken
+              ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
+              : "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
+                `noninteractive scans will use ${authentication.source}.\n`;
+            const storedCredentials = options.withAccessToken
+              ? "your stored credentials"
+              : "your ChatGPT sign-in";
             errorOutput.write(
-              "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
-                `noninteractive scans will use ${authentication.source}.\n` +
-                "To use your ChatGPT sign-in, pass '--auth chatgpt' or run " +
+              loginWarning +
+                `To use ${storedCredentials}, pass '--auth chatgpt' or run ` +
                 `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
             );
           }
@@ -1503,14 +1512,21 @@ export async function main(
       },
     });
 
-  await cli.serve([...argv], {
-    stdout: (value) => {
-      frameworkOutput += value;
+  await cli.serve(
+    argv.flatMap((argument) =>
+      argument.startsWith("--format=")
+        ? ["--format", argument.slice("--format=".length)]
+        : [argument],
+    ),
+    {
+      stdout: (value) => {
+        frameworkOutput += value;
+      },
+      exit: (code) => {
+        frameworkExit = code;
+      },
     },
-    exit: (code) => {
-      frameworkExit = code;
-    },
-  });
+  );
   if (pendingUpdate !== undefined) {
     const notice = await pendingUpdate;
     if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
@@ -2258,7 +2274,6 @@ async function runScan(
   let firstSignalAt = 0;
   let progress: Progress | null = null;
   let lastWorkerUpdate = "";
-  let workerCapacity: { planned: number; started: number } | null = null;
   let phase: string | null = null;
   const preparationAbortController = new AbortController();
   const signalListener = (signal: SignalName) => () => {
@@ -2443,10 +2458,7 @@ async function runScan(
             : `dispatch:${status.phase}:${status.planned}:${status.started}`;
         if (update === lastWorkerUpdate) return;
         lastWorkerUpdate = update;
-        if (status.kind === "dispatch") {
-          workerCapacity = { planned: status.planned, started: status.started };
-          phase = scanPhase(status.phase);
-        }
+        if (status.kind === "dispatch") phase = scanPhase(status.phase);
         const message = workerStatusMessage(status);
         if (message === null || progress === null) return;
         progress.stopTimer();
@@ -2536,7 +2548,7 @@ async function runScan(
   ).length;
   const incomplete = result.coverage.completeness !== "complete";
   progress?.stage("Scan complete");
-  printScanSummary(result, progress, errorOutput, workerCapacity);
+  printScanSummary(result, progress, errorOutput);
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
@@ -2607,7 +2619,6 @@ function printScanSummary(
   result: ScanResult,
   progress: Progress | null,
   errorOutput: Writable,
-  workers: { planned: number; started: number } | null,
 ): void {
   const severities = new Map<SeverityLevel, number>();
   for (const finding of result.findings.findings) {
@@ -2634,9 +2645,7 @@ function printScanSummary(
     completed >= started
       ? Math.floor((completed - started) / 1_000)
       : progress?.elapsedSeconds ?? 0;
-  errorOutput.write(
-    `codex-security: Elapsed: ${elapsed}s.${workers === null ? "" : ` Workers: ${workers.started}/${workers.planned}.`}\n`,
-  );
+  errorOutput.write(`codex-security: Elapsed: ${elapsed}s.\n`);
 
   const tokenSummary = formatTokenUsage(result.turnResult.usage);
   if (tokenSummary !== null) {
@@ -2647,12 +2656,11 @@ function printScanSummary(
       `codex-security: Estimated cost: ${formatUsd(result.cost.estimatedUsd)} USD.\n`,
     );
   }
-  const scanDir = cliErrorMessage(result.scanDir);
-  errorOutput.write(`codex-security: Results: ${scanDir}\n`);
   errorOutput.write(
-    result.sarifPath === null
-      ? `codex-security: Next: codex-security export ${quoteCliPath(scanDir)} --export-format sarif\n`
-      : `codex-security: Next: review ${cliErrorMessage(result.reportPath)}\n`,
+    `codex-security: Report: ${cliErrorMessage(result.reportPath)}\n`,
+  );
+  errorOutput.write(
+    `codex-security: Results: ${cliErrorMessage(result.scanDir)}\n`,
   );
 }
 

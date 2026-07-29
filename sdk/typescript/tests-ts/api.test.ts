@@ -3410,6 +3410,7 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
+    const keyLog = join(root, "api-keys");
     const scanDir = join(root, "scan");
     await mkdir(repository);
     await mkdir(codexHome);
@@ -3417,12 +3418,16 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     await writeFile(
       fakeCodex,
       `
+import { appendFileSync } from "node:fs";
+
 const args = process.argv.slice(2).join(" ");
 if (args === "login --with-api-key") {
   let apiKey = "";
   for await (const chunk of process.stdin) apiKey += chunk;
   if (!["secret-key", "ambient-key"].includes(apiKey.trim())) {
     process.exitCode = 3;
+  } else {
+    appendFileSync(${JSON.stringify(keyLog)}, apiKey);
   }
 } else if (args === "login") {
   console.error("Open https://auth.example.test/login");
@@ -3485,6 +3490,7 @@ if (args === "login --with-api-key") {
         OPENAI_API_KEY: "ambient-key",
         CODEX_API_KEY: "secondary-ambient-key",
       });
+      expect(await readFile(keyLog, "utf8")).toBe("secret-key\nambient-key\n");
     } finally {
       await client.close();
     }

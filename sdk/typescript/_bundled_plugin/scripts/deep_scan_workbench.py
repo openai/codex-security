@@ -239,7 +239,7 @@ def deep_scan_path(
         resolved.relative_to(scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"{label} must be an existing path inside the scan directory.") from exc
-    if resolved != supplied.absolute():
+    if resolved.as_posix().lower() != supplied.absolute().as_posix().lower():
         raise SystemExit(f"{label} must be a canonical non-symlink path.")
     if kind == "file" and not resolved.is_file():
         raise SystemExit(f"{label} must be a regular file.")
