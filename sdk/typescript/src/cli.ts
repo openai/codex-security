@@ -132,6 +132,12 @@ const MODEL_REASONING_EFFORTS = [
 ] as const satisfies readonly ModelReasoningEffort[];
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+const CODEX_OVERRIDE_DESCRIPTION =
+  'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
+const PLUGIN_PATH_DESCRIPTION =
+  "Codex Security plugin directory or ZIP (default: bundled plugin).";
+const PYTHON_PATH_DESCRIPTION =
+  "Python interpreter (default: PYTHON or automatic discovery).";
 const EXPORT_DEFAULT_OUTPUTS = {
   csv: "findings.csv",
   json: "findings.json",
@@ -883,32 +889,38 @@ export async function main(
           auth: z
             .enum(["auto", "chatgpt", "api-key"])
             .default("auto")
-            .describe("Select automatic, ChatGPT, or API-key authentication."),
+            .describe(
+              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            ),
           path: z
             .array(optionValue("--path"))
             .default([])
-            .describe("Scan only PATH; repeat for multiple paths."),
+            .describe(
+              "Scan only PATH; repeat for multiple repository-relative paths.",
+            ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
             .default([])
-            .describe("Read security docs; repeat for multiple paths."),
+            .describe(
+              "Add security-context files or directories; repeat for multiple paths.",
+            ),
           diff: optionValue("--diff")
             .optional()
-            .describe("Scan Git changes from BASE to --head."),
+            .describe("Scan committed Git changes from BASE to --head."),
           workingTree: z
             .boolean()
             .default(false)
-            .describe("Scan staged and unstaged changes."),
+            .describe("Scan staged and unstaged changes against --base."),
           head: optionValue("--head")
             .optional()
-            .describe("Git head ref for --diff."),
+            .describe("Git head ref for --diff (default: HEAD)."),
           base: optionValue("--base")
             .optional()
-            .describe("Git base ref for --working-tree."),
+            .describe("Git base ref for --working-tree (default: HEAD)."),
           mode: z
             .enum(["standard", "deep"])
             .default("standard")
-            .describe("Scan mode."),
+            .describe("Scan mode; deep supports repository and path targets."),
           model: optionValue("--model")
             .optional()
             .describe(
@@ -917,23 +929,23 @@ export async function main(
           effort: effortOption(),
           outputDir: optionValue("--output-dir")
             .optional()
-            .describe("Write scan artifacts to DIR."),
+            .describe(
+              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+            ),
           archiveExisting: z
             .boolean()
             .default(false)
-            .describe("Archive existing results before scanning."),
+            .describe("Archive existing results; requires --output-dir."),
           pluginPath: optionValue("--plugin-path")
             .optional()
-            .describe("Use a Codex Security plugin directory or ZIP."),
+            .describe(PLUGIN_PATH_DESCRIPTION),
           python: optionValue("--python")
             .optional()
-            .describe("Python interpreter for the bundled plugin runtime."),
+            .describe(PYTHON_PATH_DESCRIPTION),
           codex: z
             .array(optionValue("--codex"))
             .default([])
-            .describe(
-              'Override Codex settings; e.g. model_reasoning_effort="high".',
-            ),
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
           failOnSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -981,8 +993,16 @@ export async function main(
           args: { repository: "." },
           options: { model: "gpt-5.6-terra", effort: "high" },
         },
-        { args: { repository: "." }, options: { path: ["src", "tests"] } },
+        { args: { repository: "." }, options: { path: ["src"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
+        {
+          args: { repository: "." },
+          options: {
+            codex: [
+              "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+            ],
+          },
+        },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -1118,16 +1138,30 @@ export async function main(
           .string()
           .min(1)
           .optional()
-          .describe("CSV repository list; omit to discover repositories."),
+          .describe(
+            "CSV repository list; omit to discover repositories interactively.",
+          ),
       }),
       options: z.object({
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
           .optional()
-          .describe("Directory for scan artifacts and resumable results."),
-        workers: z.number().int().positive().default(4),
-        mode: z.enum(["standard", "deep"]).default("standard"),
+          .describe(
+            "Resumable results directory; required with a repository CSV.",
+          ),
+        workers: z
+          .number()
+          .int()
+          .positive()
+          .default(4)
+          .describe(
+            "Concurrent repository scans. Per-scan Codex workers are separate.",
+          ),
+        mode: z
+          .enum(["standard", "deep"])
+          .default("standard")
+          .describe("Default scan mode for repositories without a CSV mode."),
         model: optionValue("--model")
           .optional()
           .describe(
@@ -1140,15 +1174,28 @@ export async function main(
           .positive()
           .default(1)
           .describe("Maximum scan attempts per repository."),
-        pluginPath: z.string().min(1).optional(),
-        python: z.string().min(1).optional(),
+        pluginPath: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(PLUGIN_PATH_DESCRIPTION),
+        python: z.string().min(1).optional().describe(PYTHON_PATH_DESCRIPTION),
         codex: z
           .array(z.string().min(1))
           .default([])
-          .describe(
-            'Override Codex settings; e.g. model_reasoning_effort="high".',
-          ),
+          .describe(CODEX_OVERRIDE_DESCRIPTION),
       }),
+      examples: [
+        {
+          args: {},
+          options: { model: "gpt-5.6-terra", effort: "high" },
+        },
+      ],
+      hint:
+        "CSV example:\n" +
+        "  codex-security bulk-scan repositories.csv " +
+        "--output-dir /path/outside/repositories/results " +
+        "--workers 4 --max-attempts 3",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
@@ -1268,10 +1315,12 @@ export async function main(
           exportFormat: z
             .enum(["csv", "json", "sarif"])
             .default("sarif")
-            .describe("Export format (default: sarif)."),
+            .describe("Artifact format to export from the completed scan."),
           output: optionValue("--output")
             .optional()
-            .describe("Write the selected format to FILE or stdout with '-'."),
+            .describe(
+              "FILE or '-' for stdout (default: results.sarif, findings.json, or findings.csv).",
+            ),
           sourceRoot: optionValue("--source-root")
             .optional()
             .describe(
@@ -1332,7 +1381,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Set model="gpt-5.6-terra" or model_reasoning_effort="high".',
+            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
           ),
       }),
       async run({ options }) {
@@ -1368,7 +1417,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Set model="gpt-5.6-terra" or model_reasoning_effort="high".',
+            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
           ),
       }),
       async run({ options }) {
@@ -1728,7 +1777,8 @@ function validateCliArguments(
   );
   if (
     structuredOutput &&
-    ["validate", "patch", "login", "logout"].includes(command)
+    ["validate", "patch", "login", "logout"].includes(command) &&
+    !argv.includes("--schema")
   ) {
     return `${command} does not support noninteractive JSON output; run it without --json or --format json.`;
   }
