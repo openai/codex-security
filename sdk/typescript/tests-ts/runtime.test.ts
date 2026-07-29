@@ -52,6 +52,7 @@ import {
   planOutputArchive,
   preparePersistentScanRoot,
   requirePrivateOutputDirectory,
+  requireSecureOutputAncestry,
   runWorkbench,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -1100,6 +1101,51 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ).not.toThrow();
   });
+
+  testPosix(
+    "rejects scan output under a non-sticky shared parent directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      await mkdir(shared, { mode: 0o777 });
+      await chmod(shared, 0o777);
+      const output = join(shared, "results");
+
+      await expect(prepareOutputDir(output, "repo")).rejects.toThrow(
+        "sticky bit",
+      );
+      await expect(requireSecureOutputAncestry(output)).rejects.toThrow(
+        "sticky bit",
+      );
+    },
+  );
+
+  testPosix(
+    "accepts scan output under a sticky shared parent directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      await mkdir(shared, { mode: 0o1777 });
+      await chmod(shared, 0o1777);
+      // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
+      // chmod; fall back to the process temp root when it is already sticky.
+      let stickyParent = shared;
+      if (((await lstat(shared)).mode & 0o1000) === 0) {
+        stickyParent = await realpath(tmpdir());
+        if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+          return;
+        }
+      }
+      const output = join(
+        stickyParent,
+        `codex-security-sticky-${process.pid}-${Date.now()}`,
+      );
+      temporaryDirectories.push(output);
+
+      await expect(requireSecureOutputAncestry(output)).resolves.toBeUndefined();
+      expect(await prepareOutputDir(output, "repo")).toBe(output);
+    },
+  );
 
   test("archives a non-empty private output directory", async () => {
     const root = await temporaryDirectory();

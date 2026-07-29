@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmod,
   cp,
   mkdir,
   mkdtemp,
@@ -32,6 +33,7 @@ async function copyExample(): Promise<string> {
   temporaryDirectories.push(root);
   const scanDir = join(root, "scan");
   await cp(EXAMPLE, scanDir, { recursive: true });
+  if (process.platform !== "win32") await chmod(scanDir, 0o700);
   return scanDir;
 }
 
@@ -125,6 +127,17 @@ describe("canonical scan contract", () => {
   });
 
   test.skipIf(process.platform === "win32")(
+    "rejects a scan directory that is no longer private to the current user",
+    async () => {
+      const scanDir = await copyExample();
+      await chmod(scanDir, 0o755);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("must not be accessible to other users");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "accepts a scan directory beneath a symlinked parent",
     async () => {
       const root = await mkdtemp(
@@ -134,7 +147,9 @@ describe("canonical scan contract", () => {
       const parent = join(root, "actual-parent");
       const linkedParent = join(root, "linked-parent");
       await mkdir(parent);
-      await cp(EXAMPLE, join(parent, "scan"), { recursive: true });
+      const scanDir = join(parent, "scan");
+      await cp(EXAMPLE, scanDir, { recursive: true });
+      if (process.platform !== "win32") await chmod(scanDir, 0o700);
       await symlink(parent, linkedParent);
 
       await expect(

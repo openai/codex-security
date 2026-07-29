@@ -233,6 +233,7 @@ export async function validateOutputDir(
         );
       }
       requirePrivateOutputDirectory(metadata, path);
+      await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
       return canonical;
@@ -247,6 +248,7 @@ export async function validateOutputDir(
             relative(parent, path),
           );
           requireModelSafeOutputDir(canonical);
+          await requireSecureOutputAncestry(canonical);
           return canonical;
         }
         break;
@@ -370,6 +372,7 @@ export async function validatePreparedOutputDir(
     );
   }
   requirePrivateOutputDirectory(metadata, path);
+  await requireSecureOutputAncestry(canonical);
   return canonical;
 }
 
@@ -388,6 +391,59 @@ export function requirePrivateOutputDirectory(
     throw new OutputDirectoryError(
       `Scan output directory must be owned by the current user: ${path}`,
     );
+  }
+}
+
+/** Reject parents that other users can rename entries out of (non-sticky shared dirs). */
+export async function requireSecureOutputAncestry(path: string): Promise<void> {
+  if (process.platform === "win32") return;
+  let current = dirname(resolve(path));
+  while (true) {
+    try {
+      current = await realpath(current);
+      break;
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") {
+        throw new OutputDirectoryError(
+          `Unable to inspect scan output parent directory: ${current}`,
+          { cause: error },
+        );
+      }
+      const parent = dirname(current);
+      if (parent === current) {
+        throw new OutputDirectoryError(
+          `Unable to inspect scan output parent directory: ${current}`,
+          { cause: error },
+        );
+      }
+      current = parent;
+    }
+  }
+  while (true) {
+    let metadata: Stats;
+    try {
+      metadata = await lstat(current);
+    } catch (error) {
+      throw new OutputDirectoryError(
+        `Unable to inspect scan output parent directory: ${current}`,
+        { cause: error },
+      );
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new OutputDirectoryError(
+        `Scan output parent must be a non-symlink directory: ${current}`,
+      );
+    }
+    // Group/world-writable parents need the sticky bit so other users cannot
+    // rename or replace the private scan directory mid-scan.
+    if ((metadata.mode & 0o022) !== 0 && (metadata.mode & 0o1000) === 0) {
+      throw new OutputDirectoryError(
+        `Scan output parent must not be group- or world-writable without the sticky bit: ${current}`,
+      );
+    }
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
   }
 }
 

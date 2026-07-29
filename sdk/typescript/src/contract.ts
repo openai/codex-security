@@ -17,6 +17,7 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
+import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 
 const DOCUMENTS = {
@@ -581,9 +582,20 @@ async function requireScanRoot(
     ) {
       throw new Error("not a directory");
     }
+    try {
+      requirePrivateOutputDirectory(returned, canonical);
+    } catch (error) {
+      throw new ContractValidationError(
+        error instanceof Error
+          ? error.message
+          : "Scan directory must remain private to the current user.",
+        { cause: error },
+      );
+    }
     return { path: canonical, metadata: returned };
   } catch (error) {
     throwIfAborted(signal);
+    if (error instanceof ContractValidationError) throw error;
     throw new ContractValidationError(
       "Scan directory must be an existing non-symlink directory.",
       { cause: error },
