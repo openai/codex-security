@@ -470,8 +470,10 @@ async function checkoutRevision(
     throw new Error("Git is not available on a trusted PATH.");
   }
   const git = async (...args: string[]): Promise<string> => {
+    // Use the resolved absolute path so Windows PATHEXT cannot prefer a
+    // .bat/.cmd shim over the trusted executable selected above.
     const result = await execFile(
-      "git",
+      command.executable,
       [
         "-c",
         "core.hooksPath=/dev/null",
