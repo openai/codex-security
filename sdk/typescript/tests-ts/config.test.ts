@@ -27,6 +27,13 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 describe("Codex configuration", () => {
+  test("lets Codex honor native and managed credential storage", async () => {
+    expect(DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"]).toBe("auto");
+    expect((await mergedCodexConfig({}))["cli_auth_credentials_store"]).toBe(
+      "auto",
+    );
+  });
+
   test("deep-merges native multi-agent v2 defaults", async () => {
     const merged = await mergedCodexConfig({
       codexOverrides: {

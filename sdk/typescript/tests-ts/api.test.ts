@@ -243,6 +243,25 @@ describe("CodexSecurity orchestration", () => {
     });
   });
 
+  test("keeps persistent credentials read-only within writable scan state", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    const config = scanRuntimeCodexConfig({}, stateDirectory, credentialHome);
+
+    expect(config).toMatchObject({
+      permissions: {
+        codex_security_scan: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "write",
+            [stateDirectory]: "write",
+            [credentialHome]: "read",
+          },
+        },
+      },
+    });
+  });
+
   test("projects only capability and trust metadata into the readable preflight config", async () => {
     const root = await temporaryDirectory();
     const configPath = join(root, "config-preflight.toml");
@@ -2059,7 +2078,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("creates a private readable preflight snapshot outside the credential home for a real runtime", async () => {
+  test("keeps a private preflight snapshot isolated from persistent credentials", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-codex-home");
@@ -2117,6 +2136,13 @@ describe("CodexSecurity orchestration", () => {
                       ":workspace_roots": "write",
                       [join(ambientHome, "state", "plugins", "codex-security")]:
                         "write",
+                      [join(
+                        ambientHome,
+                        "state",
+                        "plugins",
+                        "codex-security",
+                        "codex-home",
+                      )]: "read",
                     },
                   },
                 },
@@ -2197,7 +2223,102 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
     expect(existsSync(capturedConfigPath!)).toBe(false);
-    expect(existsSync(capturedCodexHome!)).toBe(false);
+    expect(capturedCodexHome).toBe(
+      join(ambientHome, "state", "plugins", "codex-security", "codex-home"),
+    );
+    expect(existsSync(capturedCodexHome!)).toBe(true);
+  });
+
+  test("reuses keyring-compatible credentials across separate scan clients", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-codex-home");
+    const stateDirectory = join(root, "state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    const runtimeHomes: string[] = [];
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    await writeFile(join(ambientHome, "auth.json"), "{}\n");
+
+    for (const index of [0, 1]) {
+      const scanDir = join(root, `scan-${index}`);
+      await mkdir(scanDir, { mode: 0o700 });
+      const client = new TestClient(
+        { pluginPath: PLUGIN_ROOT },
+        {
+          environment: {
+            CODEX_HOME: ambientHome,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options: CodexOptions) => {
+            runtimeHomes.push(options.env?.["CODEX_HOME"] ?? "");
+            throw new Error("persistent credential scan reached");
+          },
+        },
+      );
+
+      try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "persistent credential scan reached",
+        );
+      } finally {
+        await client.close();
+      }
+      expect(existsSync(credentialHome)).toBe(true);
+    }
+
+    expect(runtimeHomes).toEqual([credentialHome, credentialHome]);
+  });
+
+  test("serializes parallel scans sharing a managed credential home", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-codex-home");
+    const stateDirectory = join(root, "state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    await writeFile(join(ambientHome, "auth.json"), "{}\n");
+
+    const clients = await Promise.all(
+      [0, 1].map(async (index) => {
+        const scanDir = join(root, `parallel-scan-${index}`);
+        await mkdir(scanDir, { mode: 0o700 });
+        return new TestClient(
+          { pluginPath: PLUGIN_ROOT },
+          {
+            environment: {
+              CODEX_HOME: ambientHome,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+            resolvePluginPython: async () => "/managed/python",
+            prepareOutputDir: async () => scanDir,
+            repositoryRevision: async () => "deadbeef",
+            createCodex: (options: CodexOptions) => {
+              expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
+              throw new Error("parallel managed scan reached");
+            },
+          },
+        );
+      }),
+    );
+
+    try {
+      await Promise.all(
+        clients.map(
+          async (client) =>
+            await expect(client.run(repository)).rejects.toThrow(
+              "parallel managed scan reached",
+            ),
+        ),
+      );
+      expect(existsSync(credentialHome)).toBe(true);
+    } finally {
+      await Promise.all(clients.map(async (client) => await client.close()));
+    }
   });
 
   test("rejects a shell-visible plugin root inside CODEX_HOME", async () => {
@@ -2785,6 +2906,60 @@ if (process.argv.slice(2).join(" ") !== "login --with-api-key") {
     await client.close();
   });
 
+  test("accepts native keyring authentication without an auth.json file", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "managed-codex-home");
+    const scanDir = join(root, "scan");
+    const fakeCodex = join(root, "managed-codex.mjs");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(
+      fakeCodex,
+      `
+if (process.argv.slice(2).join(" ") !== "login status") {
+  process.exitCode = 2;
+} else if (process.env.CODEX_HOME !== ${JSON.stringify(codexHome)}) {
+  process.exitCode = 3;
+} else {
+  console.log("Logged in using ChatGPT");
+}
+`,
+    );
+
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: { CODEX_HOME: codexHome },
+          credentialsAvailable: false,
+        }),
+        resolveCodexCommand: () => ({
+          command: process.execPath,
+          prefixArgs: [fakeCodex],
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => {
+          throw new Error("managed keyring scan reached");
+        },
+      },
+    );
+
+    try {
+      await expect(client.run(repository, { auth: "chatgpt" })).rejects.toThrow(
+        "managed keyring scan reached",
+      );
+      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("does not cache an environment key as reusable file authentication", async () => {
     let imported = false;
     await expect(
@@ -3322,9 +3497,10 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
         return await originalRm(...args);
       },
     }));
+    const stateDirectory = join(root, "state");
     const client = new TestClient(
       { pluginPath: join(root, "missing-plugin") },
-      { environment: {} },
+      { environment: { CODEX_SECURITY_STATE_DIR: stateDirectory } },
     );
 
     try {
@@ -3347,7 +3523,8 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
           }),
         ]),
       );
-      expect(attempted).toHaveLength(2);
+      expect(attempted).toHaveLength(1);
+      expect(existsSync(join(stateDirectory, "codex-home"))).toBe(true);
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,

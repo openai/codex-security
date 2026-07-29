@@ -46,10 +46,12 @@ import {
 } from "../src/index.js";
 import {
   bundledPluginCandidates,
+  codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   codexPlatformPackage,
   isPythonPathCandidate,
   planOutputArchive,
+  prepareCodexSecurityCredentialHome,
   preparePersistentScanRoot,
   requirePrivateOutputDirectory,
   runWorkbench,
@@ -803,6 +805,176 @@ describe("plugin runtime preparation", () => {
     ]);
     expect(install.installedRoot).toBe(installed);
     expect(install.version).toBe("1.2.3");
+
+    const reused = await bootstrapPlugin(home, selected, {
+      codexCommand: { command: "/codex", prefixArgs: [] },
+      runCodex: async () => {
+        throw new Error("must not reinstall an existing Codex Security plugin");
+      },
+    });
+    expect(reused.installedRoot).toBe(installed);
+    expect(reused.version).toBe("1.2.3");
+    expect(calls).toHaveLength(2);
+  });
+
+  test("upgrades a cached plugin without deleting persistent credentials", async () => {
+    const root = await temporaryDirectory();
+    const previous = await plugin(join(root, "previous"), "1.2.3");
+    const next = await plugin(join(root, "next"), "1.2.4");
+    const home = join(root, "home");
+    const configPath = join(home, "config.toml");
+    const marketplace = join(home, "sdk-marketplace");
+    const pluginCache = join(
+      home,
+      "plugins",
+      "cache",
+      "codex-security-sdk",
+      "codex-security",
+    );
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
+    await writeFile(join(home, "unrelated-state"), "preserved\n");
+
+    let marketplaceRegistered = false;
+    let pluginRegistered = false;
+    const updateConfig = async () => {
+      const sections = [
+        "[features]\nplugins = true\n",
+        `[projects.${JSON.stringify(join(root, "unrelated-project"))}]\ntrust_level = "trusted"\n`,
+      ];
+      if (marketplaceRegistered) {
+        sections.push(
+          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+        );
+      }
+      if (pluginRegistered) {
+        sections.push(
+          '[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
+        );
+      }
+      await writeFile(configPath, sections.join("\n"));
+    };
+    await updateConfig();
+
+    const calls: string[][] = [];
+    const runCodex: NonNullable<
+      NonNullable<Parameters<typeof bootstrapPlugin>[2]>["runCodex"]
+    > = async (_command, args, environment) => {
+      expect(environment["CODEX_HOME"]).toBe(home);
+      calls.push([...args]);
+
+      if (args[1] === "marketplace" && args[2] === "add") {
+        marketplaceRegistered = true;
+      } else if (args[1] === "marketplace" && args[2] === "remove") {
+        marketplaceRegistered = false;
+      } else if (args[1] === "remove") {
+        pluginRegistered = false;
+        await rm(pluginCache, { recursive: true, force: true });
+      } else if (args[1] === "add") {
+        const manifest = JSON.parse(
+          await readFile(
+            join(
+              marketplace,
+              "plugins",
+              "codex-security",
+              ".codex-plugin",
+              "plugin.json",
+            ),
+            "utf8",
+          ),
+        ) as { version: string };
+        const installed = join(pluginCache, manifest.version);
+        await mkdir(join(installed, ".codex-plugin"), { recursive: true });
+        await writeFile(
+          join(installed, ".codex-plugin", "plugin.json"),
+          JSON.stringify({ name: "codex-security", version: manifest.version }),
+        );
+        pluginRegistered = true;
+      } else {
+        throw new Error(`Unexpected plugin command: ${args.join(" ")}`);
+      }
+
+      await updateConfig();
+      return "";
+    };
+    const options = {
+      codexCommand: { command: "/codex", prefixArgs: [] },
+      runCodex,
+    };
+
+    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
+      "1.2.3",
+    );
+    const upgraded = await bootstrapPlugin(home, next, options);
+
+    expect(upgraded.version).toBe("1.2.4");
+    expect(upgraded.installedRoot).toBe(join(pluginCache, "1.2.4"));
+    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
+      '{"token":"preserved"}\n',
+    );
+    expect(await readFile(join(home, "unrelated-state"), "utf8")).toBe(
+      "preserved\n",
+    );
+    expect(await readFile(configPath, "utf8")).toContain(
+      `[projects.${JSON.stringify(join(root, "unrelated-project"))}]`,
+    );
+    expect(existsSync(join(pluginCache, "1.2.3"))).toBe(false);
+    expect(calls).toEqual([
+      ["plugin", "marketplace", "add", marketplace],
+      ["plugin", "add", "codex-security@codex-security-sdk"],
+      ["plugin", "remove", "codex-security@codex-security-sdk"],
+      ["plugin", "marketplace", "remove", "codex-security-sdk"],
+      ["plugin", "marketplace", "add", marketplace],
+      ["plugin", "add", "codex-security@codex-security-sdk"],
+    ]);
+  });
+
+  test("upgrades a plugin with the real bundled Codex executable", async () => {
+    const root = await temporaryDirectory();
+    const previous = await plugin(join(root, "previous"), "1.2.3");
+    const next = await plugin(join(root, "next"), "1.2.4");
+    const home = join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    await writeFile(
+      join(home, "config.toml"),
+      'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n',
+    );
+
+    const command = resolveCodexCommand();
+    const environment = {
+      ...process.env,
+      CODEX_HOME: home,
+      OPENAI_API_KEY: undefined,
+      CODEX_API_KEY: undefined,
+    };
+    const login = spawnSync(
+      command.command,
+      [...command.prefixArgs, "login", "--with-api-key"],
+      {
+        env: environment,
+        input: "synthetic-key\n",
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+    expect(login.status).toBe(0);
+    const credentials = await readFile(join(home, "auth.json"), "utf8");
+
+    const options = { codexCommand: command, environment };
+    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
+      "1.2.3",
+    );
+    const upgraded = await bootstrapPlugin(home, next, options);
+
+    expect(upgraded.version).toBe("1.2.4");
+    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
+    expect(
+      spawnSync(command.command, [...command.prefixArgs, "login", "status"], {
+        env: environment,
+        encoding: "utf8",
+        windowsHide: true,
+      }).status,
+    ).toBe(0);
   });
 
   test("resolves the exact npm Codex executable", () => {
@@ -828,6 +1000,48 @@ describe("plugin runtime preparation", () => {
 });
 
 describe("runtime directories and plugin Python boundary", () => {
+  test("prepares one private, reusable managed-credential home", async () => {
+    const root = await temporaryDirectory();
+    const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+    const expectedHome = join(root, "state", "codex-home");
+
+    expect(codexSecurityCredentialHome(environment)).toBe(expectedHome);
+    expect(await prepareCodexSecurityCredentialHome(environment)).toBe(
+      expectedHome,
+    );
+    await writeFile(join(expectedHome, "existing-state"), "preserved\n");
+    expect(await prepareCodexSecurityCredentialHome(environment)).toBe(
+      expectedHome,
+    );
+    expect(await readFile(join(expectedHome, "existing-state"), "utf8")).toBe(
+      "preserved\n",
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(expectedHome)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  testPosix("rejects unsafe persistent credential homes", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    const environment = { CODEX_SECURITY_STATE_DIR: stateDirectory };
+    const credentialHome =
+      await prepareCodexSecurityCredentialHome(environment);
+    await chmod(credentialHome, 0o755);
+    await expect(
+      prepareCodexSecurityCredentialHome(environment),
+    ).rejects.toThrow("must not be accessible to other users");
+    await chmod(credentialHome, 0o700);
+    await rm(credentialHome, { recursive: true, force: true });
+
+    const redirectedHome = join(root, "redirected-home");
+    await mkdir(redirectedHome, { mode: 0o700 });
+    await symlink(redirectedHome, credentialHome);
+    await expect(
+      prepareCodexSecurityCredentialHome(environment),
+    ).rejects.toThrow("credential home is not a directory");
+  });
+
   test("derives persistent state from the ambient home or explicit override", async () => {
     const root = await temporaryDirectory();
     expect(codexSecurityStateDirectory({ CODEX_HOME: root })).toBe(

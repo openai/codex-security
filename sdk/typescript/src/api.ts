@@ -52,6 +52,8 @@ import {
   codexSecurityStateDirectory,
   createIsolatedHome,
   importAmbientAuth,
+  prepareCodexSecurityCredentialHome,
+  preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
   planOutputArchive,
   prepareOutputDir,
@@ -103,6 +105,7 @@ interface CodexClientLike {
 
 interface PreparedRuntime {
   codexHome: string;
+  persistentCredentialHome?: boolean;
   bootstrapWorkspace?: string;
   configPath?: string;
   plugin: PluginInstall;
@@ -411,6 +414,20 @@ export class CodexSecurity {
         }
         runtime.credentialsAvailable = true;
         this.#runtimeCredentialSource = "api_key";
+      }
+      if (
+        !runtime.credentialsAvailable &&
+        authentication.method === "stored_credentials"
+      ) {
+        const status = await accountStatus(
+          this.#codexCommand(),
+          runtime.environment,
+          signal,
+        );
+        runtime.credentialsAvailable = status.authenticated;
+        this.#runtimeCredentialSource = status.authenticated
+          ? "stored_credentials"
+          : null;
       }
       if (!runtime.credentialsAvailable) {
         throw new AuthenticationRequiredError(
@@ -905,7 +922,10 @@ export class CodexSecurity {
     this.#runtimePromise = null;
     if (runtime !== null && runtime !== undefined) {
       const cleanupResults = await Promise.allSettled(
-        [runtime.codexHome, runtime.bootstrapWorkspace]
+        [
+          runtime.persistentCredentialHome ? undefined : runtime.codexHome,
+          runtime.bootstrapWorkspace,
+        ]
           .filter((path): path is string => path !== undefined)
           .map((path) => cleanupSdkDirectory(path)),
       );
@@ -1043,22 +1063,30 @@ export class CodexSecurity {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
-    const codexHome = await createIsolatedHome(temporaryRoot, validateLocation);
+    const processEnvironment = selectedScanEnvironment(
+      this.#dependencies.environment,
+      auth,
+    );
+    const persistentCredentialHome =
+      scanAuthentication(this.#dependencies.environment, auth).method ===
+      "stored_credentials";
+    const codexHome = persistentCredentialHome
+      ? await prepareCodexSecurityCredentialHome(
+          processEnvironment,
+          validateLocation,
+        )
+      : await createIsolatedHome(temporaryRoot, validateLocation);
     let bootstrapWorkspace: string | undefined;
     try {
       throwIfAborted(signal);
       bootstrapWorkspace = await createIsolatedHome(
-        dirname(codexHome),
+        temporaryRoot,
         validateLocation,
       );
       const pluginRoot = await resolvePluginPath(
         this.config.pluginPath,
         bootstrapWorkspace,
         signal,
-      );
-      const processEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
-        auth,
       );
       const nodeAmbientHome = join(homedir(), ".codex");
       const configuredAmbientHome = environmentValue(
@@ -1067,9 +1095,13 @@ export class CodexSecurity {
       );
       const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
       const mergedConfig = await mergedCodexConfig(this.config);
-      const codexConfig = scanRuntimeCodexConfig(
-        mergedConfig,
-        codexSecurityStateDirectory(processEnvironment),
+      const codexConfig = await preserveCodexSecurityPluginRegistration(
+        codexHome,
+        scanRuntimeCodexConfig(
+          mergedConfig,
+          codexSecurityStateDirectory(processEnvironment),
+          persistentCredentialHome ? codexHome : undefined,
+        ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
@@ -1089,6 +1121,7 @@ export class CodexSecurity {
       );
       return {
         codexHome,
+        persistentCredentialHome,
         bootstrapWorkspace,
         configPath,
         plugin,
@@ -1103,7 +1136,7 @@ export class CodexSecurity {
       };
     } catch (error) {
       const cleanupResults = await Promise.allSettled(
-        [bootstrapWorkspace, codexHome]
+        [bootstrapWorkspace, persistentCredentialHome ? undefined : codexHome]
           .filter((path): path is string => path !== undefined)
           .map((path) => cleanupSdkDirectory(path)),
       );
@@ -1616,6 +1649,7 @@ export function classifyConnectionFailure(
 export function scanRuntimeCodexConfig(
   config: JsonObject,
   stateDirectory: string,
+  protectedCredentialHome?: string,
 ): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
@@ -1633,6 +1667,9 @@ export function scanRuntimeCodexConfig(
           ":root": "read",
           ":workspace_roots": "write",
           [stateDirectory]: "write",
+          ...(protectedCredentialHome === undefined
+            ? {}
+            : { [protectedCredentialHome]: "read" }),
         },
       },
     },

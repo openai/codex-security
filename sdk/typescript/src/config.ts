@@ -22,7 +22,7 @@ export interface ScanModelConfiguration {
 }
 
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
-  cli_auth_credentials_store: "file",
+  cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
   model_reasoning_effort: "xhigh",
   features: {

@@ -109,6 +109,88 @@ export function codexSecurityStateDirectory(
   return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
 }
 
+export function codexSecurityCredentialHome(
+  environment: ProcessEnvironment = process.env,
+): string {
+  return join(codexSecurityStateDirectory(environment), "codex-home");
+}
+
+export async function prepareCodexSecurityCredentialHome(
+  environment: ProcessEnvironment = process.env,
+  validateLocation?: (path: string) => void,
+): Promise<string> {
+  const path = codexSecurityCredentialHome(environment);
+  try {
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new OutputDirectoryError(
+        `Codex Security credential home is not a directory: ${path}`,
+      );
+    }
+    const canonical = await realpath(path);
+    requireModelSafeOutputDir(canonical);
+    validateLocation?.(canonical);
+    requirePrivateOutputDirectory(metadata, path);
+    return canonical;
+  } catch (error) {
+    if (error instanceof OutputDirectoryError) throw error;
+    throw new OutputDirectoryError(
+      `Unable to prepare the Codex Security credential home: ${path}`,
+      { cause: error },
+    );
+  }
+}
+
+export async function preserveCodexSecurityPluginRegistration(
+  codexHome: string,
+  config: JsonObject,
+): Promise<JsonObject> {
+  let existing: unknown;
+  try {
+    existing = parse(await readFile(join(codexHome, "config.toml"), "utf8"));
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return config;
+    throw new PluginBootstrapError(
+      "Unable to read the existing Codex Security plugin registration.",
+      { cause: error },
+    );
+  }
+
+  const marketplaces = isRecord(existing)
+    ? existing["marketplaces"]
+    : undefined;
+  const plugins = isRecord(existing) ? existing["plugins"] : undefined;
+  const marketplace = isRecord(marketplaces)
+    ? marketplaces[MARKETPLACE_NAME]
+    : undefined;
+  const plugin = isRecord(plugins)
+    ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
+    : undefined;
+  const source = isRecord(marketplace) ? marketplace["source"] : undefined;
+  if (
+    !isRecord(marketplace) ||
+    marketplace["source_type"] !== "local" ||
+    typeof source !== "string" ||
+    !(await sameFile(source, join(codexHome, "sdk-marketplace"))) ||
+    !isRecord(plugin) ||
+    plugin["enabled"] !== true
+  ) {
+    return config;
+  }
+
+  return {
+    ...config,
+    marketplaces: {
+      [MARKETPLACE_NAME]: { source_type: "local", source },
+    },
+    plugins: {
+      [`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]: { enabled: true },
+    },
+  };
+}
+
 export async function preparePersistentScanRoot(
   stateDirectory: string,
   repositoryName: string,
@@ -784,13 +866,60 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const marketplace = await createMarketplace(codexHome, root, options.signal);
+  const existingMarketplace = join(codexHome, "sdk-marketplace");
+  let upgradeExistingPlugin = false;
+  try {
+    await verifyPluginRegistration(codexHome, existingMarketplace);
+    const installedRoot = await findInstalledPlugin(codexHome);
+    const installed = await pluginMetadata(installedRoot);
+    if (installed.name === name && installed.version === version) {
+      return {
+        pluginRoot: root,
+        marketplaceRoot: existingMarketplace,
+        installedRoot,
+        marketplaceName: MARKETPLACE_NAME,
+        name,
+        version,
+      };
+    }
+    upgradeExistingPlugin = true;
+  } catch (error) {
+    throwIfSignalAborted(options.signal);
+    if (
+      !(error instanceof PluginBootstrapError) &&
+      nodeErrorCode(error) !== "ENOENT"
+    ) {
+      throw error;
+    }
+  }
+
+  throwIfSignalAborted(options.signal);
   const command = options.codexCommand ?? resolveCodexCommand();
   const environment = {
     ...(options.environment ?? process.env),
     CODEX_HOME: codexHome,
   };
   const run = options.runCodex ?? runCodex;
+  if (upgradeExistingPlugin) {
+    await run(
+      command,
+      ["plugin", "remove", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
+      environment,
+      options.signal,
+    );
+    throwIfSignalAborted(options.signal);
+    await run(
+      command,
+      ["plugin", "marketplace", "remove", MARKETPLACE_NAME],
+      environment,
+      options.signal,
+    );
+    throwIfSignalAborted(options.signal);
+    await rm(existingMarketplace, { recursive: true, force: true });
+    throwIfSignalAborted(options.signal);
+  }
+
+  const marketplace = await createMarketplace(codexHome, root, options.signal);
   await run(
     command,
     ["plugin", "marketplace", "add", marketplace],
