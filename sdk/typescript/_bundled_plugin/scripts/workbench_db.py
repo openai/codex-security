@@ -1419,11 +1419,18 @@ def complete_scan_locked(
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
     if scan["recipe_json"] is not None:
-        manifest = read_json_object(artifact_path(scan_dir, ARTIFACTS["manifest"], required=True))
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-            completion_binding["startedAt"] = manifest_scan.get("startedAt")
-            completion_binding["completedAt"] = manifest_scan.get("completedAt")
+        # Fresh recipe-driven scans have no prior scan-manifest.json on disk — the
+        # draft is authored later by _write_prepared_scan_finalization. Guard the
+        # read so first-time completion does not fail with "expected a regular
+        # file inside the scan directory" (issue #73). When a prior manifest does
+        # exist (resumed / re-completed scans), preserve the sealed timestamps.
+        manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+        if manifest_path is not None:
+            manifest = read_json_object(manifest_path)
+            manifest_scan = manifest.get("scan")
+            if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
+                completion_binding["startedAt"] = manifest_scan.get("startedAt")
+                completion_binding["completedAt"] = manifest_scan.get("completedAt")
     try:
         prepared = _prepare_scan_finalization(
             scan_dir,
