@@ -1264,34 +1264,42 @@ describe("CLI", () => {
 
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
-      ["validate", ["finding", "--json"]],
-      ["patch", ["issue", "--format", "json"]],
-      ["login", ["--json"]],
-      ["login", ["status", "--format", "jsonl"]],
-      ["logout", ["--json"]],
+      ["validate", ["finding"]],
+      ["patch", ["issue"]],
+      ["login", []],
+      ["login", ["status"]],
+      ["logout", []],
     ] as const) {
-      let invoked = false;
-      const stdout = capture();
-      const stderr = capture(true);
+      for (const format of [
+        ["--json"],
+        ["--format", "json"],
+        ["--format=json"],
+        ["--format", "jsonl"],
+        ["--format=jsonl"],
+      ] as const) {
+        let invoked = false;
+        const stdout = capture();
+        const stderr = capture(true);
 
-      expect(
-        await main(
-          [command, ...arguments_],
-          stdout.stream,
-          stderr.stream,
-          dependencies({
-            onCodex: () => {
-              invoked = true;
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(2);
-      expect(invoked).toBe(false);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(
-        `${command} does not support noninteractive JSON output`,
-      );
+        expect(
+          await main(
+            [command, ...arguments_, ...format],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              onCodex: () => {
+                invoked = true;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(invoked).toBe(false);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`,
+        );
+      }
     }
   });
 

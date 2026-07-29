@@ -1780,7 +1780,7 @@ function validateCliArguments(
     ["validate", "patch", "login", "logout"].includes(command) &&
     !argv.includes("--schema")
   ) {
-    return `${command} does not support noninteractive JSON output; run it without --json or --format json.`;
+    return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
   }
   if (
     command === "export" &&
