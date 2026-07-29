@@ -923,6 +923,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(output, { mode: 0o700 });
     await writeFile(join(output, "previous.txt"), "previous scan\n");
     let archived: string | undefined;
+    let registration: readonly string[] | undefined;
     const observerErrors: Array<[ScanObserverName, string]> = [];
     const client = new TestClient(
       {},
@@ -931,6 +932,22 @@ describe("CodexSecurity orchestration", () => {
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => "/managed/python",
         repositoryRevision: async () => null,
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          if (args[0] !== "register-cli-scan") return {};
+          registration = args;
+          return {
+            scanId: "scan_example_001",
+            targetId: "target_sha256_example",
+            scanDir: output,
+          };
+        },
         createCodex: () => ({
           startThread: () => ({
             id: null,
@@ -959,6 +976,10 @@ describe("CodexSecurity orchestration", () => {
       ["onOutputArchived", "archive observer exploded"],
     ]);
     expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+    expect(registration).toContain("--archive-existing");
+    expect(
+      registration?.[registration.indexOf("--archived-scan-dir") + 1],
+    ).toBe(archived);
     expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
       "previous scan\n",
     );
@@ -3401,9 +3422,13 @@ import { appendFileSync } from "node:fs";
 
 const args = process.argv.slice(2).join(" ");
 if (args === "login --with-api-key") {
-  let input = "";
-  for await (const chunk of process.stdin) input += chunk;
-  appendFileSync(${JSON.stringify(keyLog)}, input);
+  let apiKey = "";
+  for await (const chunk of process.stdin) apiKey += chunk;
+  if (!["secret-key", "ambient-key"].includes(apiKey.trim())) {
+    process.exitCode = 3;
+  } else {
+    appendFileSync(${JSON.stringify(keyLog)}, apiKey);
+  }
 } else if (args === "login") {
   console.error("Open https://auth.example.test/login");
 } else {

@@ -158,6 +158,8 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--repository", required=True)
     register_cli_scan.add_argument("--recipe-json", required=True)
     register_cli_scan.add_argument("--parent-scan-id")
+    register_cli_scan.add_argument("--archive-existing", action="store_true")
+    register_cli_scan.add_argument("--archived-scan-dir")
 
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)

@@ -80,6 +80,7 @@ from workbench_constants import (
 )
 from workbench_feedback import get_scan_feedback
 from workbench_scan_start import (
+    archive_scan,
     compact_timestamp,
     insert_running_scan,
     safe_segment,
@@ -1552,6 +1553,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
         target_id = ensure_security_target(connection, str(repository))
         if parent_scan_id is not None:
             parent = require_scan(connection, parent_scan_id)
