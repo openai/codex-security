@@ -78,6 +78,10 @@ pass it on stdin:
 printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 ```
 
+Environment API keys are supplied directly to the current scan and are never
+saved to the Codex credential home or system keyring. Only an explicit
+`login --with-api-key` stores an API key.
+
 On Windows, set the API key in PowerShell:
 
 ```powershell
@@ -92,7 +96,8 @@ private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
 configured. Login, status, logout, and scans use the same home. Codex manages
 credentials using its configured file or system-keyring backend and honors
 managed-device policies. An existing file-based Codex sign-in is also imported
-when available.
+when available. Logging out prevents later scans from automatically reimporting
+that ambient sign-in until you explicitly log in again.
 
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an

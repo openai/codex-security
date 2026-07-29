@@ -1,10 +1,22 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurityError, type ScanOptions } from "../src/index.js";
+import {
+  codexSecurityCredentialAllowsAmbientImport,
+  prepareCodexSecurityCredentialHome,
+} from "../src/runtime.js";
 import {
   capture,
   dependencies,
@@ -65,6 +77,59 @@ describe("CLI authentication", () => {
       expect(environment?.["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "validates and canonicalizes the credential home for status and logout",
+    async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-cli-managed-auth-")),
+      );
+      try {
+        const actualState = join(root, "actual-state");
+        const linkedState = join(root, "linked-state");
+        await mkdir(actualState, { mode: 0o700 });
+        await symlink(actualState, linkedState, "dir");
+        const expectedHome = join(actualState, "codex-home");
+
+        for (const argv of [["login", "status"], ["logout"]] as const) {
+          const stdout = capture();
+          const stderr = capture();
+          const deps = dependencies({
+            environment: { CODEX_SECURITY_STATE_DIR: linkedState },
+          });
+          deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
+          let forwardedHome: string | undefined;
+          deps.runCodex = async (_args, _output, environment) => {
+            forwardedHome = environment?.["CODEX_HOME"];
+            return 0;
+          };
+
+          expect(await main(argv, stdout.stream, stderr.stream, deps)).toBe(0);
+          expect(forwardedHome).toBe(expectedHome);
+        }
+
+        expect(
+          await codexSecurityCredentialAllowsAmbientImport(expectedHome),
+        ).toBe(false);
+
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies({
+          environment: { CODEX_SECURITY_STATE_DIR: linkedState },
+        });
+        deps.prepareAuthenticationHome = prepareCodexSecurityCredentialHome;
+        deps.runCodex = async () => 0;
+        expect(await main(["login"], stdout.stream, stderr.stream, deps)).toBe(
+          0,
+        );
+        expect(
+          await codexSecurityCredentialAllowsAmbientImport(expectedHome),
+        ).toBe(true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("explains when an environment API key overrides the stored login", async () => {
     for (const [environment, expectedSource] of [
