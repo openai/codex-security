@@ -10,8 +10,9 @@ Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security
 
 ```bash
 npm install @openai/codex-security
-npx codex-security login
-npx codex-security scan .
+npx @openai/codex-security login
+npx @openai/codex-security scan .
+npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 ```
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
@@ -21,8 +22,8 @@ which credential to use. CI and other noninteractive scans keep the existing
 API-key precedence. Select a credential explicitly when needed:
 
 ```bash
-npx codex-security scan . --auth chatgpt
-npx codex-security scan . --auth api-key
+npx @openai/codex-security scan . --auth chatgpt
+npx @openai/codex-security scan . --auth api-key
 ```
 
 To make your ChatGPT sign-in the automatic default, unset any configured API

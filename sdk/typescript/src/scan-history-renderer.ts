@@ -213,6 +213,14 @@ export function renderScanHistory(
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
     }
+    const warnings = result["warnings"];
+    if (Array.isArray(warnings)) {
+      for (const warning of warnings) {
+        if (typeof warning === "string") {
+          wrap(warning, 11, `  ${paint("WARNING", 33)}  `);
+        }
+      }
+    }
     if (result["parentScanId"]) {
       lines.push(
         `  ${strong("PARENT SCAN")}  ${clean(result["parentScanId"]).slice(0, 8)}`,

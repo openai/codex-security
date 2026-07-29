@@ -32,6 +32,13 @@ def optional_text(value: str | None, *, maximum: int | None = None) -> str | Non
     return normalized or None
 
 
+def require_close_reason(close_reason: str | None, note: str | None) -> None:
+    if note is None and close_reason == "false_positive":
+        raise SystemExit("Explain why this finding is a false positive.")
+    if note is None and close_reason == "wont_fix":
+        raise SystemExit("Explain why this finding will not be fixed.")
+
+
 def reject_nonstandard_json_number(value: str) -> None:
     raise ValueError(f"invalid JSON number {value}")
 

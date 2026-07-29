@@ -90,7 +90,13 @@ describe("CLI skill commands", () => {
         expect(help.text()).toContain(
           `Usage: codex-security ${command} <${argument}>`,
         );
+        expect(help.text()).toContain(
+          "--effort <minimal|low|medium|high|xhigh>",
+        );
         expect(help.text()).toContain("--codex <array>");
+        expect(help.text()).toContain('model="gpt-5.6-terra"');
+        expect(help.text()).toContain('model_reasoning_effort="high"');
+        expect(help.text()).not.toContain("--provider");
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -275,6 +281,67 @@ describe("CLI skill commands", () => {
       ).toBe(2);
       expect(stderr.text()).toContain("codex-security:");
       expect(started).toBe(false);
+    }
+  });
+
+  test("selects reasoning effort directly for validation and patching", async () => {
+    for (const command of ["validate", "patch"] as const) {
+      let invocation: readonly string[] = [];
+      const stderr = capture();
+
+      expect(
+        await main(
+          [
+            command,
+            "a candidate finding",
+            "--effort",
+            "high",
+            "--codex",
+            'model="gpt-5.6-terra"',
+          ],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onCodex: (args) => {
+              invocation = args;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(invocation).toContain('model="gpt-5.6-terra"');
+      expect(invocation).toContain('model_reasoning_effort="high"');
+      expect(stderr.text()).toBe("");
+
+      for (const [options, message] of [
+        [
+          ["--effort", "ultra"],
+          "--effort must be minimal, low, medium, high, or xhigh",
+        ],
+        [
+          ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
+          "--effort conflicts with --codex model_reasoning_effort",
+        ],
+      ] as const) {
+        let started = false;
+        const invalidStderr = capture();
+
+        expect(
+          await main(
+            [command, "a candidate finding", ...options],
+            capture().stream,
+            invalidStderr.stream,
+            dependencies({
+              onCodex: () => {
+                started = true;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(invalidStderr.text()).toContain(message);
+        expect(started).toBe(false);
+      }
     }
   });
 
