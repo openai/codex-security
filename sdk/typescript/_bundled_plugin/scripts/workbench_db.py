@@ -1430,6 +1430,7 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
+            completion_warnings=warnings,
         )
         warning = scan_target_warning(scan)
         if warning is not None and warning not in warnings:

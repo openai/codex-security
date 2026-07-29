@@ -767,6 +767,230 @@ def _populate_unsealed_finding_identities(
         finding["fingerprints"] = fingerprints
 
 
+def _recover_unsealed_findings(
+    manifest: dict[str, Any],
+    findings: dict[str, Any],
+    schema_dir: Path,
+    scan_dir: Path,
+    warnings: list[str],
+) -> None:
+    schema = _read_json(schema_dir / "findings.schema.json")
+    _require_safe_schema(schema, "findings.schema.json")
+    properties = _require_dict(schema, "properties", "findings.schema")
+    finding_array = _require_dict(properties, "findings", "findings.schema.properties")
+    finding_schema = _require_dict(finding_array, "items", "findings.schema.properties.findings")
+    finding_properties = _require_dict(
+        finding_schema, "properties", "findings.schema.properties.findings.items"
+    )
+    writeup_schema = _require_dict(
+        finding_properties, "writeup", "findings.schema.properties.findings.items.properties"
+    )
+    scan = _require_dict(manifest, "scan", "manifest")
+    scan_id = _require_str(scan, "id", "manifest.scan")
+    if findings.get("scanId") != scan_id:
+        raise ContractError("findings.scanId: must match manifest scan id")
+
+    recovered: list[dict[str, Any]] = []
+    finding_ids: set[str] = set()
+    writeup_paths: set[str] = set()
+    for index, finding in enumerate(_require_list(findings, "findings", "findings")):
+        context = f"findings.findings[{index}]"
+        try:
+            if not isinstance(finding, dict):
+                raise ContractError(f"{context}: expected an object")
+            identity = _require_dict(finding, "identity", context)
+            fields: list[tuple[dict[str, Any], str, str, str]] = [
+                (finding, "ruleId", context, "rule identifier"),
+                (identity, "anchor", f"{context}.identity", "semantic anchor"),
+            ]
+            if "instance" in identity:
+                fields.append((identity, "instance", f"{context}.identity", "instance"))
+            normalized_fields = []
+            for parent, field, field_context, label in fields:
+                value = _require_str(parent, field, field_context)
+                if SLUG_RE.fullmatch(value):
+                    continue
+                normalized = re.sub(r"[^a-z0-9._/-]+", "-", value.lower()).strip("._/-")
+                if not SLUG_RE.fullmatch(normalized):
+                    raise ContractError(
+                        f"{field_context}.{field}: expected a stable lowercase semantic slug"
+                    )
+                parent[field] = normalized
+                normalized_fields.append(label)
+
+            _populate_unsealed_finding_identities(
+                manifest,
+                {"scanId": scan_id, "findings": [finding]},
+            )
+            finding_id = finding["findingId"]
+            if finding_id in finding_ids:
+                raise ContractError(f"{context}: duplicate logical finding")
+            _validate_finding(finding, context)
+            if "writeup" in finding:
+                try:
+                    _validate_schema_node(finding["writeup"], writeup_schema, f"{context}.writeup")
+                    _require_derived_writeup_files(scan_dir, {"findings": [finding]})
+                    report_path = finding["writeup"]["reportPath"]
+                    if report_path in writeup_paths:
+                        raise ContractError(f"{context}.writeup.reportPath: duplicate report path")
+                except ContractError as exc:
+                    finding.pop("writeup")
+                    warnings.append(f"Skipped malformed writeup for finding {index + 1}: {exc}.")
+            _validate_schema_node(finding, finding_schema, context)
+        except ContractError as exc:
+            warnings.append(f"Skipped malformed finding {index + 1}: {exc}.")
+            continue
+
+        finding_ids.add(finding_id)
+        writeup = finding.get("writeup")
+        if isinstance(writeup, dict):
+            writeup_paths.add(writeup["reportPath"])
+        recovered.append(finding)
+        if normalized_fields:
+            warnings.append(
+                f"Recovered finding {index + 1}: normalized {', '.join(normalized_fields)}."
+            )
+
+    findings["findings"] = recovered
+
+
+def _recover_unsealed_coverage(
+    coverage: dict[str, Any],
+    schema_dir: Path,
+    scan_dir: Path,
+    warnings: list[str],
+) -> None:
+    schema = _read_json(schema_dir / "coverage.schema.json")
+    _require_safe_schema(schema, "coverage.schema.json")
+    properties = _require_dict(schema, "properties", "coverage.schema")
+    completeness = coverage.get("completeness")
+    partial = not isinstance(completeness, str) or completeness not in {
+        "complete",
+        "partial",
+        "unknown",
+    }
+    if partial:
+        warnings.append("Recovered malformed coverage completeness; marked coverage as partial.")
+
+    surface_ids: set[str] = set()
+    for field, label in (
+        ("surfaces", "coverage surface"),
+        ("explicitExclusions", "coverage exclusion"),
+        ("deferred", "deferred coverage item"),
+    ):
+        array_schema = _require_dict(properties, field, "coverage.schema.properties")
+        item_schema = _require_dict(array_schema, "items", f"coverage.schema.properties.{field}")
+        items = coverage.get(field)
+        if not isinstance(items, list):
+            warnings.append(f"Skipped malformed {label} records: expected an array.")
+            coverage[field] = []
+            partial = True
+            continue
+
+        recovered: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            context = f"coverage.{field}[{index}]"
+            try:
+                if not isinstance(item, dict):
+                    raise ContractError(f"{context}: expected an object")
+                if field == "surfaces":
+                    surface_id = _require_str(item, "id", context)
+                    if surface_id in surface_ids:
+                        raise ContractError(f"{context}.id: duplicate surface id")
+                    _require_str(item, "label", context)
+                    disposition = item.get("disposition")
+                    surface_recovered = False
+                    if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
+                        warnings.append(
+                            f"Recovered coverage surface {index + 1}: "
+                            "the review disposition could not be verified."
+                        )
+                        item["disposition"] = "needs_follow_up"
+                        surface_recovered = True
+
+                    receipt_refs = item.get("receiptRefs")
+                    if not isinstance(receipt_refs, list):
+                        warnings.append(
+                            f"Skipped malformed receipt references for coverage surface "
+                            f"{index + 1}: expected an array."
+                        )
+                        receipt_refs = []
+                        surface_recovered = True
+
+                    recovered_receipts: list[str] = []
+                    for ref_index, ref in enumerate(receipt_refs):
+                        ref_context = f"{context}.receiptRefs[{ref_index}]"
+                        try:
+                            if not isinstance(ref, str):
+                                raise ContractError(f"{ref_context}: expected a string")
+                            normalized_ref = _require_safe_relative_path(ref, ref_context)
+                            if not normalized_ref.startswith("artifacts/"):
+                                raise ContractError(
+                                    f"{ref_context}: expected a file under artifacts/"
+                                )
+                            _require_scan_local_file(scan_dir, normalized_ref, ref_context)
+                        except ContractError as exc:
+                            warnings.append(
+                                f"Skipped malformed coverage receipt "
+                                f"{index + 1}.{ref_index + 1}: {exc}."
+                            )
+                            surface_recovered = True
+                            continue
+                        recovered_receipts.append(normalized_ref)
+
+                    item["receiptRefs"] = recovered_receipts
+                    if surface_recovered:
+                        item["disposition"] = "needs_follow_up"
+                        partial = True
+                    elif item["disposition"] == "needs_follow_up":
+                        if completeness != "partial":
+                            warnings.append(
+                                f"Coverage surface {index + 1} requires follow-up; "
+                                "marked coverage as partial."
+                            )
+                        partial = True
+
+                _validate_schema_node(item, item_schema, context)
+            except ContractError as exc:
+                warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
+                partial = True
+                continue
+
+            if field == "surfaces":
+                surface_ids.add(surface_id)
+            recovered.append(item)
+
+        coverage[field] = recovered
+
+    if coverage["deferred"] and completeness != "partial":
+        warnings.append("Coverage has deferred review work; marked coverage as partial.")
+        partial = True
+    if partial:
+        coverage["completeness"] = "partial"
+
+
+def _recover_unsealed_hardening(
+    manifest: dict[str, Any],
+    scan_dir: Path,
+    warnings: list[str],
+) -> None:
+    scan = _require_dict(manifest, "scan", "manifest")
+    if "hardening" not in scan:
+        return
+
+    try:
+        hardening = _require_dict(scan, "hardening", "manifest.scan")
+        portfolio_path = _require_str(hardening, "portfolioPath", "manifest.scan.hardening")
+        if portfolio_path != "hardening/hardening.md":
+            raise ContractError(
+                "manifest.scan.hardening.portfolioPath: expected hardening/hardening.md"
+            )
+        _require_hardening_portfolio_file(scan_dir, scan)
+    except ContractError as exc:
+        scan.pop("hardening")
+        warnings.append(f"Skipped malformed hardening portfolio: {exc}.")
+
+
 def _validate_derived_finding_identities(
     manifest: dict[str, Any],
     findings: dict[str, Any],
@@ -2009,6 +2233,7 @@ def _prepare_scan_finalization(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
+    completion_warnings: list[str] | None = None,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
 
@@ -2063,6 +2288,10 @@ def _prepare_scan_finalization(
         _validate_findings(manifest, findings)
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
+    elif completion_warnings is not None:
+        _recover_unsealed_findings(manifest, findings, schema_dir, scan_dir, completion_warnings)
+        _recover_unsealed_coverage(coverage, schema_dir, scan_dir, completion_warnings)
+        _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
     else:
         _populate_unsealed_finding_identities(manifest, findings)
     _validate_findings(manifest, findings)
