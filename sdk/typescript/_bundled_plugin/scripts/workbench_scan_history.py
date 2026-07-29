@@ -85,7 +85,7 @@ def list_workspace_scans(
         """
         SELECT id, mode, status, phase, scope, target_revision,
             seal_manifest_digest, started_at, completed_at, canceled_at,
-            updated_at, failure_message
+            updated_at, failure_message, completion_warnings_json
         FROM scans
         WHERE workspace_id = ?
         ORDER BY created_at DESC, id DESC
@@ -112,6 +112,11 @@ def list_workspace_scans(
                 "status": "canceled" if row["canceled_at"] else row["status"],
                 "targetRevision": row["target_revision"],
                 "updatedAt": row["updated_at"],
+                **(
+                    {"warnings": json.loads(row["completion_warnings_json"])}
+                    if row["completion_warnings_json"] != "[]"
+                    else {}
+                ),
             }
             for row in rows
         ],
@@ -242,6 +247,11 @@ def list_scans(
                 "targetRevision": row["target_revision"],
                 "targetSummary": row["target_summary"],
                 "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
+                **(
+                    {"warnings": json.loads(row["completion_warnings_json"])}
+                    if row["completion_warnings_json"] != "[]"
+                    else {}
+                ),
             }
             for row in rows[:limit]
         ]
