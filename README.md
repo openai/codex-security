@@ -1,8 +1,10 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code. Scan repositories, review changes, track findings over time, and run security checks in CI.
+`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
 
-**[Documentation](http://learn.chatgpt.com/docs/security/cli)**
+**See the [Codex Security Documentation](http://learn.chatgpt.com/docs/security/cli)** for more details.
+
+> Note: for best results, we recommend that your account is verified for [Trusted Access](https://chatgpt.com/cyber).
 
 ## Quick start
 
