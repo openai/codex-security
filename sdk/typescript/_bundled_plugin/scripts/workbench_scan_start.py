@@ -111,6 +111,23 @@ def archive_scan(
         "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
         (str(archived_scan_dir), timestamp, previous_scan["id"]),
     )
+    artifacts = connection.execute(
+        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
+        (previous_scan["id"],),
+    ).fetchall()
+    for artifact in artifacts:
+        try:
+            relative_path = Path(artifact["path"]).relative_to(scan_dir)
+        except ValueError:
+            continue
+        connection.execute(
+            "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
+            (
+                str(archived_scan_dir / relative_path),
+                previous_scan["id"],
+                artifact["kind"],
+            ),
+        )
 
 
 def insert_running_scan(
