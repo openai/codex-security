@@ -72,6 +72,19 @@ def scan_diff_identity(
     )
 
 
+def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
+    if not row["diff_target_kind"]:
+        return None
+    target = {
+        "baseRevision": row["diff_base_revision"],
+        "headRevision": row["diff_head_revision"],
+        "kind": row["diff_target_kind"],
+    }
+    if row["diff_content_digest"]:
+        target["contentDigest"] = row["diff_content_digest"]
+    return target
+
+
 def archive_scan(
     connection: sqlite3.Connection,
     args: argparse.Namespace,

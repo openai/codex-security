@@ -51,10 +51,39 @@ type ScanObserverName = Parameters<
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
+const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
 const TestClientBase = CodexSecurity as unknown as new (
   config: Record<string, unknown>,
   dependencies: Record<string, unknown>,
 ) => CodexSecurity;
+
+function mockScanRegistration(args: readonly string[]) {
+  const recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!) as {
+    repositoryRevision?: string;
+    target: { kind: string };
+  };
+  const kind =
+    recipe.target.kind === "refs" || recipe.target.kind === "working_tree"
+      ? "git_diff"
+      : recipe.repositoryRevision === undefined
+        ? "directory_snapshot"
+        : "git_revision";
+
+  return {
+    scanId: "scan_example_001",
+    targetId: "target_sha256_example",
+    targetRevision: recipe.repositoryRevision ?? "unversioned",
+    scanDir: args[args.indexOf("--scan-dir") + 1],
+    contract: {
+      target: {
+        allowedKinds: [kind],
+        ...(kind === "directory_snapshot"
+          ? { requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST }
+          : {}),
+      },
+    },
+  };
+}
 
 class TestClient extends TestClientBase {
   public constructor(
@@ -64,11 +93,7 @@ class TestClient extends TestClientBase {
     super(config, {
       runWorkbench: async (_options: unknown, args: readonly string[]) => {
         if (args[0] === "register-cli-scan") {
-          return {
-            scanId: "scan_example_001",
-            targetId: "target_sha256_example",
-            scanDir: args[args.indexOf("--scan-dir") + 1],
-          };
+          return mockScanRegistration(args);
         }
         if (args[0] === "get-scan-feedback") {
           return {
@@ -942,11 +967,7 @@ describe("CodexSecurity orchestration", () => {
           }
           if (args[0] !== "register-cli-scan") return {};
           registration = args;
-          return {
-            scanId: "scan_example_001",
-            targetId: "target_sha256_example",
-            scanDir: output,
-          };
+          return mockScanRegistration(args);
         },
         createCodex: () => ({
           startThread: () => ({
@@ -1308,11 +1329,7 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (_options: unknown, args: readonly string[]) => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              scanDir,
-            };
+            return mockScanRegistration(args);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -1382,7 +1399,12 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
       CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
+      CODEX_SECURITY_TARGET_KIND: "git_revision",
+      CODEX_SECURITY_TARGET_REVISION: "deadbeef",
     });
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST",
+    );
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
       default_permissions: "codex_security_scan",
       allow_login_shell: false,
@@ -1403,6 +1425,9 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
     expect(prompt).toContain("$CODEX_SECURITY_TARGET_DISPLAY_NAME");
+    expect(prompt).toContain("$CODEX_SECURITY_TARGET_KIND");
+    expect(prompt).toContain("$CODEX_SECURITY_TARGET_REVISION");
+    expect(prompt).toContain("$CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST");
     expect(prompt).toContain("codex-security-plugin");
     expect(prompt).not.toContain("CODEX_SECURITY_KNOWLEDGE_BASE");
     expect(prompt).not.toContain("false_positive_feedback.json");
@@ -1432,9 +1457,172 @@ describe("CodexSecurity orchestration", () => {
       "scan_example_001",
     ]);
     expect(commands[2]).toEqual([
+      "prepare-scan-completion",
+      "--scan-id",
+      "scan_example_001",
+    ]);
+    expect(commands[3]).toEqual([
       "complete-scan",
       "--scan-id",
       "scan_example_001",
+    ]);
+    await client.close();
+  });
+
+  test("passes the workbench snapshot contract to dirty Git scans", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let codexOptions: CodexOptions | null = null;
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          if (args[0] === "register-cli-scan") {
+            return {
+              ...mockScanRegistration(args),
+              targetRevision: "cafebabe",
+              contract: {
+                target: {
+                  allowedKinds: ["git_worktree"],
+                  requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
+                },
+              },
+            };
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("target contract captured");
+              },
+            }),
+          };
+        },
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "target contract captured",
+    );
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      CODEX_SECURITY_TARGET_KIND: "git_worktree",
+      CODEX_SECURITY_TARGET_REVISION: "cafebabe",
+      CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: TEST_SNAPSHOT_DIGEST,
+    });
+    await client.close();
+  });
+
+  test("rejects a scan registration without an authoritative target contract", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) =>
+          args[0] === "register-cli-scan"
+            ? {
+                ...mockScanRegistration(args),
+                contract: { target: { allowedKinds: [] } },
+              }
+            : {},
+        createCodex: () => {
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow(
+      "invalid scan registration",
+    );
+    await client.close();
+  });
+
+  test("fails a prepared scan before publishing rejected scan artifacts", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: string[] = [];
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args[0]!);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          if (args[0] === "prepare-scan-completion") {
+            await writeFile(join(scanDir, "findings.json"), "corrupted\n");
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow();
+    expect(commands).toEqual([
+      "register-cli-scan",
+      "get-scan-feedback",
+      "prepare-scan-completion",
+      "fail-scan",
     ]);
     await client.close();
   });
@@ -1478,11 +1666,7 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (_options: unknown, args: readonly string[]) => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              scanDir,
-            };
+            return mockScanRegistration(args);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -1562,7 +1746,7 @@ describe("CodexSecurity orchestration", () => {
           repositoryRevision: async () => "deadbeef",
           runWorkbench: async (_options: unknown, args: readonly string[]) => {
             if (args[0] === "register-cli-scan") {
-              return { scanId, targetId, scanDir };
+              return mockScanRegistration(args);
             }
             return args[0] === "get-scan-feedback" ? feedback : {};
           },
@@ -1608,11 +1792,7 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (_options: unknown, args: readonly string[]) => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              scanDir,
-            };
+            return mockScanRegistration(args);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -1726,11 +1906,7 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (_options: unknown, args: readonly string[]) => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              scanDir,
-            };
+            return mockScanRegistration(args);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -1771,6 +1947,7 @@ describe("CodexSecurity orchestration", () => {
     expect(commands.map(([command]) => command)).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
+      "prepare-scan-completion",
       "complete-scan",
     ]);
     expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
@@ -1811,11 +1988,7 @@ describe("CodexSecurity orchestration", () => {
           }
           if (args[0] !== "register-cli-scan") return {};
           recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
-          return {
-            scanId: "scan_example_001",
-            targetId: "target_sha256_example",
-            scanDir,
-          };
+          return mockScanRegistration(args);
         },
         createCodex: (options: CodexOptions) => ({
           startThread: () => ({

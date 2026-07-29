@@ -210,6 +210,10 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
 
+    prepare_scan_completion = subparsers.add_parser("prepare-scan-completion")
+    prepare_scan_completion.add_argument("--scan-id", required=True)
+    prepare_scan_completion.add_argument("--claim-token")
+
     complete_scan = subparsers.add_parser("complete-scan")
     complete_scan.add_argument("--scan-id", required=True)
     complete_scan.add_argument("--claim-token")

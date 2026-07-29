@@ -90,6 +90,7 @@ export async function loadContract(
   options: {
     pluginRoot: string;
     expectation?: ScanExpectation;
+    workbenchValidated?: boolean;
     signal?: AbortSignal;
   },
 ): Promise<LoadedContract> {
@@ -184,7 +185,12 @@ export async function loadContract(
     scanRoot,
   );
   if (options.expectation !== undefined) {
-    validateExpectation(manifest, coverage, options.expectation);
+    validateExpectation(
+      manifest,
+      coverage,
+      options.expectation,
+      options.workbenchValidated === true,
+    );
   }
   await verifyScanRoot(scanRoot, options.signal);
   return { manifest, findings, coverage };
@@ -465,6 +471,7 @@ function validateExpectation(
   manifest: ScanManifest,
   coverage: CoverageDocument,
   expectation: ScanExpectation,
+  workbenchValidated = false,
 ): void {
   const scan = manifest.scan;
   if (scan.producer.name !== PRODUCER_NAME) {
@@ -488,37 +495,34 @@ function validateExpectation(
     );
   }
 
-  const target = scan.target;
   const requested = expectation.target;
-  if (requested.kind === "refs" || requested.kind === "working_tree") {
-    if (target.kind !== "git_diff") {
+  if (!workbenchValidated) {
+    const target = scan.target;
+    if (requested.kind === "refs" || requested.kind === "working_tree") {
+      if (target.kind !== "git_diff") {
+        throw new ContractValidationError(
+          "Diff scan manifest target must be git_diff.",
+        );
+      }
+      if (target.baseRevision !== requested.base) {
+        throw new ContractValidationError(
+          "Diff scan base revision does not match the request.",
+        );
+      }
+      if (target.headRevision !== requested.head) {
+        throw new ContractValidationError(
+          "Diff scan head revision does not match the request.",
+        );
+      }
+    } else if (target.kind === "git_diff") {
       throw new ContractValidationError(
-        "Diff scan manifest target must be git_diff.",
+        "Repository scan manifest target must not be git_diff.",
       );
-    }
-    if (target.baseRevision !== requested.base) {
-      throw new ContractValidationError(
-        "Diff scan base revision does not match the request.",
-      );
-    }
-    if (target.headRevision !== requested.head) {
-      throw new ContractValidationError(
-        "Diff scan head revision does not match the request.",
-      );
-    }
-  } else if (expectation.repositoryRevision === null) {
-    if (target.kind !== "directory_snapshot") {
-      throw new ContractValidationError(
-        "Unversioned scan manifest target must be directory_snapshot.",
-      );
-    }
-  } else {
-    if (target.kind !== "git_revision" && target.kind !== "git_worktree") {
-      throw new ContractValidationError(
-        "Repository scan manifest target must be Git-backed.",
-      );
-    }
-    if (target.revision !== expectation.repositoryRevision) {
+    } else if (
+      target.kind !== "directory_snapshot" &&
+      expectation.repositoryRevision !== null &&
+      target.revision !== expectation.repositoryRevision
+    ) {
       throw new ContractValidationError(
         "Scan target revision does not match the repository.",
       );
