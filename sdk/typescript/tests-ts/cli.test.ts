@@ -1739,6 +1739,30 @@ describe("CLI", () => {
     expect(stdout.text()).toContain("completeness: complete");
   });
 
+  test("prints scan completion warnings without failing the scan", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Repository HEAD changed while the scan was running; results were saved for the original revision.",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Repository HEAD changed while the scan was running; results were saved for the original revision.",
+    );
+  });
+
   test("reports isolated observer failures without failing the scan", async () => {
     const stdout = capture();
     const stderr = capture();

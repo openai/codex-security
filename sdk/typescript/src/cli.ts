@@ -2385,6 +2385,11 @@ async function runScan(
         progress.stage(message);
         progress.startTimer(runningMessage());
       },
+      onWarning: (warning) => {
+        errorOutput.write(
+          `codex-security: warning: ${cliErrorMessage(warning)}\n`,
+        );
+      },
       onObserverError: (observer, error) => {
         errorOutput.write(
           `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
