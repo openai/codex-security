@@ -148,8 +148,20 @@ export async function runWorkbench(
     ));
   } catch (error) {
     if (options.signal?.aborted) throw error;
+    const detail = processErrorDetail(error);
+    const databaseFailure =
+      /\b(?:unable to open database file|attempt to write a readonly database|readonly database|disk i\/o error)\b/iu.test(
+        detail,
+      );
+    const failure =
+      options.failureMessage ?? "Could not run the Codex Security workbench";
     throw new CodexSecurityError(
-      `${options.failureMessage ?? "Could not run the Codex Security workbench"}: ${processErrorDetail(error)}`,
+      databaseFailure
+        ? `${failure}: cannot open the workbench database at ${join(
+            codexSecurityStateDirectory(options.environment),
+            "workbench.sqlite3",
+          )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
+        : `${failure}: ${detail}`,
       { cause: error },
     );
   }

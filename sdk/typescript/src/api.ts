@@ -112,6 +112,7 @@ interface PreparedRuntime {
 }
 
 export interface ScanOptions {
+  auth?: ScanAuthMode;
   target?: ScanTarget;
   mode?: ScanMode;
   knowledgeBasePaths?: string[];
@@ -135,6 +136,8 @@ export interface ScanOptions {
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
 }
+
+export type ScanAuthMode = "auto" | "chatgpt" | "api-key";
 
 export type ScanAuthentication =
   | {
@@ -222,6 +225,7 @@ export class CodexSecurity {
   #activeOperation: Promise<unknown> | null = null;
   #runtimePromise: Promise<PreparedRuntime> | null = null;
   #runtime: PreparedRuntime | null = null;
+  #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
   #closed = false;
   #closePromise: Promise<void> | null = null;
 
@@ -273,7 +277,10 @@ export class CodexSecurity {
         : {}),
       outputDir: inputs.outputDir,
       ...(archiveDir === null ? {} : { archiveDir }),
-      authentication: scanAuthentication(this.#dependencies.environment),
+      authentication: scanAuthentication(
+        this.#dependencies.environment,
+        options.auth,
+      ),
       ...model,
       ...(options.maxCostUsd === undefined
         ? {}
@@ -341,8 +348,20 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const runtime = await this.#ensureRuntime(signal, temporaryRoot, (path) =>
-        requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+      const authentication = scanAuthentication(
+        this.#dependencies.environment,
+        options.auth,
+      );
+      const scanEnvironment = selectedScanEnvironment(
+        this.#dependencies.environment,
+        options.auth,
+      );
+      const runtime = await this.#ensureRuntime(
+        signal,
+        temporaryRoot,
+        (path) =>
+          requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+        options.auth,
       );
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
@@ -355,7 +374,25 @@ export class CodexSecurity {
         );
       }
       checkOpen();
-      const apiKey = environmentApiKey(this.#dependencies.environment);
+      if (
+        authentication.method === "stored_credentials" &&
+        this.#runtimeCredentialSource === "api_key"
+      ) {
+        const ambientHome =
+          environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+          join(homedir(), ".codex");
+        runtime.credentialsAvailable = await importAmbientAuth(
+          ambientHome,
+          runtime.codexHome,
+        );
+        this.#runtimeCredentialSource = runtime.credentialsAvailable
+          ? "stored_credentials"
+          : null;
+      }
+      const apiKey =
+        authentication.method === "api_key"
+          ? environmentApiKey(this.#dependencies.environment)
+          : null;
       if (apiKey !== null) {
         const codexCommand = this.#codexCommand();
         const login = await persistApiKey(
@@ -370,6 +407,7 @@ export class CodexSecurity {
           );
         }
         runtime.credentialsAvailable = true;
+        this.#runtimeCredentialSource = "api_key";
       }
       if (!runtime.credentialsAvailable) {
         throw new AuthenticationRequiredError(
@@ -382,13 +420,13 @@ export class CodexSecurity {
         "onAuthentication",
         options.onAuthentication,
         options.onObserverError,
-        scanAuthentication(this.#dependencies.environment),
+        authentication,
       );
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
         configuredPath: this.config.pythonPath,
-        environment: this.#dependencies.environment,
+        environment: scanEnvironment,
         protectedRoot,
         signal,
       });
@@ -500,7 +538,7 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...runtime.environment,
+          ...selectedScanEnvironment(runtime.environment, options.auth),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -608,7 +646,9 @@ export class CodexSecurity {
       const environment = {
         ...pluginExecutionEnvironment(
           python,
-          withoutCodexHome(runtime.environment),
+          withoutCodexHome(
+            selectedScanEnvironment(runtime.environment, options.auth),
+          ),
         ),
         CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
@@ -735,6 +775,7 @@ export class CodexSecurity {
       );
     }
     runtime.credentialsAvailable = true;
+    this.#runtimeCredentialSource = "api_key";
   }
 
   public async loginChatGPT(): Promise<CodexLoginHandle> {
@@ -747,6 +788,7 @@ export class CodexSecurity {
         runtime.environment,
         () => {
           runtime.credentialsAvailable = true;
+          this.#runtimeCredentialSource = "stored_credentials";
         },
       ),
     );
@@ -765,6 +807,7 @@ export class CodexSecurity {
         runtime.environment,
         () => {
           runtime.credentialsAvailable = true;
+          this.#runtimeCredentialSource = "stored_credentials";
         },
       ),
     );
@@ -802,6 +845,7 @@ export class CodexSecurity {
       },
     );
     runtime.credentialsAvailable = false;
+    this.#runtimeCredentialSource = null;
   }
 
   public async close(): Promise<void> {
@@ -882,6 +926,7 @@ export class CodexSecurity {
     signal?: AbortSignal,
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
+    auth: ScanAuthMode = "auto",
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
     if (this.#runtime !== null) return this.#runtime;
@@ -890,6 +935,7 @@ export class CodexSecurity {
         signal ?? this.#abortController.signal,
         temporaryRoot,
         validateLocation,
+        auth,
       );
       this.#runtimePromise = runtimePromise;
       void runtimePromise.catch(() => {
@@ -901,6 +947,9 @@ export class CodexSecurity {
     const runtime = await this.#runtimePromise;
     this.#requireOpen();
     this.#runtime = runtime;
+    this.#runtimeCredentialSource = runtime.credentialsAvailable
+      ? "stored_credentials"
+      : null;
     return this.#runtime;
   }
 
@@ -961,6 +1010,7 @@ export class CodexSecurity {
     signal: AbortSignal,
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
+    auth: ScanAuthMode = "auto",
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
@@ -978,7 +1028,10 @@ export class CodexSecurity {
         bootstrapWorkspace,
         signal,
       );
-      const processEnvironment = this.#dependencies.environment;
+      const processEnvironment = selectedScanEnvironment(
+        this.#dependencies.environment,
+        auth,
+      );
       const nodeAmbientHome = join(homedir(), ".codex");
       const configuredAmbientHome = environmentValue(
         processEnvironment,
@@ -986,7 +1039,10 @@ export class CodexSecurity {
       );
       const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
       const mergedConfig = await mergedCodexConfig(this.config);
-      const codexConfig = scanRuntimeCodexConfig(mergedConfig);
+      const codexConfig = scanRuntimeCodexConfig(
+        mergedConfig,
+        codexSecurityStateDirectory(processEnvironment),
+      );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       await writeCodexConfig(
@@ -1138,6 +1194,13 @@ export async function runScanEvents(
         typeof event["message"] === "string"
       ) {
         const message = event["message"];
+        const classification = classifyConnectionFailure(message);
+        if (
+          classification === "unauthorized" ||
+          classification === "forbidden"
+        ) {
+          throw new CodexSecurityError(message);
+        }
         const reconnect = reconnectAttempt(message);
         if (reconnect === null) throw new CodexSecurityError(message);
         lastStreamError = message;
@@ -1375,11 +1438,35 @@ async function collectResult(
 
 export function scanAuthentication(
   environment: ProcessEnvironment,
+  auth: ScanAuthMode = "auto",
 ): ScanAuthentication {
+  if (auth === "chatgpt") {
+    return { method: "stored_credentials", verified: false };
+  }
   const key = environmentApiKeyEntry(environment);
+  if (auth === "api-key" && key === null) {
+    throw new AuthenticationRequiredError(
+      "API-key authentication requires OPENAI_API_KEY or CODEX_API_KEY. " +
+        "Set a valid API key or use '--auth chatgpt'.",
+    );
+  }
   return key === null
     ? { method: "stored_credentials", verified: false }
     : { method: "api_key", source: key.source, verified: false };
+}
+
+function selectedScanEnvironment(
+  environment: ProcessEnvironment,
+  auth: ScanAuthMode = "auto",
+): ProcessEnvironment {
+  if (auth !== "chatgpt") return environment;
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        name.toUpperCase() !== "OPENAI_API_KEY" &&
+        name.toUpperCase() !== "CODEX_API_KEY",
+    ),
+  );
 }
 
 function notifyObserver<Arguments extends unknown[]>(
@@ -1463,6 +1550,9 @@ export function classifyConnectionFailure(
   | "timeout"
   | "unknown" {
   const message = error instanceof Error ? error.message : String(error);
+  if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
+    return "unknown";
+  }
   if (
     /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
       message,
@@ -1495,7 +1585,10 @@ export function classifyConnectionFailure(
   return "unknown";
 }
 
-export function scanRuntimeCodexConfig(config: JsonObject): JsonObject {
+export function scanRuntimeCodexConfig(
+  config: JsonObject,
+  stateDirectory: string,
+): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
   const configuredPermissions = isRecord(hardened["permissions"])
@@ -1511,6 +1604,7 @@ export function scanRuntimeCodexConfig(config: JsonObject): JsonObject {
         filesystem: {
           ":root": "read",
           ":workspace_roots": "write",
+          [stateDirectory]: "write",
         },
       },
     },

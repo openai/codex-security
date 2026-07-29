@@ -3,6 +3,7 @@ export { estimateScanCost } from "./cost.js";
 export type { ScanCost } from "./cost.js";
 export type {
   CodexSecurityMetadata,
+  ScanAuthMode,
   ScanAuthentication,
   ScanOptions,
   ScanPreflight,

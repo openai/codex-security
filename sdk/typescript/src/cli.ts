@@ -31,13 +31,17 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   scanAuthentication,
+  type ScanAuthMode,
+  type ScanAuthentication,
   type ScanOptions,
   type ScanPreflight,
 } from "./api.js";
+import { accountStatus } from "./auth.js";
 import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
+  type BulkScanPrompt,
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
@@ -124,6 +128,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
   sarif: "results.sarif",
 } as const;
 const VALUE_OPTIONS = new Set([
+  "--auth",
   "--path",
   "--knowledge-base",
   "--diff",
@@ -155,6 +160,7 @@ function optionValue(flag: string) {
 }
 
 interface ScanArguments {
+  auth?: ScanAuthMode;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
@@ -216,6 +222,8 @@ interface CliDependencies {
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
   environment: NodeJS.ProcessEnv;
+  hasStoredChatGPTSignIn?: () => Promise<boolean>;
+  scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   currentDirectory(): string;
   now(): number;
   setInterval(callback: () => void, milliseconds: number): NodeJS.Timeout;
@@ -242,6 +250,17 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) => new CodexSecurity(config),
   environment: process.env,
   checkForUpdate: () => checkForUpdate({ environment: process.env }),
+  hasStoredChatGPTSignIn: async () => {
+    const environment = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([name]) =>
+          name.toUpperCase() !== "OPENAI_API_KEY" &&
+          name.toUpperCase() !== "CODEX_API_KEY",
+      ),
+    );
+    const status = await accountStatus(resolveCodexCommand(), environment);
+    return status.authenticated && /\bchatgpt\b/iu.test(status.details);
+  },
   currentDirectory: cwd,
   now: Date.now,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -838,6 +857,10 @@ export async function main(
       }),
       options: z
         .object({
+          auth: z
+            .enum(["auto", "chatgpt", "api-key"])
+            .default("auto")
+            .describe("Select automatic, ChatGPT, or API-key authentication."),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -942,6 +965,7 @@ export async function main(
         }
         const outcome = await runScan(
           {
+            auth: options.auth,
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
@@ -1337,6 +1361,30 @@ export async function main(
             );
             errorOutput.write(
               "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
+            );
+          }
+        } else if (
+          exitCode === 0 &&
+          !options.withApiKey &&
+          !options.withAccessToken
+        ) {
+          const authentication = scanAuthentication(dependencies.environment);
+          if (authentication.method === "api_key") {
+            const configuredApiKeyVariables = Object.entries(
+              dependencies.environment,
+            )
+              .filter(
+                ([name, value]) =>
+                  value?.trim() &&
+                  (name.toUpperCase() === "OPENAI_API_KEY" ||
+                    name.toUpperCase() === "CODEX_API_KEY"),
+              )
+              .map(([name]) => name);
+            errorOutput.write(
+              "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
+                `noninteractive scans will use ${authentication.source}.\n` +
+                "To use your ChatGPT sign-in, pass '--auth chatgpt' or run " +
+                `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
             );
           }
         }
@@ -2189,6 +2237,7 @@ async function runScan(
     null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
+  let selectedAuthentication: ScanAuthentication | null = null;
   let failed = false;
   let failure: unknown;
   try {
@@ -2201,6 +2250,43 @@ async function runScan(
         arguments_.codexOverrides ??
         parseCodexOverrides(arguments_.codex, arguments_.model),
     };
+    let auth = arguments_.auth;
+    selectedAuthentication = scanAuthentication(dependencies.environment, auth);
+    if (
+      (auth === undefined || auth === "auto") &&
+      !arguments_.dryRun &&
+      interactive &&
+      errorOutput.isTTY === true &&
+      selectedAuthentication.method === "api_key"
+    ) {
+      const prompt =
+        dependencies.scanAuthenticationPrompt ??
+        createBulkScanDiscoveryDependencies({
+          output: errorOutput,
+          now: dependencies.now,
+          currentDirectory: dependencies.currentDirectory,
+        }).prompt;
+      if (
+        prompt.isInteractive() &&
+        (await dependencies.hasStoredChatGPTSignIn?.()) === true
+      ) {
+        const source = selectedAuthentication.source;
+        errorOutput.write(
+          `Both a ChatGPT sign-in and an API key from ${source} are available.\n`,
+        );
+        auth = await prompt.select<ScanAuthMode>(
+          "How would you like to authenticate this scan?",
+          [
+            { label: "ChatGPT subscription", value: "chatgpt" },
+            { label: `API key from ${source}`, value: "api-key" },
+          ],
+        );
+        selectedAuthentication = scanAuthentication(
+          dependencies.environment,
+          auth,
+        );
+      }
+    }
     progress = new Progress(errorOutput, dependencies, interactive);
     const scope = scanScope(arguments_);
     const runningMessage = (): string =>
@@ -2214,6 +2300,7 @@ async function runScan(
     );
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
+      auth,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       mode: arguments_.mode,
@@ -2244,18 +2331,15 @@ async function runScan(
         scanDir = path;
       },
       onAuthentication: (authentication) => {
+        selectedAuthentication = authentication;
         progress?.stopTimer();
         if (authentication.method === "api_key") {
           progress?.stage(
             `Authentication: API key from ${authentication.source}.`,
           );
-          if (errorOutput.isTTY === true) {
-            progress?.stage(
-              process.platform === "win32"
-                ? "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY, then retry the scan."
-                : "Retry with ChatGPT: env -u OPENAI_API_KEY -u CODEX_API_KEY codex-security scan ...",
-            );
-          }
+          progress?.stage(
+            "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+          );
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
@@ -2341,7 +2425,7 @@ async function runScan(
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? cliErrorMessage(protectedRootErrorMessage(failure))
-        : scanFailureMessage(failure);
+        : scanFailureMessage(failure, selectedAuthentication);
     if (failure instanceof OutputInsideProtectedRootError) {
       errorOutput.write(`${message}\n`);
     } else {
@@ -2391,12 +2475,24 @@ async function runScan(
   return { exitCode: blockingCount > 0 ? 1 : 0, data: result.toJSON() };
 }
 
-function scanFailureMessage(error: unknown): string {
+function scanFailureMessage(
+  error: unknown,
+  authentication: ScanAuthentication | null,
+): string {
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
-      return "Authentication failed. Sign in again or provide a valid API key.";
+      return authentication?.method === "api_key"
+        ? `Authentication failed using ${authentication.source}. ` +
+            "Your ChatGPT sign-in was not used. " +
+            "Retry with '--auth chatgpt' or provide a valid API key."
+        : "Authentication failed using stored ChatGPT credentials. " +
+            "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
-      return "The selected credentials cannot access the configured model. Use an account or API key with model access.";
+      return authentication?.method === "api_key"
+        ? `The API key from ${authentication.source} cannot access the configured model. ` +
+            "Retry with '--auth chatgpt' or use an API key with model access."
+        : "The stored ChatGPT credentials cannot access the configured model. " +
+            "Use an account or API key with model access.";
     case "rate_limited":
       return "The configured account reached its rate limit. Wait and retry.";
     case "network_error":
