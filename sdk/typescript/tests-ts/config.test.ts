@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
+import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
@@ -49,6 +50,92 @@ describe("Codex configuration", () => {
     expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
+  test("preserves legacy elevated Windows sandbox overrides", async () => {
+    const merged = await mergedCodexConfig({
+      codexOverrides: {
+        features: { elevated_windows_sandbox: true },
+      },
+    });
+
+    expect(merged).toMatchObject({
+      features: { elevated_windows_sandbox: true },
+      windows: { sandbox: "elevated" },
+    });
+  });
+
+  test("gives explicit Windows sandbox overrides precedence", async () => {
+    const merged = await mergedCodexConfig({
+      codexOverrides: {
+        features: { elevated_windows_sandbox: true },
+        windows: { sandbox: "unelevated" },
+      },
+    });
+
+    expect(merged).toMatchObject({
+      features: { elevated_windows_sandbox: true },
+      windows: { sandbox: "unelevated" },
+    });
+  });
+
+  test("retains the Windows sandbox in the hardened scan profile", async () => {
+    const stateDirectory = join(tmpdir(), "codex-security-windows-state");
+    const merged = await mergedCodexConfig({});
+
+    expect(scanRuntimeCodexConfig(merged, stateDirectory)).toMatchObject({
+      windows: { sandbox: "unelevated" },
+      default_permissions: "codex_security_scan",
+      permissions: {
+        codex_security_scan: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "write",
+            [stateDirectory]: "write",
+          },
+        },
+      },
+    });
+  });
+
+  test("writes Windows sandbox settings accepted by the pinned Codex CLI", async () => {
+    const root = await temporaryDirectory();
+    const path = join(root, "config.toml");
+    await writeCodexConfig(path, await mergedCodexConfig({}));
+
+    expect(parse(await readFile(path, "utf8"))).toMatchObject({
+      windows: { sandbox: "unelevated" },
+    });
+
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const environment: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: root };
+    delete environment["OPENAI_API_KEY"];
+    delete environment["CODEX_API_KEY"];
+    const result = Bun.spawnSync(
+      [
+        node!,
+        join(
+          import.meta.dir,
+          "..",
+          "node_modules",
+          "@openai",
+          "codex",
+          "bin",
+          "codex.js",
+        ),
+        "features",
+        "list",
+      ],
+      {
+        env: environment,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+  });
+
   test("rejects prototype-bearing override keys", async () => {
     for (const key of ["__proto__", "constructor", "prototype"]) {
       await expect(
@@ -73,6 +160,7 @@ describe("Codex configuration", () => {
   test("keeps exported default configuration deeply immutable", async () => {
     expect(Object.isFrozen(DEFAULT_CODEX_CONFIG)).toBe(true);
     expect(Object.isFrozen(DEFAULT_CODEX_CONFIG["features"])).toBe(true);
+    expect(Object.isFrozen(DEFAULT_CODEX_CONFIG["windows"])).toBe(true);
     expect(
       Object.isFrozen(
         (DEFAULT_CODEX_CONFIG["features"] as Record<string, unknown>)[

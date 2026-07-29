@@ -72,6 +72,19 @@ export async function mergedCodexConfig(
   const overrides = cloneJson(config.codexOverrides ?? {});
   validateOverrides(overrides);
   validateNativeMultiAgentV2Overrides(overrides);
+  const features = overrides["features"];
+  const windows = overrides["windows"];
+  if (
+    isObject(features) &&
+    features["elevated_windows_sandbox"] === true &&
+    (windows === undefined ||
+      (isObject(windows) && !Object.hasOwn(windows, "sandbox")))
+  ) {
+    overrides["windows"] = {
+      ...(isObject(windows) ? windows : {}),
+      sandbox: "elevated",
+    };
+  }
   return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
 }
 
