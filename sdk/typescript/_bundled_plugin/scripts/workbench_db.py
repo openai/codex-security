@@ -1496,13 +1496,11 @@ def complete_scan_locked(
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
     if scan["recipe_json"] is not None:
-        manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-        if manifest_path is not None:
-            manifest = read_json_object(manifest_path)
-            manifest_scan = manifest.get("scan")
-            if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-                completion_binding["startedAt"] = manifest_scan.get("startedAt")
-                completion_binding["completedAt"] = manifest_scan.get("completedAt")
+        manifest = read_json_object(artifact_path(scan_dir, ARTIFACTS["manifest"], required=True))
+        manifest_scan = manifest.get("scan")
+        if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
+            completion_binding["startedAt"] = manifest_scan.get("startedAt")
+            completion_binding["completedAt"] = manifest_scan.get("completedAt")
     try:
         prepared = _prepare_scan_finalization(
             scan_dir,
