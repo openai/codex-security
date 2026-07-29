@@ -1030,8 +1030,7 @@ export async function main(
         if (
           !options.dryRun &&
           format === "toon" &&
-          !argv.includes("--full-output") &&
-          !argv.includes("--format")
+          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
         ) {
           return;
         }
@@ -1511,14 +1510,21 @@ export async function main(
       },
     });
 
-  await cli.serve([...argv], {
-    stdout: (value) => {
-      frameworkOutput += value;
+  await cli.serve(
+    argv.flatMap((argument) =>
+      argument.startsWith("--format=")
+        ? ["--format", argument.slice("--format=".length)]
+        : [argument],
+    ),
+    {
+      stdout: (value) => {
+        frameworkOutput += value;
+      },
+      exit: (code) => {
+        frameworkExit = code;
+      },
     },
-    exit: (code) => {
-      frameworkExit = code;
-    },
-  });
+  );
   if (pendingUpdate !== undefined) {
     const notice = await pendingUpdate;
     if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));

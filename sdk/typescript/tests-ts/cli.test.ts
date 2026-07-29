@@ -1913,9 +1913,13 @@ describe("CLI", () => {
     for (const [arguments_, marker] of [
       [["--json"], '"manifest"'],
       [["--format", "json"], '"manifest"'],
+      [["--format=json"], '"manifest"'],
       [["--format", "jsonl"], '"manifest"'],
+      [["--format=jsonl"], '"manifest"'],
       [["--format", "toon"], "manifest:"],
+      [["--format=toon"], "manifest:"],
       [["--format", "yaml"], "manifest:"],
+      [["--format=yaml"], "manifest:"],
       [["--full-output"], "manifest:"],
     ] as const) {
       const stdout = capture();
@@ -1928,6 +1932,31 @@ describe("CLI", () => {
         ),
       ).toBe(0);
       expect(stdout.text()).toContain(marker);
+    }
+  });
+
+  test("honors explicit scan token output operations", async () => {
+    for (const arguments_ of [
+      ["--token-count"],
+      ["--token-limit", "4"],
+      ["--token-offset", "1"],
+      ["--token-offset", "1", "--token-limit", "4"],
+    ] as const) {
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ...arguments_],
+          stdout.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      if (arguments_[0] === "--token-count") {
+        expect(stdout.text().trim()).toMatch(/^\d+$/u);
+        expect(Number(stdout.text().trim())).toBeGreaterThan(0);
+      } else {
+        expect(stdout.text()).toContain("[truncated: showing tokens ");
+      }
     }
   });
 
