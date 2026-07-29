@@ -3,8 +3,6 @@ import { isIP } from "node:net";
 import { PluginBootstrapError } from "./errors.js";
 import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 
-const PROCESS_PIPE_DRAIN_TIMEOUT_MS = 1_000;
-
 export interface LoginResult {
   success: boolean;
   exitCode: number | null;
@@ -92,11 +90,12 @@ export class CodexLoginHandle {
       };
       this.#child.once("close", complete);
       this.#child.once("exit", (exitCode) => {
+        if (process.platform !== "win32") return;
         fallback = setTimeout(() => {
           this.#child.stdout.destroy();
           this.#child.stderr.destroy();
           complete(exitCode);
-        }, PROCESS_PIPE_DRAIN_TIMEOUT_MS);
+        }, 1_000);
       });
     });
   }
@@ -267,18 +266,6 @@ export async function runCodex(
   });
   const completion = new Promise<LoginResult>((resolve, reject) => {
     let processError: Error | null = null;
-    let fallback: ReturnType<typeof setTimeout> | undefined;
-    let completed = false;
-    const complete = (exitCode: number | null): void => {
-      if (completed) return;
-      completed = true;
-      if (fallback !== undefined) clearTimeout(fallback);
-      if (processError !== null) {
-        reject(processError);
-      } else {
-        resolve({ success: exitCode === 0, exitCode, stdout, stderr });
-      }
-    };
     child.once("error", (error) => {
       processError = error;
     });
@@ -295,13 +282,12 @@ export async function runCodex(
         processError ??= error;
       }
     });
-    child.once("close", complete);
-    child.once("exit", (exitCode) => {
-      fallback = setTimeout(() => {
-        child.stdout.destroy();
-        child.stderr.destroy();
-        complete(exitCode);
-      }, PROCESS_PIPE_DRAIN_TIMEOUT_MS);
+    child.once("close", (exitCode) => {
+      if (processError !== null) {
+        reject(processError);
+      } else {
+        resolve({ success: exitCode === 0, exitCode, stdout, stderr });
+      }
     });
   });
   child.stdin.end(input);

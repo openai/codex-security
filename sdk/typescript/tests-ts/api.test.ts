@@ -3398,10 +3398,13 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
       `
 const args = process.argv.slice(2).join(" ");
 if (args === "login --with-api-key") {
-  process.exit(0);
+  let apiKey = "";
+  for await (const chunk of process.stdin) apiKey += chunk;
+  if (!["secret-key", "ambient-key"].includes(apiKey.trim())) {
+    process.exitCode = 3;
+  }
 } else if (args === "login") {
   console.error("Open https://auth.example.test/login");
-  process.exit(0);
 } else {
   process.exitCode = 2;
 }

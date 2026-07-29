@@ -38,23 +38,7 @@ jobs:
         run: corepack enable && corepack prepare "$(node -p 'require("./sdk/typescript/package.json").packageManager')" --activate
 
       - name: Install dependencies
-        shell: bash
-        run: |
-          install_args=(--frozen-lockfile)
-          for attempt in 1 2 3; do
-            if pnpm --dir sdk/typescript install "${install_args[@]}" \
-              && pnpm --dir sdk/typescript exec node scripts/check-native-dependencies.mjs; then
-              exit 0
-            fi
-
-            if [ "$attempt" -lt 3 ]; then
-              echo "::warning::Required native dependencies were not installed; retrying ($attempt/3)."
-              install_args=(--frozen-lockfile --force)
-            fi
-          done
-
-          echo "::error::Required native Codex or PDF dependencies could not be installed."
-          exit 1
+        run: pnpm --dir sdk/typescript install --frozen-lockfile
 
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
