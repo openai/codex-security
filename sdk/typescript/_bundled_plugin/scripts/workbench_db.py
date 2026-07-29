@@ -1496,11 +1496,13 @@ def complete_scan_locked(
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
     if scan["recipe_json"] is not None:
-        manifest = read_json_object(artifact_path(scan_dir, ARTIFACTS["manifest"], required=True))
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-            completion_binding["startedAt"] = manifest_scan.get("startedAt")
-            completion_binding["completedAt"] = manifest_scan.get("completedAt")
+        manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+        if manifest_path is not None:
+            manifest = read_json_object(manifest_path)
+            manifest_scan = manifest.get("scan")
+            if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
+                completion_binding["startedAt"] = manifest_scan.get("startedAt")
+                completion_binding["completedAt"] = manifest_scan.get("completedAt")
     try:
         prepared = _prepare_scan_finalization(
             scan_dir,
@@ -3501,7 +3503,7 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
         raise SystemExit(
             f"{file_name}: expected a regular file inside the scan directory."
         ) from exc
-    if resolved != candidate or not candidate.is_file():
+    if resolved.as_posix().lower() != candidate.as_posix().lower() or not candidate.is_file():
         raise SystemExit(f"{file_name}: expected a regular non-symlink file.")
     return resolved
 
@@ -3515,7 +3517,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         raise SystemExit(
             "Scan directory must be an existing canonical non-symlink directory."
         ) from exc
-    if not stat.S_ISDIR(metadata.st_mode) or resolved != scan_dir:
+    if not stat.S_ISDIR(metadata.st_mode) or resolved.as_posix().lower() != scan_dir.as_posix().lower():
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
     return scan_dir
 

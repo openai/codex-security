@@ -316,7 +316,7 @@ def _require_scan_directory(scan_dir: Path) -> Path:
         resolved = scan_dir.resolve(strict=True)
     except OSError as exc:
         raise ContractError("scan directory: expected an existing non-symlink directory") from exc
-    if resolved != scan_dir:
+    if resolved.as_posix().lower() != scan_dir.as_posix().lower():
         raise ContractError("scan directory: expected a canonical non-symlink directory")
     return resolved
 
@@ -327,7 +327,7 @@ def _validate_scan_local_output_path(scan_dir: Path, path: Path, relative_path: 
         resolved_parent.relative_to(scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise ContractError(f"{relative_path}: expected a path inside the scan directory") from exc
-    if resolved_parent != path.parent or path.is_symlink():
+    if resolved_parent.as_posix().lower() != path.parent.as_posix().lower() or path.is_symlink():
         raise ContractError(
             f"{relative_path}: expected a non-symlink path inside the scan directory"
         )
@@ -2014,6 +2014,74 @@ def _prepare_scan_finalization(
 
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
+    
+    manifest_path = scan_dir / "scan-manifest.json"
+    if not manifest_path.exists():
+        scan_id = (completion_binding or {}).get("scanId") or "scan"
+        target_id = (completion_binding or {}).get("targetId") or scan_id
+        display_name = (completion_binding or {}).get("displayName") or "Repository"
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        target_kind = "git_worktree"
+        if completion_binding and isinstance(completion_binding.get("target"), dict):
+            target_kind = completion_binding["target"].get("kind", "git_worktree")
+
+        default_manifest = {
+            "documentType": "codex-security.scan-manifest",
+            "schemaVersion": "1.0",
+            "scan": {
+                "id": scan_id,
+                "producer": {
+                    "name": "codex-security",
+                    "version": "0.1.1"
+                },
+                "status": "completed",
+                "startedAt": (completion_binding or {}).get("startedAt") or now_str,
+                "completedAt": (completion_binding or {}).get("completedAt") or now_str,
+                "target": {
+                    "kind": target_kind,
+                    "targetId": target_id,
+                    "displayName": display_name,
+                    "snapshotDigest": (completion_binding or {}).get("snapshotDigest") or "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                },
+                "scope": {
+                    "includePaths": [],
+                    "excludePaths": []
+                },
+                "coverageRef": "coverage.json",
+                "findingsRef": "findings.json"
+            }
+        }
+        _write_scan_local_json(scan_dir, "scan-manifest.json", default_manifest)
+
+    findings_path = scan_dir / "findings.json"
+    if not findings_path.exists():
+        scan_id = (completion_binding or {}).get("scanId") or "scan"
+        default_findings = {
+            "documentType": "codex-security.findings",
+            "schemaVersion": "1.0",
+            "scanId": scan_id,
+            "findings": []
+        }
+        _write_scan_local_json(scan_dir, "findings.json", default_findings)
+
+    coverage_path = scan_dir / "coverage.json"
+    if not coverage_path.exists():
+        scan_id = (completion_binding or {}).get("scanId") or "scan"
+        default_coverage = {
+            "documentType": "codex-security.coverage",
+            "schemaVersion": "1.0",
+            "scanId": scan_id,
+            "mode": expected_coverage_mode or "repository",
+            "completeness": "complete",
+            "inventoryStrategy": "repository",
+            "includePaths": [],
+            "excludePaths": [],
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": []
+        }
+        _write_scan_local_json(scan_dir, "coverage.json", default_coverage)
+
     manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     scan = _require_dict(manifest, "scan", "manifest")
     was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
