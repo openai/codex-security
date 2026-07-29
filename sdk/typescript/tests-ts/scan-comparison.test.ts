@@ -1,11 +1,25 @@
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
+  comparisonEnvironment,
   matchScanFindings,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
 } from "../src/scan-comparison.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
 
 function finding(occurrenceId: string): ScanComparisonInput["before"][number] {
   return { occurrenceId };
@@ -38,6 +52,144 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("preserves environment API-key precedence over managed credentials", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(root);
+    const stateDirectory = join(root, "state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+    let statusProbed = false;
+
+    const environment = await comparisonEnvironment(
+      {
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        OPENAI_API_KEY: "synthetic-key-must-not-be-used",
+        CODEX_API_KEY: "synthetic-secondary-must-not-be-used",
+      },
+      async () => {
+        statusProbed = true;
+        return {
+          authenticated: true,
+          details: "Logged in using ChatGPT",
+        };
+      },
+    );
+
+    expect(environment["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
+    expect(environment["OPENAI_API_KEY"]).toBe(
+      "synthetic-key-must-not-be-used",
+    );
+    expect(environment["CODEX_API_KEY"]).toBe(
+      "synthetic-secondary-must-not-be-used",
+    );
+    expect(environment["CODEX_HOME"]).toBeUndefined();
+    expect(statusProbed).toBe(false);
+  });
+
+  test("reuses managed keyring credentials when no environment key is present", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(root);
+    const stateDirectory = join(root, "state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+    let probedHome: string | undefined;
+
+    const environment = await comparisonEnvironment(
+      { CODEX_SECURITY_STATE_DIR: stateDirectory },
+      async (_command, storedEnvironment) => {
+        probedHome = storedEnvironment["CODEX_HOME"];
+        return { authenticated: true, details: "Logged in using ChatGPT" };
+      },
+    );
+
+    expect(environment["CODEX_HOME"]).toBe(await realpath(credentialHome));
+    expect(probedHome).toBe(await realpath(credentialHome));
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "uses the canonical keyring identity when the state parent is symlinked",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const actualState = join(root, "actual-state");
+      const linkedState = join(root, "linked-state");
+      const credentialHome = join(actualState, "codex-home");
+      await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+      await symlink(actualState, linkedState, "dir");
+      let probedHome: string | undefined;
+
+      const environment = await comparisonEnvironment(
+        { CODEX_SECURITY_STATE_DIR: linkedState },
+        async (_command, storedEnvironment) => {
+          probedHome = storedEnvironment["CODEX_HOME"];
+          return { authenticated: true, details: "Logged in using ChatGPT" };
+        },
+      );
+
+      expect(environment["CODEX_HOME"]).toBe(await realpath(credentialHome));
+      expect(probedHome).toBe(await realpath(credentialHome));
+    },
+  );
+
+  test("forwards cancellation to managed credential-status checks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(root);
+    const stateDirectory = join(root, "state");
+    await mkdir(join(stateDirectory, "codex-home"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    let statusStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      statusStarted = resolve;
+    });
+
+    const waiting = comparisonEnvironment(
+      { CODEX_SECURITY_STATE_DIR: stateDirectory },
+      async (_command, _environment, signal) => {
+        observedSignal = signal;
+        statusStarted();
+        return await new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      },
+      controller.signal,
+    );
+    await started;
+    controller.abort(new DOMException("canceled", "AbortError"));
+
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    expect(observedSignal).toBe(controller.signal);
+  });
+
+  test("retains API-key authentication when the managed home is not signed in", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(root);
+    const stateDirectory = join(root, "state");
+    const ambientHome = join(root, "ambient-codex-home");
+    await mkdir(ambientHome, { mode: 0o700 });
+    await mkdir(join(stateDirectory, "codex-home"), {
+      recursive: true,
+      mode: 0o700,
+    });
+
+    const environment = await comparisonEnvironment(
+      {
+        CODEX_HOME: ambientHome,
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        OPENAI_API_KEY: "synthetic-comparison-key",
+      },
+      async () => ({ authenticated: false, details: "Not logged in" }),
+    );
+
+    expect(environment["OPENAI_API_KEY"]).toBe("synthetic-comparison-key");
+    expect(environment["CODEX_HOME"]).toBe(ambientHome);
+  });
+
   test("compares all findings with one restricted structured-output turn", async () => {
     const input: ScanComparisonInput = {
       before: [finding("before-1"), finding("before-2")],

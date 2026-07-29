@@ -75,9 +75,11 @@ type SarifDocument = {
 
 type ScanFixture = {
   python: string;
+  repository: string;
   stateDir: string;
   scanDir: string;
   scanId: string;
+  registration: Record<string, unknown>;
 };
 
 const temporaryDirectories: string[] = [];
@@ -112,7 +114,9 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
   );
 }
 
-async function startDraftScan(): Promise<ScanFixture> {
+async function startDraftScan(
+  repositoryKind: "directory" | "clean" | "dirty" = "directory",
+): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
   );
@@ -126,11 +130,38 @@ async function startDraftScan(): Promise<ScanFixture> {
   await writeFile(join(target, "src", "extract.py"), "# fixture\n");
   await mkdir(scanDir, { mode: 0o700 });
 
+  if (repositoryKind !== "directory") {
+    for (const args of [
+      ["init", "--quiet", target],
+      ["-C", target, "add", "--", "src/extract.py"],
+      [
+        "-C",
+        target,
+        "-c",
+        "user.name=Codex Security",
+        "-c",
+        "user.email=codex-security@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+      ],
+    ]) {
+      const result = spawnSync("git", args, { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    if (repositoryKind === "dirty") {
+      await writeFile(join(target, "src", "extract.py"), "# changed fixture\n");
+    }
+  }
+
   const fixture: ScanFixture = {
     python: python!,
+    repository: target,
     stateDir: join(root, "state"),
     scanDir,
     scanId: "",
+    registration: {},
   };
   const registration = await workbench(fixture, [
     "register-cli-scan",
@@ -147,6 +178,7 @@ async function startDraftScan(): Promise<ScanFixture> {
     }),
   ]);
   fixture.scanId = String(registration["scanId"]);
+  fixture.registration = registration;
 
   await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
     recursive: true,
@@ -161,7 +193,12 @@ async function startDraftScan(): Promise<ScanFixture> {
     };
   }>(manifestPath);
   manifest.scan.id = fixture.scanId;
-  manifest.scan.target.kind = "directory_snapshot";
+  manifest.scan.target.kind =
+    repositoryKind === "directory"
+      ? "directory_snapshot"
+      : repositoryKind === "clean"
+        ? "git_revision"
+        : "git_worktree";
   delete manifest.scan.sealedAt;
   delete manifest.scan.artifacts;
   await writeJson(manifestPath, manifest);
@@ -186,6 +223,111 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
+  test("returns the authoritative directory snapshot contract at registration", async () => {
+    const fixture = await startDraftScan();
+    const registration = fixture.registration;
+    const contract = registration["contract"] as {
+      target: {
+        allowedKinds: string[];
+        displayName: string;
+        targetId: string;
+        requiredSnapshotDigest?: string;
+      };
+    };
+
+    expect(registration["targetRevision"]).toBe("unversioned");
+    expect(contract.target).toMatchObject({
+      allowedKinds: ["directory_snapshot"],
+      displayName: "repository",
+      targetId: registration["targetId"],
+      requiredSnapshotDigest: expect.stringMatching(
+        /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
+      ),
+    });
+  });
+
+  test("returns authoritative clean and dirty Git target contracts", async () => {
+    for (const kind of ["clean", "dirty"] as const) {
+      const fixture = await startDraftScan(kind);
+      const registration = fixture.registration;
+      const contract = registration["contract"] as {
+        target: {
+          allowedKinds: string[];
+          targetId: string;
+          requiredSnapshotDigest?: string;
+        };
+      };
+      const revision = spawnSync(
+        "git",
+        ["-C", fixture.repository, "rev-parse", "HEAD"],
+        { encoding: "utf8" },
+      );
+
+      expect(revision.status, revision.stderr).toBe(0);
+      expect(registration["targetRevision"]).toBe(revision.stdout.trim());
+      expect(registration["targetId"]).toBe(contract.target.targetId);
+      expect(contract.target.allowedKinds).toEqual([
+        kind === "clean" ? "git_revision" : "git_worktree",
+      ]);
+      if (kind === "clean") {
+        expect(contract.target).not.toHaveProperty("requiredSnapshotDigest");
+      } else {
+        expect(contract.target.requiredSnapshotDigest).toMatch(
+          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
+        );
+      }
+    }
+  });
+
+  test("seals a prepared scan without publishing it before acceptance", async () => {
+    const fixture = await startDraftScan();
+
+    const prepared = await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+
+    expect((prepared["scan"] as ScanSummary).progress.status).toBe("running");
+    const manifest = await readJson<{
+      scan: { sealedAt: string; completedAt: string };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(manifest.scan.sealedAt).toBe(manifest.scan.completedAt);
+    const running = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((running["scan"] as ScanSummary).progress.status).toBe("running");
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+  });
+
+  test("marks rejected prepared scans as failed without publishing completion", async () => {
+    const fixture = await startDraftScan();
+    await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    await writeFile(join(fixture.scanDir, "findings.json"), "corrupted\n");
+
+    const failed = await workbench(fixture, [
+      "fail-scan",
+      "--scan-id",
+      fixture.scanId,
+      "--message",
+      "Sealed scan could not be accepted.",
+    ]);
+
+    expect((failed["scan"] as ScanSummary).progress.status).toBe("failed");
+    const stored = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((stored["scan"] as ScanSummary).progress.status).toBe("failed");
+  });
+
   test("normalizes finding identities and persists recovery warnings", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
@@ -217,6 +359,33 @@ describe("malformed scan artifact recovery", () => {
     expect((saved["scan"] as unknown as ScanSummary).warnings).toEqual(
       completed.warnings,
     );
+  });
+
+  test("preserves recovery warnings across prepared scan completion", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+    document.findings[0]!.identity.anchor = "Archive Entry Without Containment";
+    await writeJson(path, document);
+
+    const prepared = await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    const warning = "Recovered finding 1: normalized semantic anchor.";
+
+    expect((prepared["scan"] as ScanSummary).progress.status).toBe("running");
+    expect((prepared["scan"] as ScanSummary).warnings).toEqual([warning]);
+    const completed = await completeScan(fixture);
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.warnings).toEqual([warning]);
+    const saved = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((saved["scan"] as ScanSummary).warnings).toEqual([warning]);
   });
 
   test("keeps valid findings and skips malformed or duplicate findings", async () => {

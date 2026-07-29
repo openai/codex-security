@@ -25,6 +25,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   container:
     name: linux-amd64
@@ -96,7 +100,8 @@ jobs:
           mkdir -p results state
           chmod 700 results state
           printf 'id,repository,revision\n' > repositories.csv
-          export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          CODEX_SECURITY_USER="$(id -u):$(id -g)"
+          export CODEX_SECURITY_USER
           docker compose config --quiet
           docker compose run --rm codex-security --version
 

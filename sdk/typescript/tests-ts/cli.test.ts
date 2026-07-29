@@ -186,6 +186,182 @@ describe("CLI", () => {
     expect(completions.text()).toContain('export COMPLETE="bash"');
   });
 
+  test("documents every public command argument and option", async () => {
+    const commands = [
+      ["scan"],
+      ["bulk-scan"],
+      ["export"],
+      ["validate"],
+      ["patch"],
+      ["login"],
+      ["logout"],
+      ["info"],
+      ["install-hook"],
+      ["scans", "list"],
+      ["scans", "show"],
+      ["scans", "rerun"],
+      ["scans", "match"],
+      ["scans", "compare"],
+      ["findings", "false-positive"],
+    ] as const;
+
+    for (const command of commands) {
+      const help = capture();
+      const schema = capture();
+      expect(
+        await main(
+          [...command, "--help"],
+          help.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(help.text()).not.toMatch(/--[a-z][a-z0-9-]*[A-Z][A-Za-z0-9-]*/u);
+      expect(
+        await main(
+          [...command, "--schema", "--format", "json"],
+          schema.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+
+      const definitions = JSON.parse(schema.text()) as {
+        args?: {
+          properties?: Record<string, { description?: string }>;
+        };
+        options?: {
+          properties?: Record<string, { description?: string }>;
+        };
+      };
+
+      for (const argument of Object.values(
+        definitions.args?.properties ?? {},
+      )) {
+        expect(typeof argument.description).toBe("string");
+        expect(argument.description?.trim().length).toBeGreaterThan(0);
+      }
+
+      for (const [name, option] of Object.entries(
+        definitions.options?.properties ?? {},
+      )) {
+        const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
+        expect(help.text()).toContain(flag);
+        expect(typeof option.description).toBe("string");
+        expect(option.description?.trim().length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test("documents user-facing environment and deep-scan configuration", async () => {
+    const readme = await readFile(new URL("../README.md", import.meta.url), {
+      encoding: "utf8",
+    });
+
+    for (const setting of [
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      "CODEX_SECURITY_STATE_DIR",
+      "CODEX_HOME",
+      "PYTHON",
+      "GH_HOST",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "CODEX_SECURITY_GIT_HOST",
+      "CODEX_SECURITY_IMAGE",
+      "CODEX_SECURITY_USER",
+      "CODEX_SECURITY_SECCOMP",
+      "CODEX_SECURITY_CSV",
+      "CODEX_SECURITY_RESULTS",
+      "CODEX_SECURITY_STATE",
+      "CODEX_SECURITY_NO_UPDATE_NOTICE",
+      "NO_UPDATE_NOTIFIER",
+      "CODEX_SECURITY_NPM_REGISTRY",
+      "npm_config_registry",
+      "NPM_CONFIG_REGISTRY",
+      "NO_COLOR",
+      "TERM",
+      "CI",
+      "features.multi_agent_v2.max_concurrent_threads_per_session",
+      "agents.max_threads",
+      "$CODEX_HOME/codex-security/config.toml",
+      "[deep_scan]",
+      "stop_after_no_new",
+      "max_discovery_runs",
+    ]) {
+      expect(readme).toContain(setting);
+    }
+  });
+
+  test("keeps documented runtime and deep-scan defaults accurate", async () => {
+    const readme = await readFile(new URL("../README.md", import.meta.url), {
+      encoding: "utf8",
+    });
+    expect(readme).toContain(
+      `model = "${DEFAULT_SCAN_MODEL_CONFIGURATION.model}"`,
+    );
+    expect(readme).toContain(
+      `model_reasoning_effort = "${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}"`,
+    );
+
+    const features = DEFAULT_CODEX_CONFIG["features"] as JsonObject;
+    const multiAgent = features["multi_agent_v2"] as JsonObject;
+    expect(readme).toContain(
+      `max_concurrent_threads_per_session = ${String(multiAgent["max_concurrent_threads_per_session"])}`,
+    );
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const root = await mkdtemp(join(tmpdir(), "codex-security-deep-defaults-"));
+
+    try {
+      const result = spawnSync(
+        python!,
+        [
+          fileURLToPath(
+            new URL(
+              "../_bundled_plugin/scripts/deep_scan_config.py",
+              import.meta.url,
+            ),
+          ),
+          "--available-parallelism",
+          "12",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_HOME: join(root, "codex-home"),
+            PYTHONDONTWRITEBYTECODE: "1",
+          },
+          timeout: 30_000,
+        },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+
+      const defaults = JSON.parse(result.stdout) as {
+        workers: number;
+        subagents: number;
+        stopAfterNoNew: number;
+        maxDiscoveryRuns: number;
+      };
+      expect(defaults.workers).toBe(6);
+      expect(readme).toContain('workers = "auto"');
+      expect(readme).toContain(`subagents = ${defaults.subagents}`);
+      expect(readme).toContain(
+        `stop_after_no_new = ${defaults.stopAfterNoNew}`,
+      );
+      expect(readme).toContain(
+        `max_discovery_runs = ${defaults.maxDiscoveryRuns}`,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("marks findings as false positives without starting Codex", async () => {
     const reason = "  Not reachable from untrusted input.  ";
     const expectedReason = reason.trim();
@@ -1088,34 +1264,42 @@ describe("CLI", () => {
 
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
-      ["validate", ["finding", "--json"]],
-      ["patch", ["issue", "--format", "json"]],
-      ["login", ["--json"]],
-      ["login", ["status", "--format", "jsonl"]],
-      ["logout", ["--json"]],
+      ["validate", ["finding"]],
+      ["patch", ["issue"]],
+      ["login", []],
+      ["login", ["status"]],
+      ["logout", []],
     ] as const) {
-      let invoked = false;
-      const stdout = capture();
-      const stderr = capture(true);
+      for (const format of [
+        ["--json"],
+        ["--format", "json"],
+        ["--format=json"],
+        ["--format", "jsonl"],
+        ["--format=jsonl"],
+      ] as const) {
+        let invoked = false;
+        const stdout = capture();
+        const stderr = capture(true);
 
-      expect(
-        await main(
-          [command, ...arguments_],
-          stdout.stream,
-          stderr.stream,
-          dependencies({
-            onCodex: () => {
-              invoked = true;
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(2);
-      expect(invoked).toBe(false);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(
-        `${command} does not support noninteractive JSON output`,
-      );
+        expect(
+          await main(
+            [command, ...arguments_, ...format],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              onCodex: () => {
+                invoked = true;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(invoked).toBe(false);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`,
+        );
+      }
     }
   });
 
@@ -1284,6 +1468,10 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain('model_reasoning_effort="high"');
     expect(help.text()).toContain(
+      "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+    );
+    expect(help.text()).toContain("default: Codex Security state");
+    expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra",
     );
     expect(help.text()).toContain(
@@ -1291,6 +1479,7 @@ describe("CLI", () => {
     );
     expect(help.text()).not.toContain("--provider");
     expect(help.text()).not.toContain("openai:gpt");
+    expect(help.text()).not.toContain("codex-security scan . --path src,tests");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
   });
 
@@ -1316,6 +1505,26 @@ describe("CLI", () => {
     );
     expect(help.text()).toContain("--codex <array>");
     expect(help.text()).toContain('model_reasoning_effort="high"');
+    expect(help.text()).toContain(
+      "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+    );
+    expect(help.text()).toContain("Concurrent repository scans.");
+    expect(help.text()).toContain(
+      "Default scan mode for repositories without a CSV mode.",
+    );
+    expect(help.text()).toContain(
+      "Codex Security plugin directory or ZIP (default: bundled plugin).",
+    );
+    expect(help.text()).toContain(
+      "Python interpreter (default: PYTHON or automatic discovery).",
+    );
+    expect(help.text()).toContain(
+      "codex-security bulk-scan repositories.csv " +
+        "--output-dir /path/outside/repositories/results " +
+        "--workers 4 --max-attempts 3",
+    );
+    expect(help.text()).not.toContain("--outputDir");
+    expect(help.text()).not.toContain("--maxAttempts");
     expect(help.text()).not.toContain("--provider");
     expect(stderr.text()).toBe("");
   });

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -76,6 +77,39 @@ async function resolveWindowsExecutable(
 }
 
 describe("trusted executable resolution", () => {
+  test.skipIf(process.platform === "win32")(
+    "preserves the invocation name of a trusted symlinked executable",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const trusted = join(root, "trusted");
+      const wrapper = join(trusted, "wrapper");
+      const git = join(trusted, "git");
+      await Promise.all([mkdir(repository), mkdir(trusted)]);
+      await writeFile(wrapper, "#!/bin/sh\nprintf '%s\\n' \"$0\"\n");
+      await chmod(wrapper, 0o700);
+      await symlink(wrapper, git);
+
+      const resolved = await resolveTrustedExecutable(
+        "git",
+        { PATH: trusted },
+        repository,
+      );
+      expect(resolved).toEqual({
+        executable: git,
+        environment: { PATH: trusted },
+      });
+      if (resolved === null) throw new Error("trusted Git was not resolved");
+
+      const result = spawnSync(resolved.executable, [], {
+        encoding: "utf8",
+        env: resolved.environment,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe(git);
+    },
+  );
+
   test("selects runnable Windows executables ahead of extensionless and batch files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

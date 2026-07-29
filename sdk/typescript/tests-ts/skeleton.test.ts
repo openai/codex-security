@@ -28,19 +28,31 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
-  test("advertises only compatible Node.js releases", async () => {
+  test("advertises the tested Node.js 22, 24, and 26 release lines", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
 
-    expect(Bun.semver.satisfies("22.12.0", packageJson.engines.node)).toBe(
-      false,
-    );
-    expect(Bun.semver.satisfies("22.13.0", packageJson.engines.node)).toBe(
-      true,
-    );
-    expect(Bun.semver.satisfies("24.0.0", packageJson.engines.node)).toBe(true);
-    expect(Bun.semver.satisfies("26.0.0", packageJson.engines.node)).toBe(true);
+    const supportedReleases = ["22.13.0", "22.14.0", "24.0.0", "26.0.0"];
+    const unsupportedReleases = [
+      "22.12.0",
+      "23.0.0",
+      "23.4.0",
+      "23.5.0",
+      "25.0.0",
+      "27.0.0",
+    ];
+
+    expect(
+      supportedReleases.filter((version) =>
+        Bun.semver.satisfies(version, packageJson.engines.node),
+      ),
+    ).toEqual(supportedReleases);
+    expect(
+      unsupportedReleases.filter((version) =>
+        Bun.semver.satisfies(version, packageJson.engines.node),
+      ),
+    ).toEqual([]);
   });
 
   test("builds packages before packing and provides a production audit", async () => {

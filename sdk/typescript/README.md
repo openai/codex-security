@@ -16,9 +16,10 @@ npx @openai/codex-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
-later. Scanning and exporting findings also require Python 3.10 or later. If
-you use Python 3.10, install the `tomli` package. Select another interpreter
-with `--python`, `pythonPath`, or `PYTHON` when needed.
+later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scanning and
+exporting findings also require Python 3.10 or later. If you use Python 3.10,
+install the `tomli` package. Select another interpreter with `--python`,
+`pythonPath`, or `PYTHON` when needed.
 
 When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
@@ -56,6 +57,39 @@ Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
 
+### SDK configuration and scan options
+
+Pass runtime configuration to the `CodexSecurity` constructor:
+
+| Option           | Description                                                                 |
+| ---------------- | --------------------------------------------------------------------------- |
+| `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
+| `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
+| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
+
+Pass scan configuration to `security.run(repository, options)` or
+`security.preflight(repository, options)`:
+
+| Option                  | Description                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| `auth`                  | Select `"auto"`, `"chatgpt"`, or `"api-key"`.                                         |
+| `target`                | Select a repository, repository-relative paths, committed diff, or working-tree diff. |
+| `mode`                  | Select `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
+| `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.         |
+| `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
+| `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
+| `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
+| `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                            |
+| `parentScanId`          | Link a rerun to an existing parent scan.                                              |
+| `expectedPluginVersion` | Require the original plugin version when replaying a scan.                            |
+| `signal`                | Cancel a scan with an `AbortSignal`.                                                  |
+
+Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
+`onOutputArchived`, `onOutputDirReady`, `onScanStarted`, `onReconnect`,
+`onWorkerStatus`, `onWarning`, and `onObserverError`. Preflight does not start
+the runtime, authenticate, resolve Python, inspect the plugin, or run those
+scan-lifecycle callbacks.
+
 ## Authentication
 
 For local use, sign in with ChatGPT:
@@ -78,6 +112,14 @@ pass it on stdin:
 printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 ```
 
+Environment API keys are supplied directly to the current scan and are never
+saved to the Codex credential home or system keyring. Only an explicit
+`login --with-api-key` stores an API key.
+
+To pass a Codex access token explicitly, use
+`login --with-access-token` and provide the token on stdin. An access token
+environment variable is not automatically used as a scan API key.
+
 On Windows, set the API key in PowerShell:
 
 ```powershell
@@ -85,10 +127,16 @@ $env:OPENAI_API_KEY = "<your-api-key>"
 npx @openai/codex-security scan C:\code\repository
 ```
 
-Check or remove the stored sign-in with `npx @openai/codex-security login status` and
-`npx @openai/codex-security logout`. Codex Security reuses an existing file-based Codex
-sign-in. If Codex stores credentials in the system keyring, run
-`npx @openai/codex-security login` once before scanning.
+Check or remove the stored sign-in with `npx @openai/codex-security login status`
+and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
+private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
+`$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
+configured. Login, status, logout, and scans use the same home. Codex manages
+credentials using its configured file or system-keyring backend and honors
+managed-device policies. An existing file-based Codex sign-in is imported only
+when the dedicated home does not already contain stored credentials. Logging
+out prevents later scans from automatically reimporting that ambient sign-in
+until you explicitly log in again.
 
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
@@ -197,8 +245,126 @@ the implied provider. Use `--model gpt-5.6-terra` to switch models and
 `--codex KEY=VALUE` for other Codex settings; existing
 `--codex 'model_reasoning_effort="high"'` overrides remain supported.
 
+### Runtime configuration and worker limits
+
+The standalone CLI and SDK do not load an unrelated user or repository Codex
+configuration. Each scan starts with a private runtime and these Codex
+defaults:
+
+```toml
+cli_auth_credentials_store = "file"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+
+[features]
+plugins = true
+goals = true
+
+[features.multi_agent_v2]
+enabled = true
+max_concurrent_threads_per_session = 9
+
+[windows]
+sandbox = "unelevated"
+```
+
+Use `--model` and `--effort` for model selection. Repeat
+`--codex KEY=VALUE` to deep-merge other TOML values into this isolated
+configuration:
+
+```bash
+npx @openai/codex-security scan . \
+  --model gpt-5.6-terra \
+  --effort high \
+  --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
+```
+
+The session thread limit includes the parent agent: the default of `9`
+provides up to eight delegated worker slots. This limit is separate from
+`bulk-scan --workers`, which controls how many repositories run concurrently.
+A configured limit is a maximum, not evidence that every worker started.
+
+Quote string values as TOML, for example
+`--codex 'model_reasoning_effort="high"'`. Do not pass both `--model` and
+`--codex 'model="..."'`, or both `--effort` and
+`--codex 'model_reasoning_effort="..."'`: conflicting or repeated keys are
+rejected.
+
+Plugin and marketplace loading belong to Codex Security. Overrides of
+`plugins`, `marketplaces`, or `features.plugins`, including profile-specific
+plugin overrides, are rejected; choose `--plugin-path` instead. Native
+multi-agent v2 must remain enabled. The legacy `agents.max_threads` setting
+and `features.multi_agent_v2.enabled=false` are incompatible and rejected.
+`validate` and `patch` accept `--effort` and only the `model` and
+`model_reasoning_effort` `--codex` keys; they do not accept general scan
+runtime overrides.
+
 These overrides do not change the scan's approval policy or filesystem
 permissions. See [Local security model](#local-security-model).
+
+### Deep-scan engine configuration
+
+When the bundled plugin runs in a normal Codex host, its repeated-discovery
+engine reads `$CODEX_HOME/codex-security/config.toml`, defaulting to
+`~/.codex/codex-security/config.toml`:
+
+```toml
+[deep_scan]
+workers = "auto"
+subagents = 3
+stop_after_no_new = 6
+max_discovery_runs = 60
+```
+
+`workers = "auto"` uses half the available parallelism, with a minimum of one
+and a maximum of six discovery workers. Set `workers` to a positive integer to
+choose an explicit count. `subagents` must be a nonnegative integer;
+`stop_after_no_new` and `max_discovery_runs` must be positive integers. Unknown
+`[deep_scan]` keys are rejected.
+
+These settings are separate from Codex's
+`features.multi_agent_v2.max_concurrent_threads_per_session` and
+`bulk-scan --workers`. Importantly, standalone CLI and SDK scans create an
+isolated `CODEX_HOME` and do not import the ambient deep-scan configuration
+file. Consequently, `scan --mode deep` currently uses the deep engine's
+defaults; there are no standalone CLI flags for these four settings. Use
+`--codex` to adjust the Codex session thread limit, not to set `[deep_scan]`
+values.
+
+### Environment variables
+
+The CLI and SDK recognize the following user-configurable environment:
+
+| Variable                                                                    | Effect                                                                                        |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
+| `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
+| `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
+| `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                     |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                           |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                             |
+| `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
+| `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
+
+Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
+the managed Codex runtime, and finally `python3` or `python` from `PATH`.
+`CODEX_SECURITY_STATE_DIR` takes precedence over `CODEX_HOME`; keep both
+state and result paths outside the scanned repository.
+
+The repository's Docker Compose workflow additionally recognizes
+`CODEX_SECURITY_IMAGE`, `CODEX_SECURITY_USER`, `CODEX_SECURITY_SECCOMP`,
+`CODEX_SECURITY_CSV`, `CODEX_SECURITY_RESULTS`, and `CODEX_SECURITY_STATE` for
+its image, runtime user, seccomp profile, input, results, and state mounts.
+Provide `GH_TOKEN` or `GITHUB_TOKEN` for private GitHub checkouts and
+`CODEX_SECURITY_GIT_HOST` for a GitHub Enterprise host in the container.
+These container settings are distinct from standalone CLI flags and
+interactive discovery's `GH_HOST`.
+
+Variables such as `CODEX_SECURITY_SCAN_ID`, `CODEX_SECURITY_SCAN_DIR`,
+`CODEX_SECURITY_PLUGIN_ROOT`, `CODEX_SECURITY_CONFIG_PATH`, and
+`CODEX_SECURITY_TARGET_PATHS_FILE` are generated by an active scan. They are
+internal runtime data, not supported user configuration.
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
@@ -244,7 +410,8 @@ Results remain under `--output-dir`; rerun the same command to resume.
 `npx @openai/codex-security scans list` lists scans for the current repository. Pass a
 repository path to inspect another checkout, `--scan-root DIR` to list scans
 whose artifacts are under a particular root. `scans show SCAN_ID` includes the
-scan configuration, results, coverage, and artifact locations.
+scan configuration, results, coverage, and artifact locations. Add
+`--show-linked-findings` to include finding links from previous scans.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
