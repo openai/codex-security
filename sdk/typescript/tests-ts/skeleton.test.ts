@@ -55,12 +55,15 @@ describe("TypeScript package skeleton", () => {
     ).toEqual([]);
   });
 
-  test("builds packages before packing and provides a production audit", async () => {
+  test("builds packages without a preinstalled package manager and provides a production audit", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
 
-    expect(packageJson.scripts.prepack).toBe("pnpm run build");
+    expect(packageJson.scripts.build).toBe(
+      "node --run clean && tsc -p tsconfig.build.json",
+    );
+    expect(packageJson.scripts.prepack).toBe("node --run build");
     expect(packageJson.scripts["audit:prod"]).toBe(
       "pnpm audit --prod --audit-level high",
     );
