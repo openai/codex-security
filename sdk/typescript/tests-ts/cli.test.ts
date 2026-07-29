@@ -1775,13 +1775,11 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
   });
 
-  test("turns provider-specific scan failures into actionable safe messages", async () => {
+  test("turns authentication and rate-limit failures into actionable safe messages", async () => {
     for (const [message, expected] of [
       ["401 invalid API key for org-private", "provide a valid API key"],
       ["403 model access denied for org-private", "model access"],
       ["429 rate limit reached for org-private", "rate limit"],
-      ["network failure ECONNRESET for org-private", "network connection"],
-      ["request timed out for org-private", "connection timed out"],
     ] as const) {
       const stdout = capture();
       const stderr = capture();
@@ -1798,6 +1796,58 @@ describe("CLI", () => {
       expect(stderr.text()).toContain(expected);
       expect(stderr.text()).not.toContain("org-private");
     }
+  });
+
+  test("surfaces underlying scanner errors instead of inventing a model outage", async () => {
+    for (const message of [
+      "Could not save the Codex Security scan: UNIQUE constraint failed: scans.scan_dir",
+      "sandbox-exec: sandbox_apply: Operation not permitted during network setup.",
+      "network failure ECONNRESET while connecting to the model.",
+      "request timed out while reading the scanner response.",
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw new CodexSecurityError(message);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(`codex-security: ${message}\n`);
+      expect(stderr.text()).not.toContain("model service could not be reached");
+    }
+  });
+
+  test("redacts credentials in underlying network errors", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError(
+          `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(
+      `network failure ECONNRESET ${REDACTED_CREDENTIALS}`,
+    );
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).not.toContain("model service could not be reached");
   });
 
   test("reports database connection failures without claiming the model network failed", async () => {
@@ -1835,6 +1885,30 @@ describe("CLI", () => {
     ).toBe(0);
     expect(stdout.text()).toContain("scanDir: /tmp/scan");
     expect(stdout.text()).toContain("completeness: complete");
+  });
+
+  test("prints scan completion warnings without failing the scan", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Repository HEAD changed while the scan was running; results were saved for the original revision.",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Repository HEAD changed while the scan was running; results were saved for the original revision.",
+    );
   });
 
   test("reports isolated observer failures without failing the scan", async () => {
