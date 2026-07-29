@@ -11,8 +11,9 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
-const PACKAGE_SMOKE_TIMEOUT_MS = 120_000;
+const PACKAGE_SMOKE_TIMEOUT_MS = packageSmokeTimeouts().commandTimeoutMs;
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -191,12 +192,11 @@ try {
     [
       ...npm.args,
       "install",
+      "--prefer-offline",
       "--include=optional",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
-      "--cache",
-      join(consumer, ".npm-cache"),
       archive,
     ],
     { cwd: consumer },
