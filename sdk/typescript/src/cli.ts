@@ -2385,6 +2385,11 @@ async function runScan(
         progress.stage(message);
         progress.startTimer(runningMessage());
       },
+      onWarning: (warning) => {
+        errorOutput.write(
+          `codex-security: warning: ${cliErrorMessage(warning)}\n`,
+        );
+      },
       onObserverError: (observer, error) => {
         errorOutput.write(
           `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
@@ -2496,9 +2501,7 @@ function scanFailureMessage(
     case "rate_limited":
       return "The configured account reached its rate limit. Wait and retry.";
     case "network_error":
-      return "The model service could not be reached. Check your network connection and try again.";
     case "timeout":
-      return "The connection timed out. Check your network connection and try again.";
     case "unknown":
       return cliErrorMessage(error);
   }
