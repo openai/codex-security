@@ -21,6 +21,7 @@ import {
   capture,
   dependencies,
 } from "./cli-fixtures.js";
+import { withHome } from "./support/home.js";
 
 describe("CLI", () => {
   test("does not pass credentials or Python startup paths to the exporter", () => {
@@ -435,6 +436,45 @@ describe("CLI", () => {
         ),
       ).toBe(0);
       expect(await readFile(output, "utf8")).toBe('{"version":"2.1.0"}\n');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("expands home-relative scan and output paths", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+    try {
+      const home = join(directory, "home");
+      await mkdir(join(home, "scan"), { recursive: true });
+      await mkdir(join(home, "reports"));
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await withHome(home, () =>
+          main(
+            [
+              "export",
+              "~/scan",
+              "--export-format",
+              "json",
+              "--output",
+              "~/reports/results.json",
+            ],
+            stdout.stream,
+            stderr.stream,
+            dependencies({ currentDirectory: directory }),
+          ),
+        ),
+      ).toBe(0);
+      expect(
+        JSON.parse(
+          await readFile(join(home, "reports", "results.json"), "utf8"),
+        ),
+      ).toMatchObject({ documentType: "codex-security.findings" });
+      await expect(stat(join(directory, "~"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

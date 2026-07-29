@@ -15,6 +15,7 @@ import {
   type BulkScanDiscoveryDependencies,
   type BulkScanPrompt,
 } from "../src/bulk-scan-discovery.js";
+import { withHome } from "./support/home.js";
 
 const temporaryDirectories: string[] = [];
 const NOW = Date.parse("2026-07-22T12:00:00.000Z");
@@ -362,6 +363,27 @@ describe("bulk scan repository discovery", () => {
         code: "ENOENT",
       });
     }
+  });
+
+  test("expands a home-relative output directory typed at the prompt", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const { dependencies, prompt } = discoveryDependencies(root);
+    prompt.confirms = [true];
+    prompt.inputs = ["~/security-scans"];
+
+    const result = await withHome(home, async () =>
+      runBulkScanWizard(dependencies),
+    );
+
+    expect(result?.outputDir).toBe(join(home, "security-scans"));
+    expect(result?.inputPath).toBe(
+      join(home, "security-scans", "repositories.csv"),
+    );
+    await expect(lstat(join(root, "~"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   test("rejects an existing scan without replacing its inventory", async () => {

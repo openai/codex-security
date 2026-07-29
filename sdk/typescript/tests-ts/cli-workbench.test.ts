@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget } from "../src/index.js";
@@ -9,6 +9,7 @@ import {
   REDACTED_CREDENTIALS,
   SYNTHETIC_CREDENTIALS,
 } from "./support/cli.js";
+import { withHome } from "./support/home.js";
 
 describe("CLI workbench", () => {
   test("lists repository and scan-root history without starting Codex", async () => {
@@ -55,6 +56,35 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toMatchObject({ repository: "scans" });
+  });
+
+  test("expands home-relative repository and scan-root history paths", async () => {
+    const home = resolve("/home/analyst");
+    const cases: Array<[string[], string[]]> = [
+      [
+        ["scans", "list", "~/checkouts/api"],
+        ["list-scans", "--repository", join(home, "checkouts", "api")],
+      ],
+      [
+        ["scans", "list", "--scan-root", "~/security-scans"],
+        ["list-scans", "--scan-root", join(home, "security-scans")],
+      ],
+    ];
+    for (const [argv, expected] of cases) {
+      let invocation: readonly string[] | undefined;
+      const deps = dependencies({
+        onWorkbench: (args) => {
+          invocation = args;
+          return { scans: [{ scanId: "scan-1" }] };
+        },
+      });
+      expect(
+        await withHome(home, () =>
+          main(argv, capture().stream, capture().stream, deps),
+        ),
+      ).toBe(0);
+      expect(invocation).toEqual(expected);
+    }
   });
 
   test("shows scans and returns cached comparisons with one workbench call", async () => {

@@ -159,6 +159,16 @@ function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
 }
 
+/**
+ * Resolves a path supplied on the command line. Shells such as PowerShell, and
+ * every shell when the argument is quoted, pass `~` through literally, so the
+ * CLI expands it the same way the SDK does for scan targets and output
+ * directories.
+ */
+function resolveCliPath(directory: string, value: string): string {
+  return resolve(directory, expandHome(value));
+}
+
 interface ScanArguments {
   auth?: ScanAuthMode;
   repository?: string;
@@ -647,24 +657,20 @@ export async function main(
         const repository =
           options.scanRoot !== undefined && args.repository === undefined
             ? undefined
-            : resolve(directory, args.repository ?? directory);
+            : resolveCliPath(directory, args.repository ?? directory);
+        const scanRoot =
+          options.scanRoot === undefined
+            ? undefined
+            : resolveCliPath(directory, options.scanRoot);
         return presentHistory(
           await history([
             "list-scans",
             ...(repository === undefined ? [] : ["--repository", repository]),
-            ...(options.scanRoot === undefined
-              ? []
-              : ["--scan-root", resolve(directory, options.scanRoot)]),
+            ...(scanRoot === undefined ? [] : ["--scan-root", scanRoot]),
           ]),
           "list",
           format,
-          {
-            repository,
-            scanRoot:
-              options.scanRoot === undefined
-                ? undefined
-                : resolve(directory, options.scanRoot),
-          },
+          { repository, scanRoot },
         );
       },
     })
@@ -1027,7 +1033,10 @@ export async function main(
             "git",
             [
               "-C",
-              resolve(dependencies.currentDirectory(), args.repository ?? "."),
+              resolveCliPath(
+                dependencies.currentDirectory(),
+                args.repository ?? ".",
+              ),
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
@@ -1153,8 +1162,8 @@ export async function main(
                 "--output-dir is required with a repository CSV.",
               );
             }
-            inputPath = resolve(currentDirectory, args.input);
-            outputDir = resolve(currentDirectory, options.outputDir);
+            inputPath = resolveCliPath(currentDirectory, args.input);
+            outputDir = resolveCliPath(currentDirectory, options.outputDir);
           }
           const result = await runMultiscan({
             inputPath,
@@ -1232,12 +1241,12 @@ export async function main(
         const currentDirectory = dependencies.currentDirectory();
         exitCode = await runExport(
           {
-            scanDir: resolve(currentDirectory, args.scanDir),
+            scanDir: resolveCliPath(currentDirectory, args.scanDir),
             format: options.exportFormat,
             output:
               options.output === "-"
                 ? "-"
-                : resolve(
+                : resolveCliPath(
                     currentDirectory,
                     options.output ??
                       EXPORT_DEFAULT_OUTPUTS[options.exportFormat],
@@ -1245,7 +1254,7 @@ export async function main(
             sourceRoot:
               options.sourceRoot === undefined
                 ? undefined
-                : resolve(currentDirectory, options.sourceRoot),
+                : resolveCliPath(currentDirectory, options.sourceRoot),
             pythonPath: options.python,
           },
           output,

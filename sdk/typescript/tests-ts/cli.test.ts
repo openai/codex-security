@@ -40,6 +40,7 @@ import {
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
+import { withHome } from "./support/home.js";
 
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
@@ -512,6 +513,43 @@ describe("CLI", () => {
       expect(scanOptions).toMatchObject({ mode: "deep" });
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("expands home-relative bulk scan paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
+    try {
+      const home = join(root, "home");
+      await mkdir(home);
+      await multiscanInventory(home);
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await withHome(home, () =>
+          main(
+            [
+              "bulk-scan",
+              "~/repositories.csv",
+              "--output-dir",
+              "~/results",
+              "--json",
+            ],
+            stdout.stream,
+            stderr.stream,
+            dependencies({ currentDirectory: root }),
+          ),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        total: 1,
+        completed: 1,
+        resultsPath: join(home, "results", "results.jsonl"),
+      });
+      await expect(stat(join(root, "~"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
