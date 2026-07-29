@@ -947,6 +947,102 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result).toEqual({ ok: true });
   });
 
+  test("preserves recorded artifact paths when archiving a completed scan", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    const archivedScanDir = `${scanDir}.previous-20260729T000000Z`;
+    await mkdir(scanDir, { mode: 0o700 });
+    await mkdir(archivedScanDir, { mode: 0o700 });
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, json, sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_scan_start import archive_scan",
+          "scan_dir = Path(sys.argv[2])",
+          "archived_scan_dir = Path(sys.argv[3])",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
+          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
+          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
+          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
+          "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
+          "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
+          "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        scanDir,
+        archivedScanDir,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual({
+      scanDir: archivedScanDir,
+      artifacts: [
+        { kind: "coverage", path: join(archivedScanDir, "coverage.json") },
+        { kind: "findings", path: join(archivedScanDir, "findings.json") },
+        { kind: "manifest", path: join(archivedScanDir, "scan-manifest.json") },
+        { kind: "markdownReport", path: join(archivedScanDir, "report.md") },
+      ],
+    });
+  });
+
+  test("does not strand completed scan artifacts without an archive path", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir, { mode: 0o700 });
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_scan_start import archive_scan",
+          "scan_dir = Path(sys.argv[2])",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
+          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
+          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        scanDir,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The archived scan directory is required to preserve existing scan artifacts.",
+    );
+    expect(await readdir(root)).toEqual(["scan"]);
+  });
+
   test("reports an unwritable SQLite state directory without a Python traceback", async () => {
     const root = await temporaryDirectory();
     const pluginRoot = join(root, "plugin");

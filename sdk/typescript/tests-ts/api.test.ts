@@ -923,6 +923,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(output, { mode: 0o700 });
     await writeFile(join(output, "previous.txt"), "previous scan\n");
     let archived: string | undefined;
+    let registration: readonly string[] | undefined;
     const observerErrors: Array<[ScanObserverName, string]> = [];
     const client = new TestClient(
       {},
@@ -931,6 +932,22 @@ describe("CodexSecurity orchestration", () => {
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => "/managed/python",
         repositoryRevision: async () => null,
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          if (args[0] !== "register-cli-scan") return {};
+          registration = args;
+          return {
+            scanId: "scan_example_001",
+            targetId: "target_sha256_example",
+            scanDir: output,
+          };
+        },
         createCodex: () => ({
           startThread: () => ({
             id: null,
@@ -959,6 +976,10 @@ describe("CodexSecurity orchestration", () => {
       ["onOutputArchived", "archive observer exploded"],
     ]);
     expect(archived?.startsWith(`${output}.previous-`)).toBe(true);
+    expect(registration).toContain("--archive-existing");
+    expect(
+      registration?.[registration.indexOf("--archived-scan-dir") + 1],
+    ).toBe(archived);
     expect(await readFile(join(archived!, "previous.txt"), "utf8")).toBe(
       "previous scan\n",
     );
@@ -3389,6 +3410,7 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
+    const keyLog = join(root, "api-keys");
     const scanDir = join(root, "scan");
     await mkdir(repository);
     await mkdir(codexHome);
@@ -3396,12 +3418,19 @@ appendFileSync(${JSON.stringify(keyLog)}, apiKey.trim() + "\\n");
     await writeFile(
       fakeCodex,
       `
+import { appendFileSync } from "node:fs";
+
 const args = process.argv.slice(2).join(" ");
 if (args === "login --with-api-key") {
-  process.exit(0);
+  let apiKey = "";
+  for await (const chunk of process.stdin) apiKey += chunk;
+  if (!["secret-key", "ambient-key"].includes(apiKey.trim())) {
+    process.exitCode = 3;
+  } else {
+    appendFileSync(${JSON.stringify(keyLog)}, apiKey);
+  }
 } else if (args === "login") {
   console.error("Open https://auth.example.test/login");
-  process.exit(0);
 } else {
   process.exitCode = 2;
 }
@@ -3451,16 +3480,20 @@ if (args === "login --with-api-key") {
         },
       },
     );
-    await client.loginApiKey("secret-key");
-    const login = await client.loginChatGPT();
-    await expect(login.wait()).resolves.toMatchObject({ success: true });
-    await client.run(repository);
-    expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
-    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
-      OPENAI_API_KEY: "ambient-key",
-      CODEX_API_KEY: "secondary-ambient-key",
-    });
-    await client.close();
+    try {
+      await client.loginApiKey("secret-key");
+      const login = await client.loginChatGPT();
+      await expect(login.wait()).resolves.toMatchObject({ success: true });
+      await client.run(repository);
+      expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
+      expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+        OPENAI_API_KEY: "ambient-key",
+        CODEX_API_KEY: "secondary-ambient-key",
+      });
+      expect(await readFile(keyLog, "utf8")).toBe("secret-key\nambient-key\n");
+    } finally {
+      await client.close();
+    }
   });
 
   test("aborts and waits for an in-flight API-key login during close", async () => {

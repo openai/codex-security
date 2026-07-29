@@ -126,6 +126,7 @@ without printing its value, including when no stored sign-in exists.
 ```bash
 npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
+npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
 npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
@@ -136,6 +137,7 @@ npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
+npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
@@ -149,7 +151,9 @@ npx @openai/codex-security export /path/outside/repository/results --export-form
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
+npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
+npx @openai/codex-security patch "Missing authorization check" --effort high
 ```
 
 Run `npx @openai/codex-security --version` for the installed CLI version or
@@ -187,10 +191,11 @@ for a passing policy. Incomplete scans still write the available human or JSON
 result to stdout and a coverage warning to stderr, including in report-only
 mode.
 
-Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. Use
-`--model gpt-5.6-terra` to switch models. Use repeatable `--codex KEY=VALUE`
-options for other Codex settings, such as
-`--codex 'model_reasoning_effort="high"'`.
+Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
+the implied provider. Use `--model gpt-5.6-terra` to switch models and
+`--effort minimal|low|medium|high|xhigh` to set reasoning effort. Repeat
+`--codex KEY=VALUE` for other Codex settings; existing
+`--codex 'model_reasoning_effort="high"'` overrides remain supported.
 
 These overrides do not change the scan's approval policy or filesystem
 permissions. See [Local security model](#local-security-model).
@@ -317,9 +322,9 @@ input can be either a file, whose contents are read into the request, or literal
 text. Both commands operate on the current directory, use the scan model
 and reasoning defaults, ignore unrelated user configuration and plugins, and
 print the final response without the underlying Codex event stream. Override
-the model or reasoning effort with `--codex 'model="gpt-5.6-sol"'` or
-`--codex 'model_reasoning_effort="high"'`. Inputs are limited to 64 items and
-1 MiB total.
+the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
+`--effort high` or `--codex 'model_reasoning_effort="high"'`. Inputs are
+limited to 64 items and 1 MiB total.
 
 Canonical scan documents are limited to 16 MiB for the manifest, 128 MiB for
 findings, and 32 MiB for coverage. Oversized scans are rejected before sealing.
