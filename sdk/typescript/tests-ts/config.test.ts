@@ -32,6 +32,7 @@ describe("Codex configuration", () => {
       codexOverrides: {
         features: { multi_agent_v2: { max_concurrent_threads_per_session: 4 } },
         model_reasoning_effort: "high",
+        windows: { sandbox: "elevated" },
       },
     });
     expect(merged["features"]).toEqual({
@@ -45,6 +46,7 @@ describe("Codex configuration", () => {
     expect(merged["agents"]).toBeUndefined();
     expect(merged["model"]).toBe("gpt-5.6-sol");
     expect(merged["model_reasoning_effort"]).toBe("high");
+    expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
   test("rejects prototype-bearing override keys", async () => {
@@ -92,6 +94,9 @@ describe("Codex configuration", () => {
     expect(await mergedCodexConfig({})).toMatchObject({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "xhigh",
+      windows: {
+        sandbox: "unelevated",
+      },
     });
   });
 

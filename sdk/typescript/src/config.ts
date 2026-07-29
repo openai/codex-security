@@ -33,6 +33,10 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
       max_concurrent_threads_per_session: 9,
     },
   },
+  // Named filesystem profiles need an active Windows sandbox backend.
+  windows: {
+    sandbox: "unelevated",
+  },
 };
 
 deepFreezeJson(DEFAULT_CODEX_CONFIG);
