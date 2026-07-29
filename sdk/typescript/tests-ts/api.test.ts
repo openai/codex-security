@@ -3094,6 +3094,32 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     ).resolves.toBe(true);
   });
 
+  test("preserves an explicit stored sign-in instead of reimporting ambient authentication", async () => {
+    const root = await temporaryDirectory();
+    const ambientHome = join(root, "ambient-home");
+    const credentialHome = join(root, "credential-home");
+    await mkdir(ambientHome);
+    await mkdir(credentialHome);
+    await writeFile(join(ambientHome, "auth.json"), '{"token":"ambient"}\n');
+    await writeFile(
+      join(credentialHome, "auth.json"),
+      '{"token":"explicit"}\n',
+    );
+    let imported = false;
+
+    await expect(
+      initialCredentialsAvailable({}, ambientHome, credentialHome, async () => {
+        imported = true;
+        return true;
+      }),
+    ).resolves.toBe(true);
+
+    expect(imported).toBe(false);
+    expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
+      '{"token":"explicit"}\n',
+    );
+  });
+
   test("does not reimport ambient credentials after an explicit logout", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, "ambient-home");

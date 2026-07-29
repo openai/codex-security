@@ -376,6 +376,25 @@ export async function codexSecurityCredentialAllowsAmbientImport(
   }
 }
 
+export async function codexSecurityHasStoredFileCredentials(
+  codexHome: string,
+): Promise<boolean> {
+  const path = join(codexHome, "auth.json");
+  let metadata: Stats;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new OutputDirectoryError(
+      `Codex Security stored authentication is not a regular file: ${path}`,
+    );
+  }
+  return true;
+}
+
 export async function preserveCodexSecurityPluginRegistration(
   codexHome: string,
   config: JsonObject,
@@ -759,25 +778,34 @@ export async function importAmbientAuth(
     return false;
   }
   await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
+  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   const destination = join(isolatedHome, "auth.json");
-  const temporary = join(
-    isolatedHome,
-    `.auth-${process.pid}-${Date.now()}.tmp`,
-  );
+  const temporary = join(isolatedHome, `.auth-${randomUUID()}.tmp`);
   try {
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
     await chmod(temporary, 0o600);
-    await rename(temporary, destination);
+    try {
+      await copyFile(temporary, destination, constants.COPYFILE_EXCL);
+    } catch (error) {
+      if (
+        nodeErrorCode(error) === "EEXIST" &&
+        (await codexSecurityHasStoredFileCredentials(isolatedHome))
+      ) {
+        return true;
+      }
+      throw error;
+    }
     await chmod(destination, 0o600);
     return true;
   } catch (error) {
-    await rm(temporary, { force: true }).catch(() => undefined);
     throw new PluginBootstrapError(
       "Unable to copy ambient Codex authentication.",
       {
         cause: error,
       },
     );
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
 

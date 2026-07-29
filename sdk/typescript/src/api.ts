@@ -51,6 +51,7 @@ import {
   bootstrapPlugin,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
+  codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
   importAmbientAuth,
@@ -1266,6 +1267,7 @@ export async function initialCredentialsAvailable(
   if (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome))) {
     return false;
   }
+  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   return await importer(ambientHome, isolatedHome);
 }
 

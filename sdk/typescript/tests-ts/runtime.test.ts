@@ -738,6 +738,43 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("never replaces an explicitly stored sign-in with ambient credentials", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    await mkdir(ambient);
+    await mkdir(isolated);
+    await writeFile(join(ambient, "auth.json"), '{"token":"ambient"}\n');
+    await writeFile(join(isolated, "auth.json"), '{"token":"explicit"}\n');
+
+    expect(await importAmbientAuth(ambient, isolated)).toBe(true);
+    expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(
+      '{"token":"explicit"}\n',
+    );
+  });
+
+  test("uses unique temporary files for parallel ambient credential imports", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    await mkdir(ambient);
+    await writeFile(join(ambient, "auth.json"), '{"token":"ambient"}\n');
+
+    const imports = await Promise.all(
+      Array.from({ length: 8 }, async () =>
+        importAmbientAuth(ambient, isolated),
+      ),
+    );
+
+    expect(imports).toEqual(Array.from({ length: 8 }, () => true));
+    expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(
+      '{"token":"ambient"}\n',
+    );
+    expect(
+      (await readdir(isolated)).filter((path) => path.startsWith(".auth-")),
+    ).toEqual([]);
+  });
+
   test.skipIf(process.platform === "win32")(
     "imports symlink-backed ambient auth",
     async () => {

@@ -95,9 +95,10 @@ private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
 `$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
 configured. Login, status, logout, and scans use the same home. Codex manages
 credentials using its configured file or system-keyring backend and honors
-managed-device policies. An existing file-based Codex sign-in is also imported
-when available. Logging out prevents later scans from automatically reimporting
-that ambient sign-in until you explicitly log in again.
+managed-device policies. An existing file-based Codex sign-in is imported only
+when the dedicated home does not already contain stored credentials. Logging
+out prevents later scans from automatically reimporting that ambient sign-in
+until you explicitly log in again.
 
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
