@@ -11,7 +11,7 @@ Use these shared path conventions for Codex Security scan workflows unless the u
 - `security_scans_dir=<system_temp_dir>/codex-security-scans/<repo_name>`
 - `scan_id=<commit>_<scan timestamp>`
 - `scan_dir=<security_scans_dir>/<scan_id>`
-- `target_paths_file=$CODEX_SECURITY_TARGET_PATHS_FILE` for SDK scoped-path scans; this read-only scope input lives in the isolated Codex home outside the model-writable scan directory. Pass it directly to `make-repo-rank-input --scopes-file` and `bind-repo-scopes --scopes-file` before finalization, and do not print, evaluate, modify, or treat its contents as shell syntax.
+- `target_paths_file=$CODEX_SECURITY_TARGET_PATHS_FILE` for SDK scoped-path scans; this read-only scope input lives in the isolated Codex home outside the model-writable scan directory. For a compact standard scan, pass it directly to `make-scope-inventory --scopes-file`; ranking workflows use `make-repo-rank-input --scopes-file` only when their owning skill requires ranking. Pass it to `bind-repo-scopes --scopes-file` before finalization, and do not print, evaluate, modify, or treat its contents as shell syntax.
 - `artifacts_dir=<scan_dir>/artifacts`
 - `context_dir=<artifacts_dir>/01_context`
 - `discovery_dir=<artifacts_dir>/02_discovery`
@@ -40,9 +40,11 @@ End each repository-scoped threat model with these two lines:
 
 ### Standard Repository Or Scoped-Path Scan
 
-- Deterministic in-scope file list: `<discovery_dir>/in_scope_files.txt`
+- Deterministic exhaustive scope inventory: `<discovery_dir>/scope_inventory.jsonl`
+  - Each row contains exactly one JSON-encoded repository-relative `path`.
+  - This is an inventory, not ranking input. Review every row without scoring, sharding, or filtering.
 - Compact combined candidate ledger: `<discovery_dir>/candidate_ledger.jsonl`
-  - The combiner reads one or more temporary raw candidate sources, validates them against the in-scope file list, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values. This is the sole durable standard candidate artifact.
+  - The combiner reads one or more temporary raw candidate sources, validates them against the scope inventory, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values. This is the sole durable standard candidate artifact.
   - After normalization, compact validation adds exactly one `validation` object to every row with `disposition` (`reportable`, `suppressed`, `not_applicable`, or `deferred`), `method`, `confidence` (`high`, `medium`, or `low`), `confidence_rationale`, concise `rubric` and `evidence`, `counterevidence_or_proof_gap`, `remaining_uncertainty`, and optional `artifact_paths`. Add `source`, `control`, `sink`, or `preconditions` only when they clarify or differ from the discovery fields.
   - Compact attack-path analysis adds exactly one `attack_path` object to each validation row marked `reportable` or `deferred`, with `decision` (`reportable`, `ignore`, or `deferred`), `dataflow`, `reachability`, `counterevidence`, `impact` and `likelihood` (`high`, `medium`, `low`, `ignore`, or `unknown`), `severity` (`critical`, `high`, `medium`, `low`, `ignore`, or `unknown`), `severity_rationale`, `change_conditions`, and `proof_gap` when deferred. A `reportable` decision requires severity `critical`, `high`, `medium`, or `low`; `ignore` requires severity `ignore`; `deferred` uses a provisional reportable severity or `unknown`.
   - Preserve all discovery fields and row order during enrichment, rewrite atomically, and do not pass the enriched ledger back to `normalize_candidates.py`.

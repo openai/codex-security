@@ -91,6 +91,16 @@ export interface WorkbenchCommandOptions {
   failureMessage?: string;
 }
 
+export interface ScopeInventoryOptions {
+  python: string;
+  pluginRoot: string;
+  repository: string;
+  scanDir: string;
+  scopesFile?: string;
+  environment: ProcessEnvironment;
+  signal?: AbortSignal;
+}
+
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
@@ -180,6 +190,61 @@ export async function runWorkbench(
     );
   }
   return result as JsonObject;
+}
+
+export async function prepareScopeInventory(
+  options: ScopeInventoryOptions,
+): Promise<string> {
+  const output = join(
+    options.scanDir,
+    "artifacts",
+    "02_discovery",
+    "scope_inventory.jsonl",
+  );
+  await mkdir(dirname(output), { recursive: true, mode: 0o700 });
+  try {
+    await execFile(
+      options.python,
+      [
+        "-I",
+        "-B",
+        join(options.pluginRoot, "scripts", "generate_rank_input.py"),
+        "make-scope-inventory",
+        "--repo",
+        options.repository,
+        ...(options.scopesFile === undefined
+          ? ["--scope", "."]
+          : ["--scopes-file", options.scopesFile]),
+        "--out",
+        output,
+      ],
+      {
+        env: Object.fromEntries(
+          Object.entries(options.environment).filter(
+            ([name]) =>
+              name.toUpperCase() !== "OPENAI_API_KEY" &&
+              name.toUpperCase() !== "CODEX_API_KEY",
+          ),
+        ),
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true,
+        signal: options.signal,
+      },
+    );
+    const metadata = await lstat(output);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error("inventory helper did not create a regular file");
+    }
+    await chmod(output, 0o600);
+    return output;
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      `Could not prepare the standard scan scope inventory: ${processErrorDetail(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 export function bundledPluginCandidates(moduleDirectory: string): string[] {

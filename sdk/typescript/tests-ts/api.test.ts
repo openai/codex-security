@@ -40,7 +40,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import { writeCodexConfig, type JsonObject } from "../src/config.js";
-import { runWorkbench } from "../src/runtime.js";
+import { prepareScopeInventory, runWorkbench } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -62,6 +62,7 @@ class TestClient extends TestClientBase {
     dependencies: Record<string, unknown>,
   ) {
     super(config, {
+      prepareScopeInventory: async () => "",
       runWorkbench: async (_options: unknown, args: readonly string[]) => {
         if (args[0] === "register-cli-scan") {
           return {
@@ -2353,8 +2354,10 @@ describe("CodexSecurity orchestration", () => {
       'Use "$PYTHON" as <python_command> for every plugin helper',
     );
     expect(prompt).toContain(
-      'make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
+      'the SDK has already written the exhaustive combined inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl"',
     );
+    expect(prompt).not.toContain("make-repo-rank-input");
+    expect(prompt).not.toContain("rank_input.jsonl");
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
     );
@@ -2398,31 +2401,31 @@ describe("CodexSecurity orchestration", () => {
     const interpreter =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(interpreter).not.toBeNull();
-    const rankInput = join(scanDir, "rank_input.jsonl");
+    const scopeInventory = join(scanDir, "scope_inventory.jsonl");
     execFileSync(
       interpreter!,
       [
         "-B",
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-rank-input",
+        "make-scope-inventory",
         "--repo",
         repository,
         "--scopes-file",
         capturedTargetPathsFile,
         "--out",
-        rankInput,
+        scopeInventory,
       ],
       { stdio: "pipe" },
     );
-    const rankInputContents = await readFile(rankInput, "utf8");
+    const scopeInventoryContents = await readFile(scopeInventory, "utf8");
     expect(
-      rankInputContents
+      scopeInventoryContents
         .trimEnd()
         .split("\n")
         .map((row) => JSON.parse(row).path),
     ).toEqual([...paths].sort());
     for (const separator of ["\u0085", "\u2028", "\u2029"])
-      expect(rankInputContents).not.toContain(separator);
+      expect(scopeInventoryContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
     const coverage = join(scanDir, "coverage.json");
     await writeFile(
@@ -2451,6 +2454,163 @@ describe("CodexSecurity orchestration", () => {
     expect(JSON.parse(await readFile(coverage, "utf8")).includePaths).toEqual(
       paths,
     );
+    await client.close();
+  });
+
+  test("keeps every scoped file in the standard scan inventory", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scope = join(repository, "package");
+    const inventory = join(root, "scope_inventory.jsonl");
+    const targetPaths = join(root, "target-paths.json");
+    const candidates = join(root, "candidates.jsonl");
+    const ledger = join(root, "candidate_ledger.jsonl");
+    await mkdir(join(scope, "test"), { recursive: true });
+    await mkdir(join(scope, ".git"), { recursive: true });
+    await mkdir(join(scope, "node_modules", ".bin"), { recursive: true });
+    await Promise.all([
+      writeFile(join(scope, "README.md"), "# Package\n"),
+      writeFile(join(scope, "asset.bin"), new Uint8Array([0, 1, 2, 3])),
+      writeFile(join(scope, "index.ts"), "export const value = 1;\n"),
+      writeFile(
+        join(scope, "test", "route.test.ts"),
+        "export const tested = true;\n",
+      ),
+      writeFile(join(scope, ".git", "config"), "ignored\n"),
+      writeFile(
+        join(scope, "node_modules", ".bin", "wrangler"),
+        "#!/usr/bin/env node\n",
+      ),
+      writeFile(targetPaths, JSON.stringify(["package"])),
+      writeFile(
+        candidates,
+        `${JSON.stringify({
+          cwe_ids: ["CWE-20"],
+          locations: [
+            {
+              path: "package/test/route.test.ts",
+              start_line: 1,
+              role: "evidence",
+            },
+          ],
+          summary: "Candidate from an in-scope test route.",
+          evidence: "The test contains runnable behavior.",
+        })}\n`,
+      ),
+    ]);
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+    execFileSync(
+      interpreter!,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--scopes-file",
+        targetPaths,
+        "--out",
+        inventory,
+      ],
+      { stdio: "pipe" },
+    );
+    const rows = (await readFile(inventory, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((row) => JSON.parse(row));
+    expect(rows).toEqual([
+      { path: "package/README.md" },
+      { path: "package/asset.bin" },
+      { path: "package/index.ts" },
+      { path: "package/test/route.test.ts" },
+    ]);
+    execFileSync(
+      interpreter!,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        candidates,
+        "--out",
+        ledger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        inventory,
+      ],
+      { stdio: "pipe" },
+    );
+    expect(JSON.parse(await readFile(ledger, "utf8"))).toMatchObject({
+      cwe_ids: ["CWE-20"],
+      locations: [{ path: "package/test/route.test.ts" }],
+    });
+  });
+
+  test("materializes the standard scope inventory before starting Codex", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(join(repository, "package", "test"), { recursive: true });
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await Promise.all([
+      writeFile(join(repository, "package", "README.md"), "# Package\n"),
+      writeFile(
+        join(repository, "package", "test", "route.test.ts"),
+        "export const tested = true;\n",
+      ),
+    ]);
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+    let inventoryAtTurnStart = "";
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => interpreter!,
+        prepareOutputDir: async () => scanDir,
+        prepareScopeInventory,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              inventoryAtTurnStart = await readFile(
+                join(
+                  scanDir,
+                  "artifacts",
+                  "02_discovery",
+                  "scope_inventory.jsonl",
+                ),
+                "utf8",
+              );
+              throw new Error("inventory captured");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        target: ["package"],
+        mode: "standard",
+      }),
+    ).rejects.toThrow("inventory captured");
+    expect(
+      inventoryAtTurnStart
+        .trimEnd()
+        .split("\n")
+        .map((row) => JSON.parse(row)),
+    ).toEqual([
+      { path: "package/README.md" },
+      { path: "package/test/route.test.ts" },
+    ]);
     await client.close();
   });
 

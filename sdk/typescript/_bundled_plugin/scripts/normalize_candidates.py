@@ -188,6 +188,23 @@ def read_scope(path: Path, repo_root: Path) -> set[str]:
     return scope
 
 
+def read_scope_inventory(path: Path, repo_root: Path) -> set[str]:
+    scope: set[str] = set()
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip():
+                raise ValueError(f"in-scope inventory row {number}: blank rows are not allowed")
+            try:
+                row = json.loads(line)
+                if not isinstance(row, dict) or set(row) != {"path"}:
+                    raise ValueError("expected an object with only a path field")
+                relative, _ = relative_file(row["path"], repo_root)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                raise ValueError(f"in-scope inventory row {number}: {error}") from error
+            scope.add(relative)
+    return scope
+
+
 def normalize_candidate(
     row: dict[str, Any], repo_root: Path, scope: set[str], line_counts: dict[Path, int]
 ) -> dict[str, Any]:
@@ -260,20 +277,31 @@ def main() -> None:
     parser.add_argument("--input", nargs="+", required=True, help="Candidate JSONL inputs.")
     parser.add_argument("--out", required=True, help="Combined candidate JSONL output.")
     parser.add_argument("--repo-root", required=True, help="Repository root for candidate paths.")
-    parser.add_argument("--in-scope-files", required=True, help="Repository-relative file list.")
+    scope_inputs = parser.add_mutually_exclusive_group(required=True)
+    scope_inputs.add_argument(
+        "--in-scope-files", help="Newline-delimited repository-relative file list."
+    )
+    scope_inputs.add_argument(
+        "--in-scope-inventory", help="JSONL standard-scan inventory with one path per row."
+    )
     args = parser.parse_args()
     try:
         repo_root = Path(args.repo_root).expanduser().resolve(strict=True)
         if not repo_root.is_dir():
             raise ValueError("--repo-root: expected a directory")
         output = Path(args.out).expanduser().resolve(strict=False)
-        scope_path = Path(args.in_scope_files).expanduser().resolve(strict=True)
+        scope_input = args.in_scope_inventory or args.in_scope_files
+        scope_path = Path(scope_input).expanduser().resolve(strict=True)
         inputs = sorted({Path(value).expanduser().resolve(strict=True) for value in args.input})
         if output in inputs:
             raise ValueError("--out: must not also be an input")
         if output == scope_path:
-            raise ValueError("--out: must not replace --in-scope-files")
-        scope = read_scope(scope_path, repo_root)
+            raise ValueError("--out: must not replace the in-scope inventory")
+        scope = (
+            read_scope_inventory(scope_path, repo_root)
+            if args.in_scope_inventory is not None
+            else read_scope(scope_path, repo_root)
+        )
         line_counts: dict[Path, int] = {}
         rows: list[dict[str, Any]] = []
         for source in inputs:

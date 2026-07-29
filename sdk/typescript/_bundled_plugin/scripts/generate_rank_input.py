@@ -5,6 +5,8 @@ This script stays deliberately model-free:
 
 - `make-repo-rank-input` creates the deterministic repository or scoped-path
   JSONL candidate worklist that ranking subagents consume.
+- `make-scope-inventory` creates the exhaustive JSONL file inventory that
+  compact standard scans consume without ranking or preview-based filtering.
 - `make-diff-rank-input` creates the deterministic diff-scoped JSONL candidate
   worklist from Git changed paths. It supports committed revision diffs and
   local working-tree patches.
@@ -152,6 +154,22 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_PREVIEW_BYTES,
         help=f"Maximum UTF-8 bytes in each preview. Defaults to {DEFAULT_PREVIEW_BYTES}.",
     )
+
+    inventory = subparsers.add_parser(
+        "make-scope-inventory",
+        help="Create the exhaustive file inventory for a compact standard scan.",
+    )
+    inventory.add_argument("--repo", required=True, help="Repository root.")
+    inventory.add_argument(
+        "--scope",
+        default=".",
+        help="Path within the repository to scan. Defaults to the repository root.",
+    )
+    inventory.add_argument(
+        "--scopes-file",
+        help="JSON array of repository-relative files and directories to scan together.",
+    )
+    inventory.add_argument("--out", required=True, help="Output scope_inventory.jsonl path.")
 
     bind = subparsers.add_parser(
         "bind-repo-scopes",
@@ -457,6 +475,56 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     output = Path(args.out).expanduser()
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} rows to {output}")
+
+
+def make_scope_inventory(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).expanduser().resolve()
+    if not repo.is_dir():
+        raise SystemExit(f"Repo path not found: {repo}")
+    scopes = [args.scope]
+    explicit_scopes = args.scopes_file is not None
+    if explicit_scopes:
+        scopes = load_scopes_file(Path(args.scopes_file).expanduser())
+
+    resolved_scopes = [
+        resolve_scope(repo, scope, expand_user=not explicit_scopes) for scope in scopes
+    ]
+    paths: set[str] = set()
+    for scope_abs in resolved_scopes:
+        if scope_abs.is_file():
+            candidates = [scope_abs]
+        else:
+            candidates = []
+            pending = [scope_abs]
+            while pending:
+                directory = pending.pop()
+                try:
+                    entries = list(directory.iterdir())
+                except OSError:
+                    continue
+                for entry in entries:
+                    if entry.name in {".git", "node_modules"} or entry.is_symlink():
+                        continue
+                    if entry.is_dir():
+                        pending.append(entry)
+                    elif entry.is_file():
+                        candidates.append(entry)
+        for path in candidates:
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                path.resolve(strict=True).relative_to(repo)
+            except (OSError, ValueError):
+                continue
+            relative = path.relative_to(repo)
+            if ".git" in relative.parts or "node_modules" in relative.parts:
+                continue
+            paths.add(relative.as_posix())
+
+    rows = [{"path": path} for path in sorted(paths)]
+    output = Path(args.out).expanduser()
+    write_jsonl(output, rows)
+    print(f"Wrote {len(rows)} inventory rows to {output}")
 
 
 def bind_repo_scopes(args: argparse.Namespace) -> None:
@@ -985,6 +1053,8 @@ def main() -> None:
     args = parse_args()
     if args.command == "make-repo-rank-input":
         make_repo_rank_input(args)
+    elif args.command == "make-scope-inventory":
+        make_scope_inventory(args)
     elif args.command == "bind-repo-scopes":
         bind_repo_scopes(args)
     elif args.command == "make-diff-rank-input":

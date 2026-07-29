@@ -56,6 +56,7 @@ import {
   planOutputArchive,
   prepareOutputDir,
   preparePersistentScanRoot,
+  prepareScopeInventory,
   requireModelSafeOutputDir,
   resolveCodexCommand,
   resolvePluginPath,
@@ -201,6 +202,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  prepareScopeInventory?: typeof prepareScopeInventory;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -623,6 +625,42 @@ export class CodexSecurity {
               `codex-security-target-paths-${randomUUID()}.json`,
             )
           : null;
+      const serializedPaths =
+        normalized.kind === "paths"
+          ? JSON.stringify(normalized.paths)
+              .replaceAll("\u0085", "\\u0085")
+              .replaceAll("\u2028", "\\u2028")
+              .replaceAll("\u2029", "\\u2029")
+          : null;
+      checkOpen();
+      if (serializedPaths !== null && targetPathsFile !== null) {
+        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
+          flag: "wx",
+          mode: 0o400,
+          signal,
+        });
+        await chmod(targetPathsFile, 0o400);
+      }
+      if (
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        await (
+          this.#dependencies.prepareScopeInventory ?? prepareScopeInventory
+        )({
+          python,
+          pluginRoot: runtime.plugin.pluginRoot,
+          repository: repo,
+          scanDir,
+          ...(targetPathsFile === null ? {} : { scopesFile: targetPathsFile }),
+          environment: selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+          ),
+          signal,
+        });
+      }
+      checkOpen();
       const runtimePaths = {
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
@@ -665,23 +703,6 @@ export class CodexSecurity {
         skipGitRepoCheck: true,
         approvalPolicy: "never",
       });
-      const serializedPaths =
-        normalized.kind === "paths"
-          ? JSON.stringify(normalized.paths)
-              .replaceAll("\u0085", "\\u0085")
-              .replaceAll("\u2028", "\\u2028")
-              .replaceAll("\u2029", "\\u2029")
-          : null;
-      checkOpen();
-      if (serializedPaths !== null && targetPathsFile !== null) {
-        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
-          flag: "wx",
-          mode: 0o400,
-          signal,
-        });
-        await chmod(targetPathsFile, 0o400);
-      }
-      checkOpen();
       const { events } = await thread.runStreamed(prompt, {
         signal,
       });
@@ -1316,7 +1337,7 @@ async function scanPrompt(
         ]
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
-    targetInstruction(target),
+    targetInstruction(target, mode),
     "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
   ].join("\n");
 }
@@ -1327,11 +1348,16 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(target: NormalizedTarget): string {
+function targetInstruction(target: NormalizedTarget, mode: ScanMode): string {
   if (target.kind === "repository")
-    return "Scan target: the entire repository.";
-  if (target.kind === "paths")
-    return 'Scan target paths: generate the combined inventory once with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/rank_input.jsonl". Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
+    return mode === "standard"
+      ? 'Scan target: the entire repository. The SDK has already written the exhaustive standard inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl"; review every row without regenerating, ranking, scoring, sharding, or dropping files.'
+      : "Scan target: the entire repository.";
+  if (target.kind === "paths") {
+    if (mode === "deep")
+      return 'Scan target paths: generate the combined ranking input once with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/rank_input.jsonl". Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
+    return 'Scan target paths: the SDK has already written the exhaustive combined inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl". Review every row without regenerating, ranking, scoring, sharding, or dropping files. Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
+  }
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }
