@@ -25,6 +25,7 @@ import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { ModelReasoningEffort } from "@openai/codex-sdk";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -122,6 +123,15 @@ const DISPLAY_SEVERITIES: readonly SeverityLevel[] = [
   ...REPORTABLE_SEVERITIES,
   "informational",
 ];
+const MODEL_REASONING_EFFORTS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const satisfies readonly ModelReasoningEffort[];
+const DEFAULT_SCAN_MODEL_CONFIGURATION =
+  scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const EXPORT_DEFAULT_OUTPUTS = {
   csv: "findings.csv",
   json: "findings.json",
@@ -136,6 +146,7 @@ const VALUE_OPTIONS = new Set([
   "--base",
   "--mode",
   "--model",
+  "--effort",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -159,6 +170,17 @@ function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
 }
 
+function effortOption() {
+  return z
+    .enum(MODEL_REASONING_EFFORTS, {
+      error: "--effort must be minimal, low, medium, high, or xhigh.",
+    })
+    .optional()
+    .describe(
+      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
+    );
+}
+
 interface ScanArguments {
   auth?: ScanAuthMode;
   repository?: string;
@@ -170,6 +192,7 @@ interface ScanArguments {
   base?: string;
   mode: ScanMode;
   model?: string;
+  effort?: ModelReasoningEffort;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -888,7 +911,10 @@ export async function main(
             .describe("Scan mode."),
           model: optionValue("--model")
             .optional()
-            .describe("Model to use for the scan."),
+            .describe(
+              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            ),
+          effort: effortOption(),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe("Write scan artifacts to DIR."),
@@ -906,7 +932,7 @@ export async function main(
             .array(optionValue("--codex"))
             .default([])
             .describe(
-              "Override isolated Codex config with KEY=VALUE; repeat as needed.",
+              'Override Codex settings; e.g. model_reasoning_effort="high".',
             ),
           failOnSeverity: z
             .enum(REPORTABLE_SEVERITIES)
@@ -951,6 +977,10 @@ export async function main(
       examples: [
         { args: { repository: "." } },
         { args: { repository: "." }, options: { model: "gpt-5.6-terra" } },
+        {
+          args: { repository: "." },
+          options: { model: "gpt-5.6-terra", effort: "high" },
+        },
         { args: { repository: "." }, options: { path: ["src", "tests"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
       ],
@@ -975,6 +1005,7 @@ export async function main(
             base: options.base,
             mode: options.mode,
             model: options.model,
+            effort: options.effort,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -995,6 +1026,13 @@ export async function main(
             message: outcome.error,
             exitCode,
           });
+        }
+        if (
+          !options.dryRun &&
+          format === "toon" &&
+          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+        ) {
+          return;
         }
         return outcome.data;
       },
@@ -1092,7 +1130,10 @@ export async function main(
         mode: z.enum(["standard", "deep"]).default("standard"),
         model: optionValue("--model")
           .optional()
-          .describe("Model to use for each repository."),
+          .describe(
+            `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+          ),
+        effort: effortOption(),
         maxAttempts: z
           .number()
           .int()
@@ -1101,7 +1142,12 @@ export async function main(
           .describe("Maximum scan attempts per repository."),
         pluginPath: z.string().min(1).optional(),
         python: z.string().min(1).optional(),
-        codex: z.array(z.string().min(1)).default([]),
+        codex: z
+          .array(z.string().min(1))
+          .default([])
+          .describe(
+            'Override Codex settings; e.g. model_reasoning_effort="high".',
+          ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
@@ -1122,16 +1168,28 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            if (
-              argv[0] !== "bulk-scan" ||
-              !(
-                argv.length === 1 ||
-                (argv.length === 3 && argv[1] === "--model") ||
-                (argv.length === 2 && argv[1] === `--model=${options.model}`)
-              )
-            ) {
+            let optionIndex = 1;
+            while (optionIndex < argv.length) {
+              const argument = argv[optionIndex]!;
+              if (
+                argument === "--model" ||
+                argument === "--effort" ||
+                argument === "--codex"
+              ) {
+                optionIndex += 2;
+              } else if (
+                argument.startsWith("--model=") ||
+                argument.startsWith("--effort=") ||
+                argument.startsWith("--codex=")
+              ) {
+                optionIndex += 1;
+              } else {
+                break;
+              }
+            }
+            if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--model MODEL]' to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1166,7 +1224,11 @@ export async function main(
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
-              codexOverrides: parseCodexOverrides(options.codex, options.model),
+              codexOverrides: parseCodexOverrides(
+                options.codex,
+                options.model,
+                options.effort,
+              ),
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
@@ -1265,10 +1327,13 @@ export async function main(
           .describe("Finding text or a file containing findings."),
       }),
       options: z.object({
+        effort: effortOption(),
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe("Override model or model_reasoning_effort with KEY=VALUE."),
+          .describe(
+            'Set model="gpt-5.6-terra" or model_reasoning_effort="high".',
+          ),
       }),
       async run({ options }) {
         try {
@@ -1276,6 +1341,7 @@ export async function main(
             "validation",
             positionals,
             options.codex,
+            options.effort,
             output,
             errorOutput,
             dependencies,
@@ -1297,10 +1363,13 @@ export async function main(
           .describe("Issue text or a file containing issues."),
       }),
       options: z.object({
+        effort: effortOption(),
         codex: z
           .array(optionValue("--codex"))
           .default([])
-          .describe("Override model or model_reasoning_effort with KEY=VALUE."),
+          .describe(
+            'Set model="gpt-5.6-terra" or model_reasoning_effort="high".',
+          ),
       }),
       async run({ options }) {
         try {
@@ -1308,6 +1377,7 @@ export async function main(
             "fix-finding",
             positionals,
             options.codex,
+            options.effort,
             output,
             errorOutput,
             dependencies,
@@ -1363,11 +1433,7 @@ export async function main(
               "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
             );
           }
-        } else if (
-          exitCode === 0 &&
-          !options.withApiKey &&
-          !options.withAccessToken
-        ) {
+        } else if (exitCode === 0 && !options.withApiKey) {
           const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
@@ -1380,10 +1446,16 @@ export async function main(
                     name.toUpperCase() === "CODEX_API_KEY"),
               )
               .map(([name]) => name);
+            const loginKind = options.withAccessToken
+              ? "Access-token"
+              : "ChatGPT";
+            const credential = options.withAccessToken
+              ? "access token"
+              : "ChatGPT sign-in";
             errorOutput.write(
-              "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
+              `${loginKind} login succeeded. Interactive scans will ask which account to use; ` +
                 `noninteractive scans will use ${authentication.source}.\n` +
-                "To use your ChatGPT sign-in, pass '--auth chatgpt' or run " +
+                `To use your ${credential}, pass '--auth chatgpt' or run ` +
                 `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
             );
           }
@@ -1440,14 +1512,21 @@ export async function main(
       },
     });
 
-  await cli.serve([...argv], {
-    stdout: (value) => {
-      frameworkOutput += value;
+  await cli.serve(
+    argv.flatMap((argument) =>
+      argument.startsWith("--format=")
+        ? ["--format", argument.slice("--format=".length)]
+        : [argument],
+    ),
+    {
+      stdout: (value) => {
+        frameworkOutput += value;
+      },
+      exit: (code) => {
+        frameworkExit = code;
+      },
     },
-    exit: (code) => {
-      frameworkExit = code;
-    },
-  });
+  );
   if (pendingUpdate !== undefined) {
     const notice = await pendingUpdate;
     if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
@@ -1865,6 +1944,7 @@ async function runSkill(
   skill: "validation" | "fix-finding",
   inputs: readonly string[],
   codexOverrides: readonly string[],
+  effort: ModelReasoningEffort | undefined,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
@@ -1872,7 +1952,7 @@ async function runSkill(
   if (inputs.length > MAX_SKILL_INPUT_COUNT) {
     throw new CodexSecurityError("Skill inputs exceed the 64-item limit.");
   }
-  const overrides = parseCodexOverrides(codexOverrides);
+  const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
     Object.keys(overrides).some(
       (key) => key !== "model" && key !== "model_reasoning_effort",
@@ -2194,7 +2274,6 @@ async function runScan(
   let firstSignalAt = 0;
   let progress: Progress | null = null;
   let lastWorkerUpdate = "";
-  let workerCapacity: { planned: number; started: number } | null = null;
   let phase: string | null = null;
   const preparationAbortController = new AbortController();
   const signalListener = (signal: SignalName) => () => {
@@ -2248,7 +2327,11 @@ async function runScan(
       pythonPath: arguments_.pythonPath,
       codexOverrides:
         arguments_.codexOverrides ??
-        parseCodexOverrides(arguments_.codex, arguments_.model),
+        parseCodexOverrides(
+          arguments_.codex,
+          arguments_.model,
+          arguments_.effort,
+        ),
     };
     let auth = arguments_.auth;
     selectedAuthentication = scanAuthentication(dependencies.environment, auth);
@@ -2375,15 +2458,17 @@ async function runScan(
             : `dispatch:${status.phase}:${status.planned}:${status.started}`;
         if (update === lastWorkerUpdate) return;
         lastWorkerUpdate = update;
-        if (status.kind === "dispatch") {
-          workerCapacity = { planned: status.planned, started: status.started };
-          phase = scanPhase(status.phase);
-        }
+        if (status.kind === "dispatch") phase = scanPhase(status.phase);
         const message = workerStatusMessage(status);
         if (message === null || progress === null) return;
         progress.stopTimer();
         progress.stage(message);
         progress.startTimer(runningMessage());
+      },
+      onWarning: (warning) => {
+        errorOutput.write(
+          `codex-security: warning: ${cliErrorMessage(warning)}\n`,
+        );
       },
       onObserverError: (observer, error) => {
         errorOutput.write(
@@ -2463,7 +2548,7 @@ async function runScan(
   ).length;
   const incomplete = result.coverage.completeness !== "complete";
   progress?.stage("Scan complete");
-  printScanSummary(result, progress, errorOutput, workerCapacity);
+  printScanSummary(result, progress, errorOutput);
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
@@ -2534,7 +2619,6 @@ function printScanSummary(
   result: ScanResult,
   progress: Progress | null,
   errorOutput: Writable,
-  workers: { planned: number; started: number } | null,
 ): void {
   const severities = new Map<SeverityLevel, number>();
   for (const finding of result.findings.findings) {
@@ -2561,9 +2645,7 @@ function printScanSummary(
     completed >= started
       ? Math.floor((completed - started) / 1_000)
       : progress?.elapsedSeconds ?? 0;
-  errorOutput.write(
-    `codex-security: Elapsed: ${elapsed}s.${workers === null ? "" : ` Workers: ${workers.started}/${workers.planned}.`}\n`,
-  );
+  errorOutput.write(`codex-security: Elapsed: ${elapsed}s.\n`);
 
   const tokenSummary = formatTokenUsage(result.turnResult.usage);
   if (tokenSummary !== null) {
@@ -2574,12 +2656,11 @@ function printScanSummary(
       `codex-security: Estimated cost: ${formatUsd(result.cost.estimatedUsd)} USD.\n`,
     );
   }
-  const scanDir = cliErrorMessage(result.scanDir);
-  errorOutput.write(`codex-security: Results: ${scanDir}\n`);
   errorOutput.write(
-    result.sarifPath === null
-      ? `codex-security: Next: codex-security export ${quoteCliPath(scanDir)} --export-format sarif\n`
-      : `codex-security: Next: review ${cliErrorMessage(result.reportPath)}\n`,
+    `codex-security: Report: ${cliErrorMessage(result.reportPath)}\n`,
+  );
+  errorOutput.write(
+    `codex-security: Results: ${cliErrorMessage(result.scanDir)}\n`,
   );
 }
 
@@ -2693,9 +2774,11 @@ function targetFromArguments(arguments_: ScanArguments): ScanTarget {
 export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
+  effort?: ModelReasoningEffort,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
+  if (effort !== undefined) result["model_reasoning_effort"] = effort;
   for (const value of values) {
     const separator = value.indexOf("=");
     const key = separator < 0 ? "" : value.slice(0, separator);
@@ -2743,11 +2826,15 @@ export function parseCodexOverrides(
     }
     const final = parts.at(-1)!;
     if (Object.hasOwn(cursor, final)) {
-      throw new CodexSecurityError(
-        model !== undefined && key === "model"
-          ? "--model conflicts with --codex model"
-          : "Duplicate --codex key",
-      );
+      if (model !== undefined && key === "model") {
+        throw new CodexSecurityError("--model conflicts with --codex model");
+      }
+      if (effort !== undefined && key === "model_reasoning_effort") {
+        throw new CodexSecurityError(
+          "--effort conflicts with --codex model_reasoning_effort",
+        );
+      }
+      throw new CodexSecurityError("Duplicate --codex key");
     }
     cursor[final] = parsed;
   }

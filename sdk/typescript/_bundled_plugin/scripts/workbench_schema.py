@@ -602,6 +602,14 @@ MIGRATIONS = (
         ALTER TABLE scans ADD COLUMN cost_json TEXT;
         """,
     ),
+    (
+        25,
+        "persist scan completion warnings",
+        """
+        ALTER TABLE scans
+        ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';
+        """,
+    ),
 )
 
 

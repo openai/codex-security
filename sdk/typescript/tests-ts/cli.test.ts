@@ -31,6 +31,7 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import {
   FakeSignals,
   REDACTED_CREDENTIALS,
@@ -40,6 +41,9 @@ import {
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
+
+const DEFAULT_SCAN_MODEL_CONFIGURATION =
+  scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
@@ -101,6 +105,7 @@ describe("CLI", () => {
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
           model: { type: "string" },
+          effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
@@ -483,6 +488,8 @@ describe("CLI", () => {
             "deep",
             "--model",
             "gpt-5.6-terra",
+            "--effort",
+            "high",
             "--codex",
             "features.goals=true",
             "--json",
@@ -507,6 +514,7 @@ describe("CLI", () => {
         codexOverrides: {
           features: { goals: true },
           model: "gpt-5.6-terra",
+          model_reasoning_effort: "high",
         },
       });
       expect(scanOptions).toMatchObject({ mode: "deep" });
@@ -563,6 +571,11 @@ describe("CLI", () => {
       ["bulk-scan"],
       ["bulk-scan", "--model", "gpt-5.6-terra"],
       ["bulk-scan", "--model=gpt-5.6-terra"],
+      ["bulk-scan", "--effort", "high"],
+      ["bulk-scan", "--effort=high"],
+      ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
+      ["bulk-scan", '--codex=model_reasoning_effort="high"'],
+      ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
     ] as const) {
       const stdout = capture();
       const stderr = capture();
@@ -1263,16 +1276,74 @@ describe("CLI", () => {
     expect(help.text()).toContain("--max-cost <number>");
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
+      `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+    );
+    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
+    );
+    expect(help.text()).toContain('model_reasoning_effort="high"');
+    expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra",
     );
+    expect(help.text()).toContain(
+      "codex-security scan . --model gpt-5.6-terra --effort high",
+    );
+    expect(help.text()).not.toContain("--provider");
+    expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
   });
 
-  test("selects scan models without TOML quoting", async () => {
+  test("documents existing model and reasoning options in bulk-scan help", async () => {
+    const help = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["bulk-scan", "--help"],
+        help.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(help.text()).toContain("--model <string>");
+    expect(help.text()).toContain(
+      `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+    );
+    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
+    );
+    expect(help.text()).toContain("--codex <array>");
+    expect(help.text()).toContain('model_reasoning_effort="high"');
+    expect(help.text()).not.toContain("--provider");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("selects scan models and reasoning without TOML quoting", async () => {
     for (const [options, expected] of [
       [["--model", "gpt-5.6-terra"], { model: "gpt-5.6-terra" }],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
+      [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
+      [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
+      [
+        ["--model", "gpt-5.6-terra", "--effort", "high"],
+        { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+      ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [
+        ["--codex", 'model_reasoning_effort="high"'],
+        { model_reasoning_effort: "high" },
+      ],
+      [
+        [
+          "--model",
+          "gpt-5.6-terra",
+          "--codex",
+          'model_reasoning_effort="high"',
+        ],
+        { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+      ],
       [
         ["--model", "gpt-5.6-terra", "--codex", "features.goals=true"],
         { model: "gpt-5.6-terra", features: { goals: true } },
@@ -1383,6 +1454,17 @@ describe("CLI", () => {
     expect(() =>
       parseCodexOverrides(['model="gpt-5.6-sol"'], "gpt-5.6-terra"),
     ).toThrow("--model conflicts with --codex model");
+    expect(parseCodexOverrides([], "gpt-5.6-terra", "high")).toEqual({
+      model: "gpt-5.6-terra",
+      model_reasoning_effort: "high",
+    });
+    expect(() =>
+      parseCodexOverrides(
+        ['model_reasoning_effort="medium"'],
+        undefined,
+        "high",
+      ),
+    ).toThrow("--effort conflicts with --codex model_reasoning_effort");
   });
 
   test("redacts malformed and bounded --codex overrides", () => {
@@ -1432,10 +1514,15 @@ describe("CLI", () => {
       [["scan", ".", "--max-cost=0"], "expected number to be >0"],
       [["scan", ".", "--path="], "--path must not be empty"],
       [["scan", ".", "--model="], "--model must not be empty"],
+      [
+        ["scan", ".", "--effort", "ultra"],
+        "--effort must be minimal, low, medium, high, or xhigh",
+      ],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--model", "--dry-run"], "Missing value for flag"],
+      [["scan", ".", "--effort", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
@@ -1488,6 +1575,17 @@ describe("CLI", () => {
           'model="gpt-5.6-sol"',
         ],
         "--model conflicts with --codex model",
+      ],
+      [
+        [
+          "scan",
+          ".",
+          "--effort",
+          "high",
+          "--codex",
+          'model_reasoning_effort="medium"',
+        ],
+        "--effort conflicts with --codex model_reasoning_effort",
       ],
       [["export"], "scanDir"],
       [["export", "scan", "--unknown"], "Unknown flag: --unknown"],
@@ -1779,14 +1877,111 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("SYNTHETIC_DATABASE_SECRET");
   });
 
-  test("renders scan output with the Incur default format", async () => {
+  test("prints only the completion summary for default scans", async () => {
     const stdout = capture();
     const stderr = capture();
+    const result = fakeResult(["high"], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+
     expect(
-      await main(["scan"], stdout.stream, stderr.stream, dependencies()),
+      await main(
+        ["scan"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
     ).toBe(0);
-    expect(stdout.text()).toContain("scanDir: /tmp/scan");
-    expect(stdout.text()).toContain("completeness: complete");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Scan complete");
+    expect(stderr.text()).toContain(
+      "Findings: 1 (1 high). Coverage: complete.",
+    );
+    expect(stderr.text()).toContain("Elapsed: 1s.");
+    expect(stderr.text()).toContain(
+      "Tokens: 1,250 input, 200 cached, 30 output.",
+    );
+    expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
+    expect(stderr.text()).toContain(`Report: ${result.reportPath}`);
+    expect(stderr.text()).toContain("Results: /tmp/scan");
+    expect(stderr.text()).not.toContain("Next:");
+  });
+
+  test("prints complete scan results only when explicitly requested", async () => {
+    for (const [arguments_, marker] of [
+      [["--json"], '"manifest"'],
+      [["--format", "json"], '"manifest"'],
+      [["--format=json"], '"manifest"'],
+      [["--format", "jsonl"], '"manifest"'],
+      [["--format=jsonl"], '"manifest"'],
+      [["--format", "toon"], "manifest:"],
+      [["--format=toon"], "manifest:"],
+      [["--format", "yaml"], "manifest:"],
+      [["--format=yaml"], "manifest:"],
+      [["--full-output"], "manifest:"],
+    ] as const) {
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ...arguments_],
+          stdout.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toContain(marker);
+    }
+  });
+
+  test("honors explicit scan token output operations", async () => {
+    for (const arguments_ of [
+      ["--token-count"],
+      ["--token-limit", "4"],
+      ["--token-offset", "1"],
+      ["--token-offset", "1", "--token-limit", "4"],
+    ] as const) {
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ...arguments_],
+          stdout.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      if (arguments_[0] === "--token-count") {
+        expect(stdout.text().trim()).toMatch(/^\d+$/u);
+        expect(Number(stdout.text().trim())).toBeGreaterThan(0);
+      } else {
+        expect(stdout.text()).toContain("[truncated: showing tokens ");
+      }
+    }
+  });
+
+  test("prints scan completion warnings without failing the scan", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Repository HEAD changed while the scan was running; results were saved for the original revision.",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Repository HEAD changed while the scan was running; results were saved for the original revision.",
+    );
   });
 
   test("reports isolated observer failures without failing the scan", async () => {
@@ -1935,15 +2130,14 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Findings: 4 (1 critical, 2 high, 1 informational). Coverage: complete.",
     );
-    expect(stderr.text()).toContain("Elapsed: 1s. Workers: 3/6.");
+    expect(stderr.text()).toContain("Elapsed: 1s.");
     expect(stderr.text()).toContain(
       "Tokens: 1,250 input, 200 cached, 30 output.",
     );
     expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
+    expect(stderr.text()).toContain(`Report: ${result.reportPath}`);
     expect(stderr.text()).toContain("Results: /tmp/scan");
-    expect(stderr.text()).toContain(
-      "Next: codex-security export /tmp/scan --export-format sarif",
-    );
+    expect(stderr.text()).not.toContain("Next:");
   });
 
   test("reports the running cost against the scan budget", async () => {
@@ -2072,7 +2266,8 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
-    expect(stdout.text()).toContain("completeness: complete");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Findings: 0. Coverage: complete.");
   });
 
   test("validates a dry run without starting a scan", async () => {

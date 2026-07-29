@@ -241,6 +241,31 @@ describe("scan history renderer", () => {
     expect(failed).toContain("ERROR  Repository checkout became unavailable.");
   });
 
+  test("shows saved completion warnings without marking a scan failed", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "12345678-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [],
+          warnings: [
+            "Repository HEAD changed while the scan was running; results were saved for the original revision.",
+          ],
+        },
+        "show",
+      ),
+    );
+
+    expect(output).toContain("COMPLETE");
+    expect(output).toContain("WARNING");
+    expect(output).toContain(
+      "Repository HEAD changed while the scan was running",
+    );
+    expect(output).not.toContain("ERROR");
+  });
+
   test("renders match-all results from the original workbench data", () => {
     const output = stripVTControlCharacters(
       renderScanHistory(
