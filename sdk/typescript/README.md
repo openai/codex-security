@@ -15,7 +15,7 @@ npm install @openai/codex-security
 npx @openai/codex-security --version
 ```
 
-The package supports macOS, Linux, and Windows and requires Node.js 22 or
+The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
 later. Scanning and exporting findings also require Python 3.10 or later. If
 you use Python 3.10, install the `tomli` package. Select another interpreter
 with `--python`, `pythonPath`, or `PYTHON` when needed.

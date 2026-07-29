@@ -28,6 +28,32 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("advertises only compatible Node.js releases", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
+
+    expect(Bun.semver.satisfies("22.12.0", packageJson.engines.node)).toBe(
+      false,
+    );
+    expect(Bun.semver.satisfies("22.13.0", packageJson.engines.node)).toBe(
+      true,
+    );
+    expect(Bun.semver.satisfies("24.0.0", packageJson.engines.node)).toBe(true);
+    expect(Bun.semver.satisfies("26.0.0", packageJson.engines.node)).toBe(true);
+  });
+
+  test("builds packages before packing and provides a production audit", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
+
+    expect(packageJson.scripts.prepack).toBe("pnpm run build");
+    expect(packageJson.scripts["audit:prod"]).toBe(
+      "pnpm audit --prod --audit-level high",
+    );
+  });
+
   test("exposes canonical finding and hardening fields with public types", () => {
     const finding = {} as Finding;
     const scan = {} as ScanRecord;
