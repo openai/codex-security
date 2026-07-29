@@ -503,7 +503,7 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
                 except OSError:
                     continue
                 for entry in entries:
-                    if entry.name == ".git" or entry.is_symlink():
+                    if entry.name in {".git", "node_modules"} or entry.is_symlink():
                         continue
                     if entry.is_dir():
                         pending.append(entry)
@@ -517,7 +517,7 @@ def make_scope_inventory(args: argparse.Namespace) -> None:
             except (OSError, ValueError):
                 continue
             relative = path.relative_to(repo)
-            if ".git" in relative.parts:
+            if ".git" in relative.parts or "node_modules" in relative.parts:
                 continue
             paths.add(relative.as_posix())
 

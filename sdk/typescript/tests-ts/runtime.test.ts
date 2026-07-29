@@ -338,6 +338,35 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("binds the only workbench target kind over a model-authored draft", async () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    const bundledPlugin = await bundledPluginRoot();
+    const result = Bun.spawnSync([
+      python!,
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, runpy, sys",
+        "module = runpy.run_path(sys.argv[1])",
+        "manifest = {'scan': {'target': {'kind': 'git_worktree', 'targetId': 'draft'}, 'scope': {}}}",
+        "binding = {'scanId': 'scan_123', 'startedAt': '2026-01-01T00:00:00Z', 'completedAt': '2026-01-01T00:01:00Z', 'producer': {'name': 'test'}, 'allowedTargetKinds': ['git_revision'], 'target': {'targetId': 'target_123', 'revision': 'deadbeef'}, 'scope': {}}",
+        "module['_populate_unsealed_manifest_envelope'](manifest, manifest['scan'], binding)",
+        "print(json.dumps(manifest['scan']['target']))",
+      ].join("\n"),
+      join(bundledPlugin, "scripts", "finalize_scan_contract.py"),
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      kind: "git_revision",
+      revision: "deadbeef",
+      targetId: "target_123",
+    });
+  });
+
   test("honors cancellation while staging a configured plugin directory", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "bootstrap");

@@ -40,7 +40,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import { writeCodexConfig, type JsonObject } from "../src/config.js";
-import { runWorkbench } from "../src/runtime.js";
+import { prepareScopeInventory, runWorkbench } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -62,6 +62,7 @@ class TestClient extends TestClientBase {
     dependencies: Record<string, unknown>,
   ) {
     super(config, {
+      prepareScopeInventory: async () => "",
       runWorkbench: async (_options: unknown, args: readonly string[]) => {
         if (args[0] === "register-cli-scan") {
           return {
@@ -2353,7 +2354,7 @@ describe("CodexSecurity orchestration", () => {
       'Use "$PYTHON" as <python_command> for every plugin helper',
     );
     expect(prompt).toContain(
-      'make-scope-inventory --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl"',
+      'the SDK has already written the exhaustive combined inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl"',
     );
     expect(prompt).not.toContain("make-repo-rank-input");
     expect(prompt).not.toContain("rank_input.jsonl");
@@ -2466,6 +2467,7 @@ describe("CodexSecurity orchestration", () => {
     const ledger = join(root, "candidate_ledger.jsonl");
     await mkdir(join(scope, "test"), { recursive: true });
     await mkdir(join(scope, ".git"), { recursive: true });
+    await mkdir(join(scope, "node_modules", ".bin"), { recursive: true });
     await Promise.all([
       writeFile(join(scope, "README.md"), "# Package\n"),
       writeFile(join(scope, "asset.bin"), new Uint8Array([0, 1, 2, 3])),
@@ -2475,6 +2477,10 @@ describe("CodexSecurity orchestration", () => {
         "export const tested = true;\n",
       ),
       writeFile(join(scope, ".git", "config"), "ignored\n"),
+      writeFile(
+        join(scope, "node_modules", ".bin", "wrangler"),
+        "#!/usr/bin/env node\n",
+      ),
       writeFile(targetPaths, JSON.stringify(["package"])),
       writeFile(
         candidates,
@@ -2540,6 +2546,72 @@ describe("CodexSecurity orchestration", () => {
       cwe_ids: ["CWE-20"],
       locations: [{ path: "package/test/route.test.ts" }],
     });
+  });
+
+  test("materializes the standard scope inventory before starting Codex", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(join(repository, "package", "test"), { recursive: true });
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await Promise.all([
+      writeFile(join(repository, "package", "README.md"), "# Package\n"),
+      writeFile(
+        join(repository, "package", "test", "route.test.ts"),
+        "export const tested = true;\n",
+      ),
+    ]);
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+    let inventoryAtTurnStart = "";
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => interpreter!,
+        prepareOutputDir: async () => scanDir,
+        prepareScopeInventory,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              inventoryAtTurnStart = await readFile(
+                join(
+                  scanDir,
+                  "artifacts",
+                  "02_discovery",
+                  "scope_inventory.jsonl",
+                ),
+                "utf8",
+              );
+              throw new Error("inventory captured");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        target: ["package"],
+        mode: "standard",
+      }),
+    ).rejects.toThrow("inventory captured");
+    expect(
+      inventoryAtTurnStart
+        .trimEnd()
+        .split("\n")
+        .map((row) => JSON.parse(row)),
+    ).toEqual([
+      { path: "package/README.md" },
+      { path: "package/test/route.test.ts" },
+    ]);
+    await client.close();
   });
 
   test("removes scoped target files after a scan settles", async () => {
