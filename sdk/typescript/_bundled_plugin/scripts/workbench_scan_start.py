@@ -103,7 +103,15 @@ def archive_scan(
         )
     if previous_scan["status"] == "running":
         raise SystemExit("Cannot archive the output of a running scan.")
+    artifacts = connection.execute(
+        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
+        (previous_scan["id"],),
+    ).fetchall()
     if archived_scan_dir is None:
+        if artifacts:
+            raise SystemExit(
+                "The archived scan directory is required to preserve existing scan artifacts."
+            )
         archived_scan_dir = Path(
             tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
         ).resolve()
@@ -111,10 +119,6 @@ def archive_scan(
         "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
         (str(archived_scan_dir), timestamp, previous_scan["id"]),
     )
-    artifacts = connection.execute(
-        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
-        (previous_scan["id"],),
-    ).fetchall()
     for artifact in artifacts:
         try:
             relative_path = Path(artifact["path"]).relative_to(scan_dir)

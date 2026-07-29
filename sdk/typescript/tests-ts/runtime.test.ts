@@ -1002,6 +1002,47 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("does not strand completed scan artifacts without an archive path", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir, { mode: 0o700 });
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_scan_start import archive_scan",
+          "scan_dir = Path(sys.argv[2])",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
+          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
+          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        scanDir,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The archived scan directory is required to preserve existing scan artifacts.",
+    );
+    expect(await readdir(root)).toEqual(["scan"]);
+  });
+
   test("reports an unwritable SQLite state directory without a Python traceback", async () => {
     const root = await temporaryDirectory();
     const pluginRoot = join(root, "plugin");
