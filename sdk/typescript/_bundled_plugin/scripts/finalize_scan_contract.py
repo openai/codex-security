@@ -767,13 +767,21 @@ def _populate_unsealed_finding_identities(
         finding["fingerprints"] = fingerprints
 
 
+def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        ("informational", "low", "medium", "high", "critical").index(finding["severity"]["level"]),
+        ("low", "medium", "high").index(finding["confidence"]["level"]),
+        len(finding.get("codeEvidence") or []),
+    )
+
+
 def _recover_unsealed_findings(
     manifest: dict[str, Any],
     findings: dict[str, Any],
     schema_dir: Path,
     scan_dir: Path,
     warnings: list[str],
-) -> None:
+) -> list[str]:
     schema = _read_json(schema_dir / "findings.schema.json")
     _require_safe_schema(schema, "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
@@ -791,7 +799,8 @@ def _recover_unsealed_findings(
         raise ContractError("findings.scanId: must match manifest scan id")
 
     recovered: list[dict[str, Any]] = []
-    finding_ids: set[str] = set()
+    discarded: list[str] = []
+    finding_positions: dict[str, int] = {}
     writeup_paths: set[str] = set()
     for index, finding in enumerate(_require_list(findings, "findings", "findings")):
         context = f"findings.findings[{index}]"
@@ -823,35 +832,59 @@ def _recover_unsealed_findings(
                 {"scanId": scan_id, "findings": [finding]},
             )
             finding_id = finding["findingId"]
-            if finding_id in finding_ids:
-                raise ContractError(f"{context}: duplicate logical finding")
+            previous_position = finding_positions.get(finding_id)
             _validate_finding(finding, context)
             if "writeup" in finding:
                 try:
                     _validate_schema_node(finding["writeup"], writeup_schema, f"{context}.writeup")
-                    _require_derived_writeup_files(scan_dir, {"findings": [finding]})
                     report_path = finding["writeup"]["reportPath"]
-                    if report_path in writeup_paths:
+                    previous_writeup = (
+                        recovered[previous_position].get("writeup")
+                        if previous_position is not None
+                        else None
+                    )
+                    if report_path in writeup_paths and (
+                        previous_writeup is None or previous_writeup["reportPath"] != report_path
+                    ):
                         raise ContractError(f"{context}.writeup.reportPath: duplicate report path")
+                    _require_scan_local_file(scan_dir, report_path, f"{context}.writeup.reportPath")
                 except ContractError as exc:
                     finding.pop("writeup")
                     warnings.append(f"Skipped malformed writeup for finding {index + 1}: {exc}.")
             _validate_schema_node(finding, finding_schema, context)
         except ContractError as exc:
-            warnings.append(f"Skipped malformed finding {index + 1}: {exc}.")
+            warning = f"Skipped malformed finding {index + 1}: {exc}."
+            warnings.append(warning)
+            discarded.append(warning)
             continue
 
-        finding_ids.add(finding_id)
-        writeup = finding.get("writeup")
-        if isinstance(writeup, dict):
-            writeup_paths.add(writeup["reportPath"])
-        recovered.append(finding)
+        if previous_position is not None:
+            previous = recovered[previous_position]
+            if _finding_strength(finding) <= _finding_strength(previous):
+                warnings.append(
+                    f"Skipped malformed finding {index + 1}: duplicate logical finding."
+                )
+                continue
+            previous_writeup = previous.get("writeup")
+            if previous_writeup is not None:
+                writeup_paths.discard(previous_writeup["reportPath"])
+            recovered[previous_position] = finding
+            warnings.append(
+                f"Recovered finding {index + 1}: retained stronger duplicate logical finding."
+            )
+        else:
+            finding_positions[finding_id] = len(recovered)
+            recovered.append(finding)
+
+        if "writeup" in finding:
+            writeup_paths.add(finding["writeup"]["reportPath"])
         if normalized_fields:
             warnings.append(
                 f"Recovered finding {index + 1}: normalized {', '.join(normalized_fields)}."
             )
 
     findings["findings"] = recovered
+    return discarded
 
 
 def _recover_unsealed_coverage(
@@ -859,16 +892,13 @@ def _recover_unsealed_coverage(
     schema_dir: Path,
     scan_dir: Path,
     warnings: list[str],
+    discarded_findings: list[str],
 ) -> None:
     schema = _read_json(schema_dir / "coverage.schema.json")
     _require_safe_schema(schema, "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
     completeness = coverage.get("completeness")
-    partial = not isinstance(completeness, str) or completeness not in {
-        "complete",
-        "partial",
-        "unknown",
-    }
+    partial = completeness not in ("complete", "partial", "unknown")
     if partial:
         warnings.append("Recovered malformed coverage completeness; marked coverage as partial.")
 
@@ -897,7 +927,6 @@ def _recover_unsealed_coverage(
                     surface_id = _require_str(item, "id", context)
                     if surface_id in surface_ids:
                         raise ContractError(f"{context}.id: duplicate surface id")
-                    _require_str(item, "label", context)
                     disposition = item.get("disposition")
                     surface_recovered = False
                     if not isinstance(disposition, str) or disposition not in DISPOSITIONS:
@@ -939,15 +968,13 @@ def _recover_unsealed_coverage(
                         recovered_receipts.append(normalized_ref)
 
                     item["receiptRefs"] = recovered_receipts
-                    if surface_recovered:
-                        item["disposition"] = "needs_follow_up"
-                        partial = True
-                    elif item["disposition"] == "needs_follow_up":
-                        if completeness != "partial":
+                    if surface_recovered or item["disposition"] == "needs_follow_up":
+                        if not surface_recovered and completeness != "partial":
                             warnings.append(
                                 f"Coverage surface {index + 1} requires follow-up; "
                                 "marked coverage as partial."
                             )
+                        item["disposition"] = "needs_follow_up"
                         partial = True
 
                 _validate_schema_node(item, item_schema, context)
@@ -962,8 +989,18 @@ def _recover_unsealed_coverage(
 
         coverage[field] = recovered
 
+    if discarded_findings:
+        for surface in coverage["surfaces"]:
+            surface["disposition"] = "needs_follow_up"
+        coverage["deferred"].extend(
+            {"id": f"discarded-finding-{index}", "reason": warning}
+            for index, warning in enumerate(discarded_findings, 1)
+        )
+        partial = True
+
     if coverage["deferred"] and completeness != "partial":
-        warnings.append("Coverage has deferred review work; marked coverage as partial.")
+        if not discarded_findings:
+            warnings.append("Coverage has deferred review work; marked coverage as partial.")
         partial = True
     if partial:
         coverage["completeness"] = "partial"
@@ -2016,8 +2053,21 @@ def build_sarif_projection(
             source_root_is_directory = False
         if not source_root_is_directory:
             raise ContractError("source root: expected an existing directory")
-    manifest, findings, _, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
+    manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
+    if coverage["completeness"] != "complete":
+        run = sarif["runs"][0]
+        run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
+        if coverage["deferred"]:
+            run["invocations"] = [
+                {
+                    "executionSuccessful": True,
+                    "toolExecutionNotifications": [
+                        {"level": "warning", "message": {"text": item["reason"]}}
+                        for item in coverage["deferred"]
+                    ],
+                }
+            ]
     _validate_sarif(sarif)
     return sarif
 
@@ -2286,11 +2336,14 @@ def _prepare_scan_finalization(
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
     if was_sealed:
         _validate_findings(manifest, findings)
-    if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     elif completion_warnings is not None:
-        _recover_unsealed_findings(manifest, findings, schema_dir, scan_dir, completion_warnings)
-        _recover_unsealed_coverage(coverage, schema_dir, scan_dir, completion_warnings)
+        discarded_findings = _recover_unsealed_findings(
+            manifest, findings, schema_dir, scan_dir, completion_warnings
+        )
+        _recover_unsealed_coverage(
+            coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
+        )
         _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
     else:
         _populate_unsealed_finding_identities(manifest, findings)

@@ -18,7 +18,17 @@ type Finding = Record<string, unknown> & {
   ruleId: string;
   identity: { anchor: string; instance?: string };
   summary: string;
+  severity: { level: string };
+  confidence: { level: string };
   locations: Array<{ path: string }>;
+  codeEvidence?: Array<{
+    id: string;
+    label: string;
+    path: string;
+    startLine: number;
+    code: string;
+    explanation: string;
+  }>;
   writeup?: unknown;
 };
 
@@ -47,6 +57,20 @@ type ScanSummary = {
   findingCount: number;
   progress: { status: string };
   warnings: string[];
+};
+
+type SarifDocument = {
+  runs: Array<{
+    properties: { codexSecurityCoverageCompleteness?: string };
+    results: Array<{ properties: { severity: string } }>;
+    invocations?: Array<{
+      executionSuccessful: boolean;
+      toolExecutionNotifications: Array<{
+        level: string;
+        message: { text: string };
+      }>;
+    }>;
+  }>;
 };
 
 type ScanFixture = {
@@ -239,6 +263,121 @@ describe("malformed scan artifact recovery", () => {
       ).toBe(true);
     }
     expect((await readJson<FindingsDocument>(path)).findings).toHaveLength(1);
+    const coverage = await readJson<CoverageDocument>(
+      join(fixture.scanDir, "coverage.json"),
+    );
+    expect(coverage.completeness).toBe("partial");
+    expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
+      "needs_follow_up",
+    );
+    expect(coverage.deferred).toHaveLength(4);
+  });
+
+  test("retains the strongest duplicate finding regardless of input order", async () => {
+    const cases = [
+      {
+        name: "severity ascending",
+        candidates: [
+          ["informational", "high", 1],
+          ["critical", "high", 1],
+        ],
+        expected: ["critical", "high", 1],
+      },
+      {
+        name: "severity descending",
+        candidates: [
+          ["critical", "high", 1],
+          ["informational", "high", 1],
+        ],
+        expected: ["critical", "high", 1],
+      },
+      {
+        name: "confidence ascending",
+        candidates: [
+          ["critical", "low", 1],
+          ["critical", "high", 1],
+        ],
+        expected: ["critical", "high", 1],
+      },
+      {
+        name: "confidence descending",
+        candidates: [
+          ["critical", "high", 1],
+          ["critical", "low", 1],
+        ],
+        expected: ["critical", "high", 1],
+      },
+      {
+        name: "evidence ascending",
+        candidates: [
+          ["critical", "high", 1],
+          ["critical", "high", 2],
+        ],
+        expected: ["critical", "high", 2],
+      },
+      {
+        name: "evidence descending",
+        candidates: [
+          ["critical", "high", 2],
+          ["critical", "high", 1],
+        ],
+        expected: ["critical", "high", 2],
+      },
+    ] as const;
+
+    for (const { name, candidates, expected } of cases) {
+      const fixture = await startDraftScan();
+      const path = join(fixture.scanDir, "findings.json");
+      const document = await readJson<FindingsDocument>(path);
+      const baseline = document.findings[0]!;
+      document.findings = candidates.map(([severity, confidence, count]) => {
+        const finding = structuredClone(baseline);
+        finding.severity.level = severity;
+        finding.confidence.level = confidence;
+        finding.codeEvidence = Array.from({ length: count }, (_, index) => ({
+          id: `evidence-${index + 1}`,
+          label: "Archive extraction",
+          path: "src/extract.py",
+          startLine: 1,
+          code: "# fixture",
+          explanation: "The archive entry reaches a filesystem write.",
+        }));
+        return finding;
+      });
+      await writeJson(path, document);
+
+      const completed = await completeScan(fixture);
+
+      expect(completed.progress.status, name).toBe("complete");
+      expect(completed.findingCount, name).toBe(1);
+      expect(completed.warnings, name).toHaveLength(1);
+      expect(completed.warnings[0], name).toContain(
+        "duplicate logical finding",
+      );
+      const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
+      expect(
+        [
+          recovered.severity.level,
+          recovered.confidence.level,
+          recovered.codeEvidence?.length,
+        ],
+        name,
+      ).toEqual([...expected]);
+      const coverage = await readJson<CoverageDocument>(
+        join(fixture.scanDir, "coverage.json"),
+      );
+      expect(coverage.completeness, name).toBe("complete");
+      expect(
+        await readFile(join(fixture.scanDir, "report.md"), "utf8"),
+        name,
+      ).not.toContain("### No findings");
+      const sarif = await readJson<SarifDocument>(
+        join(fixture.scanDir, "exports", "results.sarif"),
+      );
+      expect(sarif.runs[0]?.results[0]?.properties.severity, name).toBe(
+        "critical",
+      );
+    }
   });
 
   test("completes scans when every draft finding is malformed", async () => {
@@ -255,6 +394,33 @@ describe("malformed scan artifact recovery", () => {
     expect(completed.warnings).toHaveLength(1);
     expect(completed.warnings[0]).toContain("summary");
     expect((await readJson<FindingsDocument>(path)).findings).toEqual([]);
+    const coverage = await readJson<CoverageDocument>(
+      join(fixture.scanDir, "coverage.json"),
+    );
+    expect(coverage.completeness).toBe("partial");
+    expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
+      "needs_follow_up",
+    );
+    expect(coverage.deferred).toEqual([
+      { id: "discarded-finding-1", reason: completed.warnings[0] },
+    ]);
+    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
+    expect(report).toContain("| Coverage | partial |");
+    expect(report).toContain("Skipped malformed finding 1");
+    const sarif = await readJson<SarifDocument>(
+      join(fixture.scanDir, "exports", "results.sarif"),
+    );
+    expect(sarif.runs[0]?.properties.codexSecurityCoverageCompleteness).toBe(
+      "partial",
+    );
+    expect(sarif.runs[0]?.invocations).toEqual([
+      {
+        executionSuccessful: true,
+        toolExecutionNotifications: [
+          { level: "warning", message: { text: completed.warnings[0]! } },
+        ],
+      },
+    ]);
   });
 
   test("keeps findings while removing invalid or duplicate writeups", async () => {
