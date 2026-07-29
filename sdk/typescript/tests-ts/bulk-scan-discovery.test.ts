@@ -356,6 +356,46 @@ describe("bulk scan repository discovery", () => {
     ).toBe("personal-account");
   });
 
+  test("lists every organization alongside the personal account", async () => {
+    const root = await temporaryDirectory();
+    const { dependencies, prompt, requests } = discoveryDependencies(root, {
+      organizations: ["acme-labs", "acme"],
+    });
+    prompt.confirms = [true];
+    prompt.choices = ["acme-labs"];
+
+    await runBulkScanWizard(dependencies);
+
+    expect(prompt.searchOptions[0]).toEqual([
+      "personal-account (personal account)",
+      "acme (organization)",
+      "acme-labs (organization)",
+    ]);
+    expect(
+      requests.find(({ path }) => path === "/graphql")?.variables?.owner,
+    ).toBe("acme-labs");
+  });
+
+  test("scans the personal account without asking when there are no organizations", async () => {
+    const root = await temporaryDirectory();
+    const { dependencies, prompt, requests } = discoveryDependencies(root, {
+      organizations: [],
+    });
+    prompt.confirms = [true];
+
+    await runBulkScanWizard(dependencies);
+
+    expect(prompt.questions).not.toContain(
+      "Which account or organization should we scan?",
+    );
+    expect(prompt.messages.join("")).toContain(
+      "Finding repositories in personal-account.",
+    );
+    expect(
+      requests.find(({ path }) => path === "/graphql")?.variables?.owner,
+    ).toBe("personal-account");
+  });
+
   test("does not write an inventory when canceled or no repositories match", async () => {
     for (const options of [
       { confirms: [false] },
