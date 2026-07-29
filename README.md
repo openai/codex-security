@@ -2,7 +2,7 @@
 
 `@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
 
-**See the [Codex Security Documentation](http://learn.chatgpt.com/docs/security/cli)** for more details.
+**See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for more details.
 
 > Note: for best results, we recommend that your account is verified for [Trusted Access](https://chatgpt.com/cyber).
 
@@ -17,7 +17,7 @@ npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 ```
 
-For CI, set `OPENAI_API_KEY` instead of signing in. Environment API keys are
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in. Environment API keys are
 passed directly to the current scan and are never stored in Codex's credential
 home or system keyring.
 
@@ -57,4 +57,7 @@ console.log(result.reportPath);
 await security.close();
 ```
 
-For installation, authentication, scan options, and CI setup, see the [official documentation](http://learn.chatgpt.com/docs/security/cli).
+For complete command help, runtime defaults, native multi-agent worker limits,
+environment variables, deep-scan configuration, and SDK options, see the
+[package README](sdk/typescript/README.md) and the
+[official CLI reference](https://learn.chatgpt.com/docs/security/cli/reference).
