@@ -31,6 +31,7 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import {
   FakeSignals,
   REDACTED_CREDENTIALS,
@@ -40,6 +41,9 @@ import {
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
+
+const DEFAULT_SCAN_MODEL_CONFIGURATION =
+  scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 
 async function multiscanInventory(root: string): Promise<void> {
   const repository = join(root, "repository");
@@ -101,6 +105,7 @@ describe("CLI", () => {
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
           model: { type: "string" },
+          effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
@@ -483,6 +488,8 @@ describe("CLI", () => {
             "deep",
             "--model",
             "gpt-5.6-terra",
+            "--effort",
+            "high",
             "--codex",
             "features.goals=true",
             "--json",
@@ -507,6 +514,7 @@ describe("CLI", () => {
         codexOverrides: {
           features: { goals: true },
           model: "gpt-5.6-terra",
+          model_reasoning_effort: "high",
         },
       });
       expect(scanOptions).toMatchObject({ mode: "deep" });
@@ -563,6 +571,11 @@ describe("CLI", () => {
       ["bulk-scan"],
       ["bulk-scan", "--model", "gpt-5.6-terra"],
       ["bulk-scan", "--model=gpt-5.6-terra"],
+      ["bulk-scan", "--effort", "high"],
+      ["bulk-scan", "--effort=high"],
+      ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
+      ["bulk-scan", '--codex=model_reasoning_effort="high"'],
+      ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
     ] as const) {
       const stdout = capture();
       const stderr = capture();
@@ -1263,16 +1276,74 @@ describe("CLI", () => {
     expect(help.text()).toContain("--max-cost <number>");
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
+      `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+    );
+    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
+    );
+    expect(help.text()).toContain('model_reasoning_effort="high"');
+    expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra",
     );
+    expect(help.text()).toContain(
+      "codex-security scan . --model gpt-5.6-terra --effort high",
+    );
+    expect(help.text()).not.toContain("--provider");
+    expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
   });
 
-  test("selects scan models without TOML quoting", async () => {
+  test("documents existing model and reasoning options in bulk-scan help", async () => {
+    const help = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["bulk-scan", "--help"],
+        help.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(help.text()).toContain("--model <string>");
+    expect(help.text()).toContain(
+      `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+    );
+    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
+    );
+    expect(help.text()).toContain("--codex <array>");
+    expect(help.text()).toContain('model_reasoning_effort="high"');
+    expect(help.text()).not.toContain("--provider");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("selects scan models and reasoning without TOML quoting", async () => {
     for (const [options, expected] of [
       [["--model", "gpt-5.6-terra"], { model: "gpt-5.6-terra" }],
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
+      [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
+      [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
+      [
+        ["--model", "gpt-5.6-terra", "--effort", "high"],
+        { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+      ],
       [["--codex", 'model="gpt-5.6-terra"'], { model: "gpt-5.6-terra" }],
+      [
+        ["--codex", 'model_reasoning_effort="high"'],
+        { model_reasoning_effort: "high" },
+      ],
+      [
+        [
+          "--model",
+          "gpt-5.6-terra",
+          "--codex",
+          'model_reasoning_effort="high"',
+        ],
+        { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
+      ],
       [
         ["--model", "gpt-5.6-terra", "--codex", "features.goals=true"],
         { model: "gpt-5.6-terra", features: { goals: true } },
@@ -1383,6 +1454,17 @@ describe("CLI", () => {
     expect(() =>
       parseCodexOverrides(['model="gpt-5.6-sol"'], "gpt-5.6-terra"),
     ).toThrow("--model conflicts with --codex model");
+    expect(parseCodexOverrides([], "gpt-5.6-terra", "high")).toEqual({
+      model: "gpt-5.6-terra",
+      model_reasoning_effort: "high",
+    });
+    expect(() =>
+      parseCodexOverrides(
+        ['model_reasoning_effort="medium"'],
+        undefined,
+        "high",
+      ),
+    ).toThrow("--effort conflicts with --codex model_reasoning_effort");
   });
 
   test("redacts malformed and bounded --codex overrides", () => {
@@ -1432,10 +1514,15 @@ describe("CLI", () => {
       [["scan", ".", "--max-cost=0"], "expected number to be >0"],
       [["scan", ".", "--path="], "--path must not be empty"],
       [["scan", ".", "--model="], "--model must not be empty"],
+      [
+        ["scan", ".", "--effort", "ultra"],
+        "--effort must be minimal, low, medium, high, or xhigh",
+      ],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--model", "--dry-run"], "Missing value for flag"],
+      [["scan", ".", "--effort", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
@@ -1488,6 +1575,17 @@ describe("CLI", () => {
           'model="gpt-5.6-sol"',
         ],
         "--model conflicts with --codex model",
+      ],
+      [
+        [
+          "scan",
+          ".",
+          "--effort",
+          "high",
+          "--codex",
+          'model_reasoning_effort="medium"',
+        ],
+        "--effort conflicts with --codex model_reasoning_effort",
       ],
       [["export"], "scanDir"],
       [["export", "scan", "--unknown"], "Unknown flag: --unknown"],
