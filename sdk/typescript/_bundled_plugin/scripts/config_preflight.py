@@ -19,7 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = PLUGIN_ROOT / "preflight" / "capability-profiles.toml"
-DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
 DEFAULT_CONFIG = DEFAULT_CODEX_HOME / "config.toml"
 VALID_SEVERITIES = {"block", "warn", "suggest"}
