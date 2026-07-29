@@ -12,6 +12,7 @@ Requires Node.js 22 or later, Python 3.10 or later, and access to Codex Security
 npm install @openai/codex-security
 npx @openai/codex-security login
 npx @openai/codex-security scan .
+npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 ```
 
 For CI, set `OPENAI_API_KEY` instead of signing in.
