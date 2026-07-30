@@ -9,7 +9,7 @@ export function redactedErrorMessage(error: unknown): string {
   );
   return redactQuotedCredentialValues(withoutPrivateKeys)
     .replaceAll(
-      /(\b(?:authorization|auth)\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9._~-]{0,63})((?:\s|%20|\+)+)(?!\[redacted\])[^\s"',;}&\\\]]+/giu,
+      /(\b[A-Za-z0-9_-]{0,64}(?:authorization|auth)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9._~-]{0,63})((?:\s|%20|\+)+)(?!\[redacted\]|[A-Za-z_][A-Za-z0-9_-]{0,64}\s*[:=])[^\s"',;}&\\\]]+/giu,
       "$1$2$3[redacted]",
     )
     .replaceAll(
@@ -43,6 +43,7 @@ function redactQuotedCredentialValues(message: string): string {
     const openingSlashes = match[2]!.length;
     const quote = match[3]!;
     let position = assignment.lastIndex;
+    let closed = false;
     while (position < message.length) {
       const delimiter = message.indexOf(quote, position);
       if (delimiter < 0) break;
@@ -54,9 +55,15 @@ function redactQuotedCredentialValues(message: string): string {
         output += `${message.slice(consumed, assignment.lastIndex)}[redacted]${message.slice(preceding, delimiter + 1)}`;
         consumed = delimiter + 1;
         assignment.lastIndex = consumed;
+        closed = true;
         break;
       }
       position = delimiter + 1;
+    }
+    if (!closed) {
+      output += `${message.slice(consumed, assignment.lastIndex)}[redacted]`;
+      consumed = message.length;
+      break;
     }
   }
   return output + message.slice(consumed);

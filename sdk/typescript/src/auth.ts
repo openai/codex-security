@@ -90,7 +90,9 @@ export class CodexLoginHandle {
         this.#clearForcedTermination();
         this.#forceCompletion = null;
         this.#destroyPipes();
-        this.#flushInstructionTails();
+        if (!this.#outputLimitExceeded && !this.#canceled) {
+          this.#flushInstructionTails();
+        }
         const result = this.#outputLimitExceeded
           ? {
               success: false,
@@ -534,8 +536,8 @@ function visibleTerminalChunk(
     if (state === "text") {
       if (character === "\u001b") {
         state = "escape";
-      } else if (character !== "\r") {
-        text += character;
+      } else {
+        text += character === "\r" ? "\n" : character;
       }
       continue;
     }

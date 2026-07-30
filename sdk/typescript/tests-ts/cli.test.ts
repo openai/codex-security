@@ -2191,9 +2191,16 @@ describe("CLI", () => {
         "Authorization: Digest+SYNTHETIC_DIGEST_SECRET",
         "Authorization: Digest+[redacted]",
       ],
+      [
+        "client_authorization_value=ApiKey SYNTHETIC_SUFFIXED_SECRET",
+        "client_authorization_value=ApiKey [redacted]",
+      ],
     ] as const) {
       expect(redactedErrorMessage(authorization)).toBe(redacted);
     }
+    expect(redactedErrorMessage('password="correct horse battery staple')).toBe(
+      'password="[redacted]',
+    );
     let encoded: string | { password: string } = {
       password: 'foo "bar" baz',
     };

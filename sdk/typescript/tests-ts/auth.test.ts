@@ -279,6 +279,48 @@ setTimeout(() => {
     await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
+  test("recognizes carriage-return-separated interactive login instructions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-carriage-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "login.mjs");
+    await writeFile(
+      script,
+      'process.stderr.write("Open https://auth.example.test/device\\rUser code: ABCD-EFGH\\r"); setTimeout(() => process.exit(0), 25);\n',
+    );
+    const handle = new CodexLoginHandle(
+      { command: process.execPath, prefixArgs: [script] },
+      ["login", "--device-auth"],
+      process.env,
+      () => {},
+    );
+
+    await handle.waitForInstructions({ deviceCode: true });
+    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
+    expect(handle.userCode).toBe("ABCD-EFGH");
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+  });
+
+  test("rejects instruction waiters when an unfinished login exceeds its output bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tail-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "login.mjs");
+    await writeFile(
+      script,
+      'process.stderr.write("Open https://auth.example.test/device"); setTimeout(() => process.stderr.write("x".repeat(128 * 1024)), 20);\n',
+    );
+    const handle = new CodexLoginHandle(
+      { command: process.execPath, prefixArgs: [script] },
+      ["login"],
+      process.env,
+      () => {},
+    );
+
+    await expect(handle.waitForInstructions()).rejects.toThrow(
+      "64 KiB safety limit",
+    );
+    await expect(handle.wait()).resolves.toMatchObject({ success: false });
+  });
+
   test("forces an oversized login to settle when it ignores termination", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "codex-security-auth-output-kill-"),
