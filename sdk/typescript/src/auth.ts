@@ -4,6 +4,12 @@ import { PluginBootstrapError } from "./errors.js";
 import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+const MAX_CODEX_AUTH_OUTPUT_BYTES = 64 * 1024;
+const LOGIN_OUTPUT_LIMIT_MESSAGE =
+  "Codex login output exceeded the 64 KiB safety limit.";
+const COMMAND_OUTPUT_LIMIT_MESSAGE =
+  "Codex authentication command output exceeded the 64 KiB safety limit.";
+const INSTRUCTION_TAIL_BYTES = 4 * 1024;
 
 export interface LoginResult {
   success: boolean;
@@ -33,6 +39,13 @@ export class CodexLoginHandle {
   #forceCompletion: (() => void) | null = null;
   #stdout = "";
   #stderr = "";
+  #stdoutInstructionTail = "";
+  #stderrInstructionTail = "";
+  #stdoutAuthUrl: string | null = null;
+  #stderrAuthUrl: string | null = null;
+  #stdoutUserCode: string | null = null;
+  #stderrUserCode: string | null = null;
+  #outputLimitExceeded = false;
 
   public constructor(
     command: CodexCommand,
@@ -59,12 +72,10 @@ export class CodexLoginHandle {
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");
     this.#child.stdout.on("data", (chunk: string) => {
-      this.#stdout += chunk;
-      this.#notifyInstructions();
+      this.#recordOutput("stdout", chunk);
     });
     this.#child.stderr.on("data", (chunk: string) => {
-      this.#stderr += chunk;
-      this.#notifyInstructions();
+      this.#recordOutput("stderr", chunk);
     });
     this.#completion = new Promise((resolve, reject) => {
       let fallback: ReturnType<typeof setTimeout> | undefined;
@@ -76,12 +87,19 @@ export class CodexLoginHandle {
         this.#clearForcedTermination();
         this.#forceCompletion = null;
         this.#destroyPipes();
-        const result = {
-          success: exitCode === 0 && !this.#canceled,
-          exitCode,
-          stdout: this.#stdout,
-          stderr: this.#stderr,
-        };
+        const result = this.#outputLimitExceeded
+          ? {
+              success: false,
+              exitCode,
+              stdout: "",
+              stderr: LOGIN_OUTPUT_LIMIT_MESSAGE,
+            }
+          : {
+              success: exitCode === 0 && !this.#canceled,
+              exitCode,
+              stdout: this.#stdout,
+              stderr: this.#stderr,
+            };
         this.#settleInstructionWaiters(result);
         if (result.success) onSuccess();
         resolve(result);
@@ -117,7 +135,7 @@ export class CodexLoginHandle {
   }
 
   public get authUrl(): string | null {
-    return preferredAuthUrl(`${this.#stdout}\n${this.#stderr}`);
+    return this.#stdoutAuthUrl ?? this.#stderrAuthUrl;
   }
 
   public get verificationUrl(): string | null {
@@ -125,12 +143,7 @@ export class CodexLoginHandle {
   }
 
   public get userCode(): string | null {
-    const output = plainTerminalText(`${this.#stdout}\n${this.#stderr}`);
-    return (
-      output.match(/(?:code|user code)\s*[:=]\s*([A-Z0-9-]{4,})/i)?.[1] ??
-      output.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/)?.[0] ??
-      null
-    );
+    return this.#stdoutUserCode ?? this.#stderrUserCode;
   }
 
   public async wait(): Promise<LoginResult> {
@@ -176,6 +189,51 @@ export class CodexLoginHandle {
     this.#child.stdin.destroy();
     this.#child.stdout.destroy();
     this.#child.stderr.destroy();
+  }
+
+  #recordOutput(stream: "stdout" | "stderr", chunk: string): void {
+    if (this.#outputLimitExceeded) return;
+    const current = stream === "stdout" ? this.#stdout : this.#stderr;
+    const appended = appendUtf8Tail(
+      current,
+      chunk,
+      MAX_CODEX_AUTH_OUTPUT_BYTES,
+    );
+    if (stream === "stdout") {
+      this.#stdout = appended.value;
+    } else {
+      this.#stderr = appended.value;
+    }
+    if (appended.exceeded) {
+      this.#outputLimitExceeded = true;
+      this.#stdout = "";
+      this.#stderr = LOGIN_OUTPUT_LIMIT_MESSAGE;
+      this.#child.kill("SIGTERM");
+      return;
+    }
+
+    const tail =
+      stream === "stdout"
+        ? this.#stdoutInstructionTail
+        : this.#stderrInstructionTail;
+    const candidate = `${tail}${chunk}`;
+    const url = preferredAuthUrl(candidate);
+    const userCode = userCodeFromOutput(candidate);
+    const nextTail = appendUtf8Tail(
+      "",
+      candidate,
+      INSTRUCTION_TAIL_BYTES,
+    ).value;
+    if (stream === "stdout") {
+      this.#stdoutAuthUrl ??= url;
+      this.#stdoutUserCode ??= userCode;
+      this.#stdoutInstructionTail = nextTail;
+    } else {
+      this.#stderrAuthUrl ??= url;
+      this.#stderrUserCode ??= userCode;
+      this.#stderrInstructionTail = nextTail;
+    }
+    this.#notifyInstructions();
   }
 
   #notifyInstructions(): void {
@@ -296,18 +354,33 @@ export async function runCodex(
   });
   let stdout = "";
   let stderr = "";
+  let processError: Error | null = null;
+  const recordOutput = (stream: "stdout" | "stderr", chunk: string): void => {
+    if (processError !== null) return;
+    const appended = appendUtf8Tail(
+      stream === "stdout" ? stdout : stderr,
+      chunk,
+      MAX_CODEX_AUTH_OUTPUT_BYTES,
+    );
+    if (stream === "stdout") stdout = appended.value;
+    else stderr = appended.value;
+    if (!appended.exceeded) return;
+    stdout = "";
+    stderr = "";
+    processError = new PluginBootstrapError(COMMAND_OUTPUT_LIMIT_MESSAGE);
+    child.kill("SIGTERM");
+  };
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
+    recordOutput("stdout", chunk);
   });
   child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
+    recordOutput("stderr", chunk);
   });
   const completion = new Promise<LoginResult>((resolve, reject) => {
-    let processError: Error | null = null;
     child.once("error", (error) => {
-      processError = error;
+      processError ??= error;
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       // A short-lived command can close stdin before Node flushes the input.
@@ -335,29 +408,63 @@ export async function runCodex(
 }
 
 function preferredAuthUrl(value: string): string | null {
-  const urls = [
-    ...plainTerminalText(value).matchAll(/https?:\/\/[^\s<>]+/g),
-  ].map((match) => match[0].replace(/[.,;:!?)\]}]+$/, ""));
-  return (
-    urls.find((url) => {
-      try {
-        const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-        return (
-          hostname !== "localhost" &&
-          !hostname.endsWith(".localhost") &&
-          !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
-          hostname !== "0.0.0.0" &&
-          hostname !== "[::1]" &&
-          hostname !== "[::]" &&
-          hostname !== "[::ffff:0:0]" &&
-          !hostname.startsWith("[::ffff:7f") &&
-          !hostname.startsWith("[::7f")
-        );
-      } catch {
-        return false;
+  for (const match of plainTerminalText(value).matchAll(
+    /https?:\/\/[^\s<>]+/g,
+  )) {
+    const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
+    try {
+      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+      if (
+        hostname !== "localhost" &&
+        !hostname.endsWith(".localhost") &&
+        !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
+        hostname !== "0.0.0.0" &&
+        hostname !== "[::1]" &&
+        hostname !== "[::]" &&
+        hostname !== "[::ffff:0:0]" &&
+        !hostname.startsWith("[::ffff:7f") &&
+        !hostname.startsWith("[::7f")
+      ) {
+        return url;
       }
-    }) ?? null
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function userCodeFromOutput(value: string): string | null {
+  const output = plainTerminalText(value);
+  return (
+    output.match(/(?:code|user code)\s*[:=]\s*([A-Z0-9-]{4,})/i)?.[1] ??
+    output.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/)?.[0] ??
+    null
   );
+}
+
+function appendUtf8Tail(
+  current: string,
+  chunk: string,
+  maximumBytes: number,
+): { value: string; exceeded: boolean } {
+  const currentBytes = Buffer.from(current);
+  const chunkBytes = Buffer.from(chunk);
+  const exceeded = currentBytes.length + chunkBytes.length > maximumBytes;
+  if (!exceeded) return { value: `${current}${chunk}`, exceeded: false };
+  if (chunkBytes.length >= maximumBytes) {
+    return {
+      value: chunkBytes.subarray(chunkBytes.length - maximumBytes).toString(),
+      exceeded: true,
+    };
+  }
+  const retained = currentBytes.subarray(
+    Math.max(0, currentBytes.length - (maximumBytes - chunkBytes.length)),
+  );
+  return {
+    value: Buffer.concat([retained, chunkBytes]).toString(),
+    exceeded: true,
+  };
 }
 
 function plainTerminalText(value: string): string {

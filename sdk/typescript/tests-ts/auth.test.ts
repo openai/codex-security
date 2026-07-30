@@ -100,6 +100,30 @@ describe("Codex authentication process boundary", () => {
     ).resolves.toMatchObject({ success: false, exitCode: 1 });
   });
 
+  test("rejects oversized noninteractive authentication output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
+    temporaryDirectories.push(root);
+    const secret = "sk-proj-SYNTHETIC_OVERSIZED_OUTPUT_SECRET";
+    for (const stream of ["stdout", "stderr"] as const) {
+      const script = join(root, `${stream}.mjs`);
+      await writeFile(
+        script,
+        `process.${stream}.write(${JSON.stringify(secret)}.repeat(3_000), () => process.exit(0));\n`,
+      );
+      const failure = await runCodex(
+        { command: process.execPath, prefixArgs: [script] },
+        [],
+        process.env,
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(PluginBootstrapError);
+      expect(String(failure)).toContain("64 KiB safety limit");
+      expect(String(failure)).not.toContain(secret);
+    }
+  });
+
   test("reports account state and performs logout", async () => {
     const command = await fakeCodex();
     await expect(accountStatus(command, process.env)).resolves.toMatchObject({
@@ -125,6 +149,44 @@ describe("Codex authentication process boundary", () => {
     expect(handle.verificationUrl).toBe("https://127.auth.example.test/device");
     expect(handle.userCode).toBe("8356-V2EGR");
     expect(succeeded).toBe(true);
+  });
+
+  test("bounds interactive output while retaining discovered instructions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "login.mjs");
+    const secret = "sk-proj-SYNTHETIC_INTERACTIVE_OUTPUT_SECRET";
+    await writeFile(
+      script,
+      `
+console.error("Open https://auth.example.test/device");
+console.error("User code: ABCD-EFGH");
+setTimeout(() => {
+  process.stderr.write(${JSON.stringify(secret)}.repeat(3_000), () => process.exit(0));
+}, 10);
+`,
+    );
+    let succeeded = false;
+    const handle = new CodexLoginHandle(
+      { command: process.execPath, prefixArgs: [script] },
+      ["login", "--device-auth"],
+      process.env,
+      () => {
+        succeeded = true;
+      },
+    );
+
+    await handle.waitForInstructions({ deviceCode: true });
+    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
+    expect(handle.userCode).toBe("ABCD-EFGH");
+    const result = await handle.wait();
+    expect(result).toMatchObject({
+      success: false,
+      stdout: "",
+      stderr: "Codex login output exceeded the 64 KiB safety limit.",
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(succeeded).toBe(false);
   });
 
   test("drains native login stderr before resolving authentication", async () => {

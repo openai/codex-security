@@ -22,8 +22,7 @@ import {
   win32,
 } from "node:path";
 import { cwd } from "node:process";
-import { createInterface } from "node:readline";
-import { Readable, Writable as NodeWritable } from "node:stream";
+import { Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
@@ -102,6 +101,10 @@ const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
 const MAX_CODEX_OVERRIDE_DEPTH = 64;
 const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
 const MAX_SKILL_INPUT_COUNT = 64;
+const MAX_SKILL_EVENT_BYTES = 1_024 * 1_024;
+const MAX_SKILL_RESPONSE_BYTES = 256 * 1_024;
+const SKILL_OUTPUT_LIMIT_MESSAGE =
+  "Codex skill output exceeded the 1 MiB event or 256 KiB response safety limit.";
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
@@ -2232,19 +2235,23 @@ export async function readSkillCommandOutput(
   let message: string | undefined;
   let error: string | undefined;
   let malformed = false;
+  let exceeded = false;
 
-  for await (const line of createInterface({ input: Readable.from(stream) })) {
-    if (line.trim().length === 0) continue;
+  const readLine = (bytes: Buffer): void => {
+    const content =
+      bytes.at(-1) === 0x0d ? bytes.subarray(0, bytes.length - 1) : bytes;
+    const line = content.toString("utf8");
+    if (line.trim().length === 0) return;
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
       malformed = true;
-      continue;
+      return;
     }
     if (typeof event !== "object" || event === null) {
       malformed = true;
-      continue;
+      return;
     }
     const value = event as Record<string, unknown>;
     if (value["type"] === "item.completed") {
@@ -2257,7 +2264,11 @@ export async function readSkillCommandOutput(
         "text" in item &&
         typeof item.text === "string"
       ) {
-        message = item.text;
+        if (Buffer.byteLength(item.text, "utf8") > MAX_SKILL_RESPONSE_BYTES) {
+          exceeded = true;
+        } else {
+          message = item.text;
+        }
       }
     } else if (value["type"] === "turn.failed") {
       const detail = value["error"];
@@ -2267,15 +2278,63 @@ export async function readSkillCommandOutput(
         "message" in detail &&
         typeof detail.message === "string"
       ) {
-        error = detail.message;
+        if (
+          Buffer.byteLength(detail.message, "utf8") > MAX_SKILL_RESPONSE_BYTES
+        ) {
+          exceeded = true;
+        } else {
+          error = detail.message;
+        }
       }
     } else if (
       value["type"] === "error" &&
       typeof value["message"] === "string"
     ) {
-      error = value["message"];
+      if (
+        Buffer.byteLength(value["message"], "utf8") > MAX_SKILL_RESPONSE_BYTES
+      ) {
+        exceeded = true;
+      } else {
+        error = value["message"];
+      }
+    }
+  };
+
+  const pending = Buffer.alloc(MAX_SKILL_EVENT_BYTES);
+  let pendingBytes = 0;
+  let discardingOversizedLine = false;
+  for await (const rawChunk of stream) {
+    const chunk = Buffer.isBuffer(rawChunk)
+      ? rawChunk
+      : Buffer.from(rawChunk, "utf8");
+    let start = 0;
+    while (start < chunk.length) {
+      const newline = chunk.indexOf(0x0a, start);
+      const end = newline === -1 ? chunk.length : newline;
+      const segment = chunk.subarray(start, end);
+      if (!discardingOversizedLine) {
+        if (pendingBytes + segment.length > MAX_SKILL_EVENT_BYTES) {
+          exceeded = true;
+          discardingOversizedLine = true;
+          pendingBytes = 0;
+        } else if (segment.length > 0) {
+          segment.copy(pending, pendingBytes);
+          pendingBytes += segment.length;
+        }
+      }
+      if (newline === -1) break;
+      if (!discardingOversizedLine) {
+        readLine(pending.subarray(0, pendingBytes));
+      }
+      pendingBytes = 0;
+      discardingOversizedLine = false;
+      start = newline + 1;
     }
   }
+  if (!discardingOversizedLine && pendingBytes > 0) {
+    readLine(pending.subarray(0, pendingBytes));
+  }
+  if (exceeded) throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),

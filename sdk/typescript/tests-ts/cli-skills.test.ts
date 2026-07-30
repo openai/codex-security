@@ -457,6 +457,58 @@ describe("CLI skill commands", () => {
     });
   });
 
+  test("drains and rejects oversized skill events and responses", async () => {
+    let drained = false;
+    async function* oversizedLine(): AsyncGenerator<Buffer> {
+      for (let remaining = 1_024 * 1_024 + 1; remaining > 0; ) {
+        const length = Math.min(64 * 1_024, remaining);
+        yield Buffer.alloc(length, 0x78);
+        remaining -= length;
+      }
+      yield Buffer.from(
+        '\n{"type":"item.completed","item":{"type":"agent_message","text":"must still drain"}}\n',
+      );
+      drained = true;
+    }
+    await expect(readSkillCommandOutput(oversizedLine())).rejects.toThrow(
+      "Codex skill output exceeded the 1 MiB event",
+    );
+    expect(drained).toBe(true);
+
+    async function* oversizedResponse(): AsyncGenerator<Buffer> {
+      yield Buffer.from(
+        `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: "x".repeat(256 * 1_024 + 1),
+          },
+        })}\n`,
+      );
+    }
+    await expect(readSkillCommandOutput(oversizedResponse())).rejects.toThrow(
+      "Codex skill output exceeded the 1 MiB event",
+    );
+
+    const stdout = capture();
+    const stderr = capture();
+    await expect(
+      runCodexSkillCommand(
+        [],
+        { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+        {
+          command: process.execPath,
+          prefixArgs: [
+            "-e",
+            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n")',
+          ],
+        },
+      ),
+    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe("");
+  });
+
   test("summarizes skill failures without echoing credentials or private paths", () => {
     const cases = [
       ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
