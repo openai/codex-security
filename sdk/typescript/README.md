@@ -19,8 +19,9 @@ The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
 later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scans, bulk
 scans, exports, scan-history commands, and saved-finding commands also require
 Python 3.10 or later. If you use Python 3.10, install the `tomli` package.
-Scan, bulk-scan, and export commands accept `--python`; the SDK accepts
-`pythonPath`; and every Python-backed command honors `PYTHON`.
+Scan, CSV-driven bulk-scan, and export commands accept `--python`; interactive
+bulk-scan discovery uses `PYTHON`. The SDK accepts `pythonPath`, and every
+Python-backed command honors `PYTHON`.
 
 When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
@@ -222,9 +223,10 @@ directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
 
-Initialized Git submodules must have clean worktrees because their recorded
-commit, rather than uncommitted submodule changes, defines the parent
-repository snapshot.
+Repository, path, and working-tree scans require initialized Git submodules to
+have clean worktrees because their recorded commit, rather than uncommitted
+submodule changes, defines the parent repository snapshot. Committed-diff scans
+do not require unrelated initialized submodules to be clean.
 
 Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
 searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
