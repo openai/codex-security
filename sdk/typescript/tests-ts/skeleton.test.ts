@@ -55,6 +55,18 @@ describe("TypeScript package skeleton", () => {
     ).toEqual([]);
   });
 
+  test("pins each supported Node.js minimum and retains latest LTS coverage", async () => {
+    const ciWorkflow = await readFile(
+      new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
+      "utf8",
+    );
+
+    expect(ciWorkflow).toContain('node: ["22.13.0"]');
+    for (const version of ["24.0.0", "24", "26.0.0", "26"]) {
+      expect(ciWorkflow).toContain(`node: "${version}"`);
+    }
+  });
+
   test("builds packages without a preinstalled package manager and provides a production audit", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),

@@ -24,7 +24,11 @@ jobs:
         node: ["22.13.0"]
         include:
           - os: ubuntu-latest
+            node: "24.0.0"
+          - os: ubuntu-latest
             node: "24"
+          - os: ubuntu-latest
+            node: "26.0.0"
           - os: ubuntu-latest
             node: "26"
 
