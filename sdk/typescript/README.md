@@ -29,8 +29,8 @@ notice. Notices are also disabled in CI and when stderr is not a terminal.
 ## Run a scan from TypeScript
 
 Sign in with `npx @openai/codex-security login` or set `OPENAI_API_KEY` or
-`CODEX_API_KEY`. Then create a client and scan a repository you own or have
-permission to assess:
+`CODEX_API_KEY`. Then create a client and scan a repository you trust and
+either own or have explicit permission to assess:
 
 ```ts
 import { CodexSecurity } from "@openai/codex-security";
@@ -222,8 +222,6 @@ directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
 
-Working-tree snapshots include files from untracked nested Git repositories so
-saved scans and remediation checkouts retain the selected source content.
 Initialized Git submodules must have clean worktrees because their recorded
 commit, rather than uncommitted submodule changes, defines the parent
 repository snapshot.
