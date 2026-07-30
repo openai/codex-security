@@ -600,16 +600,48 @@ export async function main(
   let renderedHistory: string | undefined;
   const history = async (
     args: readonly string[],
-    select: (value: JsonObject) => JsonObject = (value) => value,
+    select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
+      value,
   ): Promise<JsonObject | undefined> => {
     try {
-      return select(await dependencies.runWorkbench(args));
+      return await select(await dependencies.runWorkbench(args));
     } catch (error) {
       errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
       exitCode = 2;
       return undefined;
     }
   };
+  const matchScanPair = async (
+    beforeId: string,
+    afterId: string,
+    force = false,
+  ): Promise<JsonObject | undefined> =>
+    history(
+      [
+        "compare-scans",
+        "--before-scan-id",
+        beforeId,
+        "--after-scan-id",
+        afterId,
+        "--include-matching-inputs",
+      ],
+      async ({ matchingCached, matchingInputs, ...comparison }) => {
+        if (matchingCached && !force) return comparison;
+        return await dependencies.runWorkbench([
+          "save-scan-comparison",
+          "--before-scan-id",
+          beforeId,
+          "--after-scan-id",
+          afterId,
+          "--matches-json",
+          JSON.stringify(
+            await dependencies.matchFindings(
+              matchingInputs as JsonObject & ScanComparisonInput,
+            ),
+          ),
+        ]);
+      },
+    );
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -830,34 +862,8 @@ export async function main(
               format,
             );
           }
-          const comparison = await history([
-            "compare-scans",
-            "--before-scan-id",
-            args.beforeId!,
-            "--after-scan-id",
-            args.afterId!,
-            "--include-matching-inputs",
-          ]);
-          if (comparison === undefined) return undefined;
-          const { matchingCached, matchingInputs, ...visibleComparison } =
-            comparison;
-          if (matchingCached && !options.force) {
-            return presentHistory(visibleComparison, "compare", format);
-          }
-
-          const matching = await dependencies.matchFindings(
-            matchingInputs as JsonObject & ScanComparisonInput,
-          );
           return presentHistory(
-            await history([
-              "save-scan-comparison",
-              "--before-scan-id",
-              args.beforeId!,
-              "--after-scan-id",
-              args.afterId!,
-              "--matches-json",
-              JSON.stringify(matching),
-            ]),
+            await matchScanPair(args.beforeId!, args.afterId!, options.force),
             "compare",
             format,
           );
@@ -869,7 +875,8 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Compare findings and coverage using saved matches.",
+      description: "Match and compare findings and coverage between scans.",
+      destructive: true,
       mcp: false,
       args: z.object({
         beforeId: z.string().min(1).describe("Earlier saved scan identifier."),
@@ -878,14 +885,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format }) {
         return presentHistory(
-          await history([
-            "compare-scans",
-            "--before-scan-id",
-            args.beforeId,
-            "--after-scan-id",
-            args.afterId,
-            "--require-matches",
-          ]),
+          await matchScanPair(args.beforeId, args.afterId),
           "compare",
           format,
         );

@@ -121,10 +121,12 @@ describe("CLI workbench", () => {
           "before",
           "--after-scan-id",
           "after",
-          "--require-matches",
+          "--include-matching-inputs",
         ],
         {
           comparable: true,
+          matchingCached: true,
+          matchingInputs: { before: [], after: [] },
           summary: { persisting: 1, resolved: 1 },
         },
         { comparable: true, summary: { persisting: 1, resolved: 1 } },
@@ -169,7 +171,7 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("matches findings and saves the result", async () => {
+  test("matches findings before matching or comparing scans", async () => {
     const before = [{ occurrenceId: "before" }];
     const after = [{ occurrenceId: "after" }];
     const matching = {
@@ -183,34 +185,64 @@ describe("CLI workbench", () => {
       ],
       uncertain: [],
     };
-    const calls: Array<readonly string[]> = [];
-    const stdout = capture();
+
+    for (const command of ["match", "compare"]) {
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+
+      expect(
+        await main(
+          ["scans", command, "before", "after", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              return args[0] === "compare-scans"
+                ? { matchingCached: false, matchingInputs: { before, after } }
+                : { summary: { persisting: 1 } };
+            },
+            onMatch: async (input) => {
+              expect(input).toEqual({ before, after });
+              return matching;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls.map((args) => args[0])).toEqual([
+        "compare-scans",
+        "save-scan-comparison",
+      ]);
+      expect(JSON.parse(calls[1]![6]!)).toEqual(matching);
+      expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
+    }
+  });
+
+  test("reports automatic matching failures without saving a comparison", async () => {
+    const calls: string[] = [];
+    const stderr = capture();
 
     expect(
       await main(
-        ["scans", "match", "before", "after", "--json"],
-        stdout.stream,
+        ["scans", "compare", "before", "after"],
         capture().stream,
+        stderr.stream,
         dependencies({
-          onWorkbench: (args): JsonObject => {
-            calls.push(args);
-            return args[0] === "compare-scans"
-              ? { matchingCached: false, matchingInputs: { before, after } }
-              : { summary: { persisting: 1 } };
+          onWorkbench: (args) => {
+            calls.push(args[0]!);
+            return {
+              matchingCached: false,
+              matchingInputs: { before: [], after: [] },
+            };
           },
-          onMatch: async (input) => {
-            expect(input).toEqual({ before, after });
-            return matching;
+          onMatch: async () => {
+            throw new Error("Root-cause matching failed.");
           },
         }),
       ),
-    ).toBe(0);
-    expect(calls.map((args) => args[0])).toEqual([
-      "compare-scans",
-      "save-scan-comparison",
-    ]);
-    expect(JSON.parse(calls[1]![6]!)).toEqual(matching);
-    expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
+    ).toBe(2);
+    expect(stderr.text()).toContain("Root-cause matching failed.");
+    expect(calls).toEqual(["compare-scans"]);
   });
 
   test("matches all scans once per later scan", async () => {

@@ -46,6 +46,11 @@ Scan history is stored in the Codex Security workbench state directory. If that
 directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
 directory outside the repository.
 
+`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
+root cause, reuses saved matches, and identifies new, persisting, reopened,
+resolved, or unknown findings. Missing findings remain unknown when coverage is
+incomplete or their original location was not reviewed.
+
 ## TypeScript SDK
 
 ```ts
