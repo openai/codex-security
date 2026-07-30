@@ -127,7 +127,18 @@ export class ScanCostTracker {
         };
         this.#sessions.set(path, session);
       }
-      await readSessionUsage(path, session);
+      try {
+        await readSessionUsage(path, session);
+      } catch (error) {
+        if (
+          session.threadId !== null &&
+          session.threadId !== this.#threadId &&
+          session.parentThreadId === null
+        ) {
+          continue;
+        }
+        throw error;
+      }
     }
 
     const included = new Set([this.#threadId]);

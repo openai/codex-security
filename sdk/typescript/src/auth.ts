@@ -90,6 +90,7 @@ export class CodexLoginHandle {
         this.#clearForcedTermination();
         this.#forceCompletion = null;
         this.#destroyPipes();
+        this.#flushInstructionTails();
         const result = this.#outputLimitExceeded
           ? {
               success: false,
@@ -230,11 +231,16 @@ export class CodexLoginHandle {
         : this.#stderrTerminalState,
     );
     const candidate = `${tail}${visible.text}`;
-    const url = preferredAuthUrl(candidate);
-    const userCode = userCodeFromOutput(candidate);
+    const lastDelimiter = Math.max(
+      candidate.lastIndexOf("\n"),
+      candidate.lastIndexOf("\r"),
+    );
+    const completed = candidate.slice(0, lastDelimiter + 1);
+    const url = preferredAuthUrl(completed);
+    const userCode = userCodeFromOutput(completed);
     const nextTail = appendUtf8Tail(
       "",
-      candidate,
+      candidate.slice(lastDelimiter + 1),
       INSTRUCTION_TAIL_BYTES,
     ).value;
     if (stream === "stdout") {
@@ -249,6 +255,13 @@ export class CodexLoginHandle {
       this.#stderrTerminalState = visible.state;
     }
     this.#notifyInstructions();
+  }
+
+  #flushInstructionTails(): void {
+    this.#stdoutAuthUrl ??= preferredAuthUrl(this.#stdoutInstructionTail);
+    this.#stdoutUserCode ??= userCodeFromOutput(this.#stdoutInstructionTail);
+    this.#stderrAuthUrl ??= preferredAuthUrl(this.#stderrInstructionTail);
+    this.#stderrUserCode ??= userCodeFromOutput(this.#stderrInstructionTail);
   }
 
   #notifyInstructions(): void {
@@ -372,7 +385,12 @@ export async function runCodex(
   let processError: Error | null = null;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   const terminate = (): void => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) {
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      return;
+    }
     child.kill("SIGTERM");
     if (forcedTermination !== undefined) return;
     forcedTermination = setTimeout(() => {

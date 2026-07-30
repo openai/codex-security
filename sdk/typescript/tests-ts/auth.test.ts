@@ -251,6 +251,34 @@ setTimeout(() => {
     await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
+  test("waits for complete login instructions split across output chunks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-fragment-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "login.mjs");
+    await writeFile(
+      script,
+      `
+process.stderr.write("Open https://auth.example");
+setTimeout(() => process.stderr.write(".test/device\\nUser code: ABCD"), 10);
+setTimeout(() => {
+  process.stderr.write("-EFGH\\n");
+  setTimeout(() => process.exit(0), 10);
+}, 20);
+`,
+    );
+    const handle = new CodexLoginHandle(
+      { command: process.execPath, prefixArgs: [script] },
+      ["login", "--device-auth"],
+      process.env,
+      () => {},
+    );
+
+    await handle.waitForInstructions({ deviceCode: true });
+    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
+    expect(handle.userCode).toBe("ABCD-EFGH");
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
+  });
+
   test("forces an oversized login to settle when it ignores termination", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "codex-security-auth-output-kill-"),

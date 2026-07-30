@@ -404,7 +404,7 @@ export class CodexSecurity {
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(
           runtime.configPath,
-          scanPreflightCodexConfig(effectiveConfig, protectedRoot),
+          scanPreflightCodexConfig(effectiveConfig, repo),
         );
       }
       const runtimeHome = await realpath(runtime.codexHome);

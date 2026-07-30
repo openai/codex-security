@@ -21,6 +21,7 @@ import type {
   JsonObject,
   ScanPreflight,
 } from "../src/index.js";
+import { redactedErrorMessage } from "../src/errors.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
@@ -2155,6 +2156,14 @@ describe("CLI", () => {
     );
     expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(stderr.text()).not.toContain("model service could not be reached");
+  });
+
+  test("redacts quoted multiword credentials and private-key assignments", () => {
+    expect(
+      redactedErrorMessage(
+        'password="correct horse battery staple" private_key=SYNTHETIC_PRIVATE_KEY_123',
+      ),
+    ).toBe('password="[redacted]" private_key=[redacted]');
   });
 
   test("reports database connection failures without claiming the model network failed", async () => {

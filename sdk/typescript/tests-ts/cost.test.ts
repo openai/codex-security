@@ -282,6 +282,29 @@ describe("live scan cost tracking", () => {
     });
   });
 
+  test("ignores oversized events from unrelated prior credential sessions", async () => {
+    const home = await codexHome();
+    const unrelated = await writeSession(home, "unrelated-thread", {
+      input_tokens: 99,
+      output_tokens: 1,
+    });
+    await appendFile(unrelated, "x".repeat(1 * 1_024 * 1_024 + 1));
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    expect((await tracker.stop()).cost).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 10,
+    });
+  });
+
   test("reports a changed running cost only once", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
