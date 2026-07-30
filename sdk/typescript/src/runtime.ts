@@ -4,6 +4,7 @@ import { constants, existsSync, type Stats } from "node:fs";
 import {
   chmod,
   copyFile,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -963,7 +964,7 @@ export async function importAmbientAuth(
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
     await chmod(temporary, 0o600);
     try {
-      await copyFile(temporary, destination, constants.COPYFILE_EXCL);
+      await link(temporary, destination);
     } catch (error) {
       if (
         nodeErrorCode(error) === "EEXIST" &&
