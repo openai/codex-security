@@ -857,7 +857,9 @@ export async function main(
         try {
           if (options.all) {
             return presentHistory(
-              await matchAllScans(dependencies, options.force),
+              await matchAllScans(dependencies, options.force, (warning) => {
+                errorOutput.write(`codex-security: warning: ${warning}\n`);
+              }),
               "match-all",
               format,
             );
@@ -1959,6 +1961,7 @@ function validateCliArguments(
 async function matchAllScans(
   dependencies: CliDependencies,
   force: boolean,
+  onWarning?: (warning: string) => void,
 ): Promise<JsonObject> {
   const result = (await dependencies.runWorkbench([
     "list-unmatched-scan-pairs",
@@ -1971,62 +1974,78 @@ async function matchAllScans(
 
   let matchedPairs = 0;
   let findingMatches = 0;
+  let unmatchedBatches = 0;
+  let firstFailure: unknown;
   for (const { afterScanId, afterFindings, beforeScans } of batches) {
-    const before = beforeScans.flatMap(({ findings }) => findings);
-    const matching =
-      before.length === 0 || afterFindings.length === 0
-        ? { matches: [], uncertain: [] }
-        : await dependencies.matchFindings(
-            { before, after: afterFindings },
-            { allowHistoricalUncertainty: true },
-          );
-    const comparisons = beforeScans.map(({ scanId, findings }) => {
-      const beforeIds = new Set(
-        findings.map(({ occurrenceId }) => occurrenceId),
-      );
-      const matches = matching.matches.flatMap((match) => {
-        const beforeOccurrenceIds = match.beforeOccurrenceIds.filter((id) =>
-          beforeIds.has(id),
+    // Each batch is independent. Containing a failure here keeps one unusable
+    // batch from discarding the comparisons already saved for earlier batches.
+    try {
+      const before = beforeScans.flatMap(({ findings }) => findings);
+      const matching =
+        before.length === 0 || afterFindings.length === 0
+          ? { matches: [], uncertain: [] }
+          : await dependencies.matchFindings(
+              { before, after: afterFindings },
+              { allowHistoricalUncertainty: true },
+            );
+      const comparisons = beforeScans.map(({ scanId, findings }) => {
+        const beforeIds = new Set(
+          findings.map(({ occurrenceId }) => occurrenceId),
         );
-        return beforeOccurrenceIds.length === 0
-          ? []
-          : [{ ...match, beforeOccurrenceIds }];
+        const matches = matching.matches.flatMap((match) => {
+          const beforeOccurrenceIds = match.beforeOccurrenceIds.filter((id) =>
+            beforeIds.has(id),
+          );
+          return beforeOccurrenceIds.length === 0
+            ? []
+            : [{ ...match, beforeOccurrenceIds }];
+        });
+        const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
+          beforeIds.has(beforeOccurrenceId),
+        );
+        const matchedAfter = new Set(
+          matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
+        );
+        if (
+          uncertain.some(({ afterOccurrenceId }) =>
+            matchedAfter.has(afterOccurrenceId),
+          )
+        ) {
+          throw new CodexSecurityError(
+            "Scan matching returned conflicting confirmed and uncertain findings.",
+          );
+        }
+        return { scanId, matches, uncertain };
       });
-      const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
-        beforeIds.has(beforeOccurrenceId),
-      );
-      const matchedAfter = new Set(
-        matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
-      );
-      if (
-        uncertain.some(({ afterOccurrenceId }) =>
-          matchedAfter.has(afterOccurrenceId),
-        )
-      ) {
-        throw new CodexSecurityError(
-          "Scan matching returned conflicting confirmed and uncertain findings.",
+      for (const { scanId, matches, uncertain } of comparisons) {
+        await dependencies.runWorkbench([
+          "save-scan-comparison",
+          "--before-scan-id",
+          scanId,
+          "--after-scan-id",
+          afterScanId,
+          "--matches-json",
+          JSON.stringify({ matches, uncertain }),
+        ]);
+        matchedPairs += 1;
+        findingMatches += matches.reduce(
+          (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
+            count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
+          0,
         );
       }
-      return { scanId, matches, uncertain };
-    });
-    for (const { scanId, matches, uncertain } of comparisons) {
-      await dependencies.runWorkbench([
-        "save-scan-comparison",
-        "--before-scan-id",
-        scanId,
-        "--after-scan-id",
-        afterScanId,
-        "--matches-json",
-        JSON.stringify({ matches, uncertain }),
-      ]);
-      matchedPairs += 1;
-      findingMatches += matches.reduce(
-        (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
-          count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
-        0,
+    } catch (error) {
+      unmatchedBatches += 1;
+      firstFailure ??= error;
+      onWarning?.(
+        `Could not match findings against scan ${afterScanId}: ${cliErrorMessage(error)}`,
       );
     }
   }
+  // A failure that left nothing matched is reported rather than presented as a
+  // successful no-op, so an unwritable workbench or a rejected credential still
+  // surfaces instead of being reduced to a warning.
+  if (matchedPairs === 0 && firstFailure !== undefined) throw firstFailure;
   return {
     repository,
     scanCount,
@@ -2034,6 +2053,7 @@ async function matchAllScans(
     matchedPairs,
     skippedPairs,
     findingMatches,
+    ...(unmatchedBatches === 0 ? {} : { unmatchedBatches }),
   };
 }
 

@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
-import { DiffTarget } from "../src/index.js";
+import { CodexSecurityError, DiffTarget } from "../src/index.js";
 import { main } from "../src/cli.js";
 import {
   capture,
@@ -463,6 +463,136 @@ describe("CLI workbench", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("conflicting confirmed and uncertain");
     expect(calls).toHaveLength(1);
+  });
+
+  test("keeps matching later scans after one batch conflicts", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stderr = capture();
+    const stdout = capture();
+    const conflicted = {
+      afterScanId: "after-conflict",
+      afterFindings: [{ occurrenceId: "after" }],
+      beforeScans: [
+        {
+          scanId: "before-conflict",
+          findings: [{ occurrenceId: "confirmed" }, { occurrenceId: "loose" }],
+        },
+      ],
+    };
+    const healthy = {
+      afterScanId: "after-ok",
+      afterFindings: [{ occurrenceId: "ok-after" }],
+      beforeScans: [
+        { scanId: "before-ok", findings: [{ occurrenceId: "ok-before" }] },
+      ],
+    };
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return args[0] === "list-unmatched-scan-pairs"
+              ? {
+                  repository: "/repo",
+                  scanCount: 3,
+                  unavailableScans: 0,
+                  skippedPairs: 0,
+                  batches: [conflicted, healthy],
+                }
+              : {};
+          },
+          onMatch: async (input) =>
+            input.after[0]?.occurrenceId === "after"
+              ? {
+                  matches: [
+                    {
+                      beforeOccurrenceIds: ["confirmed"],
+                      afterOccurrenceIds: ["after"],
+                      confidence: "high",
+                      reason: "Same root cause.",
+                    },
+                  ],
+                  uncertain: [
+                    {
+                      beforeOccurrenceId: "loose",
+                      afterOccurrenceId: "after",
+                      reason: "Possibly the same root cause.",
+                    },
+                  ],
+                }
+              : {
+                  matches: [
+                    {
+                      beforeOccurrenceIds: ["ok-before"],
+                      afterOccurrenceIds: ["ok-after"],
+                      confidence: "high",
+                      reason: "Same root cause.",
+                    },
+                  ],
+                  uncertain: [],
+                },
+        }),
+      ),
+    ).toBe(0);
+    // The conflicting batch is skipped, not saved, and does not stop the run.
+    expect(
+      calls.filter((args) => args[0] === "save-scan-comparison").length,
+    ).toBe(1);
+    expect(calls.at(-1)?.[2]).toBe("before-ok");
+    expect(stderr.text()).toContain("conflicting confirmed and uncertain");
+    expect(stderr.text()).toContain("after-conflict");
+    expect(JSON.parse(stdout.text())).toEqual({
+      repository: "/repo",
+      scanCount: 3,
+      unavailableScans: 0,
+      matchedPairs: 1,
+      skippedPairs: 0,
+      findingMatches: 1,
+      unmatchedBatches: 1,
+    });
+  });
+
+  test("reports the underlying failure when no batch could be matched", async () => {
+    const stderr = capture();
+    const batch = (afterScanId: string): JsonObject => ({
+      afterScanId,
+      afterFindings: [{ occurrenceId: `${afterScanId}-after` }],
+      beforeScans: [
+        {
+          scanId: `${afterScanId}-before`,
+          findings: [{ occurrenceId: `${afterScanId}-before` }],
+        },
+      ],
+    });
+
+    expect(
+      await main(
+        ["scans", "match", "--all"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                repository: "/repo",
+                scanCount: 2,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                batches: [batch("one"), batch("two")],
+              };
+            }
+            throw new CodexSecurityError(
+              "cannot open the workbench database at /repo/workbench.sqlite3",
+            );
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("cannot open the workbench database");
   });
 
   test("force recomputes saved matches", async () => {

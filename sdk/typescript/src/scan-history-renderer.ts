@@ -399,6 +399,14 @@ export function renderScanHistory(
         `  ${paint(`${clean(result["unavailableScans"])} scans unavailable`, 33)}`,
       );
     }
+    if (result["unmatchedBatches"]) {
+      lines.push(
+        `  ${paint(
+          `${clean(result["unmatchedBatches"])} scans could not be matched; rerun to retry`,
+          33,
+        )}`,
+      );
+    }
   }
 
   return `${lines.join("\n")}\n\n`;
