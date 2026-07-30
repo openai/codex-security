@@ -1395,12 +1395,8 @@ export async function runScanEvents(
       } else if (event.type === "turn.completed") {
         status = "completed";
         usage = event["usage"];
-      } else if (
-        event.type === "turn.failed" &&
-        isRecord(event["error"]) &&
-        typeof event["error"]["message"] === "string"
-      ) {
-        throw new CodexSecurityError(event["error"]["message"]);
+      } else if (event.type === "turn.failed") {
+        throw new CodexSecurityError(turnFailureMessage(event["error"]));
       } else if (
         event.type === "error" &&
         typeof event["message"] === "string"
@@ -1756,6 +1752,21 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
       ? { retryAfterSeconds }
       : {}),
   };
+}
+
+// A failed turn must fail the scan whatever its error payload looks like.
+//
+// Only `error.message` is reused, because that is the single shape the previous
+// code already surfaced. No other shape is forwarded or stringified: this message
+// reaches `fail-scan --message` and is stored in `scans.failure_message` without
+// redaction, so widening what is copied out of the payload would add a new
+// credential-disclosure path to persistent scan history.
+function turnFailureMessage(error: unknown): string {
+  if (isRecord(error) && typeof error["message"] === "string") {
+    const message = error["message"].trim();
+    if (message.length > 0) return error["message"];
+  }
+  return "The Codex Security scan turn failed without a readable error message.";
 }
 
 export function classifyConnectionFailure(
