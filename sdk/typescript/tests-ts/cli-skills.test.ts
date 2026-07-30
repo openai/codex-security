@@ -582,16 +582,18 @@ describe("CLI skill commands", () => {
     }
   });
 
-  test("forces a skill child to settle when it ignores SIGTERM", async () => {
-    const directory = await mkdtemp(
-      join(tmpdir(), "codex-security-skill-signal-"),
-    );
-    const ready = join(directory, "ready");
-    const child = join(directory, "child.mjs");
-    const wrapper = join(directory, "wrapper.mjs");
-    await writeFile(
-      child,
-      `
+  test.skipIf(process.platform === "win32")(
+    "forces a skill child to settle when it ignores SIGTERM",
+    async () => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "codex-security-skill-signal-"),
+      );
+      const ready = join(directory, "ready");
+      const child = join(directory, "child.mjs");
+      const wrapper = join(directory, "wrapper.mjs");
+      await writeFile(
+        child,
+        `
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 const descendant = spawn(
@@ -606,10 +608,10 @@ writeFileSync(${JSON.stringify(ready)}, JSON.stringify({
 process.on("SIGTERM", () => {});
 setInterval(() => {}, 1000);
 `,
-    );
-    await writeFile(
-      wrapper,
-      `
+      );
+      await writeFile(
+        wrapper,
+        `
 import { runCodexSkillCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
 const status = await runCodexSkillCommand(
   [],
@@ -618,55 +620,56 @@ const status = await runCodexSkillCommand(
 );
 process.exit(status);
 `,
-    );
+      );
 
-    const invocation = spawn(process.execPath, [wrapper], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    let childPids: number[] = [];
-    try {
-      const deadline = Date.now() + 5_000;
-      while (true) {
-        try {
-          const marker = JSON.parse(await Bun.file(ready).text()) as {
-            child: number;
-            descendant: number;
-          };
-          childPids = [marker.child, marker.descendant];
-          break;
-        } catch (error) {
-          if (Date.now() >= deadline) throw error;
-          await delay(25);
-        }
-      }
-      invocation.kill("SIGTERM");
-      const status = await Promise.race([
-        new Promise<number | null>((resolve, reject) => {
-          invocation.once("error", reject);
-          invocation.once("close", resolve);
-        }),
-        delay(5_000).then(() => {
-          throw new Error("CLI skill cancellation did not settle.");
-        }),
-      ]);
-      expect(status).toBe(143);
-    } finally {
-      invocation.kill("SIGKILL");
-      for (const childPid of childPids) {
-        try {
-          process.kill(childPid, "SIGKILL");
-        } catch (error) {
-          if (
-            !(error instanceof Error) ||
-            !("code" in error) ||
-            error.code !== "ESRCH"
-          ) {
-            throw error;
+      const invocation = spawn(process.execPath, [wrapper], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      let childPids: number[] = [];
+      try {
+        const deadline = Date.now() + 5_000;
+        while (true) {
+          try {
+            const marker = JSON.parse(await Bun.file(ready).text()) as {
+              child: number;
+              descendant: number;
+            };
+            childPids = [marker.child, marker.descendant];
+            break;
+          } catch (error) {
+            if (Date.now() >= deadline) throw error;
+            await delay(25);
           }
         }
+        invocation.kill("SIGTERM");
+        const status = await Promise.race([
+          new Promise<number | null>((resolve, reject) => {
+            invocation.once("error", reject);
+            invocation.once("close", resolve);
+          }),
+          delay(5_000).then(() => {
+            throw new Error("CLI skill cancellation did not settle.");
+          }),
+        ]);
+        expect(status).toBe(143);
+      } finally {
+        invocation.kill("SIGKILL");
+        for (const childPid of childPids) {
+          try {
+            process.kill(childPid, "SIGKILL");
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !("code" in error) ||
+              error.code !== "ESRCH"
+            ) {
+              throw error;
+            }
+          }
+        }
+        await rm(directory, { recursive: true, force: true });
       }
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 });
