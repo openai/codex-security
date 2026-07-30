@@ -296,13 +296,7 @@ jobs:
             exit 1
           fi
 
-          if gh api --paginate "$endpoint/versions?per_page=100" |
-            jq --exit-status --slurp --arg version "$VERSION" '
-              any(.[]; any(.[]; any(.metadata.container.tags[]?; . == $version)))
-            ' > /dev/null; then
-            echo "::error::Container version $VERSION already exists; stable version tags cannot be overwritten."
-            exit 1
-          fi
+          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION"
 
   publish-platform:
     name: publish-linux-${{ matrix.architecture }}
@@ -528,6 +522,11 @@ jobs:
       packages: write
 
     steps:
+      - name: Checkout approved immutable-version verifier
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -540,6 +539,7 @@ jobs:
 
       - name: Promote the verified, attested, immutable image digest
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ needs.authorize.outputs.image }}
           VERSION: ${{ needs.authorize.outputs.version }}
           MANIFEST_DIGEST: ${{ needs.manifest.outputs.digest }}
@@ -551,10 +551,10 @@ jobs:
             exit 1
           fi
 
-          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
-            echo "::error::Container version $VERSION already exists; stable version tags cannot be overwritten."
-            exit 1
-          fi
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          package="${GITHUB_REPOSITORY#*/}"
+          endpoint="orgs/$owner/packages/container/$package"
+          sh docker/verify-container-release-version.sh "$endpoint" "$VERSION"
 
           docker buildx imagetools create \
             --tag "$IMAGE:$VERSION" \

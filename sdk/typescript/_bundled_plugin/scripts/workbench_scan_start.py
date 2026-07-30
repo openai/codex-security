@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,6 +70,81 @@ def scan_diff_identity(
         diff_target["headRevision"],
         diff_target.get("contentDigest"),
     )
+
+
+def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
+    if not row["diff_target_kind"]:
+        return None
+    target = {
+        "baseRevision": row["diff_base_revision"],
+        "headRevision": row["diff_head_revision"],
+        "kind": row["diff_target_kind"],
+    }
+    if row["diff_content_digest"]:
+        target["contentDigest"] = row["diff_content_digest"]
+    return target
+
+
+def archive_scan(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    scan_dir: Path,
+    timestamp: str,
+    canonical_directory: Callable[[Path], Path],
+) -> None:
+    archived_scan_dir = (
+        canonical_directory(Path(args.archived_scan_dir).expanduser())
+        if args.archived_scan_dir is not None
+        else None
+    )
+    if archived_scan_dir is not None and (
+        not args.archive_existing
+        or archived_scan_dir.parent != scan_dir.parent
+        or not archived_scan_dir.name.startswith(f"{scan_dir.name}.previous-")
+    ):
+        raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
+
+    previous_scan = connection.execute(
+        "SELECT id, status FROM scans WHERE scan_dir = ?", (str(scan_dir),)
+    ).fetchone()
+    if previous_scan is None:
+        return
+    if not args.archive_existing:
+        raise SystemExit(
+            "The scan artifact directory belongs to an existing scan. "
+            "Use --archive-existing to preserve that scan and start a new one."
+        )
+    if previous_scan["status"] == "running":
+        raise SystemExit("Cannot archive the output of a running scan.")
+    artifacts = connection.execute(
+        "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?",
+        (previous_scan["id"],),
+    ).fetchall()
+    if archived_scan_dir is None:
+        if artifacts:
+            raise SystemExit(
+                "The archived scan directory is required to preserve existing scan artifacts."
+            )
+        archived_scan_dir = Path(
+            tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
+        ).resolve()
+    connection.execute(
+        "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
+        (str(archived_scan_dir), timestamp, previous_scan["id"]),
+    )
+    for artifact in artifacts:
+        try:
+            relative_path = Path(artifact["path"]).relative_to(scan_dir)
+        except ValueError:
+            continue
+        connection.execute(
+            "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
+            (
+                str(archived_scan_dir / relative_path),
+                previous_scan["id"],
+                artifact["kind"],
+            ),
+        )
 
 
 def insert_running_scan(

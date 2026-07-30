@@ -80,11 +80,13 @@ from workbench_constants import (
 )
 from workbench_feedback import get_scan_feedback
 from workbench_scan_start import (
+    archive_scan,
     compact_timestamp,
     insert_running_scan,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
+    stored_diff_target,
 )
 from workbench_schema import MIGRATIONS, normalize_pre_release_migrations, sql_statements
 from workbench_source_excerpt import finding_source_excerpt
@@ -501,19 +503,6 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
     if scan["target_snapshot_digest"] == clean_worktree_content_digest():
         return ["git_revision"]
     return ["git_worktree"]
-
-
-def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
-    if not row["diff_target_kind"]:
-        return None
-    target = {
-        "baseRevision": row["diff_base_revision"],
-        "headRevision": row["diff_head_revision"],
-        "kind": row["diff_target_kind"],
-    }
-    if row["diff_content_digest"]:
-        target["contentDigest"] = row["diff_content_digest"]
-    return target
 
 
 def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
@@ -1373,11 +1362,15 @@ def pin_legacy_manifest_digest(
         raise
 
 
-def complete_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+def complete_scan(
+    connection: sqlite3.Connection, args: argparse.Namespace, *, prepare_only: bool = False
+) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    cost_json = parse_scan_cost(args.cost_json)
+    cost_json = None if prepare_only else parse_scan_cost(args.cost_json)
     with scan_completion_lock(scan_id):
-        return complete_scan_locked(connection, scan_id, args.claim_token, cost_json)
+        return complete_scan_locked(
+            connection, scan_id, args.claim_token, cost_json, prepare_only=prepare_only
+        )
 
 
 def complete_scan_locked(
@@ -1385,6 +1378,8 @@ def complete_scan_locked(
     scan_id: str,
     claim_token: str | None,
     cost_json: str | None,
+    *,
+    prepare_only: bool = False,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1411,9 +1406,9 @@ def complete_scan_locked(
     )
     if scan["recipe_json"] is None:
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
-    warnings = []
+    warnings = json.loads(scan["completion_warnings_json"])
     warning = scan_target_warning(scan)
-    if warning is not None:
+    if warning is not None and warning not in warnings:
         warnings.append(warning)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
@@ -1429,6 +1424,7 @@ def complete_scan_locked(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
             completion_binding=completion_binding,
+            completion_warnings=warnings,
         )
         warning = scan_target_warning(scan)
         if warning is not None and warning not in warnings:
@@ -1441,9 +1437,23 @@ def complete_scan_locked(
         for kind, filename in ARTIFACTS.items()
     }
     manifest_digest = published_manifest_digest(scan_dir, manifest)
+    if prepare_only:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            updated = connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                (json.dumps(warnings), scan["id"]),
+            )
+            if updated.rowcount != 1:
+                raise SystemExit("Only a running scan can be prepared for completion.")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        return scan_context(connection, scan["id"])
     connection.execute("BEGIN IMMEDIATE")
     try:
-        timestamp = completion_timestamp
+        timestamp = manifest["scan"]["completedAt"]
         scan = require_scan(connection, scan["id"])
         if scan["status"] == "complete":
             connection.commit()
@@ -1552,6 +1562,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
         target_id = ensure_security_target(connection, str(repository))
         if parent_scan_id is not None:
             parent = require_scan(connection, parent_scan_id)
@@ -1606,7 +1617,14 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     except BaseException:
         connection.rollback()
         raise
-    return {"scanDir": str(scan_dir), "scanId": scan_id, "targetId": target_id}
+    scan = require_scan(connection, scan_id)
+    return {
+        "contract": scan_contract(scan),
+        "scanDir": str(scan_dir),
+        "scanId": scan_id,
+        "targetId": target_id,
+        "targetRevision": scan["target_revision"],
+    }
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
@@ -3433,7 +3451,7 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
         raise SystemExit(
             f"{file_name}: expected a regular file inside the scan directory."
         ) from exc
-    if resolved != candidate or not candidate.is_file():
+    if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():
         raise SystemExit(f"{file_name}: expected a regular non-symlink file.")
     return resolved
 
@@ -3447,7 +3465,9 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         raise SystemExit(
             "Scan directory must be an existing canonical non-symlink directory."
         ) from exc
-    if not stat.S_ISDIR(metadata.st_mode) or resolved != scan_dir:
+    if not stat.S_ISDIR(metadata.st_mode) or os.path.normcase(resolved) != os.path.normcase(
+        scan_dir
+    ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
     return scan_dir
 
@@ -3591,8 +3611,10 @@ def main() -> None:
                 require_scan=require_scan,
                 scan_context=scan_context,
             )
-        elif args.command == "complete-scan":
-            result = complete_scan(connection, args)
+        elif args.command in {"prepare-scan-completion", "complete-scan"}:
+            result = complete_scan(
+                connection, args, prepare_only=args.command == "prepare-scan-completion"
+            )
         elif args.command == "cancel-scan":
             result = cancel_scan(connection, args)
         elif args.command == "fail-scan":

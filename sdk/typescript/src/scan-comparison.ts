@@ -8,7 +8,13 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { accountStatus } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
+import {
+  codexSecurityCredentialHome,
+  prepareCodexSecurityCredentialHome,
+  resolveCodexCommand,
+} from "./runtime.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
 
@@ -73,7 +79,11 @@ export async function matchScanFindings(
   const codex =
     options.codex ??
     new Codex({
-      env: comparisonEnvironment(options.environment),
+      env: await comparisonEnvironment(
+        options.environment,
+        accountStatus,
+        options.signal,
+      ),
       config: {
         allow_login_shell: false,
         "features.apps": false,
@@ -134,14 +144,47 @@ function comparisonPrompt(input: ScanComparisonInput): string {
   ].join("\n");
 }
 
-function comparisonEnvironment(
+export async function comparisonEnvironment(
   source: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
+  nativeAccountStatus: typeof accountStatus = accountStatus,
+  signal?: AbortSignal,
+): Promise<Record<string, string>> {
+  signal?.throwIfAborted();
   const environment = Object.fromEntries(
     Object.entries(source).filter(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
+  if (
+    Object.entries(environment).some(
+      ([name, value]) =>
+        ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()) &&
+        value.trim().length > 0,
+    )
+  ) {
+    return environment;
+  }
+  const credentialHome = codexSecurityCredentialHome(source);
+  if (existsSync(credentialHome)) {
+    const canonicalCredentialHome =
+      await prepareCodexSecurityCredentialHome(source);
+    signal?.throwIfAborted();
+    const storedEnvironment: Record<string, string> = {
+      ...environment,
+      CODEX_HOME: canonicalCredentialHome,
+    };
+    for (const key of Object.keys(storedEnvironment)) {
+      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
+        delete storedEnvironment[key];
+      }
+    }
+    const status = await nativeAccountStatus(
+      resolveCodexCommand(),
+      storedEnvironment,
+      signal,
+    );
+    if (status.authenticated) return storedEnvironment;
+  }
   const configuredHome = environment["CODEX_HOME"]?.trim();
   const codexHome = configuredHome
     ? configuredHome === "~"

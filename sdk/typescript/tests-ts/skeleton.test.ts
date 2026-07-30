@@ -28,6 +28,62 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("advertises the tested Node.js 22, 24, and 26 release lines", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
+
+    const supportedReleases = ["22.13.0", "22.14.0", "24.0.0", "26.0.0"];
+    const unsupportedReleases = [
+      "22.12.0",
+      "23.0.0",
+      "23.4.0",
+      "23.5.0",
+      "25.0.0",
+      "27.0.0",
+    ];
+
+    expect(
+      supportedReleases.filter((version) =>
+        Bun.semver.satisfies(version, packageJson.engines.node),
+      ),
+    ).toEqual(supportedReleases);
+    expect(
+      unsupportedReleases.filter((version) =>
+        Bun.semver.satisfies(version, packageJson.engines.node),
+      ),
+    ).toEqual([]);
+  });
+
+  test("pins each Node.js minimum and preserves protected and latest LTS checks", async () => {
+    const ciWorkflow = await readFile(
+      new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
+      "utf8",
+    );
+
+    expect(ciWorkflow).toContain(
+      "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+    );
+    expect(ciWorkflow).toContain('node: ["22.13.0"]');
+    for (const version of ["24.0.0", "24", "26.0.0", "26"]) {
+      expect(ciWorkflow).toContain(`node: "${version}"`);
+    }
+  });
+
+  test("builds packages without a preinstalled package manager and provides a production audit", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
+
+    expect(packageJson.scripts.build).toBe(
+      "node --run clean && tsc -p tsconfig.build.json",
+    );
+    expect(packageJson.scripts.prepack).toBe("node --run build");
+    expect(packageJson.scripts["audit:prod"]).toBe(
+      "pnpm audit --prod --audit-level high",
+    );
+  });
+
   test("exposes canonical finding and hardening fields with public types", () => {
     const finding = {} as Finding;
     const scan = {} as ScanRecord;

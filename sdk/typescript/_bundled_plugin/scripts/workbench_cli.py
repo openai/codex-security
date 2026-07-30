@@ -158,6 +158,8 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--repository", required=True)
     register_cli_scan.add_argument("--recipe-json", required=True)
     register_cli_scan.add_argument("--parent-scan-id")
+    register_cli_scan.add_argument("--archive-existing", action="store_true")
+    register_cli_scan.add_argument("--archived-scan-dir")
 
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
@@ -207,6 +209,10 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
+
+    prepare_scan_completion = subparsers.add_parser("prepare-scan-completion")
+    prepare_scan_completion.add_argument("--scan-id", required=True)
+    prepare_scan_completion.add_argument("--claim-token")
 
     complete_scan = subparsers.add_parser("complete-scan")
     complete_scan.add_argument("--scan-id", required=True)

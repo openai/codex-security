@@ -17,6 +17,23 @@ const publicEntrypoint = join(
 const entrypoint = existsSync(publicEntrypoint)
   ? publicEntrypoint
   : join(import.meta.dir, "..", "public-repo", "docker", "entrypoint.sh");
+const publicVersionVerifier = join(
+  import.meta.dir,
+  "..",
+  "..",
+  "..",
+  "docker",
+  "verify-container-release-version.sh",
+);
+const versionVerifier = existsSync(publicVersionVerifier)
+  ? publicVersionVerifier
+  : join(
+      import.meta.dir,
+      "..",
+      "public-repo",
+      "docker",
+      "verify-container-release-version.sh",
+    );
 const appArmorRestrictsUserNamespaces = (() => {
   try {
     return (
@@ -63,6 +80,51 @@ async function runEntrypoint(
         GITHUB_TOKEN: "",
         PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
         ...overrides,
+      },
+      timeout: 10_000,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function runVersionVerifier(
+  response: string,
+  failure = false,
+): Promise<SpawnSyncReturns<string>> {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-container-version-")),
+  );
+
+  try {
+    await writeFile(
+      join(root, "gh"),
+      [
+        "#!/bin/sh",
+        'if [ "$1" != api ] || [ "$2" != --paginate ] ||',
+        '    [ "$3" != "$EXPECTED_ENDPOINT/versions?per_page=100" ]; then',
+        '    printf "%s\\n" "Unexpected GitHub API request." >&2',
+        "    exit 64",
+        "fi",
+        'if [ "$GH_FIXTURE_FAILURE" = 1 ]; then',
+        '    printf "%s\\n" "Synthetic package lookup failed." >&2',
+        "    exit 1",
+        "fi",
+        'printf "%s\\n" "$GH_FIXTURE_RESPONSE"',
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const endpoint = "orgs/openai/packages/container/codex-security";
+    return spawnSync("sh", [versionVerifier, endpoint, "0.1.4"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        EXPECTED_ENDPOINT: endpoint,
+        GH_FIXTURE_FAILURE: failure ? "1" : "0",
+        GH_FIXTURE_RESPONSE: response,
+        PATH: `${root}${delimiter}${process.env["PATH"] ?? ""}`,
       },
       timeout: 10_000,
     });
@@ -134,5 +196,47 @@ describe("customer container entrypoint", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe("--version\n");
+  });
+});
+
+describe("immutable customer container releases", () => {
+  testPosix("fails closed when package versions cannot be read", async () => {
+    const result = await runVersionVerifier("", true);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Synthetic package lookup failed.");
+    expect(result.stderr).toContain("refusing to publish");
+  });
+
+  testPosix("rejects an existing immutable release version", async () => {
+    const result = await runVersionVerifier(
+      JSON.stringify([
+        { metadata: { container: { tags: ["0.1.4", "latest"] } } },
+      ]),
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Container version 0.1.4 already exists");
+  });
+
+  testPosix(
+    "accepts an unpublished version across paginated results",
+    async () => {
+      const result = await runVersionVerifier(
+        `${JSON.stringify([
+          { metadata: { container: { tags: ["0.1.3", "latest"] } } },
+        ])}\n[]`,
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+    },
+  );
+
+  testPosix("fails closed when the version response is malformed", async () => {
+    const result = await runVersionVerifier("{not-json");
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("refusing to publish");
   });
 });

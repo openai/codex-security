@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -44,15 +45,22 @@ import {
   validateOutputDir,
 } from "../src/index.js";
 import {
+  acquireCodexSecurityCredentialHomeLock,
   bundledPluginCandidates,
+  codexSecurityCredentialAllowsAmbientImport,
+  codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   codexPlatformPackage,
   isPythonPathCandidate,
   planOutputArchive,
+  prepareCodexSecurityCredentialHome,
   preparePersistentScanRoot,
+  requirePrivateCredentialHome,
   requirePrivateOutputDirectory,
   runWorkbench,
+  setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -730,6 +738,43 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("never replaces an explicitly stored sign-in with ambient credentials", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    await mkdir(ambient);
+    await mkdir(isolated);
+    await writeFile(join(ambient, "auth.json"), '{"token":"ambient"}\n');
+    await writeFile(join(isolated, "auth.json"), '{"token":"explicit"}\n');
+
+    expect(await importAmbientAuth(ambient, isolated)).toBe(true);
+    expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(
+      '{"token":"explicit"}\n',
+    );
+  });
+
+  test("uses unique temporary files for parallel ambient credential imports", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    await mkdir(ambient);
+    await writeFile(join(ambient, "auth.json"), '{"token":"ambient"}\n');
+
+    const imports = await Promise.all(
+      Array.from({ length: 8 }, async () =>
+        importAmbientAuth(ambient, isolated),
+      ),
+    );
+
+    expect(imports).toEqual(Array.from({ length: 8 }, () => true));
+    expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(
+      '{"token":"ambient"}\n',
+    );
+    expect(
+      (await readdir(isolated)).filter((path) => path.startsWith(".auth-")),
+    ).toEqual([]);
+  });
+
   test.skipIf(process.platform === "win32")(
     "imports symlink-backed ambient auth",
     async () => {
@@ -801,6 +846,319 @@ describe("plugin runtime preparation", () => {
     ]);
     expect(install.installedRoot).toBe(installed);
     expect(install.version).toBe("1.2.3");
+
+    const reused = await bootstrapPlugin(home, selected, {
+      codexCommand: { command: "/codex", prefixArgs: [] },
+      runCodex: async () => {
+        throw new Error("must not reinstall an existing Codex Security plugin");
+      },
+    });
+    expect(reused.installedRoot).toBe(installed);
+    expect(reused.version).toBe("1.2.3");
+    expect(calls).toHaveLength(2);
+  });
+
+  test("repairs an interrupted marketplace without deleting stored credentials", async () => {
+    const root = await temporaryDirectory();
+    const selected = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    const installed = join(
+      home,
+      "plugins",
+      "cache",
+      "codex-security-sdk",
+      "codex-security",
+      "1.2.3",
+    );
+    await mkdir(join(marketplace, ".agents", "plugins"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(marketplace, ".agents", "plugins", "marketplace.json"),
+      "interrupted installation\n",
+    );
+    await writeFile(join(home, "config.toml"), "[features]\nplugins = true\n");
+    await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
+    const calls: string[][] = [];
+
+    const result = await bootstrapPlugin(home, selected, {
+      codexCommand: { command: "/codex", prefixArgs: [] },
+      runCodex: async (_command, args) => {
+        calls.push([...args]);
+        if (args[1] === "marketplace") {
+          await writeFile(
+            join(home, "config.toml"),
+            `\n[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+            { flag: "a" },
+          );
+        } else {
+          await writeFile(
+            join(home, "config.toml"),
+            '\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
+            { flag: "a" },
+          );
+          await mkdir(join(installed, ".codex-plugin"), { recursive: true });
+          await writeFile(
+            join(installed, ".codex-plugin", "plugin.json"),
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          );
+        }
+        return "";
+      },
+    });
+
+    expect(result.installedRoot).toBe(installed);
+    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
+      '{"token":"preserved"}\n',
+    );
+    expect(calls).toEqual([
+      ["plugin", "marketplace", "add", marketplace],
+      ["plugin", "add", "codex-security@codex-security-sdk"],
+    ]);
+  });
+
+  test("reinstalls changed plugin contents even when the version is unchanged", async () => {
+    const root = await temporaryDirectory();
+    const previous = await plugin(join(root, "previous"), "1.2.3");
+    const next = await plugin(join(root, "next"), "1.2.3");
+    await writeFile(join(next, "scripts", "helper.py"), "print('updated')\n");
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    const cache = join(
+      home,
+      "plugins",
+      "cache",
+      "codex-security-sdk",
+      "codex-security",
+    );
+    await mkdir(home);
+    let marketplaceRegistered = false;
+    let pluginRegistered = false;
+    const updateConfig = async () => {
+      const sections = ["[features]\nplugins = true\n"];
+      if (marketplaceRegistered) {
+        sections.push(
+          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+        );
+      }
+      if (pluginRegistered) {
+        sections.push(
+          '[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
+        );
+      }
+      await writeFile(join(home, "config.toml"), sections.join("\n"));
+    };
+    await updateConfig();
+    const calls: string[][] = [];
+    const options = {
+      codexCommand: { command: "/codex", prefixArgs: [] },
+      runCodex: async (
+        _command: { command: string; prefixArgs: readonly string[] },
+        args: readonly string[],
+      ) => {
+        calls.push([...args]);
+        if (args[1] === "marketplace" && args[2] === "add") {
+          marketplaceRegistered = true;
+        } else if (args[1] === "marketplace" && args[2] === "remove") {
+          marketplaceRegistered = false;
+        } else if (args[1] === "remove") {
+          pluginRegistered = false;
+          await rm(cache, { recursive: true, force: true });
+        } else if (args[1] === "add") {
+          const installed = join(cache, "1.2.3");
+          await mkdir(join(installed, ".codex-plugin"), { recursive: true });
+          await writeFile(
+            join(installed, ".codex-plugin", "plugin.json"),
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          );
+          pluginRegistered = true;
+        } else {
+          throw new Error(`Unexpected plugin command: ${args.join(" ")}`);
+        }
+        await updateConfig();
+        return "";
+      },
+    };
+
+    await bootstrapPlugin(home, previous, options);
+    const result = await bootstrapPlugin(home, next, options);
+
+    expect(result.pluginRoot).toBe(next);
+    expect(
+      await readFile(
+        join(marketplace, "plugins", "codex-security", "scripts", "helper.py"),
+        "utf8",
+      ),
+    ).toBe("print('updated')\n");
+    expect(calls).toEqual([
+      ["plugin", "marketplace", "add", marketplace],
+      ["plugin", "add", "codex-security@codex-security-sdk"],
+      ["plugin", "remove", "codex-security@codex-security-sdk"],
+      ["plugin", "marketplace", "remove", "codex-security-sdk"],
+      ["plugin", "marketplace", "add", marketplace],
+      ["plugin", "add", "codex-security@codex-security-sdk"],
+    ]);
+  });
+
+  test("upgrades a cached plugin without deleting persistent credentials", async () => {
+    const root = await temporaryDirectory();
+    const previous = await plugin(join(root, "previous"), "1.2.3");
+    const next = await plugin(join(root, "next"), "1.2.4");
+    const home = join(root, "home");
+    const configPath = join(home, "config.toml");
+    const marketplace = join(home, "sdk-marketplace");
+    const pluginCache = join(
+      home,
+      "plugins",
+      "cache",
+      "codex-security-sdk",
+      "codex-security",
+    );
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
+    await writeFile(join(home, "unrelated-state"), "preserved\n");
+
+    let marketplaceRegistered = false;
+    let pluginRegistered = false;
+    const updateConfig = async () => {
+      const sections = [
+        "[features]\nplugins = true\n",
+        `[projects.${JSON.stringify(join(root, "unrelated-project"))}]\ntrust_level = "trusted"\n`,
+      ];
+      if (marketplaceRegistered) {
+        sections.push(
+          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+        );
+      }
+      if (pluginRegistered) {
+        sections.push(
+          '[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
+        );
+      }
+      await writeFile(configPath, sections.join("\n"));
+    };
+    await updateConfig();
+
+    const calls: string[][] = [];
+    const runCodex: NonNullable<
+      NonNullable<Parameters<typeof bootstrapPlugin>[2]>["runCodex"]
+    > = async (_command, args, environment) => {
+      expect(environment["CODEX_HOME"]).toBe(home);
+      calls.push([...args]);
+
+      if (args[1] === "marketplace" && args[2] === "add") {
+        marketplaceRegistered = true;
+      } else if (args[1] === "marketplace" && args[2] === "remove") {
+        marketplaceRegistered = false;
+      } else if (args[1] === "remove") {
+        pluginRegistered = false;
+        await rm(pluginCache, { recursive: true, force: true });
+      } else if (args[1] === "add") {
+        const manifest = JSON.parse(
+          await readFile(
+            join(
+              marketplace,
+              "plugins",
+              "codex-security",
+              ".codex-plugin",
+              "plugin.json",
+            ),
+            "utf8",
+          ),
+        ) as { version: string };
+        const installed = join(pluginCache, manifest.version);
+        await mkdir(join(installed, ".codex-plugin"), { recursive: true });
+        await writeFile(
+          join(installed, ".codex-plugin", "plugin.json"),
+          JSON.stringify({ name: "codex-security", version: manifest.version }),
+        );
+        pluginRegistered = true;
+      } else {
+        throw new Error(`Unexpected plugin command: ${args.join(" ")}`);
+      }
+
+      await updateConfig();
+      return "";
+    };
+    const options = {
+      codexCommand: { command: "/codex", prefixArgs: [] },
+      runCodex,
+    };
+
+    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
+      "1.2.3",
+    );
+    const upgraded = await bootstrapPlugin(home, next, options);
+
+    expect(upgraded.version).toBe("1.2.4");
+    expect(upgraded.installedRoot).toBe(join(pluginCache, "1.2.4"));
+    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
+      '{"token":"preserved"}\n',
+    );
+    expect(await readFile(join(home, "unrelated-state"), "utf8")).toBe(
+      "preserved\n",
+    );
+    expect(await readFile(configPath, "utf8")).toContain(
+      `[projects.${JSON.stringify(join(root, "unrelated-project"))}]`,
+    );
+    expect(existsSync(join(pluginCache, "1.2.3"))).toBe(false);
+    expect(calls).toEqual([
+      ["plugin", "marketplace", "add", marketplace],
+      ["plugin", "add", "codex-security@codex-security-sdk"],
+      ["plugin", "remove", "codex-security@codex-security-sdk"],
+      ["plugin", "marketplace", "remove", "codex-security-sdk"],
+      ["plugin", "marketplace", "add", marketplace],
+      ["plugin", "add", "codex-security@codex-security-sdk"],
+    ]);
+  });
+
+  test("upgrades a plugin with the real bundled Codex executable", async () => {
+    const root = await temporaryDirectory();
+    const previous = await plugin(join(root, "previous"), "1.2.3");
+    const next = await plugin(join(root, "next"), "1.2.4");
+    const home = join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    await writeFile(
+      join(home, "config.toml"),
+      'cli_auth_credentials_store = "file"\n\n[features]\nplugins = true\n',
+    );
+
+    const command = resolveCodexCommand();
+    const environment = {
+      ...process.env,
+      CODEX_HOME: home,
+      OPENAI_API_KEY: undefined,
+      CODEX_API_KEY: undefined,
+    };
+    const login = spawnSync(
+      command.command,
+      [...command.prefixArgs, "login", "--with-api-key"],
+      {
+        env: environment,
+        input: "synthetic-key\n",
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+    expect(login.status).toBe(0);
+    const credentials = await readFile(join(home, "auth.json"), "utf8");
+
+    const options = { codexCommand: command, environment };
+    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
+      "1.2.3",
+    );
+    const upgraded = await bootstrapPlugin(home, next, options);
+
+    expect(upgraded.version).toBe("1.2.4");
+    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
+    expect(
+      spawnSync(command.command, [...command.prefixArgs, "login", "status"], {
+        env: environment,
+        encoding: "utf8",
+        windowsHide: true,
+      }).status,
+    ).toBe(0);
   });
 
   test("resolves the exact npm Codex executable", () => {
@@ -826,6 +1184,213 @@ describe("plugin runtime preparation", () => {
 });
 
 describe("runtime directories and plugin Python boundary", () => {
+  test("prepares one private, reusable managed-credential home", async () => {
+    const root = await temporaryDirectory();
+    const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+    const expectedHome = join(root, "state", "codex-home");
+
+    expect(codexSecurityCredentialHome(environment)).toBe(expectedHome);
+    expect(await prepareCodexSecurityCredentialHome(environment)).toBe(
+      expectedHome,
+    );
+    await writeFile(join(expectedHome, "existing-state"), "preserved\n");
+    expect(await prepareCodexSecurityCredentialHome(environment)).toBe(
+      expectedHome,
+    );
+    expect(await readFile(join(expectedHome, "existing-state"), "utf8")).toBe(
+      "preserved\n",
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(expectedHome)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  testPosix("rejects unsafe persistent credential homes", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    const environment = { CODEX_SECURITY_STATE_DIR: stateDirectory };
+    const credentialHome =
+      await prepareCodexSecurityCredentialHome(environment);
+    await chmod(credentialHome, 0o755);
+    await expect(
+      prepareCodexSecurityCredentialHome(environment),
+    ).rejects.toThrow("must not be accessible to other users");
+    await chmod(credentialHome, 0o700);
+    await rm(credentialHome, { recursive: true, force: true });
+
+    const redirectedHome = join(root, "redirected-home");
+    await mkdir(redirectedHome, { mode: 0o700 });
+    await symlink(redirectedHome, credentialHome);
+    await expect(
+      prepareCodexSecurityCredentialHome(environment),
+    ).rejects.toThrow("credential home is not a directory");
+  });
+
+  test("identifies a credential home that already exists as a regular file", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    await mkdir(stateDirectory);
+    await writeFile(join(stateDirectory, "codex-home"), "not a directory\n");
+
+    await expect(
+      prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      }),
+    ).rejects.toThrow("credential home is not a directory");
+  });
+
+  test("serializes and releases persistent credential-home locks", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const releaseFirst = await acquireCodexSecurityCredentialHomeLock(home);
+    let secondAcquired = false;
+    const second = acquireCodexSecurityCredentialHomeLock(home).then(
+      (release) => {
+        secondAcquired = true;
+        return release;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(secondAcquired).toBe(false);
+    await releaseFirst();
+    const releaseSecond = await second;
+    expect(secondAcquired).toBe(true);
+    await releaseSecond();
+    expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
+  });
+
+  test("cancels a scan waiting for the persistent credential-home lock", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const release = await acquireCodexSecurityCredentialHomeLock(home);
+    const controller = new AbortController();
+    const waiting = acquireCodexSecurityCredentialHomeLock(
+      home,
+      controller.signal,
+    );
+    controller.abort(new DOMException("canceled", "AbortError"));
+
+    try {
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      await release();
+    }
+  });
+
+  test("recovers credential-home locks left by exited processes", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const exited = spawnSync(process.execPath, ["--eval", ""], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    expect(exited.status).toBe(0);
+    expect(typeof exited.pid).toBe("number");
+    const lock = join(home, ".codex-security-scan.lock");
+    await mkdir(lock, { mode: 0o700 });
+    await writeFile(
+      join(lock, "owner.json"),
+      `${JSON.stringify({ pid: exited.pid, token: "exited-process" })}\n`,
+      { mode: 0o600 },
+    );
+
+    const release = await acquireCodexSecurityCredentialHomeLock(home);
+    expect(existsSync(lock)).toBe(true);
+    await release();
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("prevents ambient credential imports after an explicit logout", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+
+    expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(true);
+    await setCodexSecurityCredentialLogout(home, true);
+    expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(false);
+    if (process.platform !== "win32") {
+      expect(
+        (await stat(join(home, ".codex-security-logged-out"))).mode & 0o777,
+      ).toBe(0o600);
+    }
+    await setCodexSecurityCredentialLogout(home, false);
+    expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(true);
+  });
+
+  test("requires a real private-ACL operation for Windows credential homes", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const metadata = await lstat(home);
+    const secured: string[] = [];
+
+    await requirePrivateCredentialHome(metadata, home, {
+      platform: "win32",
+      secureWindowsHome: async (path) => {
+        secured.push(path);
+      },
+    });
+
+    expect(secured).toEqual([home]);
+    await expect(
+      requirePrivateCredentialHome(metadata, home, {
+        platform: "win32",
+        secureWindowsHome: async () => {
+          throw new Error("ACL could not be secured");
+        },
+      }),
+    ).rejects.toThrow("private Windows credential home");
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "creates credential homes with a verified current-user-only Windows ACL",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const powershell = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      );
+      const command = [
+        "$ErrorActionPreference = 'Stop'",
+        "$path = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_TEST_ACL_PATH', 'Process')",
+        "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+        "$acl = [System.IO.Directory]::GetAccessControl($path)",
+        "$unexpected = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $identity })",
+        "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
+      ].join("; ");
+      const result = spawnSync(
+        powershell,
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
+          timeout: 15_000,
+          windowsHide: true,
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        protected: true,
+        unexpected: 0,
+      });
+    },
+  );
+
   test("derives persistent state from the ambient home or explicit override", async () => {
     const root = await temporaryDirectory();
     expect(codexSecurityStateDirectory({ CODEX_HOME: root })).toBe(
@@ -847,6 +1412,69 @@ describe("runtime directories and plugin Python boundary", () => {
     if (process.platform !== "win32") {
       expect((await stat(scanRoot)).mode & 0o777).toBe(0o700);
     }
+  });
+
+  test("expands a tilde CODEX_HOME when discovering preflight configuration", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const codexHome = join(home, ".codex");
+    const repository = join(root, "repository");
+    const configPath = join(codexHome, "config.toml");
+    await mkdir(codexHome, { recursive: true });
+    await mkdir(repository);
+    await writeFile(configPath, "[agents]\nmax_threads = 8\n");
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+        "--profile",
+        "security_scan",
+        "--cwd",
+        repository,
+        "--runtime-check",
+        "delegation_available=true",
+        "--runtime-check",
+        "goal_tools_available=true",
+        "--multi-agent-runtime-owner",
+        "native",
+        "--multi-agent-runtime-version",
+        "v1",
+        "--multi-agent-runtime-provenance",
+        "app-server",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          USERPROFILE: home,
+          CODEX_HOME: "~/.codex",
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const payload = JSON.parse(result.stdout) as {
+      user_config_path: string;
+      config_paths: string[];
+      results: { capability: string; actual: number; source: string }[];
+    };
+    expect(payload.user_config_path).toBe(configPath);
+    expect(payload.config_paths).toEqual([
+      join("/", "etc", "codex", "config.toml"),
+      configPath,
+    ]);
+    expect(
+      payload.results.find(
+        (result) => result.capability === "usable_worker_slots_6",
+      ),
+    ).toMatchObject({ actual: 8, source: configPath });
   });
 
   test("runs workbench commands without credentials or generated bytecode", async () => {
@@ -880,6 +1508,102 @@ describe("runtime directories and plugin Python boundary", () => {
       ["test-command"],
     );
     expect(result).toEqual({ ok: true });
+  });
+
+  test("preserves recorded artifact paths when archiving a completed scan", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    const archivedScanDir = `${scanDir}.previous-20260729T000000Z`;
+    await mkdir(scanDir, { mode: 0o700 });
+    await mkdir(archivedScanDir, { mode: 0o700 });
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, json, sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_scan_start import archive_scan",
+          "scan_dir = Path(sys.argv[2])",
+          "archived_scan_dir = Path(sys.argv[3])",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
+          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
+          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
+          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
+          "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",
+          "rows = connection.execute('SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind', ('previous-scan',))",
+          "print(json.dumps({'scanDir': scan['scan_dir'], 'artifacts': [dict(row) for row in rows]}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        scanDir,
+        archivedScanDir,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual({
+      scanDir: archivedScanDir,
+      artifacts: [
+        { kind: "coverage", path: join(archivedScanDir, "coverage.json") },
+        { kind: "findings", path: join(archivedScanDir, "findings.json") },
+        { kind: "manifest", path: join(archivedScanDir, "scan-manifest.json") },
+        { kind: "markdownReport", path: join(archivedScanDir, "report.md") },
+      ],
+    });
+  });
+
+  test("does not strand completed scan artifacts without an archive path", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir, { mode: 0o700 });
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import argparse, sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_scan_start import archive_scan",
+          "scan_dir = Path(sys.argv[2])",
+          "connection = sqlite3.connect(':memory:')",
+          "connection.row_factory = sqlite3.Row",
+          "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
+          "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scan_artifacts VALUES (?, ?, ?)', ('previous-scan', 'coverage', str(scan_dir / 'coverage.json')))",
+          "args = argparse.Namespace(archive_existing=True, archived_scan_dir=None)",
+          "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        scanDir,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The archived scan directory is required to preserve existing scan artifacts.",
+    );
+    expect(await readdir(root)).toEqual(["scan"]);
   });
 
   test("reports an unwritable SQLite state directory without a Python traceback", async () => {
