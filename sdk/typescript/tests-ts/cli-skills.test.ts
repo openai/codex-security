@@ -541,6 +541,38 @@ describe("CLI skill commands", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("terminates an oversized skill child after it closes its stdout", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const timeout = AbortSignal.timeout(2_500);
+    const invocation = runCodexSkillCommand(
+      [],
+      { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+      {
+        command: process.execPath,
+        prefixArgs: [
+          "-e",
+          'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n");process.stdout.end();setInterval(()=>{},1000)',
+        ],
+      },
+    );
+
+    await expect(
+      Promise.race([
+        invocation,
+        new Promise<never>((_, reject) => {
+          timeout.addEventListener(
+            "abort",
+            () => reject(new Error("Oversized skill process did not settle.")),
+            { once: true },
+          );
+        }),
+      ]),
+    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe("");
+  });
+
   test("summarizes skill failures without echoing credentials or private paths", () => {
     const cases = [
       ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],

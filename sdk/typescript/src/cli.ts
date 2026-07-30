@@ -446,6 +446,7 @@ export async function runCodexSkillCommand(
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
   let forceCaptureCompletion: (() => void) | null = null;
+  let invocationStatus: Promise<number> | undefined;
   const requestTermination = (signal: SignalName): void => {
     requestedSignal = signal;
     invocation.kill(signal);
@@ -486,35 +487,33 @@ export async function runCodexSkillCommand(
               forceCaptureCompletion = () => resolve(undefined);
             }),
           ]);
-    const [status, events] = await Promise.all([
-      new Promise<number>((resolve, reject) => {
-        let completed = false;
-        const complete = (
-          code: number | null,
-          signal: NodeJS.Signals | null,
-        ): void => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
-          resolve(
-            requestedSignal === "SIGINT" || signal === "SIGINT"
-              ? 130
-              : requestedSignal === "SIGTERM" || signal === "SIGTERM"
-                ? 143
-                : code ?? 1,
-          );
-        };
-        forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", (error) => {
-          if (completed) return;
-          completed = true;
-          forceStatusCompletion = null;
-          reject(error);
-        });
-        invocation.once(output === undefined ? "exit" : "close", complete);
-      }),
-      captured,
-    ]);
+    invocationStatus = new Promise<number>((resolve, reject) => {
+      let completed = false;
+      const complete = (
+        code: number | null,
+        signal: NodeJS.Signals | null,
+      ): void => {
+        if (completed) return;
+        completed = true;
+        forceStatusCompletion = null;
+        resolve(
+          requestedSignal === "SIGINT" || signal === "SIGINT"
+            ? 130
+            : requestedSignal === "SIGTERM" || signal === "SIGTERM"
+              ? 143
+              : code ?? 1,
+        );
+      };
+      forceStatusCompletion = () => complete(null, null);
+      invocation.once("error", (error) => {
+        if (completed) return;
+        completed = true;
+        forceStatusCompletion = null;
+        reject(error);
+      });
+      invocation.once(output === undefined ? "exit" : "close", complete);
+    });
+    const [status, events] = await Promise.all([invocationStatus, captured]);
     if (skillOutputLimitExceeded) {
       throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
     }
@@ -538,7 +537,8 @@ export async function runCodexSkillCommand(
   } catch (error) {
     invocation.stdout?.destroy();
     invocation.stderr?.destroy();
-    invocation.kill();
+    requestTermination("SIGTERM");
+    await invocationStatus?.catch(() => undefined);
     throw error;
   } finally {
     if (forcedTermination !== undefined) clearTimeout(forcedTermination);

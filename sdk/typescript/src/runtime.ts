@@ -998,7 +998,18 @@ export async function importAmbientAuth(
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
     await chmod(temporary, 0o600);
     try {
-      await link(temporary, destination);
+      try {
+        await link(temporary, destination);
+      } catch (error) {
+        if (
+          !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
+            nodeErrorCode(error) ?? "",
+          )
+        ) {
+          throw error;
+        }
+        await copyFile(temporary, destination, constants.COPYFILE_EXCL);
+      }
     } catch (error) {
       if (
         nodeErrorCode(error) === "EEXIST" &&

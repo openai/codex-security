@@ -830,6 +830,36 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("imports ambient auth when credential files do not support hard links", async () => {
+    const root = await temporaryDirectory();
+    const ambient = join(root, "ambient");
+    const isolated = join(root, "isolated");
+    await mkdir(ambient);
+    await writeFile(join(ambient, "auth.json"), '{"token":"portable"}\n');
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async () => {
+        const error = new Error(
+          "hard links are unsupported",
+        ) as NodeJS.ErrnoException;
+        error.code = "ENOTSUP";
+        throw error;
+      },
+    }));
+    try {
+      expect(await importAmbientAuth(ambient, isolated)).toBe(true);
+      expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(
+        '{"token":"portable"}\n',
+      );
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
   test("never replaces an explicitly stored sign-in with ambient credentials", async () => {
     const root = await temporaryDirectory();
     const ambient = join(root, "ambient");
