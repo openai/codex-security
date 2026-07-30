@@ -738,6 +738,7 @@ export class CodexSecurity {
       };
       const codex = this.#dependencies.createCodex({
         ...(apiKey === null ? {} : { apiKey }),
+        ...(this.config.endpoint ? { baseUrl: this.config.endpoint } : {}),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
         ),
@@ -1880,6 +1881,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "model_reasoning_effort",
       "model_provider",
       "service_tier",
+      "openai_base_url",
     ]) {
       const value = source[key];
       if (safeString(value, 512)) result[key] = value;

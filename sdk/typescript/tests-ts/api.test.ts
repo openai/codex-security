@@ -495,6 +495,21 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("preserves openai_base_url in sanitized preflight config", () => {
+    const config = scanPreflightCodexConfig({
+      openai_base_url: "https://custom.api.example.com/v1",
+      model: "gpt-5.6-sol",
+    });
+    expect(config["openai_base_url"]).toBe("https://custom.api.example.com/v1");
+  });
+
+  test("rejects openai_base_url containing secrets", () => {
+    const config = scanPreflightCodexConfig({
+      openai_base_url: "https://service-api-key-secret.example.com/v1",
+    });
+    expect(config["openai_base_url"]).toBeUndefined();
+  });
+
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
       stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
