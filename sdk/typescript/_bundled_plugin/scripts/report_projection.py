@@ -13,7 +13,7 @@ from typing import Any
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
-REPORTABLE_SEVERITIES = {"critical", "high", "medium", "low"}
+REPORTABLE_SEVERITIES = {"critical", "high", "medium", "low", "informational"}
 DISPOSITION_LABELS = {
     "reported": "Reported",
     "no_issue_found": "No issue found",
