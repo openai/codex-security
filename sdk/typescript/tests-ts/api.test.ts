@@ -3917,6 +3917,7 @@ if (args === "login --with-api-key") {
 } else {
   process.exitCode = 2;
 }
+process.exit(process.exitCode ?? 0);
 `,
     );
     let codexOptions: CodexOptions | null = null;
