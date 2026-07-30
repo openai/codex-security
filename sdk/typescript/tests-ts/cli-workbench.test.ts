@@ -565,6 +565,79 @@ describe("CLI workbench", () => {
       knowledgeBasePaths: ["/original/security.md"],
     });
 
+    let azureConfig: CodexSecurityConfig | undefined;
+    expect(
+      await main(
+        ["scans", "rerun", "scan-azure"],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          environment: {
+            AZURE_OPENAI_API_KEY: "synthetic-azure-key",
+          },
+          onConfig: (value) => {
+            azureConfig = value;
+          },
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {
+                model: "security-deployment",
+                model_reasoning_effort: "high",
+              },
+              azureOpenAI: {
+                endpoint: "https://security-models.openai.azure.com/openai/v1",
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(azureConfig).toEqual({
+      pluginPath: undefined,
+      pythonPath: undefined,
+      azureOpenAI: {
+        endpoint: "https://security-models.openai.azure.com/openai/v1",
+      },
+      codexOverrides: {
+        model: "security-deployment",
+        model_reasoning_effort: "high",
+      },
+    });
+
+    let invalidAzureStarted = false;
+    const invalidAzureStderr = capture();
+    expect(
+      await main(
+        ["scans", "rerun", "scan-invalid-azure"],
+        capture().stream,
+        invalidAzureStderr.stream,
+        dependencies({
+          onRun: () => {
+            invalidAzureStarted = true;
+          },
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: { model: "security-deployment" },
+              azureOpenAI: {
+                endpoint: "http://unsafe.example.test?api-key=secret",
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(invalidAzureStarted).toBe(false);
+    expect(invalidAzureStderr.text()).toContain(
+      "invalid Azure OpenAI configuration",
+    );
+    expect(invalidAzureStderr.text()).not.toContain("api-key=secret");
+
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =
       [
         [

@@ -66,6 +66,27 @@ Pass runtime configuration to the `CodexSecurity` constructor:
 | `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
 | `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
 | `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
+| `azureOpenAI`    | Select an Azure OpenAI resource endpoint for API-key scans.                 |
+
+For Azure OpenAI, set `AZURE_OPENAI_API_KEY` and use the deployment name as
+`model`:
+
+```ts
+import { CodexSecurity } from "@openai/codex-security";
+
+const security = new CodexSecurity({
+  azureOpenAI: {
+    endpoint: "https://my-resource.openai.azure.com",
+  },
+  codexOverrides: {
+    model: "my-security-deployment",
+  },
+});
+```
+
+`azureOpenAI` uses Azure's v1 API. A resource-root endpoint is normalized to
+`/openai/v1`; a URL ending in `/openai` gets `/v1` appended. Endpoints must use
+HTTPS and must not contain credentials, query parameters, or fragments.
 
 Pass scan configuration to `security.run(repository, options)` or
 `security.preflight(repository, options)`:
@@ -127,6 +148,17 @@ $env:OPENAI_API_KEY = "<your-api-key>"
 npx @openai/codex-security scan C:\code\repository
 ```
 
+Azure OpenAI uses `AZURE_OPENAI_API_KEY` directly from the environment; it is
+not stored by `codex-security login`. Pass `--azure-endpoint` and use the Azure
+deployment name with `--model`. The integration currently supports API-key
+authentication only; it does not support Microsoft Entra ID, managed identity,
+or `--auth chatgpt`.
+
+For repeatable Azure rate-limit failures, review the deployment's TPM/RPM
+allocation in Foundry, reallocate or request more quota, or use a deployment
+with capacity in another region. See Microsoft's
+[Azure OpenAI quota guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota).
+
 Check or remove the stored sign-in with `npx @openai/codex-security login status`
 and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
 private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
@@ -150,9 +182,10 @@ npx @openai/codex-security scan . --auth api-key
 ```
 
 `--auth chatgpt` uses the stored sign-in and ignores `OPENAI_API_KEY` and
-`CODEX_API_KEY`. `--auth api-key` requires one of those environment variables.
-Omit `--auth`, or pass `--auth auto`, to preserve automatic API-key precedence
-for existing CI and unattended scans. The SDK accepts the same selection as
+`CODEX_API_KEY`. For OpenAI, `--auth api-key` requires one of those variables;
+with `--azure-endpoint`, it requires `AZURE_OPENAI_API_KEY`. Omit `--auth`, or
+pass `--auth auto`, to preserve automatic API-key precedence for existing CI
+and unattended scans. The SDK accepts the same selection as
 `security.run(repository, { auth: "chatgpt" })` and
 `security.preflight(repository, { auth: "chatgpt" })`.
 
@@ -183,9 +216,11 @@ npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/r
 npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
+npx @openai/codex-security scan /path/to/repository --azure-endpoint https://my-resource.openai.azure.com --model my-security-deployment
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
+npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --azure-endpoint https://my-resource.openai.azure.com --model my-security-deployment
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
@@ -240,9 +275,10 @@ result to stdout and a coverage warning to stderr, including in report-only
 mode.
 
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
-the implied provider. Use `--model gpt-5.6-terra` to switch models and
-`--effort minimal|low|medium|high|xhigh` to set reasoning effort. Repeat
-`--codex KEY=VALUE` for other Codex settings; existing
+the implied provider unless `--azure-endpoint` configures Azure OpenAI. Use
+`--model gpt-5.6-terra` to switch OpenAI models; with Azure, `--model` is the
+deployment name. Use `--effort minimal|low|medium|high|xhigh` to set reasoning
+effort. Repeat `--codex KEY=VALUE` for other Codex settings; existing
 `--codex 'model_reasoning_effort="high"'` overrides remain supported.
 
 ### Runtime configuration and worker limits
@@ -297,7 +333,8 @@ multi-agent v2 must remain enabled. The legacy `agents.max_threads` setting
 and `features.multi_agent_v2.enabled=false` are incompatible and rejected.
 `validate` and `patch` accept `--effort` and only the `model` and
 `model_reasoning_effort` `--codex` keys; they do not accept general scan
-runtime overrides.
+runtime overrides. Azure's `--azure-endpoint` option is currently available to
+`scan` and `bulk-scan`; it is not available to `validate` or `patch`.
 
 These overrides do not change the scan's approval policy or filesystem
 permissions. See [Local security model](#local-security-model).
@@ -338,6 +375,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `AZURE_OPENAI_API_KEY`                                                      | Azure OpenAI scan authentication when an Azure endpoint is configured.                        |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
 | `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
@@ -373,14 +411,17 @@ token and worker counts, estimated cost, the results directory, and the next
 useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
 
-Each scan records its model, tokens, and estimated cost in its JSON result,
-scan history, and bulk-scan receipt. Estimates use
+Each scan records its model and token usage in its JSON result, scan history,
+and bulk-scan receipt. For the built-in OpenAI provider, it also records an
+estimated cost using
 [standard API token prices](https://developers.openai.com/api/docs/models/compare),
 including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit.
+already in progress can finish above the limit. Cost estimates and cost limits
+are not available for non-OpenAI providers: Azure scans report a null estimated
+cost and reject CLI `--max-cost` or SDK `maxCostUsd`.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -419,7 +460,9 @@ least eight characters.
 Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
-are never stored in the scan configuration.
+are never stored in the scan configuration. An Azure recipe retains only the
+normalized endpoint and replay-safe scan configuration; the provider definition
+is reconstructed, and the API-key value is never stored.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the
@@ -434,7 +477,8 @@ a false positive and explain why. Later scans dismiss a matching finding only
 when the same reason still applies.
 
 `scans rerun SCAN_ID` repeats the original configuration against the current
-checkout so a fixed vulnerability can be checked again.
+checkout so a fixed vulnerability can be checked again. Before rerunning an
+Azure scan, set `AZURE_OPENAI_API_KEY` again in the current environment.
 
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
 cause; `scans match --all` matches all completed scans of the current repository,
@@ -530,8 +574,11 @@ make them more restrictive. Independently enforced host and network
 restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment, including
-unrelated API tokens and cloud credentials. Start a scan with only the
-credentials it needs.
+unrelated API tokens and cloud credentials. For Azure scans,
+`AZURE_OPENAI_API_KEY` is removed from plugin-Python, workbench, and bootstrap
+helper processes, supplied separately to the parent Codex model runtime, and
+excluded from model-run shell commands. Host tools such as Git can still
+inherit ambient variables. Start a scan with only the credentials it needs.
 
 The scanner must stay within the target and output paths you authorize and
 must not disclose private data beyond the operation you requested. Its results

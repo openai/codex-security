@@ -23,6 +23,7 @@ import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
   CodexSecurity,
+  ConfigurationError,
   DiffTarget,
   InvalidTargetError,
   OutputDirectoryError,
@@ -36,10 +37,16 @@ import {
   classifyConnectionFailure,
   environmentValue,
   initialCredentialsAvailable,
+  scanAuthentication,
   scanPreflightCodexConfig,
+  scanReplayCodexConfig,
   scanRuntimeCodexConfig,
 } from "../src/api.js";
-import { writeCodexConfig, type JsonObject } from "../src/config.js";
+import {
+  AZURE_OPENAI_PROVIDER_ID,
+  writeCodexConfig,
+  type JsonObject,
+} from "../src/config.js";
 import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
@@ -495,6 +502,58 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("stores only replay-safe Azure provider configuration", () => {
+    const definition = {
+      name: "Azure OpenAI",
+      base_url: "https://security-models.openai.azure.com/openai/v1",
+      env_key: "AZURE_OPENAI_API_KEY",
+      request_max_retries: 4,
+      wire_api: "responses",
+    } satisfies JsonObject;
+    const config = {
+      model: "secret-review-deployment",
+      model_reasoning_effort: "high",
+      features: {
+        multi_agent_v2: {
+          enabled: true,
+          max_concurrent_threads_per_session: 9,
+        },
+      },
+      model_provider: AZURE_OPENAI_PROVIDER_ID,
+      model_providers: {
+        [AZURE_OPENAI_PROVIDER_ID]: definition,
+      },
+    } satisfies JsonObject;
+    const replay = scanReplayCodexConfig(config, true);
+
+    expect(replay).toEqual({
+      model: "secret-review-deployment",
+      model_reasoning_effort: "high",
+      features: {
+        multi_agent_v2: {
+          enabled: true,
+          max_concurrent_threads_per_session: 9,
+        },
+      },
+    });
+    expect(() =>
+      scanReplayCodexConfig(
+        {
+          ...config,
+          model_providers: {
+            [AZURE_OPENAI_PROVIDER_ID]: {
+              ...definition,
+              http_headers: { "api-key": "STATIC_HEADER_SECRET" },
+            },
+          },
+        },
+        true,
+      ),
+    ).toThrow(
+      "azure model provider contains settings that cannot be stored safely",
+    );
+  });
+
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
       stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
@@ -641,6 +700,36 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects cost limits for Azure before starting the runtime", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {
+        azureOpenAI: {
+          endpoint: "https://security-models.openai.azure.com",
+        },
+        codexOverrides: {
+          model: "gpt-5.6-sol",
+        },
+      },
+      {
+        environment: { AZURE_OPENAI_API_KEY: "synthetic-azure-key" },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { maxCostUsd: 5 }),
+    ).rejects.toThrow("model provider: azure");
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
   test("validates knowledge-base documents before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -709,6 +798,10 @@ describe("CodexSecurity orchestration", () => {
         { openai_api_key: "   ", Codex_Api_Key: "synthetic-codex-key" },
         { method: "api_key", source: "CODEX_API_KEY", verified: false },
       ],
+      [
+        { AZURE_OPENAI_API_KEY: "unrelated-azure-key" },
+        { method: "stored_credentials", verified: false },
+      ],
       [{}, { method: "stored_credentials", verified: false }],
     ] as const) {
       let runtimeStarted = false;
@@ -731,6 +824,168 @@ describe("CodexSecurity orchestration", () => {
       expect(runtimeStarted).toBe(false);
       await client.close();
     }
+  });
+
+  test("selects only the configured provider credential", () => {
+    const config = {
+      model_provider: AZURE_OPENAI_PROVIDER_ID,
+      model_providers: {
+        [AZURE_OPENAI_PROVIDER_ID]: {
+          base_url: "https://security-models.openai.azure.com/openai/v1",
+          env_key: "AZURE_OPENAI_API_KEY",
+          wire_api: "responses",
+        },
+      },
+    } satisfies JsonObject;
+
+    for (const auth of ["auto", "api-key"] as const) {
+      const authentication = scanAuthentication(
+        {
+          OPENAI_API_KEY: "unrelated-openai-secret",
+          AZURE_OPENAI_API_KEY: "synthetic-azure-key",
+        },
+        auth,
+        config,
+        true,
+      );
+      expect(authentication).toEqual({
+        method: "api_key",
+        provider: "azure",
+        source: "AZURE_OPENAI_API_KEY",
+        verified: false,
+      });
+      expect(JSON.stringify(authentication)).not.toContain(
+        "synthetic-azure-key",
+      );
+    }
+
+    let missing: unknown;
+    try {
+      scanAuthentication(
+        { OPENAI_API_KEY: "unrelated-openai-secret" },
+        "auto",
+        config,
+        true,
+      );
+    } catch (error) {
+      missing = error;
+    }
+    expect(missing).toBeInstanceOf(AuthenticationRequiredError);
+    expect(String(missing)).toContain("AZURE_OPENAI_API_KEY");
+    expect(String(missing)).not.toContain("unrelated-openai-secret");
+    expect(() => scanAuthentication({}, "chatgpt", config, true)).toThrow(
+      ConfigurationError,
+    );
+  });
+
+  test("preserves custom providers even when their ID resembles managed Azure", () => {
+    for (const providerId of ["azure", AZURE_OPENAI_PROVIDER_ID]) {
+      const config = {
+        model: "gpt-5.6-sol",
+        model_provider: providerId,
+        model_providers: {
+          [providerId]: {
+            name: "Existing custom provider",
+            base_url: "https://legacy.example.test/v1",
+            env_key: "LEGACY_PROVIDER_KEY",
+            requires_openai_auth: true,
+            wire_api: "responses",
+            http_headers: { "X-Custom-Header": "existing-value" },
+          },
+        },
+        shell_environment_policy: { exclude: ["EXISTING"] },
+      } satisfies JsonObject;
+
+      expect(
+        scanAuthentication(
+          { OPENAI_API_KEY: "legacy-openai-key" },
+          "auto",
+          config,
+        ),
+      ).toEqual({
+        method: "api_key",
+        source: "OPENAI_API_KEY",
+        verified: false,
+      });
+      expect(scanReplayCodexConfig(config)).toEqual(
+        scanPreflightCodexConfig(config),
+      );
+      const hardened = scanRuntimeCodexConfig(config, "/state");
+      expect(hardened["model_providers"]).toEqual(config["model_providers"]);
+      expect(hardened["shell_environment_policy"]).toEqual({
+        exclude: ["EXISTING"],
+      });
+    }
+  });
+
+  test("rejects Azure providers outside the supported API-key contract", () => {
+    const baseDefinition: JsonObject = {
+      base_url: "https://security-models.openai.azure.com/openai/v1",
+      env_key: "AZURE_OPENAI_API_KEY",
+      wire_api: "responses",
+    };
+    const definitions: JsonObject[] = [
+      {
+        ...baseDefinition,
+        env_key: "OTHER_API_KEY",
+      },
+      {
+        ...baseDefinition,
+        wire_api: "chat",
+      },
+      {
+        ...baseDefinition,
+        requires_openai_auth: true,
+      },
+      {
+        ...baseDefinition,
+        base_url: "http://security-models.openai.azure.com/openai/v1",
+      },
+      {
+        ...baseDefinition,
+        http_headers: { "api-key": "STATIC_HEADER_SECRET" },
+      },
+    ];
+    for (const definition of definitions) {
+      expect(() =>
+        scanAuthentication(
+          { AZURE_OPENAI_API_KEY: "synthetic-azure-key" },
+          "auto",
+          {
+            model_provider: AZURE_OPENAI_PROVIDER_ID,
+            model_providers: { [AZURE_OPENAI_PROVIDER_ID]: definition },
+          },
+          true,
+        ),
+      ).toThrow(ConfigurationError);
+    }
+    expect(() =>
+      scanAuthentication(
+        { AZURE_OPENAI_API_KEY: "synthetic-azure-key" },
+        "auto",
+        {
+          model_provider: AZURE_OPENAI_PROVIDER_ID,
+          model_providers: { [AZURE_OPENAI_PROVIDER_ID]: baseDefinition },
+          profile: "other",
+          profiles: { other: { model_provider: "openai" } },
+        },
+        true,
+      ),
+    ).toThrow("selected Codex profile cannot override");
+    expect(() =>
+      scanAuthentication(
+        { AZURE_OPENAI_API_KEY: "synthetic-azure-key" },
+        "auto",
+        {
+          model: "security-deployment",
+          model_provider: AZURE_OPENAI_PROVIDER_ID,
+          model_providers: { [AZURE_OPENAI_PROVIDER_ID]: baseDefinition },
+          profile: "other",
+          profiles: { other: { model: "different-deployment" } },
+        },
+        true,
+      ),
+    ).toThrow("selected Codex profile cannot override model for Azure");
   });
 
   test("honors explicit authentication selection without initializing the runtime", async () => {
@@ -2984,6 +3239,34 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("reserves the operation before account initialization yields", async () => {
+    const root = await temporaryDirectory();
+    const codexHome = join(root, "codex-home");
+    await mkdir(codexHome);
+    let releaseRuntime!: (runtime: Record<string, unknown>) => void;
+    const pendingRuntime = new Promise<Record<string, unknown>>((resolve) => {
+      releaseRuntime = resolve;
+    });
+    const client = new TestClient(
+      {},
+      {
+        environment: { OPENAI_API_KEY: "ambient-key" },
+        prepareRuntime: async () => await pendingRuntime,
+      },
+    );
+
+    const account = client.account();
+    await expect(client.account()).rejects.toThrow(
+      "operation is already in progress",
+    );
+    releaseRuntime(preparedRuntime(codexHome));
+    await expect(account).resolves.toEqual({
+      authenticated: true,
+      details: "Authenticated with an API key.",
+    });
+    await client.close();
+  });
+
   test("reports effective ambient API-key authentication", async () => {
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
@@ -3046,6 +3329,7 @@ process.exitCode = 2;
           openai_api_key: "stale-key",
           OPENAI_API_KEY: "ambient-key",
           Codex_Api_Key: "secondary-key",
+          AZURE_OPENAI_API_KEY: "unused-azure-key",
         },
         prepareRuntime: async () => ({
           codexHome,
@@ -3061,6 +3345,7 @@ process.exitCode = 2;
             CODEX_HOME: codexHome,
             OpenAi_Api_Key: "forwarded-openai-key",
             codex_api_key: "forwarded-codex-key",
+            Azure_OpenAI_Api_Key: "forwarded-unused-azure-key",
           },
           credentialsAvailable: false,
         }),
@@ -3113,13 +3398,173 @@ process.exitCode = 2;
           ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
       ),
     ).toBe(false);
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      Azure_OpenAI_Api_Key: "forwarded-unused-azure-key",
+    });
     expect(existsSync(nativeLoginMarker)).toBe(false);
     expect(pythonEnvironment).toMatchObject({
       openai_api_key: "stale-key",
       OPENAI_API_KEY: "ambient-key",
       Codex_Api_Key: "secondary-key",
+      AZURE_OPENAI_API_KEY: "unused-azure-key",
     });
     expect(pythonProtectedRoot).toBe(await realpath(repository));
+    await client.close();
+  });
+
+  test("passes an Azure key only to Codex and keeps it out of local helpers", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let codexOptions: CodexOptions | null = null;
+    let selectedAuthentication: ScanAuthentication | undefined;
+    let pythonEnvironment: Record<string, string | undefined> | undefined;
+    let savedRecipe: JsonObject | undefined;
+    const workbenchEnvironments: Array<Record<string, string | undefined>> = [];
+    const client = new TestClient(
+      {
+        azureOpenAI: {
+          endpoint: "https://security-models.openai.azure.com",
+        },
+        codexOverrides: {
+          model: "security-deployment",
+        },
+      },
+      {
+        environment: {
+          Azure_OpenAI_Api_Key: "synthetic-azure-key",
+          OPENAI_API_KEY: "unrelated-openai-key",
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: {
+            CODEX_HOME: codexHome,
+            Azure_OpenAI_Api_Key: "runtime-azure-key",
+            OPENAI_API_KEY: "runtime-openai-key",
+          },
+        }),
+        resolvePluginPython: async (options: {
+          environment?: Record<string, string | undefined>;
+        }) => {
+          pythonEnvironment = options.environment;
+          return "/managed/python";
+        },
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          options: { environment?: Record<string, string | undefined> },
+          args: readonly string[],
+        ) => {
+          workbenchEnvironments.push(options.environment ?? {});
+          if (args[0] === "register-cli-scan") {
+            savedRecipe = JSON.parse(
+              args[args.indexOf("--recipe-json") + 1]!,
+            ) as JsonObject;
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          };
+        },
+      },
+    );
+
+    const result = await client.run(repository, {
+      onAuthentication: (authentication) => {
+        selectedAuthentication = authentication;
+      },
+    });
+    expect(selectedAuthentication).toEqual({
+      method: "api_key",
+      provider: "azure",
+      source: "AZURE_OPENAI_API_KEY",
+      verified: false,
+    });
+    expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      AZURE_OPENAI_API_KEY: "synthetic-azure-key",
+    });
+    expect(
+      Object.keys((codexOptions as CodexOptions | null)?.env ?? {}).some(
+        (name) => name.toUpperCase() === "OPENAI_API_KEY",
+      ),
+    ).toBe(false);
+    expect(
+      Object.keys(pythonEnvironment ?? {}).some(
+        (name) => name.toUpperCase() === "AZURE_OPENAI_API_KEY",
+      ),
+    ).toBe(false);
+    expect(workbenchEnvironments.length).toBeGreaterThan(0);
+    for (const environment of workbenchEnvironments) {
+      expect(
+        Object.keys(environment).some(
+          (name) => name.toUpperCase() === "AZURE_OPENAI_API_KEY",
+        ),
+      ).toBe(false);
+    }
+    expect(result.turnResult).toMatchObject({
+      model: "security-deployment",
+      modelProvider: "azure",
+    });
+    expect(result.cost).toBeNull();
+    expect(savedRecipe).toMatchObject({
+      azureOpenAI: {
+        endpoint: "https://security-models.openai.azure.com/openai/v1",
+      },
+      config: {
+        model: "security-deployment",
+      },
+    });
+    expect((savedRecipe?.["config"] as JsonObject)["model_provider"]).toBe(
+      undefined,
+    );
+    await expect(client.account()).resolves.toEqual({
+      authenticated: true,
+      details:
+        "Authenticated with an API key from AZURE_OPENAI_API_KEY for model provider azure.",
+    });
+    await client.close();
+  });
+
+  test("reports a missing Azure key as an unauthenticated account", async () => {
+    const client = new TestClient(
+      {
+        azureOpenAI: {
+          endpoint: "https://security-models.openai.azure.com",
+        },
+        codexOverrides: {
+          model: "security-deployment",
+        },
+      },
+      { environment: {} },
+    );
+
+    await expect(client.account()).resolves.toEqual({
+      authenticated: false,
+      details:
+        "Not authenticated for model provider azure; set AZURE_OPENAI_API_KEY.",
+    });
     await client.close();
   });
 

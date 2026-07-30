@@ -107,3 +107,18 @@ export class ScanResult {
     };
   }
 }
+
+export function createScanResult(
+  options: ScanResultOptions,
+  estimateCost = true,
+): ScanResult {
+  const result = new ScanResult(options);
+  if (!estimateCost) {
+    (
+      result as unknown as {
+        cost: Readonly<ScanCost> | null;
+      }
+    ).cost = null;
+  }
+  return result;
+}

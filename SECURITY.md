@@ -72,8 +72,12 @@ restrictions still apply.
 Scan and workbench subprocesses can inherit your environment. The workbench
 removes `OPENAI_API_KEY` and `CODEX_API_KEY`, but it does not remove every
 credential. Other variables, such as `GITHUB_TOKEN` or `AWS_SECRET_ACCESS_KEY`,
-can remain available to local subprocesses. Run a scan with only the
-environment credentials it needs.
+can remain available to local subprocesses. For Azure scans,
+`AZURE_OPENAI_API_KEY` is removed from plugin-Python, workbench, and bootstrap
+helper processes, supplied separately to the parent Codex model runtime, and
+added to the Codex shell-environment exclusions. Host tools such as Git can
+still inherit ambient variables. Run a scan with only the environment
+credentials it needs.
 
 ### Security boundaries
 

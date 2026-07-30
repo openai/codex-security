@@ -31,7 +31,11 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
-import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
+import {
+  AZURE_OPENAI_PROVIDER_ID,
+  DEFAULT_CODEX_CONFIG,
+  scanModelConfiguration,
+} from "../src/config.js";
 import {
   FakeSignals,
   REDACTED_CREDENTIALS,
@@ -674,6 +678,9 @@ describe("CLI", () => {
           stderr.stream,
           dependencies({
             currentDirectory: root,
+            environment: {
+              AZURE_OPENAI_API_KEY: "unrelated-azure-key",
+            },
             onConfig: (value) => (config = value),
             onTurn: (_repository, options) => (scanOptions = options),
           }),
@@ -696,6 +703,50 @@ describe("CLI", () => {
       expect(scanOptions).toMatchObject({ mode: "deep" });
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("configures Azure OpenAI for a bulk scan", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-cli-azure-bulk-"),
+    );
+    try {
+      await multiscanInventory(root);
+      let config: CodexSecurityConfig | undefined;
+      expect(
+        await main(
+          [
+            "bulk-scan",
+            "repositories.csv",
+            "--output-dir",
+            "results",
+            "--azure-endpoint",
+            "https://security.openai.azure.com",
+            "--model",
+            "security-deployment",
+            "--json",
+          ],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            currentDirectory: root,
+            environment: {
+              AZURE_OPENAI_API_KEY: "synthetic-azure-key",
+            },
+            onConfig: (value) => (config = value),
+          }),
+        ),
+      ).toBe(0);
+      expect(config).toMatchObject({
+        azureOpenAI: {
+          endpoint: "https://security.openai.azure.com",
+        },
+        codexOverrides: {
+          model: "security-deployment",
+        },
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1462,6 +1513,8 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
+    expect(help.text()).toContain("--azure-endpoint <string>");
+    expect(help.text()).toContain("--model is the deployment name");
     expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
@@ -1499,6 +1552,8 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
+    expect(help.text()).toContain("--azure-endpoint <string>");
+    expect(help.text()).toContain("--model is the deployment name");
     expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
@@ -1569,6 +1624,36 @@ describe("CLI", () => {
       ).toBe(0);
       expect(config?.codexOverrides).toEqual(expected);
     }
+  });
+
+  test("configures Azure OpenAI from dedicated scan options", async () => {
+    let config: CodexSecurityConfig | undefined;
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--azure-endpoint",
+          "https://security.openai.azure.com",
+          "--model",
+          "security-deployment",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          environment: { AZURE_OPENAI_API_KEY: "synthetic-azure-key" },
+          onConfig: (value) => (config = value),
+        }),
+      ),
+    ).toBe(0);
+    expect(config).toMatchObject({
+      azureOpenAI: {
+        endpoint: "https://security.openai.azure.com",
+      },
+      codexOverrides: {
+        model: "security-deployment",
+      },
+    });
   });
 
   test("parses repeatable options and every scan target through Incur", async () => {
@@ -1667,6 +1752,41 @@ describe("CLI", () => {
       model: "gpt-5.6-terra",
       model_reasoning_effort: "high",
     });
+    expect(
+      parseCodexOverrides([], "security-deployment", undefined, {
+        endpoint: "https://security.openai.azure.com",
+      }),
+    ).toEqual({
+      model: "security-deployment",
+    });
+    expect(() =>
+      parseCodexOverrides(
+        ['model_provider="openai"'],
+        "security-deployment",
+        undefined,
+        { endpoint: "https://security.openai.azure.com" },
+      ),
+    ).toThrow("Duplicate --codex key");
+    expect(() =>
+      parseCodexOverrides(
+        [
+          `model_providers={${AZURE_OPENAI_PROVIDER_ID}={base_url="https://attacker.example/v1"}}`,
+        ],
+        "security-deployment",
+        undefined,
+        { endpoint: "https://security.openai.azure.com" },
+      ),
+    ).toThrow("Duplicate --codex key");
+    expect(() =>
+      parseCodexOverrides(
+        [
+          `model_providers.${AZURE_OPENAI_PROVIDER_ID}.base_url="https://attacker.example/v1"`,
+        ],
+        "security-deployment",
+        undefined,
+        { endpoint: "https://security.openai.azure.com" },
+      ),
+    ).toThrow("Duplicate --codex key");
     expect(() =>
       parseCodexOverrides(
         ['model_reasoning_effort="medium"'],
@@ -1724,6 +1844,34 @@ describe("CLI", () => {
       [["scan", ".", "--path="], "--path must not be empty"],
       [["scan", ".", "--model="], "--model must not be empty"],
       [
+        ["scan", ".", "--azure-endpoint", "https://example.openai.azure.com"],
+        "--azure-endpoint requires --model",
+      ],
+      [
+        [
+          "scan",
+          ".",
+          "--azure-endpoint",
+          "http://example.openai.azure.com",
+          "--model",
+          "security-deployment",
+        ],
+        "HTTPS",
+      ],
+      [
+        [
+          "scan",
+          ".",
+          "--azure-endpoint",
+          "https://example.openai.azure.com",
+          "--model",
+          "security-deployment",
+          "--auth",
+          "chatgpt",
+        ],
+        "--azure-endpoint cannot be combined with --auth chatgpt",
+      ],
+      [
         ["scan", ".", "--effort", "ultra"],
         "--effort must be minimal, low, medium, high, or xhigh",
       ],
@@ -1732,6 +1880,10 @@ describe("CLI", () => {
       [["scan", ".", "--path", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--model", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--effort", "--dry-run"], "Missing value for flag"],
+      [
+        ["scan", ".", "--azure-endpoint", "--dry-run"],
+        "Missing value for flag",
+      ],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],

@@ -36,7 +36,7 @@ interface SessionUsage {
 
 interface ScanCostTrackerOptions {
   codexHome: string;
-  model: string;
+  model?: string;
   maxCostUsd?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
   onError?: (error: unknown) => void;

@@ -8,6 +8,7 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "../src/index.js";
+import { createScanResult } from "../src/result.js";
 
 const manifest = {
   documentType: "codex-security.scan-manifest",
@@ -87,6 +88,55 @@ describe("ScanResult", () => {
 
     expect(result.cost?.estimatedUsd).toBe(0.00625);
     expect(result.toJSON()["cost"]).toEqual(result.cost);
+  });
+
+  test("does not apply OpenAI pricing to an Azure deployment", () => {
+    const result = createScanResult(
+      {
+        manifest,
+        findings,
+        coverage,
+        scanDir: "/scan",
+        threadId: "thread",
+        turnResult: {
+          model: "gpt-5.6-sol",
+          modelProvider: "azure",
+          usage: {
+            input_tokens: 1_250,
+            cached_input_tokens: 200,
+            output_tokens: 30,
+          },
+        },
+      },
+      false,
+    );
+
+    expect(result.cost).toBeNull();
+    expect(result.toJSON()).toMatchObject({
+      cost: null,
+      turn: { model: "gpt-5.6-sol", modelProvider: "azure" },
+    });
+  });
+
+  test("preserves cost estimation for pre-existing provider metadata", () => {
+    const result = new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/scan",
+      threadId: "thread",
+      turnResult: {
+        model: "gpt-5.6-sol",
+        modelProvider: "azure",
+        usage: {
+          input_tokens: 1_250,
+          cached_input_tokens: 200,
+          output_tokens: 30,
+        },
+      },
+    });
+
+    expect(result.cost?.estimatedUsd).toBe(0.00625);
   });
 
   test("discovers SARIF at its canonical scan path", async () => {

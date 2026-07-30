@@ -46,9 +46,12 @@ import {
   type BulkScanPrompt,
 } from "./bulk-scan-discovery.js";
 import {
+  AZURE_OPENAI_PROVIDER_ID,
+  azureOpenAICodexOverrides,
   DEFAULT_CODEX_CONFIG,
   mergedCodexConfig,
   scanModelConfiguration,
+  type AzureOpenAIOptions,
   type CodexSecurityConfig,
   type JsonObject,
   type JsonValue,
@@ -157,6 +160,7 @@ const VALUE_OPTIONS = new Set([
   "--mode",
   "--model",
   "--effort",
+  "--azure-endpoint",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -203,6 +207,7 @@ interface ScanArguments {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
+  azureEndpoint?: string;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -953,6 +958,11 @@ export async function main(
               `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
             ),
           effort: effortOption(),
+          azureEndpoint: optionValue("--azure-endpoint")
+            .optional()
+            .describe(
+              "Use Azure OpenAI at its HTTPS resource endpoint; --model is the deployment name and AZURE_OPENAI_API_KEY is required.",
+            ),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -1011,6 +1021,21 @@ export async function main(
           (options) =>
             !options.archiveExisting || options.outputDir !== undefined,
           { message: "--archive-existing requires --output-dir." },
+        )
+        .refine(
+          (options) =>
+            options.azureEndpoint === undefined || options.auth !== "chatgpt",
+          {
+            message: "--azure-endpoint cannot be combined with --auth chatgpt.",
+          },
+        )
+        .refine(
+          (options) =>
+            options.azureEndpoint === undefined || options.model !== undefined,
+          {
+            message:
+              "--azure-endpoint requires --model with an Azure deployment name.",
+          },
         ),
       examples: [
         { args: { repository: "." } },
@@ -1052,6 +1077,7 @@ export async function main(
             mode: options.mode,
             model: options.model,
             effort: options.effort,
+            azureEndpoint: options.azureEndpoint,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -1168,49 +1194,67 @@ export async function main(
             "CSV repository list; omit to discover repositories interactively.",
           ),
       }),
-      options: z.object({
-        outputDir: z
-          .string()
-          .min(1, "--output-dir must not be empty.")
-          .optional()
-          .describe(
-            "Resumable results directory; required with a repository CSV.",
-          ),
-        workers: z
-          .number()
-          .int()
-          .positive()
-          .default(4)
-          .describe(
-            "Concurrent repository scans. Per-scan Codex workers are separate.",
-          ),
-        mode: z
-          .enum(["standard", "deep"])
-          .default("standard")
-          .describe("Default scan mode for repositories without a CSV mode."),
-        model: optionValue("--model")
-          .optional()
-          .describe(
-            `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
-          ),
-        effort: effortOption(),
-        maxAttempts: z
-          .number()
-          .int()
-          .positive()
-          .default(1)
-          .describe("Maximum scan attempts per repository."),
-        pluginPath: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(PLUGIN_PATH_DESCRIPTION),
-        python: z.string().min(1).optional().describe(PYTHON_PATH_DESCRIPTION),
-        codex: z
-          .array(z.string().min(1))
-          .default([])
-          .describe(CODEX_OVERRIDE_DESCRIPTION),
-      }),
+      options: z
+        .object({
+          outputDir: z
+            .string()
+            .min(1, "--output-dir must not be empty.")
+            .optional()
+            .describe(
+              "Resumable results directory; required with a repository CSV.",
+            ),
+          workers: z
+            .number()
+            .int()
+            .positive()
+            .default(4)
+            .describe(
+              "Concurrent repository scans. Per-scan Codex workers are separate.",
+            ),
+          mode: z
+            .enum(["standard", "deep"])
+            .default("standard")
+            .describe("Default scan mode for repositories without a CSV mode."),
+          model: optionValue("--model")
+            .optional()
+            .describe(
+              `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            ),
+          effort: effortOption(),
+          azureEndpoint: optionValue("--azure-endpoint")
+            .optional()
+            .describe(
+              "Use Azure OpenAI at its HTTPS resource endpoint; --model is the deployment name and AZURE_OPENAI_API_KEY is required.",
+            ),
+          maxAttempts: z
+            .number()
+            .int()
+            .positive()
+            .default(1)
+            .describe("Maximum scan attempts per repository."),
+          pluginPath: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(PLUGIN_PATH_DESCRIPTION),
+          python: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(PYTHON_PATH_DESCRIPTION),
+          codex: z
+            .array(z.string().min(1))
+            .default([])
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
+        })
+        .refine(
+          (options) =>
+            options.azureEndpoint === undefined || options.model !== undefined,
+          {
+            message:
+              "--azure-endpoint requires --model with an Azure deployment name.",
+          },
+        ),
       examples: [
         {
           args: {},
@@ -1247,12 +1291,14 @@ export async function main(
               if (
                 argument === "--model" ||
                 argument === "--effort" ||
+                argument === "--azure-endpoint" ||
                 argument === "--codex"
               ) {
                 optionIndex += 2;
               } else if (
                 argument.startsWith("--model=") ||
                 argument.startsWith("--effort=") ||
+                argument.startsWith("--azure-endpoint=") ||
                 argument.startsWith("--codex=")
               ) {
                 optionIndex += 1;
@@ -1297,10 +1343,19 @@ export async function main(
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
+              azureOpenAI:
+                options.azureEndpoint === undefined
+                  ? undefined
+                  : { endpoint: options.azureEndpoint },
               codexOverrides: parseCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
+                options.azureEndpoint === undefined
+                  ? undefined
+                  : {
+                      endpoint: options.azureEndpoint,
+                    },
               ),
             },
             createSecurity: dependencies.createSecurity,
@@ -1744,6 +1799,28 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains invalid configuration.",
     );
   }
+  const azureOpenAI = recipe["azureOpenAI"];
+  if (
+    azureOpenAI !== undefined &&
+    (!isJsonObject(azureOpenAI) ||
+      typeof azureOpenAI["endpoint"] !== "string" ||
+      azureOpenAI["endpoint"].length === 0)
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid Azure OpenAI configuration.",
+    );
+  }
+  if (azureOpenAI !== undefined) {
+    try {
+      azureOpenAICodexOverrides({
+        endpoint: azureOpenAI["endpoint"] as string,
+      });
+    } catch {
+      throw new CodexSecurityError(
+        "The saved scan recipe contains invalid Azure OpenAI configuration.",
+      );
+    }
+  }
   const reference = target["baseRef"] ?? target["base"];
   if (
     (reference !== undefined && typeof reference !== "string") ||
@@ -1792,6 +1869,10 @@ function scanArgumentsFromRecipe(
     archiveExisting: false,
     codex: [],
     codexOverrides: config,
+    azureEndpoint:
+      azureOpenAI === undefined
+        ? undefined
+        : (azureOpenAI["endpoint"] as string),
     failOnSeverity: threshold as FailureSeverity | undefined,
     maxCostUsd,
     dryRun: false,
@@ -2436,22 +2517,37 @@ async function runScan(
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
+      azureOpenAI:
+        arguments_.azureEndpoint === undefined
+          ? undefined
+          : { endpoint: arguments_.azureEndpoint },
       codexOverrides:
         arguments_.codexOverrides ??
         parseCodexOverrides(
           arguments_.codex,
           arguments_.model,
           arguments_.effort,
+          arguments_.azureEndpoint === undefined
+            ? undefined
+            : {
+                endpoint: arguments_.azureEndpoint,
+              },
         ),
     };
     let auth = arguments_.auth;
-    selectedAuthentication = scanAuthentication(dependencies.environment, auth);
+    selectedAuthentication = scanAuthentication(
+      dependencies.environment,
+      auth,
+      undefined,
+      config.azureOpenAI !== undefined,
+    );
     if (
       (auth === undefined || auth === "auto") &&
       !arguments_.dryRun &&
       interactive &&
       errorOutput.isTTY === true &&
-      selectedAuthentication.method === "api_key"
+      selectedAuthentication.method === "api_key" &&
+      selectedAuthentication.provider !== "azure"
     ) {
       const prompt =
         dependencies.scanAuthenticationPrompt ??
@@ -2478,6 +2574,8 @@ async function runScan(
         selectedAuthentication = scanAuthentication(
           dependencies.environment,
           auth,
+          undefined,
+          config.azureOpenAI !== undefined,
         );
       }
     }
@@ -2528,12 +2626,18 @@ async function runScan(
         selectedAuthentication = authentication;
         progress?.stopTimer();
         if (authentication.method === "api_key") {
-          progress?.stage(
-            `Authentication: API key from ${authentication.source}.`,
-          );
-          progress?.stage(
-            "To use your ChatGPT sign-in, retry with --auth chatgpt.",
-          );
+          if (authentication.provider === "azure") {
+            progress?.stage(
+              `Authentication: API key from ${authentication.source} for ${authentication.provider}.`,
+            );
+          } else {
+            progress?.stage(
+              `Authentication: API key from ${authentication.source}.`,
+            );
+            progress?.stage(
+              "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+            );
+          }
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
@@ -2680,18 +2784,37 @@ function scanFailureMessage(
 ): string {
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
-      return authentication?.method === "api_key"
-        ? `Authentication failed using ${authentication.source}. ` +
-            "Your ChatGPT sign-in was not used. " +
-            "Retry with '--auth chatgpt' or provide a valid API key."
-        : "Authentication failed using stored ChatGPT credentials. " +
-            "Sign in again with 'codex-security login' or provide a valid API key.";
+      if (authentication?.method === "api_key") {
+        if (authentication.provider === "azure") {
+          return (
+            `Authentication failed using ${authentication.source} for model provider ${authentication.provider}. ` +
+            "Provide a valid provider API key."
+          );
+        }
+        return (
+          `Authentication failed using ${authentication.source}. ` +
+          "Your ChatGPT sign-in was not used. " +
+          "Retry with '--auth chatgpt' or provide a valid API key."
+        );
+      }
+      return (
+        "Authentication failed using stored ChatGPT credentials. " +
+        "Sign in again with 'codex-security login' or provide a valid API key."
+      );
     case "forbidden":
-      return authentication?.method === "api_key"
-        ? `The API key from ${authentication.source} cannot access the configured model. ` +
-            "Retry with '--auth chatgpt' or use an API key with model access."
-        : "The stored ChatGPT credentials cannot access the configured model. " +
-            "Use an account or API key with model access.";
+      if (authentication?.method === "api_key") {
+        if (authentication.provider === "azure") {
+          return `The API key from ${authentication.source} cannot access the configured model through provider ${authentication.provider}.`;
+        }
+        return (
+          `The API key from ${authentication.source} cannot access the configured model. ` +
+          "Retry with '--auth chatgpt' or use an API key with model access."
+        );
+      }
+      return (
+        "The stored ChatGPT credentials cannot access the configured model. " +
+        "Use an account or API key with model access."
+      );
     case "rate_limited":
       return "The configured account reached its rate limit. Wait and retry.";
     case "network_error":
@@ -2904,8 +3027,12 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelReasoningEffort,
+  azure?: AzureOpenAIOptions,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
+  if (azure !== undefined) {
+    azureOpenAICodexOverrides(azure);
+  }
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
   for (const value of values) {
@@ -2933,6 +3060,14 @@ export function parseCodexOverrides(
       )
     ) {
       throw new CodexSecurityError("Invalid --codex key");
+    }
+    if (
+      azure !== undefined &&
+      (key === "model_provider" ||
+        key === `model_providers.${AZURE_OPENAI_PROVIDER_ID}` ||
+        key.startsWith(`model_providers.${AZURE_OPENAI_PROVIDER_ID}.`))
+    ) {
+      throw new CodexSecurityError("Duplicate --codex key");
     }
     let parsed: JsonValue;
     try {
@@ -2966,6 +3101,15 @@ export function parseCodexOverrides(
       throw new CodexSecurityError("Duplicate --codex key");
     }
     cursor[final] = parsed;
+  }
+  const modelProviders = result["model_providers"];
+  if (
+    azure !== undefined &&
+    modelProviders !== undefined &&
+    isJsonObject(modelProviders) &&
+    Object.hasOwn(modelProviders, AZURE_OPENAI_PROVIDER_ID)
+  ) {
+    throw new CodexSecurityError("Duplicate --codex key");
   }
   return result;
 }
