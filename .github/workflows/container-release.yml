@@ -463,7 +463,7 @@ jobs:
             --tag "$candidate" \
             "${references[@]}"
 
-          manifest_digest="$(docker buildx imagetools inspect "$candidate" | awk '/^Digest:/{print $2; exit}')"
+          manifest_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$candidate")"
           if [[ ! "$manifest_digest" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
             echo 'The registry did not return a valid multiarchitecture image digest.' >&2
             exit 1
@@ -590,7 +590,7 @@ jobs:
             --tag "$IMAGE:latest" \
             "$IMAGE@$MANIFEST_DIGEST"
 
-          actual_digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" | awk '/^Digest:/{print $2; exit}')"
+          actual_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE:$VERSION")"
           if [[ "$actual_digest" != "$MANIFEST_DIGEST" ]]; then
             echo '::error::The promoted stable tag does not reference the verified and attested candidate digest.'
             exit 1
