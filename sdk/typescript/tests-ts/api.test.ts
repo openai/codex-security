@@ -3487,11 +3487,13 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     ).resolves.toBe(false);
     expect(imported).toBe(false);
 
+    const isolatedHome = join(await temporaryDirectory(), "isolated-home");
+    await mkdir(isolatedHome, { mode: 0o700 });
     await expect(
       initialCredentialsAvailable(
         { OPENAI_API_KEY: "   " },
         "/ambient-home",
-        "/isolated-home",
+        isolatedHome,
         async () => true,
       ),
     ).resolves.toBe(true);
@@ -3502,11 +3504,12 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     const ambientHome = join(root, "ambient-home");
     const credentialHome = join(root, "credential-home");
     await mkdir(ambientHome);
-    await mkdir(credentialHome);
+    await mkdir(credentialHome, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), '{"token":"ambient"}\n');
     await writeFile(
       join(credentialHome, "auth.json"),
       '{"token":"explicit"}\n',
+      { mode: 0o600 },
     );
     let imported = false;
 
@@ -3528,7 +3531,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     const ambientHome = join(root, "ambient-home");
     const credentialHome = join(root, "credential-home");
     await mkdir(ambientHome);
-    await mkdir(credentialHome);
+    await mkdir(credentialHome, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), '{"token":"ambient"}\n');
     await setCodexSecurityCredentialLogout(credentialHome, true);
     let imported = false;
@@ -3561,7 +3564,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     const ambientAuthentication = '{"auth_mode":"chatgpt"}\n';
     await mkdir(repository);
     await mkdir(ambientHome);
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), ambientAuthentication);
     const authentications: ScanAuthentication[] = [];
