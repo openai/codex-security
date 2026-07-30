@@ -335,6 +335,20 @@ export async function acquireCodexSecurityCredentialHomeLock(
       expectedInode,
       validateWindowsAcl: false,
     });
+    const existingLock = await lstat(lock).catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (existingLock !== null) {
+      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
+      continue;
+    }
+    await requireSecureCredentialHome(codexHome, {
+      ...securityOptions,
+      expectedDevice,
+      expectedInode,
+    });
     try {
       await mkdir(lock, { mode: 0o700 });
     } catch (error) {
@@ -345,11 +359,6 @@ export async function acquireCodexSecurityCredentialHomeLock(
     }
 
     try {
-      await requireSecureCredentialHome(codexHome, {
-        ...securityOptions,
-        expectedDevice,
-        expectedInode,
-      });
       await writeFile(
         ownerPath,
         `${JSON.stringify({ pid: process.pid, token })}\n`,

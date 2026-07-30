@@ -9,7 +9,11 @@ export function redactedErrorMessage(error: unknown): string {
   );
   return redactQuotedCredentialValues(withoutPrivateKeys)
     .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\]|(?:Bearer|Basic|Token)(?:\s|%20|\+))[^\s"',;}&\\\]]+/giu,
+      /(\b(?:authorization|auth)\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9._~-]{0,63})((?:\s|%20|\+)+)(?!\[redacted\])[^\s"',;}&\\\]]+/giu,
+      "$1$2$3[redacted]",
+    )
+    .replaceAll(
+      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\]|[A-Za-z][A-Za-z0-9._~-]{0,63}(?:\s|%20|\+)+\[redacted\])[^\s"',;}&\\\]]+/giu,
       "$1[redacted]",
     )
     .replaceAll(/sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}/gu, "[redacted]")

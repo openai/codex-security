@@ -1547,6 +1547,10 @@ describe("runtime directories and plugin Python boundary", () => {
     const securityOptions = {
       platform: "win32" as const,
       secureWindowsHome: async (path: string) => {
+        const lock = join(path, ".codex-security-scan.lock");
+        expect(existsSync(lock) && !existsSync(join(lock, "owner.json"))).toBe(
+          false,
+        );
         validations.push(path);
       },
     };

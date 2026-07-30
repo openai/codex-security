@@ -2181,6 +2181,19 @@ describe("CLI", () => {
     ).toBe(
       'authorization="[redacted]" _auth=[redacted] https://example.test/?authorization=[redacted]',
     );
+    for (const [authorization, redacted] of [
+      [
+        "Authorization: ApiKey SYNTHETIC_APIKEY_SECRET",
+        "Authorization: ApiKey [redacted]",
+      ],
+      ["auth=Custom%20SYNTHETIC_CUSTOM_SECRET", "auth=Custom%20[redacted]"],
+      [
+        "Authorization: Digest+SYNTHETIC_DIGEST_SECRET",
+        "Authorization: Digest+[redacted]",
+      ],
+    ] as const) {
+      expect(redactedErrorMessage(authorization)).toBe(redacted);
+    }
     let encoded: string | { password: string } = {
       password: 'foo "bar" baz',
     };
