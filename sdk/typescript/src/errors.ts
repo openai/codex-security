@@ -3,15 +3,11 @@ import { formatUsd, type ScanCost } from "./cost.js";
 /** Returns an error message with credential-shaped substrings redacted. */
 export function redactedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message
-    .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}private[_-]?key(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*)(?:\\?["'])?-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----(?:\\?["'])?/giu,
-      "$1[redacted]",
-    )
-    .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*)(\\?["'])(?:(?!\2)(?:\\.|[^\\]))*\2/giu,
-      "$1$2[redacted]$2",
-    )
+  const withoutPrivateKeys = message.replaceAll(
+    /(\b[A-Za-z0-9_-]{0,64}private[_-]?key(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*)(?:\\?["'])?-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----(?:\\?["'])?/giu,
+    "$1[redacted]",
+  );
+  return redactQuotedCredentialValues(withoutPrivateKeys)
     .replaceAll(
       /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\])[^\s"',;}&\\\]]+/giu,
       "$1[redacted]",
@@ -28,6 +24,38 @@ export function redactedErrorMessage(error: unknown): string {
       /((?:[?&]|%3F|%26)(?:(?!%3F|%26|%3D)(?:[A-Za-z0-9_.%-]|\[|\])){0,64}(?:api[_-]?key|access(?:[_-]|%5F|%2D)?key(?:(?:[_-]|%5F|%2D)?id)?|private(?:[_-]|%5F|%2D)?key|token|secret|credential|signature|sig|password|passwd)(?:(?:[_-]|%5F|%2D)[A-Za-z0-9_.%-]{1,64})?(?:\]|%5D)?(?:=|%3D))(?:(?!%26)[^&\s])+/giu,
       "$1[redacted]",
     );
+}
+
+function redactQuotedCredentialValues(message: string): string {
+  const assignment =
+    /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\*["'])?\s*[:=]\s*)(\\*)(["'])/giu;
+  let output = "";
+  let consumed = 0;
+  for (
+    let match = assignment.exec(message);
+    match !== null;
+    match = assignment.exec(message)
+  ) {
+    const openingSlashes = match[2]!.length;
+    const quote = match[3]!;
+    let position = assignment.lastIndex;
+    while (position < message.length) {
+      const delimiter = message.indexOf(quote, position);
+      if (delimiter < 0) break;
+      let preceding = delimiter;
+      while (preceding > position && message[preceding - 1] === "\\") {
+        preceding -= 1;
+      }
+      if (delimiter - preceding === openingSlashes) {
+        output += `${message.slice(consumed, assignment.lastIndex)}[redacted]${message.slice(preceding, delimiter + 1)}`;
+        consumed = delimiter + 1;
+        assignment.lastIndex = consumed;
+        break;
+      }
+      position = delimiter + 1;
+    }
+  }
+  return output + message.slice(consumed);
 }
 
 /** Base error for Codex Security SDK failures. */

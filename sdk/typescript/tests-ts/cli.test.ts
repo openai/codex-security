@@ -2174,6 +2174,21 @@ describe("CLI", () => {
         '{\\"access_token_value\\":\\"another horse battery staple\\"}',
       ),
     ).toBe('{\\"access_token_value\\":\\"[redacted]\\"}');
+    let encoded: string | { password: string } = {
+      password: 'foo "bar" baz',
+    };
+    for (let depth = 1; depth <= 3; depth += 1) {
+      encoded = JSON.stringify(encoded);
+      const redacted = redactedErrorMessage(encoded);
+      expect(redacted).not.toContain("foo");
+      expect(redacted).not.toContain("bar");
+      expect(redacted).not.toContain("baz");
+      let decoded: unknown = redacted;
+      for (let layer = 0; layer < depth; layer += 1) {
+        decoded = JSON.parse(decoded as string);
+      }
+      expect(decoded).toEqual({ password: "[redacted]" });
+    }
     for (const separator of ["\n", "\\n"]) {
       expect(
         redactedErrorMessage(
