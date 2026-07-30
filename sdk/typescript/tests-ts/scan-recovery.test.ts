@@ -115,7 +115,7 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
 }
 
 async function startDraftScan(
-  repositoryKind: "directory" | "clean" | "dirty" = "directory",
+  repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -152,6 +152,15 @@ async function startDraftScan(
     }
     if (repositoryKind === "dirty") {
       await writeFile(join(target, "src", "extract.py"), "# changed fixture\n");
+    }
+    if (repositoryKind === "nested") {
+      const nested = join(target, "nested");
+      await mkdir(nested);
+      await writeFile(join(nested, "source.py"), "# nested fixture\n");
+      const initialized = spawnSync("git", ["init", "--quiet", nested], {
+        encoding: "utf8",
+      });
+      expect(initialized.status, initialized.stderr).toBe(0);
     }
   }
 
@@ -246,8 +255,8 @@ describe("malformed scan artifact recovery", () => {
     });
   });
 
-  test("returns authoritative clean and dirty Git target contracts", async () => {
-    for (const kind of ["clean", "dirty"] as const) {
+  test("returns authoritative clean, dirty, and nested Git target contracts", async () => {
+    for (const kind of ["clean", "dirty", "nested"] as const) {
       const fixture = await startDraftScan(kind);
       const registration = fixture.registration;
       const contract = registration["contract"] as {
@@ -277,43 +286,6 @@ describe("malformed scan artifact recovery", () => {
         );
       }
     }
-  });
-
-  test("registers Git repositories containing untracked nested repositories", async () => {
-    const fixture = await startDraftScan("clean");
-    const nested = join(fixture.repository, "nested");
-    await mkdir(nested);
-    await writeFile(join(nested, "source.py"), "# nested fixture\n");
-    const initialized = spawnSync("git", ["init", "--quiet", nested], {
-      encoding: "utf8",
-    });
-    expect(initialized.status, initialized.stderr).toBe(0);
-
-    const scanDir = join(fixture.stateDir, "..", "nested-scan");
-    await mkdir(scanDir, { mode: 0o700 });
-    const registered = await workbench(fixture, [
-      "register-cli-scan",
-      "--repository",
-      fixture.repository,
-      "--scan-dir",
-      scanDir,
-      "--recipe-json",
-      JSON.stringify({
-        config: {},
-        mode: "standard",
-        repository: fixture.repository,
-        target: { kind: "repository", paths: [] },
-      }),
-    ]);
-
-    expect(registered["contract"]).toMatchObject({
-      target: {
-        allowedKinds: ["git_worktree"],
-        requiredSnapshotDigest: expect.stringMatching(
-          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
-        ),
-      },
-    });
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {
