@@ -45,6 +45,7 @@ import {
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
+import { REDACTED_CREDENTIALS, SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 
 type ScanObserverName = Parameters<
@@ -2161,6 +2162,80 @@ describe("CodexSecurity orchestration", () => {
     expect(history["scans"]).toMatchObject([
       { progress: { status: "failed" } },
     ]);
+    await client.close();
+  });
+
+  test("redacts credentials from the stored scan failure message", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const stateDirectory = join(root, "state");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const environment = {
+      PATH: process.env["PATH"],
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    const commands: Array<readonly string[]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => python!,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          options: Parameters<typeof runWorkbench>[0],
+          args: readonly string[],
+        ) => {
+          commands.push(args);
+          return await runWorkbench(options, args);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              async function* failingEvents(): AsyncGenerator<ThreadEvent> {
+                yield { type: "error", message: SYNTHETIC_CREDENTIALS };
+              }
+              return { events: failingEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    // The in-memory error keeps its original text; only what leaves the process
+    // is redacted, so the CLI can still classify the upstream failure.
+    await expect(client.run(repository)).rejects.toThrow(SYNTHETIC_CREDENTIALS);
+    const failure = commands.find((args) => args[0] === "fail-scan");
+    const scanId = failure?.[2] ?? "";
+    expect(scanId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(failure?.[3]).toBe("--message");
+    expect(failure?.[4]).toBe(REDACTED_CREDENTIALS);
+
+    // `scans show` reads the stored message back through get-scan.
+    const context = await runWorkbench(
+      { python: python!, pluginRoot: PLUGIN_ROOT, environment },
+      ["get-scan", "--scan-id", scanId],
+    );
+    expect(context["scan"]).toMatchObject({
+      progress: { status: "failed" },
+      failureMessage: REDACTED_CREDENTIALS,
+    });
+
+    // Every synthetic credential is tagged SYNTHETIC, so the database file
+    // itself proves nothing was persisted anywhere on the failure path.
+    const database = await readFile(join(stateDirectory, "workbench.sqlite3"));
+    expect(database.toString("latin1")).not.toContain("SYNTHETIC");
     await client.close();
   });
 

@@ -57,6 +57,7 @@ import { formatUsd } from "./cost.js";
 import {
   CodexSecurityError,
   OutputInsideProtectedRootError,
+  redactedErrorMessage,
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
@@ -606,7 +607,7 @@ export async function main(
     try {
       return await select(await dependencies.runWorkbench(args));
     } catch (error) {
-      errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
       exitCode = 2;
       return undefined;
     }
@@ -805,7 +806,7 @@ export async function main(
           ]);
           scanArguments = scanArgumentsFromRecipe(recipe, args.scanId);
         } catch (error) {
-          const message = cliErrorMessage(error);
+          const message = redactedErrorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
           return incurError({
@@ -868,7 +869,7 @@ export async function main(
             format,
           );
         } catch (error) {
-          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -1146,7 +1147,7 @@ export async function main(
             failOnSeverity: options.failOnSeverity,
           };
         } catch (error) {
-          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -1307,7 +1308,7 @@ export async function main(
             signal: controller.signal,
             onProgress: ({ repository, status, attempt, error }) => {
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${error === undefined ? "" : `: ${cliErrorMessage(error)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${error === undefined ? "" : `: ${redactedErrorMessage(error)}`}\n`,
               );
             },
           });
@@ -1319,7 +1320,7 @@ export async function main(
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
-          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
         } finally {
           dependencies.removeSignalListener("SIGINT", onInterrupt);
           dependencies.removeSignalListener("SIGTERM", onTerminate);
@@ -1423,7 +1424,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
         }
       },
     })
@@ -1459,7 +1460,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
         }
       },
     })
@@ -1644,7 +1645,7 @@ export async function main(
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
-      `codex-security: ${cliErrorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      `codex-security: ${redactedErrorMessage(incurErrorMessage(frameworkOutput))}\n`,
     );
     return 2;
   }
@@ -1653,7 +1654,7 @@ export async function main(
     await writeCliOutput(output, renderedHistory ?? frameworkOutput);
     return exitCode;
   } catch (error) {
-    errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
     return 2;
   }
 }
@@ -2369,7 +2370,7 @@ async function runExport(
     }
     return 0;
   } catch (error) {
-    errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
     return 2;
   }
 }
@@ -2517,7 +2518,7 @@ async function runScan(
       onOutputArchived: (archiveDir) => {
         progress?.stopTimer();
         errorOutput.write(
-          `Moved existing results to: ${cliErrorMessage(archiveDir)}\n`,
+          `Moved existing results to: ${redactedErrorMessage(archiveDir)}\n`,
         );
       },
       signal: preparationAbortController.signal,
@@ -2578,12 +2579,12 @@ async function runScan(
       },
       onWarning: (warning) => {
         errorOutput.write(
-          `codex-security: warning: ${cliErrorMessage(warning)}\n`,
+          `codex-security: warning: ${redactedErrorMessage(warning)}\n`,
         );
       },
       onObserverError: (observer, error) => {
         errorOutput.write(
-          `codex-security: warning: ${observer} observer failed: ${cliErrorMessage(error)}\n`,
+          `codex-security: warning: ${observer} observer failed: ${redactedErrorMessage(error)}\n`,
         );
       },
     };
@@ -2620,7 +2621,7 @@ async function runScan(
   if (failed) {
     const message =
       failure instanceof OutputInsideProtectedRootError
-        ? cliErrorMessage(protectedRootErrorMessage(failure))
+        ? redactedErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
@@ -2628,7 +2629,7 @@ async function runScan(
     }
     if (scanDir !== null) {
       errorOutput.write(
-        `Partial output was kept at ${cliErrorMessage(scanDir)}.\n`,
+        `Partial output was kept at ${redactedErrorMessage(scanDir)}.\n`,
       );
     }
     return { exitCode: 2, error: message };
@@ -2697,7 +2698,7 @@ function scanFailureMessage(
     case "network_error":
     case "timeout":
     case "unknown":
-      return cliErrorMessage(error);
+      return redactedErrorMessage(error);
   }
 }
 
@@ -2711,7 +2712,9 @@ function scanScope(arguments_: ScanArguments): string | null {
         portable.startsWith("//")
           ? portable.split("/").at(-1) ?? portable
           : portable;
-      return cliErrorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
+      return redactedErrorMessage(
+        scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "),
+      );
     });
     return `${displayed.join(", ")}${arguments_.paths.length > displayed.length ? `, +${arguments_.paths.length - displayed.length} more` : ""}`;
   }
@@ -2773,7 +2776,7 @@ function printScanSummary(
           ? 33
           : 36;
   errorOutput.write(
-    `\n  ${paint("REPORT", "1;36")}    ${paint(cliErrorMessage(result.reportPath), 4)}\n\n` +
+    `\n  ${paint("REPORT", "1;36")}    ${paint(redactedErrorMessage(result.reportPath), 4)}\n\n` +
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${severitySummary === "" ? "" : ` (${severitySummary})`}`, findingColor)}\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
       `  ${paint("ELAPSED", 1)}   ${duration}\n`,
@@ -2789,7 +2792,7 @@ function printScanSummary(
     );
   }
   errorOutput.write(
-    `  ${paint("RESULTS", 1)}   ${cliErrorMessage(result.scanDir)}\n`,
+    `  ${paint("RESULTS", 1)}   ${redactedErrorMessage(result.scanDir)}\n`,
   );
 }
 
@@ -3089,7 +3092,7 @@ function interruptedExit(
   errorOutput.write(
     scanDir === null
       ? "codex-security: No partial output was kept.\n"
-      : `codex-security: Partial output was kept at ${cliErrorMessage(scanDir)}.\n`,
+      : `codex-security: Partial output was kept at ${redactedErrorMessage(scanDir)}.\n`,
   );
   return ctrlC ? 130 : 143;
 }
@@ -3109,34 +3112,13 @@ function invokedAsMain(): boolean {
   }
 }
 
-function cliErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message
-    .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|token|secret|credential|signature|sig|password|passwd)\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)[^\s"',;}&\\\]]+/giu,
-      "$1[redacted]",
-    )
-    .replaceAll(/sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}/gu, "[redacted]")
-    .replaceAll(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_-]{8,}/giu, "[redacted]")
-    .replaceAll(/npm_[A-Za-z0-9_-]{8,}/giu, "[redacted]")
-    .replaceAll(
-      /(^|%20|[^A-Za-z0-9_])(Bearer|Basic|Token)((?:\s|%20|\+)+)[A-Za-z0-9.%_~+/*=-]{8,}/giu,
-      "$1$2$3[redacted]",
-    )
-    .replaceAll(/((?:https?|ssh|git\+ssh):\/\/)[^\s/@]+@/giu, "$1[redacted]@")
-    .replaceAll(
-      /((?:[?&]|%3F|%26)(?:(?!%3F|%26|%3D)(?:[A-Za-z0-9_.%-]|\[|\])){0,64}(?:api[_-]?key|access(?:[_-]|%5F|%2D)?key(?:(?:[_-]|%5F|%2D)?id)?|token|secret|credential|signature|sig|password|passwd)(?:\]|%5D)?(?:=|%3D))(?:(?!%26)[^&\s])+/giu,
-      "$1[redacted]",
-    );
-}
-
 if (invokedAsMain()) {
   void main().then(
     (exitCode) => {
       process.exitCode = exitCode;
     },
     (error: unknown) => {
-      process.stderr.write(`codex-security: ${cliErrorMessage(error)}\n`);
+      process.stderr.write(`codex-security: ${redactedErrorMessage(error)}\n`);
       process.exitCode = 2;
     },
   );

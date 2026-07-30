@@ -17,6 +17,7 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
+import { redactedErrorMessage } from "./errors.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -190,7 +191,7 @@ async function runCampaign(
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
-          failure = redactError(error);
+          failure = redactedErrorMessage(error);
         } finally {
           await rm(checkout, { recursive: true, force: true });
         }
@@ -522,17 +523,4 @@ export function buildGitHubCredentialArgs(host: string | undefined): string[] {
   }
   const key = `credential.${url.origin}.helper`;
   return ["-c", `${key}=`, "-c", `${key}=!gh auth git-credential`];
-}
-
-function redactError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error))
-    .replaceAll(
-      /((?:api[_-]?key|token|secret|credential|password)[A-Za-z0-9_-]*\s*[:=]\s*)[^\s,;]+/giu,
-      "$1[redacted]",
-    )
-    .replaceAll(
-      /\b(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|npm_)[A-Za-z0-9_*=-]{8,}/gu,
-      "[redacted]",
-    )
-    .replaceAll(/\b(Bearer|Basic|Token)\s+[^\s,;]+/giu, "$1 [redacted]");
 }
