@@ -2195,6 +2195,12 @@ describe("CLI", () => {
         "client_authorization_value=ApiKey SYNTHETIC_SUFFIXED_SECRET",
         "client_authorization_value=ApiKey [redacted]",
       ],
+      ["Authorization: ApiKey dGVzdA==", "Authorization: ApiKey [redacted]"],
+      ["Authorization: ApiKey dGVzdA=", "Authorization: ApiKey [redacted]"],
+      [
+        "client_auth_token=Custom dGVzdA==",
+        "client_auth_token=Custom [redacted]",
+      ],
     ] as const) {
       expect(redactedErrorMessage(authorization)).toBe(redacted);
     }
