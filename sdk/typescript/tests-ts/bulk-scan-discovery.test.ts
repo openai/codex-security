@@ -282,6 +282,31 @@ describe("bulk scan repository discovery", () => {
     expect(csv).not.toContain("unrelated");
   });
 
+  test("expands a home-relative output directory from the wizard prompt", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const previousHome = process.env.HOME;
+    const previousProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const { dependencies, prompt } = discoveryDependencies(root);
+      prompt.confirms = [true];
+      prompt.inputs = ["~/custom-results"];
+
+      const result = await runBulkScanWizard(dependencies);
+
+      expect(result?.outputDir).toBe(join(home, "custom-results"));
+      expect(await lstat(join(root, "~")).catch(() => null)).toBeNull();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousProfile;
+    }
+  });
+
   test("includes public repositories and excludes archived, forked, and empty repositories", async () => {
     const root = await temporaryDirectory();
     const { dependencies, prompt } = discoveryDependencies(root, {

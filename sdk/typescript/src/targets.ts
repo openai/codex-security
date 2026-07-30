@@ -438,11 +438,13 @@ function abortReason(signal: AbortSignal): unknown {
 }
 
 function expandHome(value: string): string {
+  const home =
+    process.env["HOME"]?.trim() || process.env["USERPROFILE"]?.trim() || homedir();
   if (value === "~") {
-    return homedir();
+    return home;
   }
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
+    return resolve(home, value.slice(2).replace(/^[/\\]+/, ""));
   }
   return value;
 }

@@ -2006,9 +2006,11 @@ async function sameFile(left: string, right: string): Promise<boolean> {
 }
 
 export function expandHome(value: string): string {
-  if (value === "~") return homedir();
+  const home =
+    process.env["HOME"]?.trim() || process.env["USERPROFILE"]?.trim() || homedir();
+  if (value === "~") return home;
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return join(homedir(), value.slice(2));
+    return join(home, value.slice(2));
   }
   return value;
 }

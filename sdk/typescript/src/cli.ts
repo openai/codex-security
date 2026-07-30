@@ -180,6 +180,10 @@ function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
 }
 
+function resolveCliPath(directory: string, value: string): string {
+  return resolve(directory, expandHome(value));
+}
+
 function effortOption() {
   return z
     .enum(MODEL_REASONING_EFFORTS, {
@@ -734,14 +738,14 @@ export async function main(
         const repository =
           options.scanRoot !== undefined && args.repository === undefined
             ? undefined
-            : resolve(directory, args.repository ?? directory);
+            : resolveCliPath(directory, args.repository ?? directory);
         return presentHistory(
           await history([
             "list-scans",
             ...(repository === undefined ? [] : ["--repository", repository]),
             ...(options.scanRoot === undefined
               ? []
-              : ["--scan-root", resolve(directory, options.scanRoot)]),
+              : ["--scan-root", resolveCliPath(directory, options.scanRoot)]),
           ]),
           "list",
           format,
@@ -750,7 +754,7 @@ export async function main(
             scanRoot:
               options.scanRoot === undefined
                 ? undefined
-                : resolve(directory, options.scanRoot),
+                : resolveCliPath(directory, options.scanRoot),
           },
         );
       },
@@ -1111,7 +1115,10 @@ export async function main(
             "git",
             [
               "-C",
-              resolve(dependencies.currentDirectory(), args.repository ?? "."),
+              resolveCliPath(
+                dependencies.currentDirectory(),
+                args.repository ?? ".",
+              ),
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
@@ -1284,8 +1291,8 @@ export async function main(
                 "--output-dir is required with a repository CSV.",
               );
             }
-            inputPath = resolve(currentDirectory, args.input);
-            outputDir = resolve(currentDirectory, options.outputDir);
+            inputPath = resolveCliPath(currentDirectory, args.input);
+            outputDir = resolveCliPath(currentDirectory, options.outputDir);
           }
           const result = await runMultiscan({
             inputPath,
@@ -1369,12 +1376,12 @@ export async function main(
         const currentDirectory = dependencies.currentDirectory();
         exitCode = await runExport(
           {
-            scanDir: resolve(currentDirectory, args.scanDir),
+            scanDir: resolveCliPath(currentDirectory, args.scanDir),
             format: options.exportFormat,
             output:
               options.output === "-"
                 ? "-"
-                : resolve(
+                : resolveCliPath(
                     currentDirectory,
                     options.output ??
                       EXPORT_DEFAULT_OUTPUTS[options.exportFormat],
@@ -1382,7 +1389,7 @@ export async function main(
             sourceRoot:
               options.sourceRoot === undefined
                 ? undefined
-                : resolve(currentDirectory, options.sourceRoot),
+                : resolveCliPath(currentDirectory, options.sourceRoot),
             pythonPath: options.python,
           },
           output,
