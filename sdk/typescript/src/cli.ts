@@ -1541,7 +1541,9 @@ export async function main(
             ? await dependencies.prepareAuthenticationHome(
                 dependencies.environment,
               )
-            : codexSecurityCredentialHome(dependencies.environment);
+            : await prepareCodexSecurityCredentialHome(
+                dependencies.environment,
+              );
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
@@ -1617,7 +1619,9 @@ export async function main(
             ? await dependencies.prepareAuthenticationHome(
                 dependencies.environment,
               )
-            : codexSecurityCredentialHome(dependencies.environment);
+            : await prepareCodexSecurityCredentialHome(
+                dependencies.environment,
+              );
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,

@@ -9,6 +9,7 @@ import {
   readFile,
   realpath,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -49,6 +50,7 @@ import {
   bundledPluginCandidates,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
+  codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   codexPlatformPackage,
   isPythonPathCandidate,
@@ -56,7 +58,11 @@ import {
   prepareCodexSecurityCredentialHome,
   preparePersistentScanRoot,
   requirePrivateCredentialHome,
+  requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
+  requireSecureCredentialHome,
+  requireSecureOutputAncestry,
+  requireTrustedOutputAncestor,
   runWorkbench,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
@@ -829,9 +835,15 @@ describe("plugin runtime preparation", () => {
     const ambient = join(root, "ambient");
     const isolated = join(root, "isolated");
     await mkdir(ambient);
-    await mkdir(isolated);
+    await mkdir(isolated, { mode: 0o700 });
+    if (process.platform !== "win32") await chmod(isolated, 0o700);
     await writeFile(join(ambient, "auth.json"), '{"token":"ambient"}\n');
-    await writeFile(join(isolated, "auth.json"), '{"token":"explicit"}\n');
+    await writeFile(join(isolated, "auth.json"), '{"token":"explicit"}\n', {
+      mode: 0o600,
+    });
+    if (process.platform !== "win32") {
+      await chmod(join(isolated, "auth.json"), 0o600);
+    }
 
     expect(await importAmbientAuth(ambient, isolated)).toBe(true);
     expect(await readFile(join(isolated, "auth.json"), "utf8")).toBe(
@@ -1311,6 +1323,146 @@ describe("runtime directories and plugin Python boundary", () => {
       prepareCodexSecurityCredentialHome(environment),
     ).rejects.toThrow("credential home is not a directory");
   });
+
+  testPosix(
+    "rejects credential homes under a non-sticky shared parent directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      await mkdir(shared, { mode: 0o777 });
+      await chmod(shared, 0o777);
+      expect((await lstat(shared)).mode & 0o1000).toBe(0);
+      const environment = { CODEX_SECURITY_STATE_DIR: join(shared, "state") };
+
+      await expect(
+        prepareCodexSecurityCredentialHome(environment),
+      ).rejects.toThrow("sticky bit");
+      await expect(requireSecureOutputAncestry(join(shared, "state"))).rejects.toThrow(
+        "sticky bit",
+      );
+    },
+  );
+
+  testPosix(
+    "accepts credential homes under a sticky shared parent directory",
+    async () => {
+      const root = await temporaryDirectory();
+      // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
+      // chmod; fall back to the process temp root when it is already sticky.
+      let stickyParent = join(root, "shared");
+      await mkdir(stickyParent, { mode: 0o1777 });
+      await chmod(stickyParent, 0o1777);
+      if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+        stickyParent = await realpath(tmpdir());
+        if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+          return;
+        }
+      }
+      const stateDirectory = join(
+        stickyParent,
+        `codex-security-sticky-${process.pid}-${Date.now()}`,
+      );
+      temporaryDirectories.push(stateDirectory);
+      await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      });
+      await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
+      await expect(
+        requireSecureOutputAncestry(home),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  testPosix("rejects sticky shared parents controlled by another user", () => {
+    expect(() =>
+      requireTrustedOutputAncestor(
+        { mode: 0o41777, uid: 1001 },
+        "/shared",
+        1000,
+      ),
+    ).toThrow("trusted owner");
+    expect(() =>
+      requireTrustedOutputAncestor(
+        { mode: 0o40755, uid: 1001 },
+        "/shared",
+        1000,
+      ),
+    ).toThrow("trusted owner");
+    expect(() =>
+      requireTrustedOutputAncestor(
+        { mode: 0o41777, uid: 1000 },
+        "/shared",
+        1000,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      requireTrustedOutputAncestor({ mode: 0o41777, uid: 0 }, "/tmp", 1000),
+    ).not.toThrow();
+  });
+
+  testPosix(
+    "rejects a credential home that is no longer private to the current user",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      await chmod(home, 0o755);
+      await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+        "must not be accessible to other users",
+      );
+      await expect(
+        acquireCodexSecurityCredentialHomeLock(home),
+      ).rejects.toThrow("must not be accessible to other users");
+    },
+  );
+
+  testPosix(
+    "pins credential-home identity for the duration of a lock session",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const release = await acquireCodexSecurityCredentialHomeLock(home);
+      const stolen = join(root, "stolen-home");
+      await rename(home, stolen);
+      await mkdir(home, { recursive: true, mode: 0o700 });
+      await chmod(home, 0o700);
+      await expect(release()).rejects.toThrow("credential home was replaced");
+    },
+  );
+
+  testPosix(
+    "rejects world-writable or symlink stored authentication files",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const authPath = join(home, "auth.json");
+      await writeFile(authPath, '{"token":"test"}\n', { mode: 0o600 });
+      expect(await codexSecurityHasStoredFileCredentials(home)).toBe(true);
+
+      await chmod(authPath, 0o644);
+      await expect(codexSecurityHasStoredFileCredentials(home)).rejects.toThrow(
+        "must not be accessible to other users",
+      );
+      await rm(authPath);
+
+      const target = join(home, "auth-target.json");
+      await writeFile(target, '{"token":"test"}\n', { mode: 0o600 });
+      await symlink(target, authPath);
+      await expect(codexSecurityHasStoredFileCredentials(home)).rejects.toThrow(
+        "not a regular file",
+      );
+
+      expect(() =>
+        requirePrivateCredentialFile({ mode: 0o100644, uid: 1000 }, authPath, 1000),
+      ).toThrow("must not be accessible to other users");
+    },
+  );
 
   test("identifies a credential home that already exists as a regular file", async () => {
     const root = await temporaryDirectory();
