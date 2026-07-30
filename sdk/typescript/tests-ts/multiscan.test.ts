@@ -444,6 +444,11 @@ describe("multiscan", () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
     const secret = "sk-proj-SYNTHETIC_MULTISCAN_SECRET_123";
+    const proxyUrl =
+      "https://SYNTHETIC_USER:SYNTHETIC_MULTISCAN_PASSWORD@proxy.test/v1/responses";
+    const queryUrl =
+      "https://proxy.test/v1/responses?api_key=SYNTHETIC_MULTISCAN_QUERY_123&safe=1";
+    const shortAuthorization = "Bearer abc123";
     await writeFile(
       paths.input,
       `id,repository,revision\nretry,${source.path},${source.revision}\n`,
@@ -455,7 +460,11 @@ describe("multiscan", () => {
         paths,
         client(async (_repository, scanOptions = {}) => {
           attempts += 1;
-          if (attempts === 1) throw new Error(`temporary failure ${secret}`);
+          if (attempts === 1) {
+            throw new Error(
+              `temporary failure ${secret} ${shortAuthorization} sending request for url (${proxyUrl}) and ${queryUrl}`,
+            );
+          }
           return await completedScan(scanOptions.outputDir!);
         }),
       ),
@@ -467,7 +476,12 @@ describe("multiscan", () => {
       { id: "retry", status: "failed", attempt: 1 },
       { id: "retry", status: "completed", attempt: 2 },
     ]);
-    expect(await readFile(summary.resultsPath, "utf8")).not.toContain(secret);
+    const ledger = await readFile(summary.resultsPath, "utf8");
+    expect(ledger).not.toContain(secret);
+    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_PASSWORD");
+    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_QUERY_123");
+    expect(ledger).not.toContain(shortAuthorization);
+    expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {

@@ -1,5 +1,27 @@
 import { formatUsd, type ScanCost } from "./cost.js";
 
+/** Returns an error message with credential-shaped substrings redacted. */
+export function redactedErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replaceAll(
+      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|token|secret|credential|signature|sig|password|passwd)\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)[^\s"',;}&\\\]]+/giu,
+      "$1[redacted]",
+    )
+    .replaceAll(/sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}/gu, "[redacted]")
+    .replaceAll(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_-]{8,}/giu, "[redacted]")
+    .replaceAll(/npm_[A-Za-z0-9_-]{8,}/giu, "[redacted]")
+    .replaceAll(
+      /(^|%20|[^A-Za-z0-9_])(Bearer|Basic|Token)((?:\s|%20|\+)+)[A-Za-z0-9.%_~+/*=-]+/giu,
+      "$1$2$3[redacted]",
+    )
+    .replaceAll(/((?:https?|ssh|git\+ssh):\/\/)[^\s/@]+@/giu, "$1[redacted]@")
+    .replaceAll(
+      /((?:[?&]|%3F|%26)(?:(?!%3F|%26|%3D)(?:[A-Za-z0-9_.%-]|\[|\])){0,64}(?:api[_-]?key|access(?:[_-]|%5F|%2D)?key(?:(?:[_-]|%5F|%2D)?id)?|token|secret|credential|signature|sig|password|passwd)(?:\]|%5D)?(?:=|%3D))(?:(?!%26)[^&\s])+/giu,
+      "$1[redacted]",
+    );
+}
+
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
   public constructor(message: string, options?: ErrorOptions) {

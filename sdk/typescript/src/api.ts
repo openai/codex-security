@@ -32,6 +32,7 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   type ProtectedScanPathKind,
+  redactedErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -843,11 +844,10 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
+            // Redact before truncating: the stored message is read back by
+            // `scans show` and travels inside the results directory.
             "--message",
-            (failure instanceof Error
-              ? failure.message
-              : String(failure)
-            ).slice(0, 2400),
+            redactedErrorMessage(failure).slice(0, 2400),
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
