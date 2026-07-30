@@ -15,6 +15,8 @@ export interface AccountStatus {
   details: string;
 }
 
+const LOGIN_CHILD_SETTLE_MS = 1_000;
+
 export class CodexLoginHandle {
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #completion: Promise<LoginResult>;
@@ -27,6 +29,7 @@ export class CodexLoginHandle {
   #urlReadySettled = false;
   #deviceReadySettled = false;
   #canceled = false;
+  #forceKillTimer: ReturnType<typeof setTimeout> | undefined;
   #stdout = "";
   #stderr = "";
 
@@ -64,6 +67,7 @@ export class CodexLoginHandle {
     });
     this.#completion = new Promise((resolve, reject) => {
       this.#child.once("error", (error) => {
+        this.#clearForceKillTimer();
         this.#settleInstructionWaiters({
           success: false,
           exitCode: null,
@@ -78,6 +82,8 @@ export class CodexLoginHandle {
         if (completed) return;
         completed = true;
         if (fallback !== undefined) clearTimeout(fallback);
+        this.#clearForceKillTimer();
+        this.#destroyStdio();
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
@@ -89,13 +95,14 @@ export class CodexLoginHandle {
         resolve(result);
       };
       this.#child.once("close", complete);
+      // A descendant that inherits stdout/stderr can keep the pipes open after
+      // the login child exits. Destroy them after a short grace period so
+      // wait()/close() always settle on every platform.
       this.#child.once("exit", (exitCode) => {
-        if (process.platform !== "win32") return;
         fallback = setTimeout(() => {
-          this.#child.stdout.destroy();
-          this.#child.stderr.destroy();
+          this.#destroyStdio();
           complete(exitCode);
-        }, 1_000);
+        }, LOGIN_CHILD_SETTLE_MS);
       });
     });
   }
@@ -132,10 +139,32 @@ export class CodexLoginHandle {
   }
 
   public cancel(): void {
-    if (this.#child.exitCode === null) {
-      this.#canceled = true;
-      this.#child.kill("SIGTERM");
+    this.#canceled = true;
+    this.#destroyStdio();
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+      return;
     }
+    this.#child.kill("SIGTERM");
+    if (this.#forceKillTimer !== undefined) return;
+    this.#forceKillTimer = setTimeout(() => {
+      this.#forceKillTimer = undefined;
+      this.#destroyStdio();
+      if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
+        return;
+      }
+      this.#child.kill("SIGKILL");
+    }, LOGIN_CHILD_SETTLE_MS);
+  }
+
+  #clearForceKillTimer(): void {
+    if (this.#forceKillTimer === undefined) return;
+    clearTimeout(this.#forceKillTimer);
+    this.#forceKillTimer = undefined;
+  }
+
+  #destroyStdio(): void {
+    this.#child.stdout.destroy();
+    this.#child.stderr.destroy();
   }
 
   #notifyInstructions(): void {
