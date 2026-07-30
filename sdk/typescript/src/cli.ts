@@ -2841,7 +2841,7 @@ function scanFailureMessage(
   // appending it. That is deliberate: upstream authentication and authorization
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
-  if (isLocalScanFailure(error)) return cliErrorMessage(error);
+  if (isLocalScanFailure(error)) return redactedErrorMessage(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
       return authentication?.method === "api_key"
