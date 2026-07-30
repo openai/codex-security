@@ -832,7 +832,7 @@ export function requirePrivateOutputDirectory(
   }
 }
 
-/** Reject shared parents whose owner can rename or replace a private directory. */
+/** Reject shared parents whose owner can rename or replace private scan output. */
 export async function requireSecureOutputAncestry(
   path: string,
   effectiveUid = process.geteuid?.(),
@@ -846,14 +846,14 @@ export async function requireSecureOutputAncestry(
     } catch (error) {
       if (nodeErrorCode(error) !== "ENOENT") {
         throw new OutputDirectoryError(
-          `Unable to inspect parent directory: ${current}`,
+          `Unable to inspect scan output parent directory: ${current}`,
           { cause: error },
         );
       }
       const parent = dirname(current);
       if (parent === current) {
         throw new OutputDirectoryError(
-          `Unable to inspect parent directory: ${current}`,
+          `Unable to inspect scan output parent directory: ${current}`,
           { cause: error },
         );
       }
@@ -866,13 +866,13 @@ export async function requireSecureOutputAncestry(
       metadata = await lstat(current);
     } catch (error) {
       throw new OutputDirectoryError(
-        `Unable to inspect parent directory: ${current}`,
+        `Unable to inspect scan output parent directory: ${current}`,
         { cause: error },
       );
     }
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
       throw new OutputDirectoryError(
-        `Parent must be a non-symlink directory: ${current}`,
+        `Scan output parent must be a non-symlink directory: ${current}`,
       );
     }
     requireTrustedOutputAncestor(metadata, current, effectiveUid);
@@ -893,13 +893,13 @@ export function requireTrustedOutputAncestor(
     metadata.uid !== effectiveUid
   ) {
     throw new OutputDirectoryError(
-      `Parent must have a trusted owner: ${path}`,
+      `Scan output parent must have a trusted owner: ${path}`,
     );
   }
   if ((metadata.mode & 0o022) === 0) return;
   if ((metadata.mode & 0o1000) === 0) {
     throw new OutputDirectoryError(
-      `Parent must not be group- or world-writable without the sticky bit: ${path}`,
+      `Scan output parent must not be group- or world-writable without the sticky bit: ${path}`,
     );
   }
 }

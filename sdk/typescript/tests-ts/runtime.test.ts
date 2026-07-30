@@ -1337,9 +1337,9 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(
         prepareCodexSecurityCredentialHome(environment),
       ).rejects.toThrow("sticky bit");
-      await expect(requireSecureOutputAncestry(join(shared, "state"))).rejects.toThrow(
-        "sticky bit",
-      );
+      await expect(
+        requireSecureOutputAncestry(join(shared, "state")),
+      ).rejects.toThrow("sticky bit");
     },
   );
 
@@ -1368,9 +1368,7 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: stateDirectory,
       });
       await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
-      await expect(
-        requireSecureOutputAncestry(home),
-      ).resolves.toBeUndefined();
+      await expect(requireSecureOutputAncestry(home)).resolves.toBeUndefined();
     },
   );
 
@@ -1459,7 +1457,11 @@ describe("runtime directories and plugin Python boundary", () => {
       );
 
       expect(() =>
-        requirePrivateCredentialFile({ mode: 0o100644, uid: 1000 }, authPath, 1000),
+        requirePrivateCredentialFile(
+          { mode: 0o100644, uid: 1000 },
+          authPath,
+          1000,
+        ),
       ).toThrow("must not be accessible to other users");
     },
   );

@@ -19,10 +19,25 @@ import {
 } from "../src/runtime.js";
 import {
   capture,
-  dependencies,
+  dependencies as cliDependencies,
   fakePreflight,
   fakeResult,
 } from "./support/cli.js";
+
+function dependencies(
+  options: Parameters<typeof cliDependencies>[0] = {},
+): ReturnType<typeof cliDependencies> {
+  return cliDependencies({
+    ...options,
+    environment: {
+      CODEX_SECURITY_STATE_DIR: join(
+        tmpdir(),
+        `codex-security-cli-authentication-${process.pid}`,
+      ),
+      ...options.environment,
+    },
+  });
+}
 
 describe("CLI authentication", () => {
   test("delegates login and logout without overriding managed credential storage", async () => {
