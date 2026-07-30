@@ -519,7 +519,7 @@ describe("CodexSecurity orchestration", () => {
         profiles,
         projects,
       },
-      activeProject,
+      join(activeProject, "packages", "service"),
     );
 
     expect(prioritized["profile"]).toBe("selected");

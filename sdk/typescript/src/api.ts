@@ -404,7 +404,7 @@ export class CodexSecurity {
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(
           runtime.configPath,
-          scanPreflightCodexConfig(effectiveConfig, repo),
+          scanPreflightCodexConfig(effectiveConfig, protectedRoot),
         );
       }
       const runtimeHome = await realpath(runtime.codexHome);
@@ -570,6 +570,7 @@ export class CodexSecurity {
       costTracker = tracker;
       const recipe = scanRecipe(
         repo,
+        protectedRoot,
         normalized,
         mode,
         expectation.repositoryRevision,
@@ -1608,6 +1609,7 @@ function targetInstruction(target: NormalizedTarget): string {
 
 function scanRecipe(
   repository: string,
+  activeProjectPath: string,
   target: NormalizedTarget,
   mode: ScanMode,
   repositoryRevision: string | null,
@@ -1630,7 +1632,7 @@ function scanRecipe(
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
-    config: scanPreflightCodexConfig(effectiveConfig, repository),
+    config: scanPreflightCodexConfig(effectiveConfig, activeProjectPath),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
@@ -2021,9 +2023,24 @@ export function scanPreflightCodexConfig(
   if (isRecord(projects)) {
     const sanitized: JsonObject = {};
     let accepted = 0;
+    const activeProjectRoot =
+      activeProjectPath === undefined
+        ? undefined
+        : Object.keys(projects)
+            .filter((path) => {
+              if (!safeString(path, 4096) || !isAbsolute(path)) return false;
+              const remaining = relative(path, activeProjectPath);
+              return (
+                remaining === "" ||
+                (remaining !== ".." &&
+                  !remaining.startsWith(`..${sep}`) &&
+                  !isAbsolute(remaining))
+              );
+            })
+            .sort((left, right) => right.length - left.length)[0];
     for (const [path, project] of prioritizedEntries(
       projects,
-      activeProjectPath,
+      activeProjectRoot ?? activeProjectPath,
     )) {
       if (!safeString(path, 4096) || !isAbsolute(path) || !isRecord(project)) {
         continue;

@@ -10,6 +10,7 @@ const LOGIN_OUTPUT_LIMIT_MESSAGE =
 const COMMAND_OUTPUT_LIMIT_MESSAGE =
   "Codex authentication command output exceeded the 64 KiB safety limit.";
 const INSTRUCTION_TAIL_BYTES = 4 * 1024;
+type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
 
 export interface LoginResult {
   success: boolean;
@@ -41,6 +42,8 @@ export class CodexLoginHandle {
   #stderr = "";
   #stdoutInstructionTail = "";
   #stderrInstructionTail = "";
+  #stdoutTerminalState: TerminalEscapeState = "text";
+  #stderrTerminalState: TerminalEscapeState = "text";
   #stdoutAuthUrl: string | null = null;
   #stderrAuthUrl: string | null = null;
   #stdoutUserCode: string | null = null;
@@ -220,7 +223,13 @@ export class CodexLoginHandle {
       stream === "stdout"
         ? this.#stdoutInstructionTail
         : this.#stderrInstructionTail;
-    const candidate = `${tail}${chunk}`;
+    const visible = visibleTerminalChunk(
+      chunk,
+      stream === "stdout"
+        ? this.#stdoutTerminalState
+        : this.#stderrTerminalState,
+    );
+    const candidate = `${tail}${visible.text}`;
     const url = preferredAuthUrl(candidate);
     const userCode = userCodeFromOutput(candidate);
     const nextTail = appendUtf8Tail(
@@ -232,10 +241,12 @@ export class CodexLoginHandle {
       this.#stdoutAuthUrl ??= url;
       this.#stdoutUserCode ??= userCode;
       this.#stdoutInstructionTail = nextTail;
+      this.#stdoutTerminalState = visible.state;
     } else {
       this.#stderrAuthUrl ??= url;
       this.#stderrUserCode ??= userCode;
       this.#stderrInstructionTail = nextTail;
+      this.#stderrTerminalState = visible.state;
     }
     this.#notifyInstructions();
   }
@@ -493,4 +504,45 @@ function plainTerminalText(value: string): string {
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
+}
+
+function visibleTerminalChunk(
+  value: string,
+  initialState: TerminalEscapeState,
+): { text: string; state: TerminalEscapeState } {
+  let state = initialState;
+  let text = "";
+  for (const character of value) {
+    if (state === "text") {
+      if (character === "\u001b") {
+        state = "escape";
+      } else if (character !== "\r") {
+        text += character;
+      }
+      continue;
+    }
+    if (state === "escape") {
+      if (character === "[") {
+        state = "csi";
+      } else if (character === "]") {
+        state = "osc";
+      } else {
+        text += `\u001b${character}`;
+        state = "text";
+      }
+      continue;
+    }
+    if (state === "csi") {
+      if (character >= "@" && character <= "~") state = "text";
+      continue;
+    }
+    if (state === "osc") {
+      if (character === "\u0007") state = "text";
+      else if (character === "\u001b") state = "osc-escape";
+      continue;
+    }
+    if (character === "\\" || character === "\u0007") state = "text";
+    else if (character !== "\u001b") state = "osc";
+  }
+  return { text, state };
 }

@@ -438,6 +438,7 @@ export async function runCodexSkillCommand(
     windowsHide: true,
   });
   let requestedSignal: SignalName | null = null;
+  let skillOutputLimitExceeded = false;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
   let forceCaptureCompletion: (() => void) | null = null;
@@ -473,7 +474,10 @@ export async function runCodexSkillCommand(
       output === undefined || invocation.stdout === null
         ? Promise.resolve(undefined)
         : Promise.race([
-            readSkillCommandOutput(invocation.stdout),
+            readSkillCommandOutput(invocation.stdout, () => {
+              skillOutputLimitExceeded = true;
+              requestTermination("SIGTERM");
+            }),
             new Promise<undefined>((resolve) => {
               forceCaptureCompletion = () => resolve(undefined);
             }),
@@ -507,6 +511,9 @@ export async function runCodexSkillCommand(
       }),
       captured,
     ]);
+    if (skillOutputLimitExceeded) {
+      throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
+    }
     if (output === undefined || status === 130 || status === 143) return status;
     if (status !== 0) {
       await writeCliOutput(
@@ -2231,11 +2238,17 @@ async function runSkill(
 
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
+  onLimitExceeded?: () => void,
 ): Promise<{ message?: string; error?: string; malformed: boolean }> {
   let message: string | undefined;
   let error: string | undefined;
   let malformed = false;
   let exceeded = false;
+  const markExceeded = (): void => {
+    if (exceeded) return;
+    exceeded = true;
+    onLimitExceeded?.();
+  };
 
   const readLine = (bytes: Buffer): void => {
     const content =
@@ -2265,7 +2278,7 @@ export async function readSkillCommandOutput(
         typeof item.text === "string"
       ) {
         if (Buffer.byteLength(item.text, "utf8") > MAX_SKILL_RESPONSE_BYTES) {
-          exceeded = true;
+          markExceeded();
         } else {
           message = item.text;
         }
@@ -2281,7 +2294,7 @@ export async function readSkillCommandOutput(
         if (
           Buffer.byteLength(detail.message, "utf8") > MAX_SKILL_RESPONSE_BYTES
         ) {
-          exceeded = true;
+          markExceeded();
         } else {
           error = detail.message;
         }
@@ -2293,7 +2306,7 @@ export async function readSkillCommandOutput(
       if (
         Buffer.byteLength(value["message"], "utf8") > MAX_SKILL_RESPONSE_BYTES
       ) {
-        exceeded = true;
+        markExceeded();
       } else {
         error = value["message"];
       }
@@ -2314,7 +2327,7 @@ export async function readSkillCommandOutput(
       const segment = chunk.subarray(start, end);
       if (!discardingOversizedLine) {
         if (pendingBytes + segment.length > MAX_SKILL_EVENT_BYTES) {
-          exceeded = true;
+          markExceeded();
           discardingOversizedLine = true;
           pendingBytes = 0;
         } else if (segment.length > 0) {
