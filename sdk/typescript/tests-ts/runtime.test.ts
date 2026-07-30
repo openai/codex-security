@@ -1590,6 +1590,30 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow("private Windows credential home");
   });
 
+  test("revalidates the Windows credential ACL every time the home is used", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const validations: string[] = [];
+
+    await requireSecureCredentialHome(home, {
+      platform: "win32",
+      secureWindowsHome: async (path) => {
+        validations.push(path);
+      },
+    });
+
+    expect(validations).toEqual([home]);
+    await expect(
+      requireSecureCredentialHome(home, {
+        platform: "win32",
+        secureWindowsHome: async () => {
+          throw new Error("ACL changed after preparation");
+        },
+      }),
+    ).rejects.toThrow("private Windows credential home");
+  });
+
   test.skipIf(process.platform !== "win32")(
     "creates credential homes with a verified current-user-only Windows ACL",
     async () => {

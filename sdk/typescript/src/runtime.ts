@@ -155,7 +155,6 @@ export async function prepareCodexSecurityCredentialHome(
     requireModelSafeOutputDir(canonical);
     validateLocation?.(canonical);
     await requireSecureCredentialHome(canonical, {
-      applyWindowsAcl: true,
       metadata,
     });
     return canonical;
@@ -181,7 +180,6 @@ export async function requireSecureCredentialHome(
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-    applyWindowsAcl?: boolean;
     metadata?: Stats;
     expectedDevice?: number;
     expectedInode?: number;
@@ -225,12 +223,10 @@ export async function requireSecureCredentialHome(
     );
   }
   if (platform === "win32") {
-    if (options.applyWindowsAcl) {
-      await requirePrivateCredentialHome(metadata, canonical, {
-        platform,
-        secureWindowsHome: options.secureWindowsHome,
-      });
-    }
+    await requirePrivateCredentialHome(metadata, canonical, {
+      platform,
+      secureWindowsHome: options.secureWindowsHome,
+    });
     return metadata;
   }
   await requirePrivateCredentialHome(metadata, canonical, { platform });

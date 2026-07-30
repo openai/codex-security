@@ -2164,6 +2164,13 @@ describe("CLI", () => {
         'password="correct horse battery staple" private_key=SYNTHETIC_PRIVATE_KEY_123',
       ),
     ).toBe('password="[redacted]" private_key=[redacted]');
+    for (const separator of ["\n", "\\n"]) {
+      expect(
+        redactedErrorMessage(
+          `private_key=-----BEGIN PRIVATE KEY-----${separator}MII_SYNTHETIC_PRIVATE_KEY${separator}-----END PRIVATE KEY----- safe=value`,
+        ),
+      ).toBe("private_key=[redacted] safe=value");
+    }
   });
 
   test("reports database connection failures without claiming the model network failed", async () => {
