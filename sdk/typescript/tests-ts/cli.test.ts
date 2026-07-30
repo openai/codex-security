@@ -2164,6 +2164,16 @@ describe("CLI", () => {
         'password="correct horse battery staple" private_key=SYNTHETIC_PRIVATE_KEY_123',
       ),
     ).toBe('password="[redacted]" private_key=[redacted]');
+    expect(
+      redactedErrorMessage(
+        '{"client_secret_value":"correct horse battery staple","safe":"visible"}',
+      ),
+    ).toBe('{"client_secret_value":"[redacted]","safe":"visible"}');
+    expect(
+      redactedErrorMessage(
+        '{\\"access_token_value\\":\\"another horse battery staple\\"}',
+      ),
+    ).toBe('{\\"access_token_value\\":\\"[redacted]\\"}');
     for (const separator of ["\n", "\\n"]) {
       expect(
         redactedErrorMessage(

@@ -2321,6 +2321,10 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
     };
     const commands: Array<readonly string[]> = [];
+    const quotedCredential = JSON.stringify({
+      client_secret_value: "SYNTHETIC correct horse battery staple",
+    });
+    const redactedFailure = `${REDACTED_CREDENTIALS} {"client_secret_value":"[redacted]"}`;
     const client = new TestClient(
       {},
       {
@@ -2344,7 +2348,10 @@ describe("CodexSecurity orchestration", () => {
             id: null,
             async runStreamed() {
               async function* failingEvents(): AsyncGenerator<ThreadEvent> {
-                yield { type: "error", message: SYNTHETIC_CREDENTIALS };
+                yield {
+                  type: "error",
+                  message: `${SYNTHETIC_CREDENTIALS} ${quotedCredential}`,
+                };
               }
               return { events: failingEvents() };
             },
@@ -2360,7 +2367,7 @@ describe("CodexSecurity orchestration", () => {
     const scanId = failure?.[2] ?? "";
     expect(scanId).toMatch(/^[0-9a-f-]{36}$/);
     expect(failure?.[3]).toBe("--message");
-    expect(failure?.[4]).toBe(REDACTED_CREDENTIALS);
+    expect(failure?.[4]).toBe(redactedFailure);
 
     // `scans show` reads the stored message back through get-scan.
     const context = await runWorkbench(
@@ -2369,7 +2376,7 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(context["scan"]).toMatchObject({
       progress: { status: "failed" },
-      failureMessage: REDACTED_CREDENTIALS,
+      failureMessage: redactedFailure,
     });
 
     // Every synthetic credential is tagged SYNTHETIC, so the database file
