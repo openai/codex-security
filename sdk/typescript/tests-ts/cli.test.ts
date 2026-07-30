@@ -25,7 +25,10 @@ import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
   DiffTarget,
+  InvalidTargetError,
+  OutputDirectoryError,
   OutputInsideProtectedRootError,
+  PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
   VERSION,
@@ -2032,6 +2035,100 @@ describe("CLI", () => {
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("codex-security:");
       expect(stderr.text()).not.toContain("model service could not be reached");
+    }
+  });
+
+  test("reports local input and filesystem failures without connectivity advice", async () => {
+    // https://github.com/openai/codex-security/issues/36 -- classification
+    // matches bare words such as "permission denied" anywhere in the message,
+    // so local failures were reported as credential or connectivity problems
+    // and their own text was discarded.
+    const failures: Array<[string, unknown]> = [
+      [
+        "EACCES from a read-only TMPDIR",
+        Object.assign(
+          new Error(
+            "EACCES: permission denied, mkdtemp '/tmp/openai-codex-security-home-XXXXXX'",
+          ),
+          { code: "EACCES" },
+        ),
+      ],
+      [
+        "EPERM writing the scan directory",
+        Object.assign(
+          new Error("EPERM: operation not permitted, mkdir '/out/scan'"),
+          { code: "EPERM" },
+        ),
+      ],
+      [
+        "output directory rejected",
+        new OutputDirectoryError(
+          "Scan output directory must not be accessible to other users (chmod 700): /out",
+        ),
+      ],
+      [
+        "path target naming a 403 directory",
+        new InvalidTargetError("Path target does not exist: src/403/client.ts"),
+      ],
+      [
+        "git ref naming a forbidden branch",
+        new InvalidTargetError("unknown Git ref: origin/forbidden-paths"),
+      ],
+      [
+        "python interpreter unavailable",
+        new PluginPythonUnavailableError(
+          "The configured plugin Python interpreter is unavailable or unusable: /usr/bin/python3",
+        ),
+      ],
+    ];
+
+    for (const [, failure] of failures) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw failure;
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", "."], stdout.stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(stderr.text()).toContain((failure as Error).message);
+      expect(stderr.text()).not.toContain("cannot access the configured model");
+      expect(stderr.text()).not.toContain("Authentication failed");
+      expect(stderr.text()).not.toContain("reached its rate limit");
+    }
+  });
+
+  test("keeps model authorization advice for genuine transport failures", async () => {
+    // The bypass must not swallow real 401/403 handling, and the advice must
+    // still replace upstream text that can name the organization or project.
+    for (const [detail, expected] of [
+      ["401 invalid API key for org-private", "Authentication failed"],
+      [
+        "403 model access denied for org-private",
+        "cannot access the configured model",
+      ],
+    ] as const) {
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw new CodexSecurityError(detail);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", "."], capture().stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).not.toContain("org-private");
     }
   });
 

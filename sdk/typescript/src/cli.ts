@@ -56,7 +56,11 @@ import {
 import { formatUsd } from "./cost.js";
 import {
   CodexSecurityError,
+  ConfigurationError,
+  InvalidTargetError,
+  OutputDirectoryError,
   OutputInsideProtectedRootError,
+  PluginPythonUnavailableError,
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
@@ -2674,10 +2678,61 @@ async function runScan(
   return { exitCode: blockingCount > 0 ? 1 : 0, data: result.toJSON() };
 }
 
+// Filesystem and OS syscall failures cannot originate from the model transport,
+// so they must never be rewritten as connectivity or credential advice. Network
+// errno codes are deliberately absent: they are genuine transport failures.
+const LOCAL_SYSCALL_CODES = new Set([
+  "EACCES",
+  "EBUSY",
+  "EEXIST",
+  "EFBIG",
+  "EIO",
+  "EISDIR",
+  "ELOOP",
+  "EMFILE",
+  "ENAMETOOLONG",
+  "ENFILE",
+  "ENOENT",
+  "ENOMEM",
+  "ENOSPC",
+  "ENOTDIR",
+  "ENOTEMPTY",
+  "EPERM",
+  "EROFS",
+  "EXDEV",
+]);
+
+function isLocalScanFailure(error: unknown): boolean {
+  if (
+    error instanceof InvalidTargetError ||
+    error instanceof OutputDirectoryError ||
+    error instanceof ConfigurationError ||
+    error instanceof PluginPythonUnavailableError
+  ) {
+    return true;
+  }
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code: unknown }).code === "string" &&
+    LOCAL_SYSCALL_CODES.has((error as { code: string }).code)
+  );
+}
+
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
 ): string {
+  // A local failure keeps its own message. Classification matches bare words
+  // such as "permission denied" anywhere in the text, so an EACCES from a
+  // read-only TMPDIR would otherwise be reported as a credential problem.
+  //
+  // The advice branches below still replace the underlying text rather than
+  // appending it. That is deliberate: upstream authentication and authorization
+  // errors can name the organization or project, which must not reach stderr or
+  // the JSON error field.
+  if (isLocalScanFailure(error)) return cliErrorMessage(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
       return authentication?.method === "api_key"
