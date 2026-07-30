@@ -1031,6 +1031,59 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("reports the real scan failure when scan cleanup also fails", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await mkdir(join(repository, "src"), { recursive: true });
+    await mkdir(codexHome);
+    let failedCleanupPath: string | undefined;
+    const warnings: string[] = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: { OPENAI_API_KEY: "test-key" },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              // Cleanup removes the target paths file with a non-recursive rm, so
+              // replacing that file with a directory makes cleanup reject on every
+              // platform.
+              failedCleanupPath =
+                options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+              await rm(failedCleanupPath!, { force: true });
+              await mkdir(failedCleanupPath!);
+              throw new Error("the model refused the scan");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        target: ["src"],
+        outputDir: join(root, "scan"),
+        onWarning: (warning) => {
+          warnings.push(warning);
+        },
+      }),
+    ).rejects.toThrow("the model refused the scan");
+    expect(failedCleanupPath).toBeDefined();
+    // The cleanup failure is reported rather than discarded.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(
+      warnings.filter((warning) =>
+        warning.startsWith("Could not clean up after the Codex Security scan:"),
+      ),
+    ).toHaveLength(1);
+    await client.close();
+  });
+
   test("rejects scan output inside the repository before runtime initialization", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
