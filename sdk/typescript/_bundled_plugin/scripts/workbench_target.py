@@ -146,7 +146,9 @@ def worktree_content_digest_for_context(
         elif stat.S_ISDIR(metadata.st_mode):
             update_digest_field(digest, b"untracked-kind", b"directory")
             update_digest_field(
-                digest, b"untracked-content", directory_content_digest(path).encode()
+                digest,
+                b"untracked-content",
+                directory_content_digest(path.resolve()).encode(),
             )
         elif stat.S_ISREG(metadata.st_mode):
             content_digest = hashlib.sha256()
@@ -424,7 +426,13 @@ def copy_git_worktree_files(source: Path, destination: Path, excluded: tuple[Pat
             destination_path.symlink_to(os.readlink(source_path))
         elif stat.S_ISREG(metadata.st_mode):
             shutil.copy2(source_path, destination_path, follow_symlinks=False)
-        elif not stat.S_ISDIR(metadata.st_mode):
+        elif stat.S_ISDIR(metadata.st_mode):
+            nested_git_dir = git_output(source_path, "rev-parse", "--absolute-git-dir")
+            if nested_git_dir is None:
+                raise SystemExit(f"Could not inspect nested Git working tree: {relative}")
+            copy_git_worktree_files(source_path, destination_path, excluded)
+            (destination_path / ".git").write_text(f"gitdir: {nested_git_dir}\n")
+        else:
             raise SystemExit(f"Unsupported Git working-tree file type: {relative}")
     copied_target = destination if pathspec == "." else destination / pathspec
     copied_target.mkdir(parents=True, exist_ok=True)

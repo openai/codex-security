@@ -285,6 +285,31 @@ describe("malformed scan artifact recovery", () => {
           /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
         );
       }
+      if (kind === "nested") {
+        const copied = spawnSync(
+          fixture.python,
+          [
+            "-I",
+            "-B",
+            "-c",
+            [
+              "import sys",
+              "from pathlib import Path",
+              "sys.path.insert(0, sys.argv[1])",
+              "import workbench_target as target",
+              "source = Path(sys.argv[2])",
+              "checkout = target.copy_git_worktree_files(source, Path(sys.argv[3]), ())",
+              "git_dir = Path(target.git_output(source, 'rev-parse', '--absolute-git-dir'))",
+              "assert target.worktree_content_digest_for_context(checkout, '.', git_dir=git_dir, work_tree=checkout) == target.worktree_content_digest(source)",
+            ].join("\n"),
+            join(PLUGIN_ROOT, "scripts"),
+            fixture.repository,
+            join(fixture.stateDir, "checkout"),
+          ],
+          { encoding: "utf8" },
+        );
+        expect(copied.status, copied.stderr).toBe(0);
+      }
     }
   });
 
