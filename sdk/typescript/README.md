@@ -224,9 +224,10 @@ to
 `<scan-dir>/exports/results.sarif`.
 
 Repository, path, and working-tree scans require initialized Git submodules to
-have clean worktrees because their recorded commit, rather than uncommitted
-submodule changes, defines the parent repository snapshot. Committed-diff scans
-do not require unrelated initialized submodules to be clean.
+have clean worktrees and be checked out at the revision recorded by the parent
+repository. That recorded commit, rather than uncommitted submodule changes,
+defines the parent repository snapshot. Committed-diff scans do not require
+unrelated initialized submodules to be clean.
 
 Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
 searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
