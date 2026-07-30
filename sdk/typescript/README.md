@@ -405,6 +405,12 @@ service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef0123
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.
 
+Bulk-scan receipt ledgers are limited to 64 MiB total and 1 MiB per record.
+If a committed record is malformed, the original ledger is retained as
+`results.corrupt-<uuid>.jsonl` and valid records are republished to
+`results.jsonl` before the campaign resumes. An oversized ledger is quarantined
+whole and the campaign safely rescans its repositories.
+
 ### Scan history and reruns
 
 `npx @openai/codex-security scans list` lists scans for the current repository. Pass a

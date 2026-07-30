@@ -2,12 +2,14 @@ import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   rm,
   symlink,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -501,6 +503,98 @@ describe("multiscan", () => {
       "manifest does not match",
     );
     expect(calls).toBe(2);
+  });
+
+  test("quarantines malformed committed receipts and preserves valid history", async () => {
+    const corruptions = (
+      receipt: Record<string, unknown>,
+    ): Array<[string, string]> => {
+      const { id: _id, ...withoutId } = receipt;
+      return [
+        ["malformed JSON", '{"broken":\n'],
+        ["non-object JSON", "null\n"],
+        ["missing ID", `${JSON.stringify(withoutId)}\n`],
+        ["invalid attempt", `${JSON.stringify({ ...receipt, attempt: 0 })}\n`],
+        [
+          "invalid status",
+          `${JSON.stringify({ ...receipt, status: "running" })}\n`,
+        ],
+        [
+          "invalid output path",
+          `${JSON.stringify({ ...receipt, outputDir: 42 })}\n`,
+        ],
+        [
+          "oversized line",
+          `${JSON.stringify({ padding: "x".repeat(1024 * 1024) })}\n`,
+        ],
+      ];
+    };
+
+    for (const [index] of Array.from({ length: 7 }).entries()) {
+      const paths = await fixture();
+      const source = await repository(paths.root, `corrupt-${index}`);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ncorrupt-${index},${source.path},${source.revision}\n`,
+      );
+      let calls = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        calls += 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+      const initial = await runMultiscan(options(paths, security));
+      const [receipt] = await results(initial.resultsPath);
+      const [, corruption] = corruptions(receipt!)[index]!;
+      await appendFile(
+        initial.resultsPath,
+        `${corruption}${JSON.stringify(receipt)}\n`,
+      );
+
+      const resumed = await runMultiscan(options(paths, security));
+      expect(resumed).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(calls).toBe(1);
+      expect(await results(resumed.resultsPath)).toHaveLength(2);
+      const quarantines = (await readdir(paths.output)).filter((entry) =>
+        entry.startsWith("results.corrupt-"),
+      );
+      expect(quarantines).toHaveLength(1);
+      expect(
+        await readFile(join(paths.output, quarantines[0]!), "utf8"),
+      ).toContain(corruption.trim());
+    }
+  });
+
+  test("quarantines an oversized receipt ledger before rescanning", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "oversized-ledger");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\noversized-ledger,${source.path},${source.revision}\n`,
+    );
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const initial = await runMultiscan(options(paths, security));
+    await truncate(initial.resultsPath, 64 * 1024 * 1024 + 1);
+
+    const resumed = await runMultiscan(options(paths, security));
+
+    expect(resumed).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(calls).toBe(2);
+    expect(await results(resumed.resultsPath)).toHaveLength(1);
+    const quarantines = (await readdir(paths.output)).filter((entry) =>
+      entry.startsWith("results.corrupt-"),
+    );
+    expect(quarantines).toHaveLength(1);
+    expect(
+      (await lstat(join(paths.output, quarantines[0]!))).size,
+    ).toBeGreaterThan(64 * 1024 * 1024);
   });
 
   test("ignores repository-local Git shims while preserving credential configuration", async () => {

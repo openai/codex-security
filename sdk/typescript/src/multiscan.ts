@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -8,7 +9,6 @@ import {
   realpath,
   rename,
   rm,
-  truncate,
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -27,6 +27,9 @@ const REQUIRED_ARTIFACTS = [
   "coverage.json",
   "report.md",
 ];
+const MAX_RECEIPT_LEDGER_BYTES = 64 * 1024 * 1024;
+const MAX_RECEIPT_LINE_BYTES = 1024 * 1024;
+const MAX_RECEIPT_ERROR_BYTES = 64 * 1024;
 
 interface MultiscanTask {
   id: string;
@@ -106,7 +109,7 @@ async function runCampaign(
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   await ensureManifest(join(output, "manifest.json"), tasks);
-  const receipts = await readReceipts(ledger);
+  const receipts = await readReceipts(ledger, options.signal);
   const pending: MultiscanTask[] = [];
   let completed = 0;
   for (const task of tasks) {
@@ -255,6 +258,9 @@ async function ensureOutputDirectory(path: string): Promise<void> {
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
+  if (Buffer.byteLength(receipt) > MAX_RECEIPT_LINE_BYTES) {
+    throw new Error("Multiscan receipt exceeds the 1 MiB safety limit.");
+  }
   const file = await open(path, "a", 0o600);
   try {
     await file.writeFile(receipt, "utf8");
@@ -311,28 +317,224 @@ async function ensureManifest(
 
 async function readReceipts(
   path: string,
+  signal?: AbortSignal,
 ): Promise<Map<string, MultiscanReceipt>> {
-  let contents: string;
+  signal?.throwIfAborted();
+  let metadata;
   try {
-    contents = await readFile(path, "utf8");
+    metadata = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
     throw error;
   }
-  const lines = contents.split("\n");
-  if (!contents.endsWith("\n")) {
-    const partial = lines.pop()!;
-    await truncate(
-      path,
-      Buffer.byteLength(contents) - Buffer.byteLength(partial),
+  signal?.throwIfAborted();
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(
+      "Multiscan receipt ledger must be a regular file. Move results.jsonl aside before resuming.",
     );
   }
-  return new Map(
-    lines.filter(Boolean).map((line): [string, MultiscanReceipt] => {
-      const receipt = JSON.parse(line) as MultiscanReceipt;
-      return [receipt.id.toLowerCase(), receipt];
-    }),
+  if (metadata.size > MAX_RECEIPT_LEDGER_BYTES) {
+    await replaceCorruptReceiptLedger(path, async () => {});
+    return new Map();
+  }
+
+  const receipts = new Map<string, MultiscanReceipt>();
+  const replacement = receiptRepairPath(path);
+  const repaired = await open(replacement, "wx", 0o600);
+  let corrupted = false;
+  let discardAll = false;
+  try {
+    const pending = Buffer.alloc(MAX_RECEIPT_LINE_BYTES);
+    let pendingBytes = 0;
+    let discardingLine = false;
+    let totalBytes = 0;
+    const acceptLine = async (bytes: Buffer): Promise<void> => {
+      if (bytes.length === 0) return;
+      const receipt = parseMultiscanReceipt(bytes);
+      if (receipt === null) {
+        corrupted = true;
+        return;
+      }
+      await repaired.write(bytes);
+      await repaired.write("\n");
+      receipts.set(receipt.id.toLowerCase(), receipt);
+    };
+
+    const input = createReadStream(path, {
+      highWaterMark: 64 * 1024,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    for await (const rawChunk of input) {
+      signal?.throwIfAborted();
+      const chunk = Buffer.isBuffer(rawChunk)
+        ? rawChunk
+        : Buffer.from(rawChunk);
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_RECEIPT_LEDGER_BYTES) {
+        corrupted = true;
+        discardAll = true;
+        receipts.clear();
+        break;
+      }
+
+      let start = 0;
+      while (start < chunk.length) {
+        signal?.throwIfAborted();
+        const newline = chunk.indexOf(0x0a, start);
+        const end = newline === -1 ? chunk.length : newline;
+        const segment = chunk.subarray(start, end);
+        if (!discardingLine) {
+          if (pendingBytes + segment.length > MAX_RECEIPT_LINE_BYTES) {
+            corrupted = true;
+            discardingLine = true;
+            pendingBytes = 0;
+          } else if (segment.length > 0) {
+            segment.copy(pending, pendingBytes);
+            pendingBytes += segment.length;
+          }
+        }
+        if (newline === -1) break;
+        if (!discardingLine) {
+          await acceptLine(pending.subarray(0, pendingBytes));
+        }
+        pendingBytes = 0;
+        discardingLine = false;
+        start = newline + 1;
+      }
+    }
+    signal?.throwIfAborted();
+    if (discardAll) {
+      await repaired.truncate(0);
+    } else if (discardingLine || pendingBytes > 0) {
+      corrupted = true;
+    }
+    await repaired.sync();
+  } catch (error) {
+    await repaired.close();
+    await rm(replacement, { force: true });
+    throw error;
+  }
+  await repaired.close();
+
+  if (!corrupted) {
+    await rm(replacement, { force: true });
+    return receipts;
+  }
+  await publishReceiptRepair(path, replacement);
+  return receipts;
+}
+
+function parseMultiscanReceipt(bytes: Buffer): MultiscanReceipt | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  const scope = value["scope"];
+  const cost = value["cost"];
+  const error = value["error"];
+  if (
+    typeof value["id"] !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value["id"]) ||
+    typeof value["repository"] !== "string" ||
+    value["repository"].length === 0 ||
+    value["repository"].length > 4096 ||
+    value["repository"].includes("\0") ||
+    typeof value["revision"] !== "string" ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value["revision"]) ||
+    (value["mode"] !== "standard" && value["mode"] !== "deep") ||
+    (scope !== undefined &&
+      (typeof scope !== "string" ||
+        scope.length > 4096 ||
+        isAbsolute(scope) ||
+        scope.includes("\\") ||
+        scope.split("/").includes("..") ||
+        scope.includes("\0"))) ||
+    (value["status"] !== "completed" && value["status"] !== "failed") ||
+    !Number.isSafeInteger(value["attempt"]) ||
+    (value["attempt"] as number) < 1 ||
+    typeof value["outputDir"] !== "string" ||
+    value["outputDir"].length === 0 ||
+    value["outputDir"].length > 4096 ||
+    !isAbsolute(value["outputDir"]) ||
+    value["outputDir"].includes("\0") ||
+    (cost !== undefined && !isScanCost(cost)) ||
+    (error !== undefined && typeof error !== "string")
+  ) {
+    return null;
+  }
+  return value as unknown as MultiscanReceipt;
+}
+
+function isScanCost(value: unknown): value is ScanCost {
+  if (
+    !isRecord(value) ||
+    typeof value["model"] !== "string" ||
+    value["model"].length === 0 ||
+    value["model"].length > 256
+  ) {
+    return false;
+  }
+  for (const name of [
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+  ]) {
+    const count = value[name];
+    if (!Number.isSafeInteger(count) || (count as number) < 0) return false;
+  }
+  return (
+    typeof value["estimatedUsd"] === "number" &&
+    Number.isFinite(value["estimatedUsd"]) &&
+    value["estimatedUsd"] >= 0
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function receiptRepairPath(path: string): string {
+  return join(dirname(path), `.results.repair-${randomUUID()}.jsonl`);
+}
+
+async function replaceCorruptReceiptLedger(
+  path: string,
+  writeReplacement: (file: Awaited<ReturnType<typeof open>>) => Promise<void>,
+): Promise<void> {
+  const replacement = receiptRepairPath(path);
+  const file = await open(replacement, "wx", 0o600);
+  try {
+    await writeReplacement(file);
+    await file.sync();
+  } catch (error) {
+    await file.close();
+    await rm(replacement, { force: true });
+    throw error;
+  }
+  await file.close();
+  await publishReceiptRepair(path, replacement);
+}
+
+async function publishReceiptRepair(
+  path: string,
+  replacement: string,
+): Promise<void> {
+  const quarantine = join(
+    dirname(path),
+    `results.corrupt-${randomUUID()}.jsonl`,
+  );
+  await rename(path, quarantine);
+  try {
+    await rename(replacement, path);
+  } catch (error) {
+    await rename(quarantine, path).catch(() => undefined);
+    await rm(replacement, { force: true });
+    throw error;
+  }
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {
@@ -396,7 +598,8 @@ function parseInventory(
     const scope = get("scope");
     if (
       scope &&
-      (isAbsolute(scope) ||
+      (scope.length > 4096 ||
+        isAbsolute(scope) ||
         scope.includes("\\") ||
         scope.split("/").includes("..") ||
         scope.includes("\0"))
@@ -525,7 +728,7 @@ export function buildGitHubCredentialArgs(host: string | undefined): string[] {
 }
 
 function redactError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error))
+  const redacted = (error instanceof Error ? error.message : String(error))
     .replaceAll(
       /((?:api[_-]?key|token|secret|credential|password)[A-Za-z0-9_-]*\s*[:=]\s*)[^\s,;]+/giu,
       "$1[redacted]",
@@ -535,4 +738,8 @@ function redactError(error: unknown): string {
       "[redacted]",
     )
     .replaceAll(/\b(Bearer|Basic|Token)\s+[^\s,;]+/giu, "$1 [redacted]");
+  const bytes = Buffer.from(redacted);
+  return bytes.length <= MAX_RECEIPT_ERROR_BYTES
+    ? redacted
+    : `${bytes.subarray(0, MAX_RECEIPT_ERROR_BYTES).toString("utf8")}[truncated]`;
 }
