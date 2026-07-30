@@ -78,16 +78,20 @@ jobs:
           done
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build customer container
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           load: true
           platforms: linux/amd64
           push: false
           tags: codex-security:ci
+          cache-from: type=gha,scope=codex-security-amd64
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max,scope=codex-security-amd64' || '' }}
 
       - name: Verify bundled scanner
         run: |
@@ -129,7 +133,7 @@ jobs:
           if output="$("${command[@]}" sandbox /usr/bin/true 2>&1)"; then
             printf '%s\n' "$output"
           elif grep -Eq 'bwrap: (Failed to make / slave: Permission denied|loopback: Failed RTM_NEW(ADDR|LINK): Operation not permitted|setting up uid map: Permission denied|No permissions to create a new namespace)' <<< "$output"; then
-            echo '::warning::This Docker host blocks nested Bubblewrap namespaces; verifying the supported Landlock fallback.'
+            echo '::notice::This Docker host blocks nested Bubblewrap namespaces; verifying the supported Landlock fallback.'
             "${command[@]}" sandbox --enable use_legacy_landlock /usr/bin/true
           else
             printf 'The hardened Codex sandbox failed unexpectedly:\n%s\n' "$output" >&2

@@ -45,16 +45,20 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build native customer image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           load: true
           platforms: linux/${{ matrix.architecture }}
           push: false
           tags: codex-security:release-candidate
+          cache-from: type=gha,scope=codex-security-${{ matrix.architecture }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=codex-security-{0}', matrix.architecture) || '' }}
 
       - name: Verify native image and bundled scanner
         env:
@@ -124,7 +128,7 @@ jobs:
           if output="$("${command[@]}" sandbox /usr/bin/true 2>&1)"; then
             printf '%s\n' "$output"
           elif grep -Eq 'bwrap: (Failed to make / slave: Permission denied|loopback: Failed RTM_NEW(ADDR|LINK): Operation not permitted|setting up uid map: Permission denied|No permissions to create a new namespace)' <<< "$output"; then
-            echo '::warning::This Docker host blocks nested Bubblewrap namespaces; verifying the supported Landlock fallback.'
+            echo '::notice::This Docker host blocks nested Bubblewrap namespaces; verifying the supported Landlock fallback.'
             "${command[@]}" sandbox --enable use_legacy_landlock /usr/bin/true
           else
             printf 'The hardened Codex sandbox failed unexpectedly:\n%s\n' "$output" >&2
@@ -322,10 +326,10 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Sign in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -333,13 +337,15 @@ jobs:
 
       - name: Publish native image by immutable digest
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/${{ matrix.architecture }}
           outputs: type=image,name=${{ needs.authorize.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
+          cache-from: type=gha,scope=codex-security-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=codex-security-${{ matrix.architecture }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.authorize.outputs.version }}
@@ -416,7 +422,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Download verified platform digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -426,7 +432,7 @@ jobs:
           merge-multiple: true
 
       - name: Sign in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -531,14 +537,14 @@ jobs:
 
     steps:
       - name: Sign in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sign verified multiarchitecture candidate provenance
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           push-to-registry: true
           subject-name: ${{ needs.authorize.outputs.image }}
@@ -563,10 +569,10 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Sign in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
