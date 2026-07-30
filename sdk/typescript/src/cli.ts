@@ -157,6 +157,7 @@ const VALUE_OPTIONS = new Set([
   "--mode",
   "--model",
   "--effort",
+  "--endpoint",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -203,6 +204,7 @@ interface ScanArguments {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
+  endpoint?: string;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -953,6 +955,11 @@ export async function main(
               `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
             ),
           effort: effortOption(),
+          endpoint: optionValue("--endpoint")
+            .optional()
+            .describe(
+              "Custom LLM API endpoint URL. Also settable via CODEX_ENDPOINT env var.",
+            ),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -1029,6 +1036,13 @@ export async function main(
             ],
           },
         },
+        {
+          args: { repository: "." },
+          options: {
+            model: "gpt-5.6-terra",
+            endpoint: "https://custom.api.example.com/v1",
+          },
+        },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -1052,6 +1066,7 @@ export async function main(
             mode: options.mode,
             model: options.model,
             effort: options.effort,
+            endpoint: options.endpoint,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -1194,6 +1209,11 @@ export async function main(
             `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ),
         effort: effortOption(),
+        endpoint: optionValue("--endpoint")
+          .optional()
+          .describe(
+            "Custom LLM API endpoint URL. Also settable via CODEX_ENDPOINT env var.",
+          ),
         maxAttempts: z
           .number()
           .int()
@@ -1215,6 +1235,14 @@ export async function main(
         {
           args: {},
           options: { model: "gpt-5.6-terra", effort: "high" },
+        },
+        {
+          args: {},
+          options: {
+            model: "gpt-5.6-terra",
+            effort: "high",
+            endpoint: "https://custom.api.example.com/v1",
+          },
         },
       ],
       hint:
@@ -1247,13 +1275,15 @@ export async function main(
               if (
                 argument === "--model" ||
                 argument === "--effort" ||
-                argument === "--codex"
+                argument === "--codex" ||
+                argument === "--endpoint"
               ) {
                 optionIndex += 2;
               } else if (
                 argument.startsWith("--model=") ||
                 argument.startsWith("--effort=") ||
-                argument.startsWith("--codex=")
+                argument.startsWith("--codex=") ||
+                argument.startsWith("--endpoint=")
               ) {
                 optionIndex += 1;
               } else {
@@ -1262,7 +1292,7 @@ export async function main(
             }
             if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE]' to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--endpoint URL] [--codex KEY=VALUE]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1295,6 +1325,8 @@ export async function main(
             mode: options.mode,
             maxAttempts: options.maxAttempts,
             config: {
+              endpoint:
+                options.endpoint ?? dependencies.environment["CODEX_ENDPOINT"],
               pluginPath: options.pluginPath,
               pythonPath: options.python,
               codexOverrides: parseCodexOverrides(
@@ -2434,6 +2466,8 @@ async function runScan(
     const repository = arguments_.repository ?? dependencies.currentDirectory();
     const target = targetFromArguments(arguments_);
     const config: CodexSecurityConfig = {
+      endpoint:
+        arguments_.endpoint ?? dependencies.environment["CODEX_ENDPOINT"],
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
       codexOverrides:

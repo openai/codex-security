@@ -6,6 +6,7 @@ import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
   ConfigurationError,
+  type CodexSecurityConfig,
   DEFAULT_CODEX_CONFIG,
   type JsonObject,
   mergedCodexConfig,
@@ -318,6 +319,15 @@ describe("Codex configuration", () => {
         sandbox: "unelevated",
       },
     });
+  });
+
+  test("passes an optional custom endpoint through configuration", () => {
+    const config: CodexSecurityConfig = {};
+    expect(config.endpoint).toBeUndefined();
+    const withEndpoint: CodexSecurityConfig = {
+      endpoint: "https://custom.api.example.com/v1",
+    };
+    expect(withEndpoint.endpoint).toBe("https://custom.api.example.com/v1");
   });
 
   test("rejects owned plugin keys and incompatible v2 overrides", async () => {
