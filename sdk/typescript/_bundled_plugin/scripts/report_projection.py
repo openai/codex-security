@@ -363,6 +363,23 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _unreported_findings_note(findings: list[dict[str, Any]]) -> str:
+    """Describe findings held back from this report by the reportable-severity gate.
+
+    They remain sealed in findings.json and exported to SARIF and CSV, so without
+    this line the three artifacts of one scan contradict each other and the one a
+    human reads is the one missing data.
+    """
+    count = len(findings)
+    subject = "finding is" if count == 1 else "findings are"
+    pronoun = "It remains" if count == 1 else "They remain"
+    return (
+        f"{count} {subject} outside the reportable severity set "
+        f"({_severity_mix(findings)}) and not detailed here. "
+        f"{pronoun} recorded in `findings.json` and in the SARIF and CSV exports."
+    )
+
+
 def _severity_mix(findings: list[dict[str, Any]]) -> str:
     counts = Counter(finding["severity"]["level"] for finding in findings)
     return (
@@ -588,6 +605,11 @@ def build_report_markdown(
         ),
         key=_finding_sort_key,
     )
+    unreported = [
+        finding
+        for finding in findings_document["findings"]
+        if finding["severity"]["level"] not in REPORTABLE_SEVERITIES
+    ]
     writeup_paths = [_writeup_report_path(finding) for finding in findings]
     duplicate_writeup_paths = sorted(
         path
@@ -719,6 +741,8 @@ def build_report_markdown(
                     f"| {finding_link} | {finding['severity']['level']} "
                     f"| {finding['confidence']['level']} | {writeup_link} |"
                 )
+        if unreported:
+            lines.extend(["", _unreported_findings_note(unreported)])
         lines.extend(
             [
                 "",
@@ -746,6 +770,8 @@ def build_report_markdown(
                 "No reportable findings survived the canonical discovery, validation, and reportability gates.",
             ]
         )
+        if unreported:
+            lines.extend(["", _unreported_findings_note(unreported)])
     if hardening_portfolio_path is not None:
         lines.extend(
             [
