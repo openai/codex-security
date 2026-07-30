@@ -496,6 +496,93 @@ describe("CodexSecurity orchestration", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("prioritizes the selected profile and active project before projection limits", () => {
+    const activeProject = "/workspace/active";
+    const profiles = Object.fromEntries([
+      ...Array.from({ length: 256 }, (_, index) => [
+        `profile_${index}`,
+        { features: { goals: index % 2 === 0 } },
+      ]),
+      ["selected", { agents: { max_threads: 17 } }],
+    ]);
+    const projects = Object.fromEntries([
+      ...Array.from({ length: 256 }, (_, index) => [
+        `/workspace/project-${index}`,
+        { trust_level: "untrusted" },
+      ]),
+      [activeProject, { trust_level: "trusted" }],
+    ]);
+
+    const prioritized = scanPreflightCodexConfig(
+      {
+        profile: "selected",
+        profiles,
+        projects,
+      },
+      activeProject,
+    );
+
+    expect(prioritized["profile"]).toBe("selected");
+    expect(Object.keys(prioritized["profiles"] as JsonObject)).toHaveLength(
+      256,
+    );
+    expect(prioritized["profiles"]).toMatchObject({
+      selected: { agents: { max_threads: 17 } },
+    });
+    expect(Object.keys(prioritized["projects"] as JsonObject)).toHaveLength(
+      256,
+    );
+    expect(prioritized["projects"]).toMatchObject({
+      [activeProject]: { trust_level: "trusted" },
+    });
+
+    const validProfiles = Object.fromEntries(
+      Array.from({ length: 256 }, (_, index) => [
+        `valid_${index}`,
+        { features: { goals: true } },
+      ]),
+    );
+    const validProjects = Object.fromEntries(
+      Array.from({ length: 256 }, (_, index) => [
+        `/valid/project-${index}`,
+        { trust_level: "trusted" },
+      ]),
+    );
+    const afterInvalid = scanPreflightCodexConfig({
+      profiles: {
+        ...Object.fromEntries(
+          Array.from({ length: 256 }, (_, index) => [
+            `invalid.profile.${index}`,
+            { features: { goals: false } },
+          ]),
+        ),
+        ...validProfiles,
+      },
+      projects: {
+        ...Object.fromEntries(
+          Array.from({ length: 256 }, (_, index) => [
+            `relative-${index}`,
+            { trust_level: "trusted" },
+          ]),
+        ),
+        ...validProjects,
+      },
+    });
+
+    expect(Object.keys(afterInvalid["profiles"] as JsonObject)).toHaveLength(
+      256,
+    );
+    expect(afterInvalid["profiles"]).toMatchObject({
+      valid_255: { features: { goals: true } },
+    });
+    expect(Object.keys(afterInvalid["projects"] as JsonObject)).toHaveLength(
+      256,
+    );
+    expect(afterInvalid["projects"]).toMatchObject({
+      "/valid/project-255": { trust_level: "trusted" },
+    });
+  });
+
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
       stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
@@ -2396,11 +2483,21 @@ describe("CodexSecurity orchestration", () => {
     expect(interpreter).not.toBeNull();
     let capturedConfigPath: string | undefined;
     let capturedCodexHome: string | undefined;
+    const unrelatedProjects = Object.fromEntries(
+      Array.from({ length: 256 }, (_, index) => [
+        join(root, `unrelated-project-${index}`),
+        { trust_level: "untrusted" },
+      ]),
+    );
     const client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
           features: { goals: true },
+          projects: {
+            ...unrelatedProjects,
+            [repository]: { trust_level: "trusted" },
+          },
           mcp_servers: {
             private: {
               command: "echo",
@@ -2459,6 +2556,11 @@ describe("CodexSecurity orchestration", () => {
               expect(serialized).not.toContain("RUNTIME_SHELL_SECRET");
               expect(serialized).not.toContain("mcp_servers");
               expect(serialized).not.toContain("shell_environment_policy");
+              expect(parseToml(serialized)).toMatchObject({
+                projects: {
+                  [repository]: { trust_level: "trusted" },
+                },
+              });
               expect(input).toContain('--config "$CODEX_SECURITY_CONFIG_PATH"');
               expect(input).toContain("--effective-config");
               const shellEnvironment = options.env as Record<string, string>;
