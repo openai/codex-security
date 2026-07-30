@@ -499,8 +499,10 @@ jobs:
               "repos/$GITHUB_REPOSITORY/releases/generate-notes"
               -f "tag_name=$RELEASE_TAG"
               -f "target_commitish=$RELEASE_SHA"
-              -f "configuration_file_path=.github/release.yml"
             )
+            if git cat-file -e "$RELEASE_SHA:.github/release.yml" 2>/dev/null; then
+              notes_args+=(-f "configuration_file_path=.github/release.yml")
+            fi
             if [[ -n "$PREVIOUS_TAG" ]]; then
               notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
             fi
