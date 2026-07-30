@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  opendir,
   readFile,
   readdir,
   realpath,
@@ -1108,24 +1109,25 @@ async function pluginProjectionFingerprint(
   } else {
     paths = [];
     const pending = [canonical];
-    let entries = 0;
+    let entries = 1;
     while (pending.length > 0) {
       throwIfSignalAborted(signal);
       const path = pending.pop()!;
       const metadata = await lstat(path);
-      if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
-        throw new PluginBootstrapError(
-          `Plugin source exceeds the copy entry limit: ${path}`,
-        );
-      }
       if (metadata.isSymbolicLink()) {
         throw new PluginBootstrapError(
           `Plugin contains an unsafe source path: ${path}`,
         );
       }
       if (metadata.isDirectory()) {
-        for (const entry of await readdir(path)) {
-          pending.push(join(path, entry));
+        for await (const entry of pluginDirectoryEntries(path, signal)) {
+          const child = join(path, entry);
+          if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
+            throw new PluginBootstrapError(
+              `Plugin source exceeds the copy entry limit: ${child}`,
+            );
+          }
+          pending.push(child);
         }
       } else if (metadata.isFile()) {
         paths.push(relative(canonical, path).split(sep).join("/"));
@@ -1661,7 +1663,7 @@ async function copyPluginTree(
     { source, destination },
   ];
   const directories = new Map<string, Stats>();
-  let entries = 0;
+  let entries = 1;
   let size = 0;
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   try {
@@ -1670,18 +1672,27 @@ async function copyPluginTree(
       const current = pending.pop()!;
       await requirePluginAncestors(source, current.source, directories, signal);
       const metadata = await lstat(current.source);
-      if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
-        throw new PluginBootstrapError(
-          `Plugin source exceeds the copy entry limit: ${current.source}`,
-        );
-      }
       if (metadata.isSymbolicLink()) {
         throw new PluginBootstrapError(
           `Plugin contains an unsafe source path: ${current.source}`,
         );
       }
       if (metadata.isDirectory()) {
-        const children = await readdir(current.source);
+        for await (const entry of pluginDirectoryEntries(
+          current.source,
+          signal,
+        )) {
+          const childSource = join(current.source, entry);
+          if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
+            throw new PluginBootstrapError(
+              `Plugin source exceeds the copy entry limit: ${childSource}`,
+            );
+          }
+          pending.push({
+            source: childSource,
+            destination: join(current.destination, entry),
+          });
+        }
         const afterRead = await lstat(current.source);
         if (!samePluginFile(metadata, afterRead)) {
           throw new PluginBootstrapError(
@@ -1690,12 +1701,6 @@ async function copyPluginTree(
         }
         directories.set(current.source, afterRead);
         await mkdir(current.destination, { mode: 0o700 });
-        for (const child of children) {
-          pending.push({
-            source: join(current.source, child),
-            destination: join(current.destination, child),
-          });
-        }
         continue;
       }
       if (!metadata.isFile()) {
@@ -1764,6 +1769,25 @@ async function copyPluginTree(
   } catch (error) {
     await rm(destination, { recursive: true, force: true });
     throw error;
+  }
+}
+
+async function* pluginDirectoryEntries(
+  path: string,
+  signal?: AbortSignal,
+): AsyncGenerator<string> {
+  throwIfSignalAborted(signal);
+  const directory = await opendir(path);
+  try {
+    for (;;) {
+      throwIfSignalAborted(signal);
+      const entry = await directory.read();
+      throwIfSignalAborted(signal);
+      if (entry === null) return;
+      yield entry.name;
+    }
+  } finally {
+    await directory.close();
   }
 }
 

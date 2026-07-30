@@ -385,6 +385,92 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
+  test("bounds configured plugin directory discovery", async () => {
+    const overflowRoot = await temporaryDirectory();
+    const overflowSource = await plugin(overflowRoot);
+    const overflowDirectory = join(overflowSource, "many-files");
+    await mkdir(overflowDirectory);
+    for (let offset = 0; offset < 4_096; offset += 128) {
+      await Promise.all(
+        Array.from({ length: 128 }, (_value, index) =>
+          writeFile(join(overflowDirectory, String(offset + index)), ""),
+        ),
+      );
+    }
+    const overflowDestination = join(overflowRoot, "overflow-home");
+    await expect(
+      createMarketplace(overflowDestination, overflowSource),
+    ).rejects.toThrow("copy entry limit");
+    expect(
+      existsSync(
+        join(
+          overflowDestination,
+          "sdk-marketplace",
+          "plugins",
+          "codex-security",
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  test("cancels configured plugin directory discovery", async () => {
+    const cancellationRoot = await temporaryDirectory();
+    const cancellationSource = await plugin(cancellationRoot);
+    const cancellationDirectory = join(cancellationSource, "many-files");
+    await mkdir(cancellationDirectory);
+    await Promise.all(
+      Array.from({ length: 32 }, (_value, index) =>
+        writeFile(join(cancellationDirectory, String(index)), ""),
+      ),
+    );
+    const cancellationDestination = join(cancellationRoot, "canceled-home");
+    const controller = new AbortController();
+    const originalOpendir = fsPromises.opendir;
+    let discovered = 0;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      opendir: async (...args: Parameters<typeof originalOpendir>) => {
+        const directory = await originalOpendir(...args);
+        if (String(args[0]) !== cancellationDirectory) return directory;
+        const originalRead = directory.read.bind(directory);
+        directory.read = async () => {
+          const entry = await originalRead();
+          discovered += 1;
+          if (discovered === 2) {
+            controller.abort(new DOMException("canceled", "AbortError"));
+          }
+          return entry;
+        };
+        return directory;
+      },
+    }));
+    try {
+      await expect(
+        createMarketplace(
+          cancellationDestination,
+          cancellationSource,
+          controller.signal,
+        ),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(discovered).toBe(2);
+      expect(
+        existsSync(
+          join(
+            cancellationDestination,
+            "sdk-marketplace",
+            "plugins",
+            "codex-security",
+          ),
+        ),
+      ).toBe(false);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        opendir: originalOpendir,
+      }));
+    }
+  });
+
   testPosix(
     "rejects plugin symlinks and removes the partial marketplace",
     async () => {
