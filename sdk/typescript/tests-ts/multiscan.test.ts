@@ -453,6 +453,8 @@ describe("multiscan", () => {
     const suffixedToken = "SYNTHETIC_SUFFIXED_ACCESS_TOKEN_123";
     const suffixedQuery = "SYNTHETIC_SUFFIXED_QUERY_SECRET_123";
     const quotedSecret = "SYNTHETIC correct horse battery staple";
+    const opaqueAuthorization = "SYNTHETIC opaque authorization secret";
+    const npmAuthorization = "SYNTHETIC_NPM_AUTH_VALUE_123";
     await writeFile(
       paths.input,
       `id,repository,revision\nretry,${source.path},${source.revision}\n`,
@@ -466,7 +468,7 @@ describe("multiscan", () => {
           attempts += 1;
           if (attempts === 1) {
             throw new Error(
-              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
+              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} authorization="${opaqueAuthorization}" _auth=${npmAuthorization} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
             );
           }
           return await completedScan(scanOptions.outputDir!);
@@ -488,6 +490,8 @@ describe("multiscan", () => {
     expect(ledger).not.toContain(suffixedToken);
     expect(ledger).not.toContain(suffixedQuery);
     expect(ledger).not.toContain(quotedSecret);
+    expect(ledger).not.toContain(opaqueAuthorization);
+    expect(ledger).not.toContain(npmAuthorization);
     expect(ledger).not.toContain(shortAuthorization);
     expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
   });

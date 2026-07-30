@@ -184,6 +184,7 @@ export async function requireSecureCredentialHome(
     metadata?: Stats;
     expectedDevice?: number;
     expectedInode?: number;
+    validateWindowsAcl?: boolean;
   } = {},
 ): Promise<Stats> {
   const platform = options.platform ?? process.platform;
@@ -205,13 +206,20 @@ export async function requireSecureCredentialHome(
   }
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
-  if (canonical !== path) {
-    metadata = await lstat(canonical);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new OutputDirectoryError(
-        `Codex Security credential home is not a directory: ${path}`,
-      );
-    }
+  const canonicalMetadata = await lstat(canonical);
+  if (
+    canonicalMetadata.dev !== metadata.dev ||
+    canonicalMetadata.ino !== metadata.ino
+  ) {
+    throw new OutputDirectoryError(
+      `Codex Security credential home was replaced: ${canonical}`,
+    );
+  }
+  metadata = canonicalMetadata;
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new OutputDirectoryError(
+      `Codex Security credential home is not a directory: ${path}`,
+    );
   }
   if (
     options.expectedDevice !== undefined &&
@@ -224,10 +232,12 @@ export async function requireSecureCredentialHome(
     );
   }
   if (platform === "win32") {
-    await requirePrivateCredentialHome(metadata, canonical, {
-      platform,
-      secureWindowsHome: options.secureWindowsHome,
-    });
+    if (options.validateWindowsAcl !== false) {
+      await requirePrivateCredentialHome(metadata, canonical, {
+        platform,
+        secureWindowsHome: options.secureWindowsHome,
+      });
+    }
     return metadata;
   }
   await requirePrivateCredentialHome(metadata, canonical, { platform });
@@ -302,8 +312,15 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
 export async function acquireCodexSecurityCredentialHomeLock(
   codexHome: string,
   signal?: AbortSignal,
+  securityOptions: {
+    platform?: NodeJS.Platform;
+    secureWindowsHome?: (path: string) => Promise<void>;
+  } = {},
 ): Promise<() => Promise<void>> {
-  const homeMetadata = await requireSecureCredentialHome(codexHome);
+  const homeMetadata = await requireSecureCredentialHome(
+    codexHome,
+    securityOptions,
+  );
   const expectedDevice = homeMetadata.dev;
   const expectedInode = homeMetadata.ino;
   const lock = join(codexHome, CREDENTIAL_LOCK_NAME);
@@ -313,8 +330,10 @@ export async function acquireCodexSecurityCredentialHomeLock(
   while (true) {
     throwIfSignalAborted(signal);
     await requireSecureCredentialHome(codexHome, {
+      ...securityOptions,
       expectedDevice,
       expectedInode,
+      validateWindowsAcl: false,
     });
     try {
       await mkdir(lock, { mode: 0o700 });
@@ -326,6 +345,11 @@ export async function acquireCodexSecurityCredentialHomeLock(
     }
 
     try {
+      await requireSecureCredentialHome(codexHome, {
+        ...securityOptions,
+        expectedDevice,
+        expectedInode,
+      });
       await writeFile(
         ownerPath,
         `${JSON.stringify({ pid: process.pid, token })}\n`,
@@ -340,6 +364,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
     return async () => {
       if (released) return;
       await requireSecureCredentialHome(codexHome, {
+        ...securityOptions,
         expectedDevice,
         expectedInode,
       });

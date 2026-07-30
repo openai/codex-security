@@ -9,7 +9,7 @@ export function redactedErrorMessage(error: unknown): string {
   );
   return redactQuotedCredentialValues(withoutPrivateKeys)
     .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\])[^\s"',;}&\\\]]+/giu,
+      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\]|(?:Bearer|Basic|Token)(?:\s|%20|\+))[^\s"',;}&\\\]]+/giu,
       "$1[redacted]",
     )
     .replaceAll(/sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}/gu, "[redacted]")
@@ -21,14 +21,14 @@ export function redactedErrorMessage(error: unknown): string {
     )
     .replaceAll(/((?:https?|ssh|git\+ssh):\/\/)[^\s/@]+@/giu, "$1[redacted]@")
     .replaceAll(
-      /((?:[?&]|%3F|%26)(?:(?!%3F|%26|%3D)(?:[A-Za-z0-9_.%-]|\[|\])){0,64}(?:api[_-]?key|access(?:[_-]|%5F|%2D)?key(?:(?:[_-]|%5F|%2D)?id)?|private(?:[_-]|%5F|%2D)?key|token|secret|credential|signature|sig|password|passwd)(?:(?:[_-]|%5F|%2D)[A-Za-z0-9_.%-]{1,64})?(?:\]|%5D)?(?:=|%3D))(?:(?!%26)[^&\s])+/giu,
+      /((?:[?&]|%3F|%26)(?:(?!%3F|%26|%3D)(?:[A-Za-z0-9_.%-]|\[|\])){0,64}(?:api[_-]?key|access(?:[_-]|%5F|%2D)?key(?:(?:[_-]|%5F|%2D)?id)?|private(?:[_-]|%5F|%2D)?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:(?:[_-]|%5F|%2D)[A-Za-z0-9_.%-]{1,64})?(?:\]|%5D)?(?:=|%3D))(?:(?!%26)[^&\s])+/giu,
       "$1[redacted]",
     );
 }
 
 function redactQuotedCredentialValues(message: string): string {
   const assignment =
-    /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\*["'])?\s*[:=]\s*)(\\*)(["'])/giu;
+    /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64})?\b(?:\\*["'])?\s*[:=]\s*)(\\*)(["'])/giu;
   let output = "";
   let consumed = 0;
   for (

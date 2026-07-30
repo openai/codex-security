@@ -2174,6 +2174,13 @@ describe("CLI", () => {
         '{\\"access_token_value\\":\\"another horse battery staple\\"}',
       ),
     ).toBe('{\\"access_token_value\\":\\"[redacted]\\"}');
+    expect(
+      redactedErrorMessage(
+        'authorization="opaque secret value" _auth=Zm9vOmJhcg== https://example.test/?authorization=opaque%20query%20secret',
+      ),
+    ).toBe(
+      'authorization="[redacted]" _auth=[redacted] https://example.test/?authorization=[redacted]',
+    );
     let encoded: string | { password: string } = {
       password: 'foo "bar" baz',
     };

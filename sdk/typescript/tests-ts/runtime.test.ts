@@ -1433,6 +1433,23 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   testPosix(
+    "rejects stale credential-home metadata after canonical target replacement",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const stale = await lstat(home);
+      await rename(home, join(root, "original-home"));
+      await mkdir(home, { mode: 0o700 });
+
+      await expect(
+        requireSecureCredentialHome(home, { metadata: stale }),
+      ).rejects.toThrow("credential home was replaced");
+    },
+  );
+
+  testPosix(
     "rejects world-writable or symlink stored authentication files",
     async () => {
       const root = await temporaryDirectory();
@@ -1516,6 +1533,39 @@ describe("runtime directories and plugin Python boundary", () => {
     controller.abort(new DOMException("canceled", "AbortError"));
 
     try {
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      await release();
+    }
+  });
+
+  test("does not rewrite Windows credential ACLs while polling a held lock", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "credential-home");
+    await mkdir(home, { mode: 0o700 });
+    const validations: string[] = [];
+    const securityOptions = {
+      platform: "win32" as const,
+      secureWindowsHome: async (path: string) => {
+        validations.push(path);
+      },
+    };
+    const release = await acquireCodexSecurityCredentialHomeLock(
+      home,
+      undefined,
+      securityOptions,
+    );
+    const controller = new AbortController();
+    const waiting = acquireCodexSecurityCredentialHomeLock(
+      home,
+      controller.signal,
+      securityOptions,
+    );
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(validations).toHaveLength(3);
+      controller.abort(new DOMException("canceled", "AbortError"));
       await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
     } finally {
       await release();
