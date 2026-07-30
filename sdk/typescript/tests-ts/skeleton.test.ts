@@ -55,12 +55,15 @@ describe("TypeScript package skeleton", () => {
     ).toEqual([]);
   });
 
-  test("pins each supported Node.js minimum and retains latest LTS coverage", async () => {
+  test("pins each Node.js minimum and preserves protected and latest LTS checks", async () => {
     const ciWorkflow = await readFile(
       new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
       "utf8",
     );
 
+    expect(ciWorkflow).toContain(
+      "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+    );
     expect(ciWorkflow).toContain('node: ["22.13.0"]');
     for (const version of ["24.0.0", "24", "26.0.0", "26"]) {
       expect(ciWorkflow).toContain(`node: "${version}"`);
