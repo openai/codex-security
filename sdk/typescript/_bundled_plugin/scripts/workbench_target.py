@@ -120,12 +120,29 @@ def worktree_content_digest_for_context(
     )
     if tracked is None or untracked is None:
         raise SystemExit("Could not snapshot the selected working-tree changes.")
+    root = work_tree or repository
+    untracked_paths = [path for path in untracked.split(b"\0") if path]
+    for raw_path in tuple(untracked_paths):
+        relative_path = os.fsdecode(raw_path)
+        path = root / relative_path
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise SystemExit(f"Could not read untracked file: {relative_path}") from exc
+        if stat.S_ISDIR(metadata.st_mode):
+            nested_paths = git_directory_snapshot_paths(path)
+            if nested_paths is None:
+                raise SystemExit(f"Could not inspect untracked directory: {relative_path}")
+            untracked_paths.extend(
+                os.fsencode(nested_path.relative_to(root).as_posix())
+                for nested_path in nested_paths
+            )
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
     update_digest_field(digest, b"tracked-diff", tracked)
-    for raw_path in sorted(path for path in untracked.split(b"\0") if path):
+    for raw_path in sorted(set(untracked_paths)):
         relative_path = os.fsdecode(raw_path)
-        path = (work_tree or repository) / relative_path
+        path = root / relative_path
         try:
             metadata = path.lstat()
         except OSError as exc:
@@ -143,6 +160,8 @@ def worktree_content_digest_for_context(
                 b"untracked-content",
                 os.fsencode(os.readlink(path)),
             )
+        elif stat.S_ISDIR(metadata.st_mode):
+            update_digest_field(digest, b"untracked-kind", b"directory")
         elif stat.S_ISREG(metadata.st_mode):
             content_digest = hashlib.sha256()
             content_size = 0
