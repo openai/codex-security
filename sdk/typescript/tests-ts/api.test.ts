@@ -4156,6 +4156,7 @@ if (args === "login --with-api-key") {
   }
 } else if (args === "login") {
   console.error("Open https://auth.example.test/login");
+  process.exit(0);
 } else {
   process.exitCode = 2;
 }

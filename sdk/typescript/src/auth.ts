@@ -158,6 +158,10 @@ export class CodexLoginHandle {
 
   public cancel(): void {
     this.#canceled = true;
+    this.#requestTermination();
+  }
+
+  #requestTermination(): void {
     if (
       this.#child.exitCode !== null ||
       this.#child.signalCode !== null ||
@@ -208,7 +212,7 @@ export class CodexLoginHandle {
       this.#outputLimitExceeded = true;
       this.#stdout = "";
       this.#stderr = LOGIN_OUTPUT_LIMIT_MESSAGE;
-      this.#child.kill("SIGTERM");
+      this.#requestTermination();
       return;
     }
 
@@ -355,6 +359,21 @@ export async function runCodex(
   let stdout = "";
   let stderr = "";
   let processError: Error | null = null;
+  let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+  const terminate = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGTERM");
+    if (forcedTermination !== undefined) return;
+    forcedTermination = setTimeout(() => {
+      forcedTermination = undefined;
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, LOGIN_CHILD_TERMINATION_GRACE_MS);
+  };
   const recordOutput = (stream: "stdout" | "stderr", chunk: string): void => {
     if (processError !== null) return;
     const appended = appendUtf8Tail(
@@ -368,7 +387,7 @@ export async function runCodex(
     stdout = "";
     stderr = "";
     processError = new PluginBootstrapError(COMMAND_OUTPUT_LIMIT_MESSAGE);
-    child.kill("SIGTERM");
+    terminate();
   };
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -381,6 +400,7 @@ export async function runCodex(
   const completion = new Promise<LoginResult>((resolve, reject) => {
     child.once("error", (error) => {
       processError ??= error;
+      terminate();
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       // A short-lived command can close stdin before Node flushes the input.
@@ -396,6 +416,7 @@ export async function runCodex(
       }
     });
     child.once("close", (exitCode) => {
+      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
       if (processError !== null) {
         reject(processError);
       } else {
