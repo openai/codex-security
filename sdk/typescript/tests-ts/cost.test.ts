@@ -226,6 +226,62 @@ describe("live scan cost tracking", () => {
     });
   });
 
+  test("retains a bounded partial event across incremental reads", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+
+    const event = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: 250, output_tokens: 20 },
+        },
+      },
+    });
+    const padding = " ".repeat(128 * 1_024);
+    await appendFile(path, `${padding}${event.slice(0, 40)}`);
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+
+    await appendFile(path, `${event.slice(40)}\n`);
+    expect((await tracker.stop()).cost?.inputTokens).toBe(250);
+  });
+
+  test("rejects and quarantines a session event larger than 1 MiB", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    await appendFile(path, "x".repeat(1 * 1_024 * 1_024 + 1));
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    await expect(tracker.refresh()).rejects.toThrow(
+      "Codex session event exceeds the 1 MiB safety limit.",
+    );
+    expect((await tracker.refresh()).cost).toEqual({
+      model: "gpt-5.6-terra",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 10,
+      estimatedUsd: 0.0004,
+    });
+  });
+
   test("reports a changed running cost only once", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {

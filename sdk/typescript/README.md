@@ -380,7 +380,9 @@ including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit.
+already in progress can finish above the limit. Cost tracking accepts Codex
+session events up to 1 MiB; an oversized event stops the scan because its
+running cost can no longer be verified safely.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
