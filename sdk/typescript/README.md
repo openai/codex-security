@@ -403,7 +403,9 @@ service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef0123
 ```
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
-Results remain under `--output-dir`; rerun the same command to resume.
+Results remain under `--output-dir`; rerun the same command to resume. A
+completed receipt is skipped only when its canonical artifacts and seal remain
+valid and its coverage is complete; otherwise the repository is scanned again.
 
 ### Scan history and reruns
 

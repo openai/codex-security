@@ -16,7 +16,9 @@ import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
+import { loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
+import { resolvePluginPath } from "./runtime.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -90,10 +92,28 @@ export async function runMultiscan(
   const output = resolve(options.outputDir);
   await ensureOutputDirectory(output);
   const unlock = await acquireLock(output);
+  let pluginWorkspace: string | null = null;
+  let pluginRoot: Promise<string> | null = null;
+  const resumePluginRoot = (): Promise<string> =>
+    (pluginRoot ??= (async () => {
+      if (options.config.pluginPath !== undefined) {
+        pluginWorkspace = await mkdirTemporaryPluginWorkspace(output);
+      }
+      return await resolvePluginPath(
+        options.config.pluginPath,
+        pluginWorkspace ?? output,
+        options.signal,
+      );
+    })());
   try {
-    return await runCampaign(options, tasks, output);
+    return await runCampaign(options, tasks, output, resumePluginRoot);
   } finally {
-    await unlock();
+    await Promise.all([
+      unlock(),
+      pluginWorkspace === null
+        ? undefined
+        : rm(pluginWorkspace, { recursive: true, force: true }),
+    ]);
   }
 }
 
@@ -101,6 +121,7 @@ async function runCampaign(
   options: MultiscanOptions,
   tasks: MultiscanTask[],
   output: string,
+  resumePluginRoot: () => Promise<string>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
@@ -115,7 +136,11 @@ async function runCampaign(
       receipt?.status === "completed" &&
       receipt.outputDir ===
         join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
-      (await hasArtifacts(receipt.outputDir))
+      (await hasArtifacts(
+        receipt.outputDir,
+        await resumePluginRoot(),
+        options.signal,
+      ))
     ) {
       completed += 1;
     } else {
@@ -335,15 +360,34 @@ async function readReceipts(
   );
 }
 
-async function hasArtifacts(path: string): Promise<boolean> {
+async function hasArtifacts(
+  path: string,
+  pluginRoot: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
   try {
+    signal?.throwIfAborted();
     if (!(await lstat(path)).isDirectory()) return false;
     for (const artifact of REQUIRED_ARTIFACTS) {
       if (!(await lstat(join(path, artifact))).isFile()) return false;
     }
-    return true;
-  } catch {
+    const contract = await loadContract(path, { pluginRoot, signal });
+    return contract.coverage.completeness === "complete";
+  } catch (error) {
+    if (signal?.aborted === true) signal.throwIfAborted();
     return false;
+  }
+}
+
+async function mkdirTemporaryPluginWorkspace(output: string): Promise<string> {
+  for (;;) {
+    const path = join(output, `.resume-plugin-${randomUUID()}`);
+    try {
+      await mkdir(path, { mode: 0o700 });
+      return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
   }
 }
 

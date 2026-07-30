@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   access,
   appendFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -13,13 +15,16 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { loadContract } from "../src/contract.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
 
+const COMPLETED_SCAN = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -80,12 +85,8 @@ async function completedScan(
   outputDir: string,
   completeness: "complete" | "partial" = "complete",
 ): Promise<ScanResult> {
-  await mkdir(outputDir, { recursive: true });
-  await Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"].map(
-      (name) => writeFile(join(outputDir, name), "{}\n"),
-    ),
-  );
+  await cp(COMPLETED_SCAN, outputDir, { recursive: true });
+  await writeFile(join(outputDir, "report.md"), "# Scan report\n");
   return { coverage: { completeness } } as ScanResult;
 }
 
@@ -118,6 +119,19 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+async function reseal(scanDir: string): Promise<void> {
+  const manifestPath = join(scanDir, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    scan: { artifacts: Array<{ path: string; sha256: string }> };
+  };
+  for (const artifact of manifest.scan.artifacts) {
+    artifact.sha256 = createHash("sha256")
+      .update(await readFile(join(scanDir, artifact.path)))
+      .digest("hex");
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 describe("multiscan", () => {
@@ -501,6 +515,57 @@ describe("multiscan", () => {
       "manifest does not match",
     );
     expect(calls).toBe(2);
+  });
+
+  test("rescans completed receipts with invalid, unsealed, or incomplete artifacts", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "resume-integrity");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nresume-integrity,${source.path},${source.revision}\n`,
+    );
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const run = async () => await runMultiscan(options(paths, security));
+    const latestOutput = async (): Promise<string> =>
+      (await results(join(paths.output, "results.jsonl"))).at(-1)?.[
+        "outputDir"
+      ] as string;
+
+    await run();
+    expect(calls).toBe(1);
+
+    await writeFile(join(await latestOutput(), "findings.json"), "");
+    expect(await run()).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(calls).toBe(2);
+
+    await appendFile(join(await latestOutput(), "coverage.json"), "\n");
+    expect(await run()).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(calls).toBe(3);
+
+    const incompleteOutput = await latestOutput();
+    const coveragePath = join(incompleteOutput, "coverage.json");
+    const coverage = JSON.parse(await readFile(coveragePath, "utf8")) as {
+      completeness: string;
+    };
+    coverage.completeness = "partial";
+    await writeFile(coveragePath, `${JSON.stringify(coverage, null, 2)}\n`);
+    await reseal(incompleteOutput);
+    expect(
+      (
+        await loadContract(incompleteOutput, {
+          pluginRoot: PLUGIN_ROOT,
+        })
+      ).coverage.completeness,
+    ).toBe("partial");
+    expect(await run()).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(calls).toBe(4);
+    expect(await latestOutput()).toBe(
+      join(paths.output, "artifacts", "resume-integrity", "attempt-4"),
+    );
   });
 
   test("ignores repository-local Git shims while preserving credential configuration", async () => {
