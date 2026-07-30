@@ -2094,6 +2094,7 @@ describe("CLI", () => {
       cached_input_tokens: 200,
       output_tokens: 30,
     });
+    result.manifest.scan.completedAt = "2026-01-01T00:06:37Z";
 
     expect(
       await main(
@@ -2106,16 +2107,51 @@ describe("CLI", () => {
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Scan complete");
     expect(stderr.text()).toContain(
-      "Findings: 1 (1 high). Coverage: complete.",
+      [
+        `  REPORT    ${result.reportPath}`,
+        "",
+        "  FINDINGS  1 (1 high)",
+        "  COVERAGE  complete",
+        "  ELAPSED   6m 37s",
+        "  TOKENS    1,250 input, 200 cached, 30 output",
+        "  COST      $0.00625",
+        "  RESULTS   /tmp/scan",
+      ].join("\n"),
     );
-    expect(stderr.text()).toContain("Elapsed: 1s.");
-    expect(stderr.text()).toContain(
-      "Tokens: 1,250 input, 200 cached, 30 output.",
-    );
-    expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
-    expect(stderr.text()).toContain(`Report: ${result.reportPath}`);
-    expect(stderr.text()).toContain("Results: /tmp/scan");
+    expect(stderr.text()).not.toContain("codex-security:");
     expect(stderr.text()).not.toContain("Next:");
+  });
+
+  test("styles terminal scan summaries and respects color settings", async () => {
+    for (const [environment, color] of [
+      [{}, true],
+      [{ NO_COLOR: "1" }, false],
+      [{ TERM: "dumb" }, false],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture(true);
+      const result = fakeResult(["medium"]);
+
+      expect(
+        await main(
+          ["scan"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ environment, result }),
+        ),
+      ).toBe(0);
+
+      if (color) {
+        expect(stderr.text()).toContain("\u001B[1;36mREPORT\u001B[0m");
+        expect(stderr.text()).toContain(
+          `\u001B[4m${result.reportPath}\u001B[0m`,
+        );
+        expect(stderr.text()).toContain("\u001B[33m1 (1 medium)\u001B[0m");
+      } else {
+        expect(stderr.text()).toContain(`  REPORT    ${result.reportPath}`);
+        expect(stderr.text()).not.toContain("\u001B[1;36mREPORT");
+      }
+    }
   });
 
   test("prints complete scan results only when explicitly requested", async () => {
@@ -2337,15 +2373,16 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain(
-      "Findings: 4 (1 critical, 2 high, 1 informational). Coverage: complete.",
+      "FINDINGS  4 (1 critical, 2 high, 1 informational)",
     );
-    expect(stderr.text()).toContain("Elapsed: 1s.");
+    expect(stderr.text()).toContain("COVERAGE  complete");
+    expect(stderr.text()).toContain("ELAPSED   1s");
     expect(stderr.text()).toContain(
-      "Tokens: 1,250 input, 200 cached, 30 output.",
+      "TOKENS    1,250 input, 200 cached, 30 output",
     );
-    expect(stderr.text()).toContain("Estimated cost: $0.00625 USD.");
-    expect(stderr.text()).toContain(`Report: ${result.reportPath}`);
-    expect(stderr.text()).toContain("Results: /tmp/scan");
+    expect(stderr.text()).toContain("COST      $0.00625");
+    expect(stderr.text()).toContain(`REPORT    ${result.reportPath}`);
+    expect(stderr.text()).toContain("RESULTS   /tmp/scan");
     expect(stderr.text()).not.toContain("Next:");
   });
 
@@ -2476,7 +2513,7 @@ describe("CLI", () => {
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Findings: 0. Coverage: complete.");
+    expect(stderr.text()).toContain("FINDINGS  0\n  COVERAGE  complete");
   });
 
   test("validates a dry run without starting a scan", async () => {
