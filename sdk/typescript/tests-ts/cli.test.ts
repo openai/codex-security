@@ -2171,6 +2171,20 @@ describe("CLI", () => {
     ).toBe('{"client_secret_value":"[redacted]","safe":"visible"}');
     expect(
       redactedErrorMessage(
+        '{"clientSecretValue":"camel case secret","accessTokenValue":"camel case token"}',
+      ),
+    ).toBe(
+      '{"clientSecretValue":"[redacted]","accessTokenValue":"[redacted]"}',
+    );
+    expect(
+      redactedErrorMessage(
+        "clientSecretValue=SYNTHETIC_CAMEL_SECRET accessTokenValue=SYNTHETIC_CAMEL_TOKEN https://example.test/?clientSecretValue=SYNTHETIC_CAMEL_QUERY",
+      ),
+    ).toBe(
+      "clientSecretValue=[redacted] accessTokenValue=[redacted] https://example.test/?clientSecretValue=[redacted]",
+    );
+    expect(
+      redactedErrorMessage(
         '{\\"access_token_value\\":\\"another horse battery staple\\"}',
       ),
     ).toBe('{\\"access_token_value\\":\\"[redacted]\\"}');

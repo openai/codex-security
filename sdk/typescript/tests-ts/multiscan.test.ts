@@ -458,6 +458,7 @@ describe("multiscan", () => {
     const customAuthorization = "SYNTHETIC_CUSTOM_AUTHORIZATION_123";
     const suffixedAuthorization = "SYNTHETIC_SUFFIXED_AUTHORIZATION_123";
     const paddedAuthorization = "SYNTHETIC_PADDED_AUTHORIZATION_TOKEN==";
+    const camelCaseSecret = "SYNTHETIC_CAMEL_CASE_CLIENT_SECRET_123";
     await writeFile(
       paths.input,
       `id,repository,revision\nretry,${source.path},${source.revision}\n`,
@@ -471,7 +472,7 @@ describe("multiscan", () => {
           attempts += 1;
           if (attempts === 1) {
             throw new Error(
-              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} authorization="${opaqueAuthorization}" _auth=${npmAuthorization} Authorization: ApiKey ${customAuthorization} client_authorization_value=ApiKey ${suffixedAuthorization} auth=ApiKey ${paddedAuthorization} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
+              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} authorization="${opaqueAuthorization}" _auth=${npmAuthorization} Authorization: ApiKey ${customAuthorization} client_authorization_value=ApiKey ${suffixedAuthorization} auth=ApiKey ${paddedAuthorization} clientSecretValue=${camelCaseSecret} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
             );
           }
           return await completedScan(scanOptions.outputDir!);
@@ -498,6 +499,7 @@ describe("multiscan", () => {
     expect(ledger).not.toContain(customAuthorization);
     expect(ledger).not.toContain(suffixedAuthorization);
     expect(ledger).not.toContain(paddedAuthorization);
+    expect(ledger).not.toContain(camelCaseSecret);
     expect(ledger).not.toContain(shortAuthorization);
     expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
   });
