@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 
+const MAX_CODE_POINT = 0x10ffff;
 const SUPPORTED_EXTENSIONS = new Set([
   ".md",
   ".markdown",
@@ -216,9 +217,28 @@ function decodeXml(value: string): string {
     (entity, name: string) => {
       if (!name.startsWith("#")) return entities[name.toLowerCase()] ?? entity;
       const hexadecimal = name[1]?.toLowerCase() === "x";
-      return String.fromCodePoint(
-        Number.parseInt(name.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10),
+      const codePoint = Number.parseInt(
+        name.slice(hexadecimal ? 2 : 1),
+        hexadecimal ? 16 : 10,
       );
+      // A reference that cannot name a Unicode scalar value is left as literal
+      // text, matching the unrecognized-named-entity fallback above. Without the
+      // bound String.fromCodePoint throws RangeError, which surfaced as an
+      // unextractable document and failed the whole knowledge base. Surrogates
+      // are excluded too: XML forbids them and writing one would silently encode
+      // as U+FFFD.
+      return isUnicodeScalarValue(codePoint)
+        ? String.fromCodePoint(codePoint)
+        : entity;
     },
+  );
+}
+
+function isUnicodeScalarValue(codePoint: number): boolean {
+  return (
+    Number.isInteger(codePoint) &&
+    codePoint >= 0 &&
+    codePoint <= MAX_CODE_POINT &&
+    !(codePoint >= 0xd800 && codePoint <= 0xdfff)
   );
 }
