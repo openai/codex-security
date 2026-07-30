@@ -2242,6 +2242,11 @@ describe("CLI", () => {
           `private_key=-----BEGIN PRIVATE KEY-----${separator}MII_SYNTHETIC_PRIVATE_KEY${separator}-----END PRIVATE KEY----- safe=value`,
         ),
       ).toBe("private_key=[redacted] safe=value");
+      expect(
+        redactedErrorMessage(
+          `private_key=-----BEGIN PRIVATE KEY-----${separator}MII_SYNTHETIC_TRUNCATED_PRIVATE_KEY`,
+        ),
+      ).toBe("private_key=[redacted]");
     }
   });
 
