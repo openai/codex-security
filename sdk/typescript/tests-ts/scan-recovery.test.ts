@@ -279,6 +279,107 @@ describe("malformed scan artifact recovery", () => {
     }
   });
 
+  test("persists an immutable diff digest during CLI scan registration", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-diff-registration-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    const runGit = (args: string[]) => {
+      const result = spawnSync("git", ["-C", repository, ...args], {
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    runGit(["init", "--quiet"]);
+    runGit(["config", "user.name", "Codex Security"]);
+    runGit(["config", "user.email", "codex-security@example.invalid"]);
+    await writeFile(join(repository, "app.ts"), "export const value = 1;\n");
+    runGit(["add", "app.ts"]);
+    runGit(["commit", "--quiet", "-m", "base"]);
+    const base = runGit(["rev-parse", "HEAD"]);
+    await writeFile(join(repository, "app.ts"), "export const value = 2;\n");
+    runGit(["add", "app.ts"]);
+    runGit(["commit", "--quiet", "-m", "head"]);
+    const head = runGit(["rev-parse", "HEAD"]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const fixture: ScanFixture = {
+      python: python!,
+      repository,
+      stateDir: join(root, "state"),
+      scanDir,
+      scanId: "",
+      registration: {},
+    };
+
+    const registration = await workbench(fixture, [
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository,
+        target: { kind: "refs", paths: [], base, head },
+      }),
+    ]);
+    const contract = registration["contract"] as {
+      diffTarget: { contentDigest?: string };
+    };
+
+    expect(contract.diffTarget.contentDigest).toMatch(
+      /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
+    );
+
+    fixture.scanId = String(registration["scanId"]);
+    fixture.registration = registration;
+    await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+      recursive: true,
+    });
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson<{
+      scan: {
+        id: string;
+        target: { kind: string };
+        sealedAt?: string;
+        artifacts?: unknown[];
+      };
+    }>(manifestPath);
+    manifest.scan.id = fixture.scanId;
+    manifest.scan.target.kind = "git_diff";
+    delete manifest.scan.sealedAt;
+    delete manifest.scan.artifacts;
+    await writeJson(manifestPath, manifest);
+    for (const name of ["findings.json", "coverage.json"] as const) {
+      const path = join(scanDir, name);
+      const document = await readJson<{ scanId: string }>(path);
+      document.scanId = fixture.scanId;
+      await writeJson(path, document);
+    }
+    await writeFile(join(scanDir, "report.md"), "# Draft report\n");
+
+    await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    const preparedManifest = await readJson<{
+      scan: { target: { snapshotDigest?: string } };
+    }>(manifestPath);
+    expect(preparedManifest.scan.target.snapshotDigest).toBe(
+      contract.diffTarget.contentDigest,
+    );
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+  });
+
   test("seals a prepared scan without publishing it before acceptance", async () => {
     const fixture = await startDraftScan();
 

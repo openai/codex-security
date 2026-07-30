@@ -1184,6 +1184,54 @@ describe("plugin runtime preparation", () => {
 });
 
 describe("runtime directories and plugin Python boundary", () => {
+  test("binds immutable Git diffs to a deterministic snapshot digest", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const runGit = (...args: string[]): string => {
+      const result = Bun.spawnSync(["git", ...args], { cwd: repository });
+      expect(result.exitCode).toBe(0);
+      return result.stdout.toString().trim();
+    };
+    runGit("init", "-b", "main");
+    runGit("config", "user.email", "test@example.com");
+    runGit("config", "user.name", "Test");
+    await writeFile(join(repository, "app.ts"), "export const value = 1;\n");
+    runGit("add", "app.ts");
+    runGit("commit", "-m", "initial");
+    const base = runGit("rev-parse", "HEAD");
+    await writeFile(join(repository, "app.ts"), "export const value = 2;\n");
+    runGit("add", "app.ts");
+    runGit("commit", "-m", "change");
+    const head = runGit("rev-parse", "HEAD");
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const scripts = join(await bundledPluginRoot(), "scripts");
+    const source = [
+      "import pathlib, sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "from workbench_target import git_diff_content_digest",
+      "print(git_diff_content_digest(pathlib.Path(sys.argv[2]), sys.argv[3], sys.argv[4]))",
+    ].join("\n");
+    const digest = (): string => {
+      const result = Bun.spawnSync(
+        [python!, "-I", "-c", source, scripts, repository, base, head],
+        { cwd: repository },
+      );
+      expect(result.exitCode).toBe(0);
+      return result.stdout.toString().trim();
+    };
+
+    const first = digest();
+    expect(first).toMatch(/^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/);
+    await writeFile(
+      join(repository, "untracked.txt"),
+      "outside immutable diff\n",
+    );
+    expect(digest()).toBe(first);
+  });
+
   test("prepares one private, reusable managed-credential home", async () => {
     const root = await temporaryDirectory();
     const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };

@@ -97,6 +97,7 @@ from workbench_target import (
     directory_content_digest,
     directory_snapshot_regular_file_count,
     git_command,
+    git_diff_content_digest,
     git_output,
     git_revision,
     git_submodule_paths,
@@ -413,12 +414,28 @@ def require_diff_target(
             )
             if supplied_base != parent:
                 raise SystemExit("Commit base revision must match the selected commit's parent.")
-        return {"kind": kind, "baseRevision": parent, "headRevision": head}
+        current_digest = git_diff_content_digest(target, parent, head)
+        if content_digest and content_digest != current_digest:
+            raise SystemExit("The selected commit contents changed. Select the commit again.")
+        return {
+            "kind": kind,
+            "baseRevision": parent,
+            "headRevision": head,
+            "contentDigest": current_digest,
+        }
     base = resolve_git_commit(target, base_revision or "", "Base revision")
     head = resolve_git_commit(target, head_revision or "", "Head revision")
     if base == head:
         raise SystemExit("Base and head revisions must identify different commits.")
-    return {"kind": kind, "baseRevision": base, "headRevision": head}
+    current_digest = git_diff_content_digest(target, base, head)
+    if content_digest and content_digest != current_digest:
+        raise SystemExit("The selected range contents changed. Select the range again.")
+    return {
+        "kind": kind,
+        "baseRevision": base,
+        "headRevision": head,
+        "contentDigest": current_digest,
+    }
 
 
 def inspect_setup_values(
@@ -582,7 +599,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
+        if scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -650,13 +667,9 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             raise SystemExit(
                 "scan-manifest.json target headRevision must match the workbench diff target."
             )
-        if (
-            scan["diff_target_kind"] == "working_tree"
-            and target.get("snapshotDigest") != scan["diff_content_digest"]
-        ):
+        if target.get("snapshotDigest") != scan["diff_content_digest"]:
             raise SystemExit(
-                "scan-manifest.json target snapshotDigest must match the selected "
-                "working-tree contents."
+                "scan-manifest.json target snapshotDigest must match the selected diff contents."
             )
     scope = manifest_scan.get("scope")
     if not isinstance(scope, dict):
@@ -1539,6 +1552,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if head != current_head:
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
+        else:
+            diff_target["contentDigest"] = git_diff_content_digest(repository, base, head)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (

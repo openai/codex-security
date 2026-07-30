@@ -80,6 +80,30 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def git_diff_content_digest(target: Path, base_revision: str, head_revision: str) -> str:
+    diff = git_bytes(
+        target,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--ignore-submodules=none",
+        base_revision,
+        head_revision,
+        "--",
+        ".",
+    )
+    if diff is None:
+        raise SystemExit("Could not snapshot the selected Git diff.")
+    digest = hashlib.sha256()
+    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    update_digest_field(digest, b"git-diff", diff)
+    return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
+
+
 def worktree_content_digest(target: Path) -> str:
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
