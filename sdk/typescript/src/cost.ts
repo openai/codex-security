@@ -111,6 +111,7 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
+    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
     )) {
@@ -130,14 +131,8 @@ export class ScanCostTracker {
       try {
         await readSessionUsage(path, session);
       } catch (error) {
-        if (
-          session.threadId !== null &&
-          session.threadId !== this.#threadId &&
-          session.parentThreadId === null
-        ) {
-          continue;
-        }
-        throw error;
+        if (session.threadId === null) throw error;
+        unreadable.push({ session, error });
       }
     }
 
@@ -156,6 +151,9 @@ export class ScanCostTracker {
           changed = true;
         }
       }
+    }
+    for (const { session, error } of unreadable) {
+      if (included.has(session.threadId!)) throw error;
     }
 
     let usage: ScanTokenUsage | null = null;
