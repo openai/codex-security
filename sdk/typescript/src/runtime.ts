@@ -153,7 +153,10 @@ export async function prepareCodexSecurityCredentialHome(
     const canonical = await realpath(path);
     requireModelSafeOutputDir(canonical);
     validateLocation?.(canonical);
-    await requirePrivateCredentialHome(metadata, canonical);
+    await requireSecureCredentialHome(canonical, {
+      applyWindowsAcl: true,
+      metadata,
+    });
     return canonical;
   } catch (error) {
     if (error instanceof OutputDirectoryError) throw error;
@@ -162,6 +165,76 @@ export async function prepareCodexSecurityCredentialHome(
       { cause: error },
     );
   }
+}
+
+/**
+ * Re-verify the credential home before every use.
+ *
+ * Durable cross-process `(st_dev, st_ino)` pins are deferred: there is no
+ * workbench row for credential homes, and path+mode+trusted-ancestry checks on
+ * each use already close the cross-user rename/replace class. Lock acquisition
+ * still pins identity for the duration of a single lock session.
+ */
+export async function requireSecureCredentialHome(
+  path: string,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsHome?: (path: string) => Promise<void>;
+    applyWindowsAcl?: boolean;
+    metadata?: Stats;
+    expectedDevice?: number;
+    expectedInode?: number;
+  } = {},
+): Promise<Stats> {
+  const platform = options.platform ?? process.platform;
+  let metadata = options.metadata;
+  if (metadata === undefined) {
+    try {
+      metadata = await lstat(path);
+    } catch (error) {
+      throw new OutputDirectoryError(
+        `Unable to inspect the Codex Security credential home: ${path}`,
+        { cause: error },
+      );
+    }
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new OutputDirectoryError(
+      `Codex Security credential home is not a directory: ${path}`,
+    );
+  }
+  const canonical = await realpath(path);
+  requireModelSafeOutputDir(canonical);
+  if (canonical !== path) {
+    metadata = await lstat(canonical);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new OutputDirectoryError(
+        `Codex Security credential home is not a directory: ${path}`,
+      );
+    }
+  }
+  if (
+    options.expectedDevice !== undefined &&
+    options.expectedInode !== undefined &&
+    (metadata.dev !== options.expectedDevice ||
+      metadata.ino !== options.expectedInode)
+  ) {
+    throw new OutputDirectoryError(
+      `Codex Security credential home was replaced: ${canonical}`,
+    );
+  }
+  if (platform === "win32") {
+    if (options.applyWindowsAcl) {
+      await requirePrivateCredentialHome(metadata, canonical, {
+        platform,
+        secureWindowsHome: options.secureWindowsHome,
+      });
+    }
+    return metadata;
+  }
+  await requirePrivateCredentialHome(metadata, canonical, { platform });
+  await requireSecureOutputAncestry(canonical);
+  return metadata;
 }
 
 export async function requirePrivateCredentialHome(
@@ -232,12 +305,19 @@ export async function acquireCodexSecurityCredentialHomeLock(
   codexHome: string,
   signal?: AbortSignal,
 ): Promise<() => Promise<void>> {
+  const homeMetadata = await requireSecureCredentialHome(codexHome);
+  const expectedDevice = homeMetadata.dev;
+  const expectedInode = homeMetadata.ino;
   const lock = join(codexHome, CREDENTIAL_LOCK_NAME);
   const ownerPath = join(lock, "owner.json");
   const token = randomUUID();
 
   while (true) {
     throwIfSignalAborted(signal);
+    await requireSecureCredentialHome(codexHome, {
+      expectedDevice,
+      expectedInode,
+    });
     try {
       await mkdir(lock, { mode: 0o700 });
     } catch (error) {
@@ -261,6 +341,10 @@ export async function acquireCodexSecurityCredentialHomeLock(
     let released = false;
     return async () => {
       if (released) return;
+      await requireSecureCredentialHome(codexHome, {
+        expectedDevice,
+        expectedInode,
+      });
       const owner = JSON.parse(await readFile(ownerPath, "utf8")) as {
         token?: unknown;
       };
@@ -334,6 +418,7 @@ export async function setCodexSecurityCredentialLogout(
   codexHome: string,
   loggedOut: boolean,
 ): Promise<void> {
+  await requireSecureCredentialHome(codexHome);
   const marker = join(codexHome, CREDENTIAL_LOGOUT_MARKER);
   if (!loggedOut) {
     await rm(marker, { force: true });
@@ -362,6 +447,7 @@ export async function setCodexSecurityCredentialLogout(
 export async function codexSecurityCredentialAllowsAmbientImport(
   codexHome: string,
 ): Promise<boolean> {
+  await requireSecureCredentialHome(codexHome);
   try {
     const marker = await lstat(join(codexHome, CREDENTIAL_LOGOUT_MARKER));
     if (!marker.isFile() || marker.isSymbolicLink()) {
@@ -379,6 +465,7 @@ export async function codexSecurityCredentialAllowsAmbientImport(
 export async function codexSecurityHasStoredFileCredentials(
   codexHome: string,
 ): Promise<boolean> {
+  await requireSecureCredentialHome(codexHome);
   const path = join(codexHome, "auth.json");
   let metadata: Stats;
   try {
@@ -392,7 +479,26 @@ export async function codexSecurityHasStoredFileCredentials(
       `Codex Security stored authentication is not a regular file: ${path}`,
     );
   }
+  requirePrivateCredentialFile(metadata, path);
   return true;
+}
+
+export function requirePrivateCredentialFile(
+  metadata: Pick<Stats, "mode" | "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if (process.platform === "win32") return;
+  if ((metadata.mode & 0o077) !== 0) {
+    throw new OutputDirectoryError(
+      `Codex Security stored authentication must not be accessible to other users: ${path}`,
+    );
+  }
+  if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
+    throw new OutputDirectoryError(
+      `Codex Security stored authentication must be owned by the current user: ${path}`,
+    );
+  }
 }
 
 export async function preserveCodexSecurityPluginRegistration(
@@ -725,6 +831,78 @@ export function requirePrivateOutputDirectory(
   }
 }
 
+/** Reject shared parents whose owner can rename or replace a private directory. */
+export async function requireSecureOutputAncestry(
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): Promise<void> {
+  if (process.platform === "win32") return;
+  let current = dirname(resolve(path));
+  while (true) {
+    try {
+      current = await realpath(current);
+      break;
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") {
+        throw new OutputDirectoryError(
+          `Unable to inspect parent directory: ${current}`,
+          { cause: error },
+        );
+      }
+      const parent = dirname(current);
+      if (parent === current) {
+        throw new OutputDirectoryError(
+          `Unable to inspect parent directory: ${current}`,
+          { cause: error },
+        );
+      }
+      current = parent;
+    }
+  }
+  while (true) {
+    let metadata: Stats;
+    try {
+      metadata = await lstat(current);
+    } catch (error) {
+      throw new OutputDirectoryError(
+        `Unable to inspect parent directory: ${current}`,
+        { cause: error },
+      );
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new OutputDirectoryError(
+        `Parent must be a non-symlink directory: ${current}`,
+      );
+    }
+    requireTrustedOutputAncestor(metadata, current, effectiveUid);
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+export function requireTrustedOutputAncestor(
+  metadata: Pick<Stats, "mode" | "uid">,
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): void {
+  if (
+    effectiveUid !== undefined &&
+    metadata.uid !== 0 &&
+    metadata.uid !== effectiveUid
+  ) {
+    throw new OutputDirectoryError(
+      `Parent must have a trusted owner: ${path}`,
+    );
+  }
+  if ((metadata.mode & 0o022) === 0) return;
+  if ((metadata.mode & 0o1000) === 0) {
+    throw new OutputDirectoryError(
+      `Parent must not be group- or world-writable without the sticky bit: ${path}`,
+    );
+  }
+}
+
 async function removeEmptyDirectories(
   path: string,
   root: string,
@@ -778,6 +956,9 @@ export async function importAmbientAuth(
     return false;
   }
   await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
+    await chmod(isolatedHome, 0o700);
+  }
   if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   const destination = join(isolatedHome, "auth.json");
   const temporary = join(isolatedHome, `.auth-${randomUUID()}.tmp`);

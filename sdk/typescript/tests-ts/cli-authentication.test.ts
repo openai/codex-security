@@ -55,7 +55,12 @@ describe("CLI authentication", () => {
 
   test("uses the same stable credential home for login, status, and logout", async () => {
     const stateDirectory = join(tmpdir(), "codex-security-managed-auth-state");
-    const expectedHome = join(stateDirectory, "codex-home");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    const expectedHome = await realpath(
+      await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      }),
+    );
 
     for (const argv of [["login"], ["login", "status"], ["logout"]] as const) {
       const stdout = capture();
