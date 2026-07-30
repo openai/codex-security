@@ -178,6 +178,55 @@ describe("customer container entrypoint", () => {
   );
 
   testPosix(
+    "preserves an explicit Landlock override without duplicating it",
+    async () => {
+      const arguments_ = [
+        "bulk-scan",
+        "/input/repositories.csv",
+        "--output-dir",
+        "/output",
+        "--codex",
+        "features.use_legacy_landlock=true",
+      ];
+      const result = await runEntrypoint(arguments_);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+    },
+  );
+
+  testPosix(
+    "rejects incompatible Landlock overrides only on restricted hosts",
+    async () => {
+      const arguments_ = [
+        "bulk-scan",
+        "/input/repositories.csv",
+        "--output-dir",
+        "/output",
+        "--codex",
+        "features.use_legacy_landlock=false",
+      ];
+      const result = await runEntrypoint(arguments_);
+
+      if (
+        appArmorRestrictsUserNamespaces &&
+        !usesCodexSecurityAppArmorProfile
+      ) {
+        expect(result.status).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe(
+          "codex-security: restricted Ubuntu hosts require --codex features.use_legacy_landlock=true.\n",
+        );
+      } else {
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout).toBe(`${arguments_.join("\n")}\n`);
+      }
+    },
+  );
+
+  testPosix(
     "rejects interactive discovery before starting the CLI",
     async () => {
       const result = await runEntrypoint(["bulk-scan"]);

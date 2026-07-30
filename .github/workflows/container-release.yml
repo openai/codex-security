@@ -345,6 +345,34 @@ jobs:
             org.opencontainers.image.version=${{ needs.authorize.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Verify the exact published native image
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          IMAGE: ${{ needs.authorize.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[[:xdigit:]]{64}$ ]]; then
+            echo 'The registry did not return a valid immutable platform digest.' >&2
+            exit 1
+          fi
+
+          reference="$IMAGE@$IMAGE_DIGEST"
+          docker logout ghcr.io
+          docker pull "$reference"
+
+          actual_architecture="$(docker image inspect --format '{{.Architecture}}' "$reference")"
+          if [[ "$actual_architecture" != "$EXPECTED_ARCHITECTURE" ]]; then
+            echo "Expected a native $EXPECTED_ARCHITECTURE image; found $actual_architecture." >&2
+            exit 1
+          fi
+
+          docker run --rm "$reference" --version
+          docker run --rm "$reference" bulk-scan --help
+          docker run --rm "$reference" info --json
+          [[ "$(docker run --rm --entrypoint id "$reference" -u)" == 10001 ]]
+
       - name: Record verified platform digest
         env:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
