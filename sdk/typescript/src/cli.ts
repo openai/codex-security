@@ -109,6 +109,7 @@ const SCAN_HISTORY_OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
+const CHILD_TERMINATION_GRACE_MS = 1_000;
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
   readonly isTTY?: boolean;
@@ -434,13 +435,29 @@ export async function runCodexSkillCommand(
     windowsHide: true,
   });
   let requestedSignal: SignalName | null = null;
+  let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+  let forceStatusCompletion: (() => void) | null = null;
+  let forceCaptureCompletion: (() => void) | null = null;
+  const requestTermination = (signal: SignalName): void => {
+    requestedSignal = signal;
+    invocation.kill(signal);
+    if (forcedTermination !== undefined) return;
+    forcedTermination = setTimeout(() => {
+      forcedTermination = undefined;
+      if (invocation.exitCode === null && invocation.signalCode === null) {
+        invocation.kill("SIGKILL");
+      }
+      forceCaptureCompletion?.();
+      invocation.stdout?.destroy();
+      invocation.stderr?.destroy();
+      forceStatusCompletion?.();
+    }, CHILD_TERMINATION_GRACE_MS);
+  };
   const onInterrupt = (): void => {
-    requestedSignal = "SIGINT";
-    invocation.kill("SIGINT");
+    requestTermination("SIGINT");
   };
   const onTerminate = (): void => {
-    requestedSignal = "SIGTERM";
-    invocation.kill("SIGTERM");
+    requestTermination("SIGTERM");
   };
   process.on("SIGINT", onInterrupt);
   process.on("SIGTERM", onTerminate);
@@ -452,22 +469,38 @@ export async function runCodexSkillCommand(
     const captured =
       output === undefined || invocation.stdout === null
         ? Promise.resolve(undefined)
-        : readSkillCommandOutput(invocation.stdout);
+        : Promise.race([
+            readSkillCommandOutput(invocation.stdout),
+            new Promise<undefined>((resolve) => {
+              forceCaptureCompletion = () => resolve(undefined);
+            }),
+          ]);
     const [status, events] = await Promise.all([
       new Promise<number>((resolve, reject) => {
-        invocation.once("error", reject);
-        invocation.once(
-          output === undefined ? "exit" : "close",
-          (code, signal) => {
-            resolve(
-              requestedSignal === "SIGINT" || signal === "SIGINT"
-                ? 130
-                : requestedSignal === "SIGTERM" || signal === "SIGTERM"
-                  ? 143
-                  : code ?? 1,
-            );
-          },
-        );
+        let completed = false;
+        const complete = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ): void => {
+          if (completed) return;
+          completed = true;
+          forceStatusCompletion = null;
+          resolve(
+            requestedSignal === "SIGINT" || signal === "SIGINT"
+              ? 130
+              : requestedSignal === "SIGTERM" || signal === "SIGTERM"
+                ? 143
+                : code ?? 1,
+          );
+        };
+        forceStatusCompletion = () => complete(null, null);
+        invocation.once("error", (error) => {
+          if (completed) return;
+          completed = true;
+          forceStatusCompletion = null;
+          reject(error);
+        });
+        invocation.once(output === undefined ? "exit" : "close", complete);
       }),
       captured,
     ]);
@@ -494,6 +527,9 @@ export async function runCodexSkillCommand(
     invocation.kill();
     throw error;
   } finally {
+    if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+    forceStatusCompletion = null;
+    forceCaptureCompletion = null;
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
   }

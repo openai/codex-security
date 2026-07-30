@@ -3,6 +3,8 @@ import { isIP } from "node:net";
 import { PluginBootstrapError } from "./errors.js";
 import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 
+const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+
 export interface LoginResult {
   success: boolean;
   exitCode: number | null;
@@ -27,6 +29,8 @@ export class CodexLoginHandle {
   #urlReadySettled = false;
   #deviceReadySettled = false;
   #canceled = false;
+  #forcedTermination: ReturnType<typeof setTimeout> | undefined;
+  #forceCompletion: (() => void) | null = null;
   #stdout = "";
   #stderr = "";
 
@@ -63,21 +67,15 @@ export class CodexLoginHandle {
       this.#notifyInstructions();
     });
     this.#completion = new Promise((resolve, reject) => {
-      this.#child.once("error", (error) => {
-        this.#settleInstructionWaiters({
-          success: false,
-          exitCode: null,
-          stdout: this.#stdout,
-          stderr: error.message,
-        });
-        reject(error);
-      });
       let fallback: ReturnType<typeof setTimeout> | undefined;
       let completed = false;
       const complete = (exitCode: number | null): void => {
         if (completed) return;
         completed = true;
         if (fallback !== undefined) clearTimeout(fallback);
+        this.#clearForcedTermination();
+        this.#forceCompletion = null;
+        this.#destroyPipes();
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
@@ -88,14 +86,28 @@ export class CodexLoginHandle {
         if (result.success) onSuccess();
         resolve(result);
       };
+      this.#forceCompletion = () => complete(this.#child.exitCode);
+      this.#child.once("error", (error) => {
+        if (completed) return;
+        completed = true;
+        if (fallback !== undefined) clearTimeout(fallback);
+        this.#clearForcedTermination();
+        this.#forceCompletion = null;
+        this.#destroyPipes();
+        this.#settleInstructionWaiters({
+          success: false,
+          exitCode: null,
+          stdout: this.#stdout,
+          stderr: error.message,
+        });
+        reject(error);
+      });
       this.#child.once("close", complete);
       this.#child.once("exit", (exitCode) => {
-        if (process.platform !== "win32") return;
         fallback = setTimeout(() => {
-          this.#child.stdout.destroy();
-          this.#child.stderr.destroy();
+          this.#destroyPipes();
           complete(exitCode);
-        }, 1_000);
+        }, LOGIN_CHILD_TERMINATION_GRACE_MS);
       });
     });
   }
@@ -132,10 +144,38 @@ export class CodexLoginHandle {
   }
 
   public cancel(): void {
-    if (this.#child.exitCode === null) {
-      this.#canceled = true;
-      this.#child.kill("SIGTERM");
+    this.#canceled = true;
+    if (
+      this.#child.exitCode !== null ||
+      this.#child.signalCode !== null ||
+      this.#forceCompletion === null
+    ) {
+      this.#destroyPipes();
+      this.#forceCompletion?.();
+      return;
     }
+    this.#child.kill("SIGTERM");
+    if (this.#forcedTermination !== undefined) return;
+    this.#forcedTermination = setTimeout(() => {
+      this.#forcedTermination = undefined;
+      if (this.#child.exitCode === null && this.#child.signalCode === null) {
+        this.#child.kill("SIGKILL");
+      }
+      this.#destroyPipes();
+      this.#forceCompletion?.();
+    }, LOGIN_CHILD_TERMINATION_GRACE_MS);
+  }
+
+  #clearForcedTermination(): void {
+    if (this.#forcedTermination === undefined) return;
+    clearTimeout(this.#forcedTermination);
+    this.#forcedTermination = undefined;
+  }
+
+  #destroyPipes(): void {
+    this.#child.stdin.destroy();
+    this.#child.stdout.destroy();
+    this.#child.stderr.destroy();
   }
 
   #notifyInstructions(): void {

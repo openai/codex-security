@@ -3921,14 +3921,14 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     }
   });
 
-  test("cancels interactive login children during close", async () => {
+  test("forces interactive login children to settle during close", async () => {
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
     await mkdir(codexHome);
     await writeFile(
       fakeCodex,
-      'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nsetInterval(() => {}, 1000);\n',
+      'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n',
     );
     const client = new TestClient(
       {},
@@ -3959,7 +3959,19 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     const login = await client.loginChatGPTDeviceCode();
     expect(login.verificationUrl).toBe("https://auth.example.test/device");
     expect(login.userCode).toBe("ABCD-EFGH");
-    await client.close();
+    const timeout = AbortSignal.timeout(5_000);
+    await expect(
+      Promise.race([
+        client.close(),
+        new Promise<never>((_, reject) => {
+          timeout.addEventListener(
+            "abort",
+            () => reject(new Error("SDK close did not settle login cleanup.")),
+            { once: true },
+          );
+        }),
+      ]),
+    ).resolves.toBeUndefined();
     await expect(login.wait()).resolves.toMatchObject({ success: false });
   });
 

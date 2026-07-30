@@ -237,7 +237,7 @@ grandchild.once("error", (error) => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "releases native login pipes when the Windows fallback fires",
+    "releases native login pipes when the cross-platform fallback fires",
     async () => {
       const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pipes-"));
       temporaryDirectories.push(root);
@@ -350,7 +350,7 @@ grandchild.once("error", (error) => {
           new Promise<never>((_, reject) => {
             timeout.addEventListener(
               "abort",
-              () => reject(new Error("The Windows login fallback timed out.")),
+              () => reject(new Error("The login fallback timed out.")),
               { once: true },
             );
           }),
@@ -380,7 +380,7 @@ grandchild.once("error", (error) => {
             }
             if (Date.now() >= deadline) {
               throw new Error(
-                "The Windows login grandchild did not exit after pipe cleanup.",
+                "The login grandchild did not exit after pipe cleanup.",
               );
             }
             await delay(25);
@@ -389,6 +389,41 @@ grandchild.once("error", (error) => {
       }
     },
   );
+
+  test("escalates cancellation when a login child ignores SIGTERM", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-sigkill-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "codex.mjs");
+    await writeFile(
+      script,
+      `
+console.error("Open https://auth.example.test/device");
+console.error("User code: ABCD-EFGH");
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`,
+    );
+    let succeeded = false;
+    const handle = new CodexLoginHandle(
+      { command: process.execPath, prefixArgs: [script] },
+      ["login", "--device-auth"],
+      process.env,
+      () => {
+        succeeded = true;
+      },
+    );
+    await handle.waitForInstructions({ deviceCode: true });
+    handle.cancel();
+    await expect(
+      Promise.race([
+        handle.wait(),
+        delay(5_000).then(() => {
+          throw new Error("Login cancellation did not settle.");
+        }),
+      ]),
+    ).resolves.toMatchObject({ success: false });
+    expect(succeeded).toBe(false);
+  });
 
   test("does not report a canceled interactive login as successful", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-cancel-"));

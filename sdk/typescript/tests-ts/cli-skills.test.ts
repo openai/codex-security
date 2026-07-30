@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, test } from "bun:test";
 import {
   main,
@@ -525,6 +527,94 @@ describe("CLI skill commands", () => {
       }
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
       expect(stderr.text()).not.toContain("/private");
+    }
+  });
+
+  test("forces a skill child to settle when it ignores SIGTERM", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-skill-signal-"),
+    );
+    const ready = join(directory, "ready");
+    const child = join(directory, "child.mjs");
+    const wrapper = join(directory, "wrapper.mjs");
+    await writeFile(
+      child,
+      `
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const descendant = spawn(
+  process.execPath,
+  ["-e", "setInterval(() => {}, 1000)"],
+  { stdio: ["ignore", "inherit", "inherit"], windowsHide: true },
+);
+writeFileSync(${JSON.stringify(ready)}, JSON.stringify({
+  child: process.pid,
+  descendant: descendant.pid,
+}));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`,
+    );
+    await writeFile(
+      wrapper,
+      `
+import { runCodexSkillCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+const status = await runCodexSkillCommand(
+  [],
+  { command: "validate", stdout: process.stdout, stderr: process.stderr },
+  { command: process.execPath, prefixArgs: [${JSON.stringify(child)}] },
+);
+process.exit(status);
+`,
+    );
+
+    const invocation = spawn(process.execPath, [wrapper], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    let childPids: number[] = [];
+    try {
+      const deadline = Date.now() + 5_000;
+      while (true) {
+        try {
+          const marker = JSON.parse(await Bun.file(ready).text()) as {
+            child: number;
+            descendant: number;
+          };
+          childPids = [marker.child, marker.descendant];
+          break;
+        } catch (error) {
+          if (Date.now() >= deadline) throw error;
+          await delay(25);
+        }
+      }
+      invocation.kill("SIGTERM");
+      const status = await Promise.race([
+        new Promise<number | null>((resolve, reject) => {
+          invocation.once("error", reject);
+          invocation.once("close", resolve);
+        }),
+        delay(5_000).then(() => {
+          throw new Error("CLI skill cancellation did not settle.");
+        }),
+      ]);
+      expect(status).toBe(143);
+    } finally {
+      invocation.kill("SIGKILL");
+      for (const childPid of childPids) {
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !("code" in error) ||
+            error.code !== "ESRCH"
+          ) {
+            throw error;
+          }
+        }
+      }
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });
