@@ -1430,7 +1430,7 @@ describe("CLI", () => {
       expect([failed.status, failed.stdout, failed.stderr]).toEqual([
         2,
         "",
-        "codex-security: working directory is unavailable\n",
+        "working directory is unavailable\n",
       ]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -2029,7 +2029,8 @@ describe("CLI", () => {
         await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(`codex-security: ${message}\n`);
+      expect(stderr.text()).toContain(`${message}\n`);
+      expect(stderr.text()).not.toContain("codex-security:");
       expect(stderr.text()).not.toContain("model service could not be reached");
     }
   });
@@ -2769,7 +2770,7 @@ describe("CLI", () => {
       await main(["scan", "."], stdout.stream, stderr.stream, failing),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("codex-security: invalid scan request\n");
+    expect(stderr.text()).toContain("invalid scan request\n");
     expect(stderr.text()).not.toContain("Running scan");
     expect(stderr.text()).not.toContain("CodexSecurityError");
   });
@@ -2794,7 +2795,7 @@ describe("CLI", () => {
       ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("codex-security: invalid scan request\n");
+    expect(stderr.text()).toContain("invalid scan request\n");
 
     const unavailableCwd = dependencies();
     unavailableCwd.currentDirectory = () => {
@@ -2922,6 +2923,7 @@ describe("CLI", () => {
       "Isolated Codex runtime directory must be outside the scanned directory and any enclosing Git worktree.",
     );
     expect(stderr.text()).toContain(`Partial output was kept at ${partial}.`);
+    expect(stderr.text()).not.toContain("codex-security:");
   });
 
   test("redacts credentials embedded in protected-root diagnostics", async () => {
@@ -2982,8 +2984,7 @@ describe("CLI", () => {
       ).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe(
-        "[00:00] Preparing scan\n" +
-          `codex-security: scan failed ${REDACTED_CREDENTIALS}\n`,
+        "[00:00] Preparing scan\n" + `scan failed ${REDACTED_CREDENTIALS}\n`,
       );
     }
   });

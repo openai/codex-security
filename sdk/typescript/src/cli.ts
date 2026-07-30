@@ -2622,17 +2622,13 @@ async function runScan(
       failure instanceof OutputInsideProtectedRootError
         ? cliErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
-    if (failure instanceof OutputInsideProtectedRootError) {
-      errorOutput.write(`${message}\n`);
-    } else {
-      errorOutput.write(`codex-security: ${message}\n`);
-    }
+    errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
       return { exitCode: 2, error: message };
     }
     if (scanDir !== null) {
       errorOutput.write(
-        `codex-security: Partial output was kept at ${cliErrorMessage(scanDir)}.\n`,
+        `Partial output was kept at ${cliErrorMessage(scanDir)}.\n`,
       );
     }
     return { exitCode: 2, error: message };
@@ -2642,7 +2638,7 @@ async function runScan(
     return { exitCode: 0, data: { dryRun: true, ...preflight } };
   }
   if (result === null) {
-    errorOutput.write("codex-security: scan completed without a result\n");
+    errorOutput.write("scan completed without a result\n");
     return { exitCode: 2, error: "Scan completed without a result." };
   }
   const threshold = arguments_.failOnSeverity;
@@ -2844,7 +2840,7 @@ function protectedRootErrorMessage(
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
         : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`;
   return [
-    `codex-security: ${description} must be outside the scanned directory and any enclosing Git worktree.`,
+    `${description} must be outside the scanned directory and any enclosing Git worktree.`,
     `  Resolved path:  ${error.outputDirectory}`,
     `  Protected root: ${error.protectedRoot}`,
     `  Reason:         ${reason}`,
