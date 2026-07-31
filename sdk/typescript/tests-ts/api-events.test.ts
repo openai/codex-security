@@ -45,6 +45,35 @@ describe("one-shot scan events", () => {
     });
   });
 
+  test("accepts target identity validated by the workbench", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const events = completedEvents();
+
+    const result = await runScanEvents({
+      thread: {
+        id: null,
+        async runStreamed() {
+          return { events };
+        },
+      },
+      events,
+      signal: new AbortController().signal,
+      scanDir,
+      pluginRoot: PLUGIN_ROOT,
+      expectation: {
+        repository: "/repository",
+        repositoryRevision: "different-revision",
+        target: { kind: "repository", paths: [] },
+        mode: "standard",
+        pluginVersion: "0.1.0",
+      },
+      workbenchValidated: true,
+    });
+
+    expect(result.threadId).toBe("thread-1");
+    expect(result.turnResult.status).toBe("completed");
+  });
+
   test("lets the workbench seal artifacts before validating completed scans", async () => {
     const root = await temporaryDirectory();
     const scanDir = join(root, "scan");

@@ -4,6 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import {
   accessSync,
   constants,
+  existsSync,
   lstatSync,
   realpathSync,
   writeSync,
@@ -63,11 +64,14 @@ import { runMultiscan } from "./multiscan.js";
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
+  codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   expandHome,
+  prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
+  setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
 import {
@@ -132,6 +136,12 @@ const MODEL_REASONING_EFFORTS = [
 ] as const satisfies readonly ModelReasoningEffort[];
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+const CODEX_OVERRIDE_DESCRIPTION =
+  'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
+const PLUGIN_PATH_DESCRIPTION =
+  "Codex Security plugin directory or ZIP (default: bundled plugin).";
+const PYTHON_PATH_DESCRIPTION =
+  "Python interpreter (default: PYTHON or automatic discovery).";
 const EXPORT_DEFAULT_OUTPUTS = {
   csv: "findings.csv",
   json: "findings.json",
@@ -245,6 +255,9 @@ interface CliDependencies {
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
   environment: NodeJS.ProcessEnv;
+  prepareAuthenticationHome?: (
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<string>;
   hasStoredChatGPTSignIn?: () => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   currentDirectory(): string;
@@ -262,6 +275,7 @@ interface CliDependencies {
   runCodex(
     args: readonly string[],
     output?: SkillCommandOutput,
+    environment?: NodeJS.ProcessEnv,
   ): Promise<number>;
   bulkScan?: BulkScanDiscoveryDependencies;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
@@ -272,6 +286,7 @@ interface CliDependencies {
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) => new CodexSecurity(config),
   environment: process.env,
+  prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: () => checkForUpdate({ environment: process.env }),
   hasStoredChatGPTSignIn: async () => {
     const environment = Object.fromEntries(
@@ -281,8 +296,23 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
           name.toUpperCase() !== "CODEX_API_KEY",
       ),
     );
-    const status = await accountStatus(resolveCodexCommand(), environment);
-    return status.authenticated && /\bchatgpt\b/iu.test(status.details);
+    const command = resolveCodexCommand();
+    if (existsSync(codexSecurityCredentialHome(process.env))) {
+      const dedicatedStatus = await accountStatus(command, {
+        ...environment,
+        CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
+      });
+      if (
+        dedicatedStatus.authenticated &&
+        /\bchatgpt\b/iu.test(dedicatedStatus.details)
+      ) {
+        return true;
+      }
+    }
+    const ambientStatus = await accountStatus(command, environment);
+    return (
+      ambientStatus.authenticated && /\bchatgpt\b/iu.test(ambientStatus.details)
+    );
   },
   currentDirectory: cwd,
   now: Date.now,
@@ -299,7 +329,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     writeSync(stream.fd, value);
   },
   forceExit: (signal) => process.kill(process.pid, signal),
-  runCodex: runCodexSkillCommand,
+  runCodex: (args, output, environment) =>
+    runCodexSkillCommand(args, output, resolveCodexCommand(), environment),
   exportFindings: async (arguments_, output) => {
     const environment = exportEnvironment();
     const python = await resolvePluginPython({
@@ -385,9 +416,10 @@ export async function runCodexSkillCommand(
   args: readonly string[],
   output?: SkillCommandOutput,
   command: CodexCommand = resolveCodexCommand(),
+  processEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
-  const configuredHome = process.env["CODEX_HOME"];
-  const environment = { ...process.env };
+  const configuredHome = processEnvironment["CODEX_HOME"];
+  const environment = { ...processEnvironment };
   for (const name of Object.keys(environment)) {
     if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
   }
@@ -568,16 +600,48 @@ export async function main(
   let renderedHistory: string | undefined;
   const history = async (
     args: readonly string[],
-    select: (value: JsonObject) => JsonObject = (value) => value,
+    select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
+      value,
   ): Promise<JsonObject | undefined> => {
     try {
-      return select(await dependencies.runWorkbench(args));
+      return await select(await dependencies.runWorkbench(args));
     } catch (error) {
       errorOutput.write(`codex-security: ${cliErrorMessage(error)}\n`);
       exitCode = 2;
       return undefined;
     }
   };
+  const matchScanPair = async (
+    beforeId: string,
+    afterId: string,
+    force = false,
+  ): Promise<JsonObject | undefined> =>
+    history(
+      [
+        "compare-scans",
+        "--before-scan-id",
+        beforeId,
+        "--after-scan-id",
+        afterId,
+        "--include-matching-inputs",
+      ],
+      async ({ matchingCached, matchingInputs, ...comparison }) => {
+        if (matchingCached && !force) return comparison;
+        return await dependencies.runWorkbench([
+          "save-scan-comparison",
+          "--before-scan-id",
+          beforeId,
+          "--after-scan-id",
+          afterId,
+          "--matches-json",
+          JSON.stringify(
+            await dependencies.matchFindings(
+              matchingInputs as JsonObject & ScanComparisonInput,
+            ),
+          ),
+        ]);
+      },
+    );
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -798,34 +862,8 @@ export async function main(
               format,
             );
           }
-          const comparison = await history([
-            "compare-scans",
-            "--before-scan-id",
-            args.beforeId!,
-            "--after-scan-id",
-            args.afterId!,
-            "--include-matching-inputs",
-          ]);
-          if (comparison === undefined) return undefined;
-          const { matchingCached, matchingInputs, ...visibleComparison } =
-            comparison;
-          if (matchingCached && !options.force) {
-            return presentHistory(visibleComparison, "compare", format);
-          }
-
-          const matching = await dependencies.matchFindings(
-            matchingInputs as JsonObject & ScanComparisonInput,
-          );
           return presentHistory(
-            await history([
-              "save-scan-comparison",
-              "--before-scan-id",
-              args.beforeId!,
-              "--after-scan-id",
-              args.afterId!,
-              "--matches-json",
-              JSON.stringify(matching),
-            ]),
+            await matchScanPair(args.beforeId!, args.afterId!, options.force),
             "compare",
             format,
           );
@@ -837,7 +875,8 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Compare findings and coverage using saved matches.",
+      description: "Match and compare findings and coverage between scans.",
+      destructive: true,
       mcp: false,
       args: z.object({
         beforeId: z.string().min(1).describe("Earlier saved scan identifier."),
@@ -846,14 +885,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format }) {
         return presentHistory(
-          await history([
-            "compare-scans",
-            "--before-scan-id",
-            args.beforeId,
-            "--after-scan-id",
-            args.afterId,
-            "--require-matches",
-          ]),
+          await matchScanPair(args.beforeId, args.afterId),
           "compare",
           format,
         );
@@ -883,32 +915,38 @@ export async function main(
           auth: z
             .enum(["auto", "chatgpt", "api-key"])
             .default("auto")
-            .describe("Select automatic, ChatGPT, or API-key authentication."),
+            .describe(
+              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            ),
           path: z
             .array(optionValue("--path"))
             .default([])
-            .describe("Scan only PATH; repeat for multiple paths."),
+            .describe(
+              "Scan only PATH; repeat for multiple repository-relative paths.",
+            ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
             .default([])
-            .describe("Read security docs; repeat for multiple paths."),
+            .describe(
+              "Add security-context files or directories; repeat for multiple paths.",
+            ),
           diff: optionValue("--diff")
             .optional()
-            .describe("Scan Git changes from BASE to --head."),
+            .describe("Scan committed Git changes from BASE to --head."),
           workingTree: z
             .boolean()
             .default(false)
-            .describe("Scan staged and unstaged changes."),
+            .describe("Scan staged and unstaged changes against --base."),
           head: optionValue("--head")
             .optional()
-            .describe("Git head ref for --diff."),
+            .describe("Git head ref for --diff (default: HEAD)."),
           base: optionValue("--base")
             .optional()
-            .describe("Git base ref for --working-tree."),
+            .describe("Git base ref for --working-tree (default: HEAD)."),
           mode: z
             .enum(["standard", "deep"])
             .default("standard")
-            .describe("Scan mode."),
+            .describe("Scan mode; deep supports repository and path targets."),
           model: optionValue("--model")
             .optional()
             .describe(
@@ -917,23 +955,23 @@ export async function main(
           effort: effortOption(),
           outputDir: optionValue("--output-dir")
             .optional()
-            .describe("Write scan artifacts to DIR."),
+            .describe(
+              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+            ),
           archiveExisting: z
             .boolean()
             .default(false)
-            .describe("Archive existing results before scanning."),
+            .describe("Archive existing results; requires --output-dir."),
           pluginPath: optionValue("--plugin-path")
             .optional()
-            .describe("Use a Codex Security plugin directory or ZIP."),
+            .describe(PLUGIN_PATH_DESCRIPTION),
           python: optionValue("--python")
             .optional()
-            .describe("Python interpreter for the bundled plugin runtime."),
+            .describe(PYTHON_PATH_DESCRIPTION),
           codex: z
             .array(optionValue("--codex"))
             .default([])
-            .describe(
-              'Override Codex settings; e.g. model_reasoning_effort="high".',
-            ),
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
           failOnSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -981,8 +1019,16 @@ export async function main(
           args: { repository: "." },
           options: { model: "gpt-5.6-terra", effort: "high" },
         },
-        { args: { repository: "." }, options: { path: ["src", "tests"] } },
+        { args: { repository: "." }, options: { path: ["src"] } },
         { args: { repository: "." }, options: { diff: "origin/main" } },
+        {
+          args: { repository: "." },
+          options: {
+            codex: [
+              "features.multi_agent_v2.max_concurrent_threads_per_session=4",
+            ],
+          },
+        },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -1118,16 +1164,30 @@ export async function main(
           .string()
           .min(1)
           .optional()
-          .describe("CSV repository list; omit to discover repositories."),
+          .describe(
+            "CSV repository list; omit to discover repositories interactively.",
+          ),
       }),
       options: z.object({
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
           .optional()
-          .describe("Directory for scan artifacts and resumable results."),
-        workers: z.number().int().positive().default(4),
-        mode: z.enum(["standard", "deep"]).default("standard"),
+          .describe(
+            "Resumable results directory; required with a repository CSV.",
+          ),
+        workers: z
+          .number()
+          .int()
+          .positive()
+          .default(4)
+          .describe(
+            "Concurrent repository scans. Per-scan Codex workers are separate.",
+          ),
+        mode: z
+          .enum(["standard", "deep"])
+          .default("standard")
+          .describe("Default scan mode for repositories without a CSV mode."),
         model: optionValue("--model")
           .optional()
           .describe(
@@ -1140,15 +1200,28 @@ export async function main(
           .positive()
           .default(1)
           .describe("Maximum scan attempts per repository."),
-        pluginPath: z.string().min(1).optional(),
-        python: z.string().min(1).optional(),
+        pluginPath: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(PLUGIN_PATH_DESCRIPTION),
+        python: z.string().min(1).optional().describe(PYTHON_PATH_DESCRIPTION),
         codex: z
           .array(z.string().min(1))
           .default([])
-          .describe(
-            'Override Codex settings; e.g. model_reasoning_effort="high".',
-          ),
+          .describe(CODEX_OVERRIDE_DESCRIPTION),
       }),
+      examples: [
+        {
+          args: {},
+          options: { model: "gpt-5.6-terra", effort: "high" },
+        },
+      ],
+      hint:
+        "CSV example:\n" +
+        "  codex-security bulk-scan repositories.csv " +
+        "--output-dir /path/outside/repositories/results " +
+        "--workers 4 --max-attempts 3",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
@@ -1268,10 +1341,12 @@ export async function main(
           exportFormat: z
             .enum(["csv", "json", "sarif"])
             .default("sarif")
-            .describe("Export format (default: sarif)."),
+            .describe("Artifact format to export from the completed scan."),
           output: optionValue("--output")
             .optional()
-            .describe("Write the selected format to FILE or stdout with '-'."),
+            .describe(
+              "FILE or '-' for stdout (default: results.sarif, findings.json, or findings.csv).",
+            ),
           sourceRoot: optionValue("--source-root")
             .optional()
             .describe(
@@ -1332,7 +1407,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Set model="gpt-5.6-terra" or model_reasoning_effort="high".',
+            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
           ),
       }),
       async run({ options }) {
@@ -1368,7 +1443,7 @@ export async function main(
           .array(optionValue("--codex"))
           .default([])
           .describe(
-            'Set model="gpt-5.6-terra" or model_reasoning_effort="high".',
+            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
           ),
       }),
       async run({ options }) {
@@ -1410,15 +1485,34 @@ export async function main(
           .describe("Read an access token from stdin."),
       }),
       async run({ args, options }) {
-        exitCode = await dependencies.runCodex([
-          "login",
-          ...(args.action === undefined ? [] : [args.action]),
-          ...(options.deviceAuth ? ["--device-auth"] : []),
-          ...(options.withApiKey ? ["--with-api-key"] : []),
-          ...(options.withAccessToken ? ["--with-access-token"] : []),
-          "-c",
-          'cli_auth_credentials_store="file"',
-        ]);
+        const credentialHome =
+          dependencies.prepareAuthenticationHome !== undefined
+            ? await dependencies.prepareAuthenticationHome(
+                dependencies.environment,
+              )
+            : codexSecurityCredentialHome(dependencies.environment);
+        const authenticationEnvironment = {
+          ...dependencies.environment,
+          CODEX_HOME: credentialHome,
+        };
+        exitCode = await dependencies.runCodex(
+          [
+            "login",
+            ...(args.action === undefined ? [] : [args.action]),
+            ...(options.deviceAuth ? ["--device-auth"] : []),
+            ...(options.withApiKey ? ["--with-api-key"] : []),
+            ...(options.withAccessToken ? ["--with-access-token"] : []),
+          ],
+          undefined,
+          authenticationEnvironment,
+        );
+        if (
+          args.action === undefined &&
+          exitCode === 0 &&
+          dependencies.prepareAuthenticationHome !== undefined
+        ) {
+          await setCodexSecurityCredentialLogout(credentialHome, false);
+        }
         if (args.action === "status") {
           const authentication = scanAuthentication(dependencies.environment);
           if (
@@ -1433,11 +1527,7 @@ export async function main(
               "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
             );
           }
-        } else if (
-          exitCode === 0 &&
-          !options.withApiKey &&
-          !options.withAccessToken
-        ) {
+        } else if (exitCode === 0 && !options.withApiKey) {
           const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
@@ -1450,10 +1540,16 @@ export async function main(
                     name.toUpperCase() === "CODEX_API_KEY"),
               )
               .map(([name]) => name);
+            const loginWarning = options.withAccessToken
+              ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
+              : "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
+                `noninteractive scans will use ${authentication.source}.\n`;
+            const storedCredentials = options.withAccessToken
+              ? "your stored credentials"
+              : "your ChatGPT sign-in";
             errorOutput.write(
-              "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
-                `noninteractive scans will use ${authentication.source}.\n` +
-                "To use your ChatGPT sign-in, pass '--auth chatgpt' or run " +
+              loginWarning +
+                `To use ${storedCredentials}, pass '--auth chatgpt' or run ` +
                 `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
             );
           }
@@ -1465,11 +1561,27 @@ export async function main(
       destructive: true,
       mcp: false,
       async run() {
-        exitCode = await dependencies.runCodex([
-          "logout",
-          "-c",
-          'cli_auth_credentials_store="file"',
-        ]);
+        const credentialHome =
+          dependencies.prepareAuthenticationHome !== undefined
+            ? await dependencies.prepareAuthenticationHome(
+                dependencies.environment,
+              )
+            : codexSecurityCredentialHome(dependencies.environment);
+        const authenticationEnvironment = {
+          ...dependencies.environment,
+          CODEX_HOME: credentialHome,
+        };
+        exitCode = await dependencies.runCodex(
+          ["logout"],
+          undefined,
+          authenticationEnvironment,
+        );
+        if (
+          exitCode === 0 &&
+          dependencies.prepareAuthenticationHome !== undefined
+        ) {
+          await setCodexSecurityCredentialLogout(credentialHome, true);
+        }
       },
     })
     .command("info", {
@@ -1726,9 +1838,10 @@ function validateCliArguments(
   );
   if (
     structuredOutput &&
-    ["validate", "patch", "login", "logout"].includes(command)
+    ["validate", "patch", "login", "logout"].includes(command) &&
+    !argv.includes("--schema")
   ) {
-    return `${command} does not support noninteractive JSON output; run it without --json or --format json.`;
+    return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
   }
   if (
     command === "export" &&
@@ -2509,17 +2622,13 @@ async function runScan(
       failure instanceof OutputInsideProtectedRootError
         ? cliErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
-    if (failure instanceof OutputInsideProtectedRootError) {
-      errorOutput.write(`${message}\n`);
-    } else {
-      errorOutput.write(`codex-security: ${message}\n`);
-    }
+    errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
       return { exitCode: 2, error: message };
     }
     if (scanDir !== null) {
       errorOutput.write(
-        `codex-security: Partial output was kept at ${cliErrorMessage(scanDir)}.\n`,
+        `Partial output was kept at ${cliErrorMessage(scanDir)}.\n`,
       );
     }
     return { exitCode: 2, error: message };
@@ -2529,7 +2638,7 @@ async function runScan(
     return { exitCode: 0, data: { dryRun: true, ...preflight } };
   }
   if (result === null) {
-    errorOutput.write("codex-security: scan completed without a result\n");
+    errorOutput.write("scan completed without a result\n");
     return { exitCode: 2, error: "Scan completed without a result." };
   }
   const threshold = arguments_.failOnSeverity;
@@ -2546,7 +2655,14 @@ async function runScan(
   ).length;
   const incomplete = result.coverage.completeness !== "complete";
   progress?.stage("Scan complete");
-  printScanSummary(result, progress, errorOutput);
+  printScanSummary(
+    result,
+    progress,
+    errorOutput,
+    progress?.interactive === true &&
+      dependencies.environment["NO_COLOR"] === undefined &&
+      dependencies.environment["TERM"] !== "dumb",
+  );
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
@@ -2617,7 +2733,10 @@ function printScanSummary(
   result: ScanResult,
   progress: Progress | null,
   errorOutput: Writable,
+  color: boolean,
 ): void {
+  const paint = (value: string, code: number | string): string =>
+    color ? `\u001B[${code}m${value}\u001B[0m` : value;
   const severities = new Map<SeverityLevel, number>();
   for (const finding of result.findings.findings) {
     severities.set(
@@ -2631,9 +2750,6 @@ function printScanSummary(
   })
     .filter((value): value is string => value !== null)
     .join(", ");
-  errorOutput.write(
-    `codex-security: Findings: ${result.findings.findings.length}${severitySummary === "" ? "" : ` (${severitySummary})`}. Coverage: ${result.coverage.completeness}.\n`,
-  );
 
   const started = Date.parse(result.manifest.scan.startedAt);
   const completed = Date.parse(result.manifest.scan.completedAt);
@@ -2643,22 +2759,37 @@ function printScanSummary(
     completed >= started
       ? Math.floor((completed - started) / 1_000)
       : progress?.elapsedSeconds ?? 0;
-  errorOutput.write(`codex-security: Elapsed: ${elapsed}s.\n`);
+  const duration =
+    elapsed < 60
+      ? `${elapsed}s`
+      : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+  const findingCount = result.findings.findings.length;
+  const findingColor =
+    findingCount === 0
+      ? 32
+      : severities.has("critical") || severities.has("high")
+        ? 31
+        : severities.has("medium")
+          ? 33
+          : 36;
+  errorOutput.write(
+    `\n  ${paint("REPORT", "1;36")}    ${paint(cliErrorMessage(result.reportPath), 4)}\n\n` +
+      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${severitySummary === "" ? "" : ` (${severitySummary})`}`, findingColor)}\n` +
+      `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
+      `  ${paint("ELAPSED", 1)}   ${duration}\n`,
+  );
 
   const tokenSummary = formatTokenUsage(result.turnResult.usage);
   if (tokenSummary !== null) {
-    errorOutput.write(`codex-security: Tokens: ${tokenSummary}.\n`);
+    errorOutput.write(`  ${paint("TOKENS", 1)}    ${tokenSummary}\n`);
   }
   if (result.cost !== null) {
     errorOutput.write(
-      `codex-security: Estimated cost: ${formatUsd(result.cost.estimatedUsd)} USD.\n`,
+      `  ${paint("COST", 1)}      ${formatUsd(result.cost.estimatedUsd)}\n`,
     );
   }
   errorOutput.write(
-    `codex-security: Report: ${cliErrorMessage(result.reportPath)}\n`,
-  );
-  errorOutput.write(
-    `codex-security: Results: ${cliErrorMessage(result.scanDir)}\n`,
+    `  ${paint("RESULTS", 1)}   ${cliErrorMessage(result.scanDir)}\n`,
   );
 }
 
@@ -2709,7 +2840,7 @@ function protectedRootErrorMessage(
         ? "Set TMPDIR (or TEMP on Windows) to a writable directory outside the protected root."
         : `Set TMPDIR (or TEMP on Windows) to ${quoteCliPath(suggestion)} after creating that directory.`;
   return [
-    `codex-security: ${description} must be outside the scanned directory and any enclosing Git worktree.`,
+    `${description} must be outside the scanned directory and any enclosing Git worktree.`,
     `  Resolved path:  ${error.outputDirectory}`,
     `  Protected root: ${error.protectedRoot}`,
     `  Reason:         ${reason}`,

@@ -22,7 +22,7 @@ export interface ScanModelConfiguration {
 }
 
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
-  cli_auth_credentials_store: "file",
+  cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
   model_reasoning_effort: "xhigh",
   features: {
@@ -32,6 +32,10 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
       enabled: true,
       max_concurrent_threads_per_session: 9,
     },
+  },
+  // Named filesystem profiles need an active Windows sandbox backend.
+  windows: {
+    sandbox: "unelevated",
   },
 };
 
@@ -68,7 +72,38 @@ export async function mergedCodexConfig(
   const overrides = cloneJson(config.codexOverrides ?? {});
   validateOverrides(overrides);
   validateNativeMultiAgentV2Overrides(overrides);
+  normalizeLegacyWindowsSandboxOverride(overrides);
+  const profiles = overrides["profiles"];
+  if (isObject(profiles)) {
+    for (const profile of Object.values(profiles)) {
+      if (isObject(profile)) {
+        normalizeLegacyWindowsSandboxOverride(profile);
+      }
+    }
+  }
   return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
+}
+
+function normalizeLegacyWindowsSandboxOverride(overrides: JsonObject): void {
+  const features = overrides["features"];
+  if (!isObject(features)) {
+    return;
+  }
+  const elevated = features["elevated_windows_sandbox"];
+  if (typeof elevated !== "boolean") {
+    return;
+  }
+  const windows = overrides["windows"];
+  if (
+    windows !== undefined &&
+    (!isObject(windows) || Object.hasOwn(windows, "sandbox"))
+  ) {
+    return;
+  }
+  overrides["windows"] = {
+    ...(isObject(windows) ? windows : {}),
+    sandbox: elevated ? "elevated" : "unelevated",
+  };
 }
 
 export async function writeCodexConfig(

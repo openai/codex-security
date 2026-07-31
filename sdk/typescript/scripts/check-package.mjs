@@ -4,6 +4,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
+import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
+
+const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
+  packageSmokeTimeouts().processTimeoutMs;
 
 const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
@@ -279,15 +283,16 @@ if (args.length === 1) {
     [fileURLToPath(new URL("./smoke-package.mjs", import.meta.url)), archive],
     {
       stdio: "inherit",
-      timeout: 150_000,
+      timeout: PACKAGE_SMOKE_PROCESS_TIMEOUT_MS,
       killSignal: "SIGKILL",
       windowsHide: true,
     },
   );
   if (smoke.error?.code === "ETIMEDOUT") {
-    throw new Error("Installed npm package smoke timed out after 150000 ms.", {
-      cause: smoke.error,
-    });
+    throw new Error(
+      `Installed npm package smoke timed out after ${PACKAGE_SMOKE_PROCESS_TIMEOUT_MS} ms.`,
+      { cause: smoke.error },
+    );
   }
   if (smoke.error !== undefined) throw smoke.error;
   if (smoke.status !== 0) {

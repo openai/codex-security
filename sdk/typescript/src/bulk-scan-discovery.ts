@@ -197,22 +197,20 @@ async function selectGitHubOwner(
   prompt: BulkScanPrompt,
   signal?: AbortSignal,
 ): Promise<string> {
-  const { data } = await github.request("GET /user/orgs", {
-    per_page: 100,
-    request: { signal },
-  });
-  const organizations = data.map(({ login }) => login).sort();
-  if (organizations.length > 1) {
+  const [orgs, user] = await Promise.all([
+    github.request("GET /user/orgs", { per_page: 100, request: { signal } }),
+    github.request("GET /user", { request: { signal } }),
+  ]);
+  const personal = user.data.login;
+  const owners = [personal, ...orgs.data.map(({ login }) => login)].sort();
+  if (owners.length > 1) {
     return await prompt.select(
       "Which account or organization should we scan?",
-      organizations.map((owner) => ({ label: owner, value: owner })),
+      owners.map((owner) => ({ label: owner, value: owner })),
     );
   }
-  const owner =
-    organizations[0] ??
-    (await github.request("GET /user", { request: { signal } })).data.login;
-  prompt.write(`\nFinding repositories in ${owner}.\n`);
-  return owner;
+  prompt.write(`\nFinding repositories in ${personal}.\n`);
+  return personal;
 }
 
 async function selectGitHubRepositories(

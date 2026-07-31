@@ -822,6 +822,80 @@ describe("canonical scan contract", () => {
     }
   });
 
+  test("accepts Git-backed scans when the SDK cannot resolve a revision", async () => {
+    const scanDir = await copyExample();
+
+    await expect(
+      loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          ...expectation({ kind: "repository", paths: [] }),
+          repositoryRevision: null,
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  test("accepts directory scans without requiring a Git repository", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifest = await readJson(manifestPath);
+    const coverage = await readJson(coveragePath);
+    manifest["scan"]["target"]["kind"] = "directory_snapshot";
+    delete manifest["scan"]["target"]["revision"];
+    delete manifest["scan"]["target"]["remote"];
+    coverage["inventoryStrategy"] = "directory";
+    await writeJson(manifestPath, manifest);
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    for (const repositoryRevision of [null, "deadbeef"]) {
+      await expect(
+        loadContract(scanDir, {
+          pluginRoot: PLUGIN_ROOT,
+          expectation: {
+            ...expectation({ kind: "repository", paths: [] }),
+            repositoryRevision,
+          },
+        }),
+      ).resolves.toBeDefined();
+    }
+  });
+
+  test("rejects Git-backed scans for a different revision", async () => {
+    const scanDir = await copyExample();
+
+    await expect(
+      loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          ...expectation({ kind: "repository", paths: [] }),
+          repositoryRevision: "different-revision",
+        },
+      }),
+    ).rejects.toThrow("Scan target revision does not match the repository.");
+  });
+
+  test("rejects diff targets for repository scans", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    manifest["scan"]["target"]["kind"] = "git_diff";
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          ...expectation({ kind: "repository", paths: [] }),
+          repositoryRevision: null,
+        },
+      }),
+    ).rejects.toThrow("Repository scan manifest target must not be git_diff.");
+  });
+
   test("binds requested path scope, mode, and plugin version", async () => {
     const scanDir = await copyExample();
     const coveragePath = join(scanDir, "coverage.json");
