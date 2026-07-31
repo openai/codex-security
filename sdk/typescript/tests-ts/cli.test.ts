@@ -705,6 +705,49 @@ describe("CLI", () => {
     }
   });
 
+  test("expands ~ in bulk-scan path arguments", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-tilde-"));
+    const home = join(root, "home");
+    const work = join(root, "work");
+    const previousHome = process.env.HOME;
+    const previousProfile = process.env.USERPROFILE;
+    try {
+      await mkdir(home);
+      await mkdir(work);
+      await multiscanInventory(home);
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "bulk-scan",
+            "~/repositories.csv",
+            "--output-dir",
+            "~/security-scans",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: work,
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        resultsPath: join(home, "security-scans", "results.jsonl"),
+      });
+      expect(await stat(join(work, "~")).catch(() => null)).toBeNull();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousProfile;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("preserves the bulk-scan failure summary and redacts progress errors", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
