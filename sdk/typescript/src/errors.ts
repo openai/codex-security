@@ -9,7 +9,7 @@ export function redactedErrorMessage(error: unknown): string {
   );
   return redactQuotedCredentialValues(withoutPrivateKeys)
     .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:authorization|auth)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9._~-]{0,63})((?:\s|%20|\+)+)(?!\[redacted\]|[A-Za-z_][A-Za-z0-9_-]{0,64}\s*[:=]\s*(?=[^=\s"',;}&\\\]]))[^\s"',;}&\\\]]+/giu,
+      /(\b[A-Za-z0-9_-]{0,64}(?:authorization|auth)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9._~-]{0,63})((?:\s|%20|\+)+)(?!\[redacted\]|(?!key\s*=)[A-Za-z_][A-Za-z0-9_-]{0,64}\s*[:=]\s*(?=[^=\s"',;}&\\\]]))[^\s"',;}&\\\]]+/giu,
       "$1$2$3[redacted]",
     )
     .replaceAll(

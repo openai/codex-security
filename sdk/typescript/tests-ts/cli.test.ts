@@ -2211,6 +2211,8 @@ describe("CLI", () => {
       ],
       ["Authorization: ApiKey dGVzdA==", "Authorization: ApiKey [redacted]"],
       ["Authorization: ApiKey dGVzdA=", "Authorization: ApiKey [redacted]"],
+      ["Authorization: ApiKey key=SECRET", "Authorization: ApiKey [redacted]"],
+      ["auth=Custom key=SECRET", "auth=Custom [redacted]"],
       [
         "client_auth_token=Custom dGVzdA==",
         "client_auth_token=Custom [redacted]",
