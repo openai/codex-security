@@ -16,7 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
+from workbench_constants import GIT_REPOSITORY_ENVIRONMENT, trusted_git_executable
 
 
 def git_output(
@@ -54,10 +54,22 @@ def git_command(
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
-    command = ["git", "-c", "core.fsmonitor=false", "-C", str(target)]
+    executable = trusted_git_executable(target)
+    command = [
+        executable or "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        str(target),
+    ]
     if git_dir is not None and work_tree is not None:
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
+    if executable is None:
+        empty_output = "" if text else b""
+        return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
     try:
         return subprocess.run(
             full_command,

@@ -1858,6 +1858,113 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result).toEqual({ ok: true });
   });
 
+  testPosix(
+    "uses trusted Git for workbench commands instead of a repository-local shim",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const shimDirectory = join(repository, "node_modules", ".bin");
+      const pluginRoot = join(root, "plugin");
+      const marker = join(root, "repository-git-executed");
+      await mkdir(shimDirectory, { recursive: true });
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      await writeFile(
+        join(shimDirectory, "git"),
+        `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, subprocess",
+          "assert os.environ.get('GIT_CONFIG_COUNT') is None",
+          "git = os.environ['CODEX_SECURITY_GIT']",
+          "completed = subprocess.run([git, '--version'], check=True, capture_output=True, text=True)",
+          "print(json.dumps({'git': git, 'path': os.environ.get('PATH'), 'version': completed.stdout.strip()}))",
+        ].join("\n"),
+      );
+      const python = Bun.which("python3") ?? Bun.which("python");
+      const git = Bun.which("git");
+      expect(python).not.toBeNull();
+      expect(git).not.toBeNull();
+
+      const result = await runWorkbench(
+        {
+          python: python!,
+          pluginRoot,
+          protectedRoot: repository,
+          environment: {
+            PATH: `${shimDirectory}${delimiter}${dirname(git!)}`,
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.fsmonitor",
+            GIT_CONFIG_VALUE_0: join(repository, "fsmonitor"),
+          },
+        },
+        ["test-command"],
+      );
+
+      expect(result).toMatchObject({
+        git,
+        version: expect.stringMatching(/^git version /u),
+      });
+      expect(String(result["path"]).split(delimiter)).not.toContain(
+        shimDirectory,
+      );
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  testPosix(
+    "does not let diff ranking fall back to a repository-local Git shim",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const shimDirectory = join(repository, "node_modules", ".bin");
+      const marker = join(root, "rank-git-executed");
+      const output = join(root, "rank-input.jsonl");
+      await mkdir(shimDirectory, { recursive: true });
+      await writeFile(
+        join(shimDirectory, "git"),
+        `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o700 },
+      );
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-diff-rank-input",
+          "--repo",
+          repository,
+          "--base",
+          "HEAD",
+          "--mode",
+          "local-patch",
+          "--out",
+          output,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            PATH: shimDirectory,
+            CODEX_SECURITY_GIT: join(shimDirectory, "git"),
+          },
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "CODEX_SECURITY_GIT must stay outside the protected repository.",
+      );
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(output)).toBe(false);
+    },
+  );
+
   test("preserves recorded artifact paths when archiving a completed scan", async () => {
     const root = await temporaryDirectory();
     const scanDir = join(root, "scan");
@@ -2283,6 +2390,33 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(managed);
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
+      PYTHON: managed,
+    });
+    expect(
+      pluginExecutionEnvironment(
+        managed,
+        { PATH: "/repository/bin", GIT_CONFIG_COUNT: "1", TEST: "1" },
+        {
+          executable: "/trusted/bin/git",
+          environment: { PATH: "/trusted/bin" },
+        },
+      ),
+    ).toEqual({
+      PATH: "/trusted/bin",
+      TEST: "1",
+      CODEX_SECURITY_GIT: "/trusted/bin/git",
+      PYTHON: managed,
+    });
+    expect(
+      pluginExecutionEnvironment(
+        managed,
+        { Path: "/repository/bin", TEST: "1" },
+        null,
+      ),
+    ).toEqual({
+      PATH: "",
+      TEST: "1",
+      CODEX_SECURITY_GIT: "",
       PYTHON: managed,
     });
     await expect(

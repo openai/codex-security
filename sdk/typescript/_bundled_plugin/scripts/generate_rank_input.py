@@ -37,6 +37,7 @@ from pathlib import Path
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
+from workbench_constants import trusted_git_executable
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -488,12 +489,21 @@ def bind_repo_scopes(args: argparse.Namespace) -> None:
 
 
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
+    git = trusted_git_executable(repo)
+    if git is None:
+        raise SystemExit("Git is unavailable on the trusted executable path.")
     result = subprocess.run(
         [
-            "git",
+            git,
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
             "-C",
             str(repo),
             "diff",
+            "--no-ext-diff",
+            "--no-textconv",
             "--name-status",
             "-z",
             "--diff-filter=ACMRD",

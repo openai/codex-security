@@ -1,6 +1,8 @@
 """Shared constants for the Codex Security workbench."""
 
 import argparse
+import os
+from pathlib import Path
 
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
@@ -71,6 +73,26 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_WORK_TREE",
 )
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def trusted_git_executable(protected_root: Path | None = None) -> str | None:
+    executable = os.environ.get("CODEX_SECURITY_GIT")
+    if not executable:
+        return None
+    candidate = Path(executable)
+    if not candidate.is_absolute():
+        raise SystemExit("CODEX_SECURITY_GIT must name an absolute trusted executable.")
+    try:
+        canonical = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.") from exc
+    if not canonical.is_file() or not os.access(canonical, os.X_OK):
+        raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.")
+    if protected_root is not None:
+        root = protected_root.resolve()
+        if canonical == root or root in canonical.parents:
+            raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
+    return str(canonical)
 
 
 def main() -> None:

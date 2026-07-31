@@ -2907,6 +2907,7 @@ describe("CodexSecurity orchestration", () => {
           const runtime = preparedRuntime(codexHome);
           return {
             ...runtime,
+            environment: { PATH: process.env["PATH"] },
             plugin: {
               ...(runtime["plugin"] as Record<string, unknown>),
               installedRoot: join(
@@ -2960,6 +2961,7 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_SCAN_DIR: scanDir,
       CODEX_SECURITY_PLUGIN_ROOT: PLUGIN_ROOT,
       CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
+      CODEX_SECURITY_GIT: expect.stringMatching(/git(?:\.exe)?$/iu),
     });
     expect(environment).not.toHaveProperty("CODEX_SECURITY_TARGET_PATHS_JSON");
     const targetPathsFile = environment?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
