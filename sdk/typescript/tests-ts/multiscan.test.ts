@@ -8,6 +8,7 @@ import {
   readdir,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -438,6 +439,59 @@ describe("multiscan", () => {
     expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
     expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
     await expect(access(lock)).rejects.toThrow();
+  });
+
+  test("recovers locks with missing or malformed owner metadata", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-recovery");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlock-recovery,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    const aged = new Date(Date.now() - 2 * 60_000);
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    for (const owner of [undefined, '{"pid":', '{"pid":"invalid"}']) {
+      await mkdir(lock);
+      if (owner !== undefined) {
+        await writeFile(join(lock, "owner.json"), owner);
+      }
+      await utimes(lock, aged, aged);
+      const result = await runMultiscan(options(paths, security));
+      expect(result).toMatchObject({ completed: 1, failed: 0 });
+      await expect(access(lock)).rejects.toThrow();
+    }
+
+    expect(scans).toBe(1);
+    expect(
+      (await readdir(paths.output)).some((name) =>
+        name.startsWith(".lock.stale-"),
+      ),
+    ).toBe(false);
+  });
+
+  test("treats a fresh lock without owner metadata as an active supervisor", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-fresh");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlock-fresh,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    await mkdir(join(paths.output, ".lock"));
+    const security = client(async (_repository, scanOptions = {}) => {
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+      /running|locked|supervisor/iu,
+    );
   });
 
   test("retries a failed attempt and records both durable receipts", async () => {

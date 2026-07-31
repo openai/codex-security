@@ -28,6 +28,7 @@ const REQUIRED_ARTIFACTS = [
   "coverage.json",
   "report.md",
 ];
+const INCOMPLETE_LOCK_MILLISECONDS = 30_000;
 
 interface MultiscanTask {
   id: string;
@@ -268,29 +269,71 @@ async function appendReceipt(path: string, receipt: string): Promise<void> {
 async function acquireLock(output: string): Promise<() => Promise<void>> {
   const path = join(output, ".lock");
   const ownerPath = join(path, "owner.json");
-  try {
-    await mkdir(path, { mode: 0o700 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const { pid } = JSON.parse(await readFile(ownerPath, "utf8")) as {
-      pid: number;
-    };
+  for (;;) {
     try {
-      process.kill(pid, 0);
-      throw new Error("A multiscan supervisor is already running.");
-    } catch (failure) {
-      if ((failure as NodeJS.ErrnoException).code !== "ESRCH") throw failure;
+      await mkdir(path, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!(await recoverStaleLock(output, path, ownerPath))) {
+        throw new Error("A multiscan supervisor is already running.");
+      }
+      continue;
     }
-    const stale = join(output, `.lock.stale-${randomUUID()}`);
-    await rename(path, stale);
-    await rm(stale, { recursive: true });
-    return await acquireLock(output);
+    await writeFile(ownerPath, `${JSON.stringify({ pid: process.pid })}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    return async () => rm(path, { recursive: true });
   }
-  await writeFile(ownerPath, `${JSON.stringify({ pid: process.pid })}\n`, {
-    flag: "wx",
-    mode: 0o600,
+}
+
+async function recoverStaleLock(
+  output: string,
+  path: string,
+  ownerPath: string,
+): Promise<boolean> {
+  const metadata = await lstat(path).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   });
-  return async () => rm(path, { recursive: true });
+  if (metadata === null) return true;
+
+  let owner: unknown;
+  if (metadata.isDirectory()) {
+    try {
+      owner = JSON.parse(await readFile(ownerPath, "utf8"));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    }
+  }
+
+  if (isRecord(owner) && typeof owner["pid"] === "number") {
+    try {
+      process.kill(owner["pid"], 0);
+      return false;
+    } catch (failure) {
+      const code = (failure as NodeJS.ErrnoException).code;
+      if (code === "EPERM") return false;
+      if (code !== "ESRCH") throw failure;
+    }
+  } else if (Date.now() - metadata.mtimeMs < INCOMPLETE_LOCK_MILLISECONDS) {
+    return false;
+  }
+
+  const stale = join(output, `.lock.stale-${randomUUID()}`);
+  try {
+    await rename(path, stale);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+  await rm(stale, { recursive: true, force: true });
+  return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function ensureManifest(
