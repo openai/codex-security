@@ -54,6 +54,28 @@ type ReleaseAutomation = {
     integrity: string;
     sha256: string;
   };
+  verifyGitHubPublishedRelease: (
+    metadata: ReleaseMetadata,
+    archive: Uint8Array,
+    expected: {
+      version: string;
+      gitHead: string;
+      repository: string;
+      runId: string;
+    },
+    provenance: {
+      version: string;
+      gitHead: string;
+      repository: string;
+      runId: string;
+      sha512: string;
+    },
+  ) => {
+    version: string;
+    gitHead: string;
+    integrity: string;
+    sha256: string;
+  };
   verifySignatureAudit: (
     report: ReleaseMetadata,
     archive: Uint8Array,
@@ -108,6 +130,7 @@ const {
   requirePublishedReleaseIncrease,
   releaseHistory,
   verifyPublishedRelease,
+  verifyGitHubPublishedRelease,
   verifySignatureAudit,
   verifyRecoveredSignatureAudit,
   verifyGitHubRelease,
@@ -741,6 +764,111 @@ describe("published npm release verification", () => {
         { version: "0.1.2", gitHead: releaseCommit },
       ),
     ).toThrow("Published npm package must have SLSA v1 provenance.");
+  });
+});
+
+describe("GitHub release publication verification", () => {
+  const expected = {
+    version: "0.1.2",
+    gitHead: releaseCommit,
+    repository: releaseRepository,
+    runId: releaseRun,
+  };
+  const provenance = {
+    ...expected,
+    sha512,
+  };
+
+  test("retains strict source and artifact verification for current releases", () => {
+    expect(
+      verifyGitHubPublishedRelease(
+        publishedMetadata(),
+        archive,
+        expected,
+        provenance,
+      ),
+    ).toEqual({
+      version: "0.1.2",
+      gitHead: releaseCommit,
+      integrity,
+      sha256: digest.slice("sha256:".length),
+    });
+  });
+
+  test.each(["0.1.0", "0.1.1"])(
+    "recovers the missing gitHead only from verified provenance for %s",
+    (version) => {
+      const metadata: ReleaseMetadata = { ...publishedMetadata(), version };
+      delete metadata["gitHead"];
+
+      expect(
+        verifyGitHubPublishedRelease(
+          metadata,
+          archive,
+          { ...expected, version },
+          { ...provenance, version },
+        ),
+      ).toEqual({
+        version,
+        gitHead: releaseCommit,
+        integrity,
+        sha256: digest.slice("sha256:".length),
+      });
+
+      expect(() =>
+        verifyPublishedRelease(metadata, archive, { ...expected, version }),
+      ).toThrow("npm package gitHead must match release commit");
+    },
+  );
+
+  test("rejects a missing gitHead on all later npm releases", () => {
+    const metadata: ReleaseMetadata = { ...publishedMetadata() };
+    delete metadata["gitHead"];
+
+    expect(() =>
+      verifyGitHubPublishedRelease(metadata, archive, expected, provenance),
+    ).toThrow("Only npm releases 0.1.0 and 0.1.1 may omit gitHead.");
+  });
+
+  test("rejects a mismatched historical npm gitHead", () => {
+    expect(() =>
+      verifyGitHubPublishedRelease(
+        {
+          ...publishedMetadata(),
+          version: "0.1.0",
+          gitHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+        archive,
+        { ...expected, version: "0.1.0" },
+        { ...provenance, version: "0.1.0" },
+      ),
+    ).toThrow("npm package gitHead must match release commit");
+  });
+
+  test.each([
+    { version: "0.1.1" },
+    { gitHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    { repository: "different/codex-security" },
+    { runId: "30481596228" },
+    { sha512: "0".repeat(128) },
+  ])("rejects signed provenance that does not match %j", (mismatch) => {
+    expect(() =>
+      verifyGitHubPublishedRelease(publishedMetadata(), archive, expected, {
+        ...provenance,
+        ...mismatch,
+      }),
+    ).toThrow("Verified signed npm provenance must match the GitHub release.");
+  });
+
+  test("rejects missing verified provenance", () => {
+    expect(() =>
+      verifyGitHubPublishedRelease(
+        publishedMetadata(),
+        archive,
+        expected,
+        undefined as unknown as typeof provenance,
+      ),
+    ).toThrow("Verified signed npm provenance must match the GitHub release.");
   });
 });
 
@@ -2129,7 +2257,9 @@ describe("GitHub release workflow safeguards", () => {
           '  if [[ "${1:-}" == "sdk/typescript/scripts/release-automation.mjs" ]]; then',
           "    cat >/dev/null",
           '    case "$2" in',
-          "      verify-publication)",
+          "      verify-github-publication)",
+          '        if [[ -z "${CODEX_SECURITY_VERIFIED_PROVENANCE:-}" ||',
+          '              "$6" != "$GITHUB_REPOSITORY" ]]; then return 69; fi',
           "        printf '%s\\n' 'verified published artifact'",
           "        ;;",
           "      verify-provenance)",

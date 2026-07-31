@@ -437,6 +437,36 @@ export function verifyPublishedRelease(metadata, archive, expected) {
   };
 }
 
+export function verifyGitHubPublishedRelease(
+  metadata,
+  archive,
+  expected,
+  provenance,
+) {
+  const version = releaseVersion(metadata);
+  const sha512 = createHash("sha512").update(archive).digest("hex");
+  if (
+    provenance?.version !== version ||
+    provenance.gitHead !== expected.gitHead ||
+    provenance.repository !== expected.repository ||
+    provenance.runId !== String(expected.runId) ||
+    provenance.sha512 !== sha512
+  ) {
+    throw new Error(
+      "Verified signed npm provenance must match the GitHub release.",
+    );
+  }
+
+  if (metadata.gitHead === undefined) {
+    if (version !== "0.1.0" && version !== "0.1.1") {
+      throw new Error("Only npm releases 0.1.0 and 0.1.1 may omit gitHead.");
+    }
+    metadata = { ...metadata, gitHead: provenance.gitHead };
+  }
+
+  return verifyPublishedRelease(metadata, archive, expected);
+}
+
 export function verifySignatureAudit(report, archive, expected) {
   if (
     !Array.isArray(report?.invalid) ||
@@ -793,6 +823,27 @@ function main() {
     return;
   }
 
+  if (command === "verify-github-publication" && process.argv.length === 8) {
+    const metadata = JSON.parse(readFileSync(0, "utf8"));
+    const archive = readFileSync(process.argv[3]);
+    const provenance = JSON.parse(
+      process.env.CODEX_SECURITY_VERIFIED_PROVENANCE ?? "null",
+    );
+    const verified = verifyGitHubPublishedRelease(
+      metadata,
+      archive,
+      {
+        version: process.argv[4],
+        gitHead: process.argv[5],
+        repository: process.argv[6],
+        runId: process.argv[7],
+      },
+      provenance,
+    );
+    console.log(JSON.stringify(verified));
+    return;
+  }
+
   if (command === "verify-provenance" && process.argv.length === 8) {
     const report = JSON.parse(readFileSync(0, "utf8"));
     const archive = readFileSync(process.argv[3]);
@@ -848,6 +899,9 @@ function main() {
       "release-history <tag>, " +
       "verify-publication <archive> <version> <git-head> " +
       "(package metadata JSON from stdin), " +
+      "verify-github-publication <archive> <version> <git-head> " +
+      "<repository> <run-id> (package metadata JSON from stdin and " +
+      "verified provenance from CODEX_SECURITY_VERIFIED_PROVENANCE), " +
       "verify-provenance <archive> <version> <git-head> <repository> <run-id> " +
       "(signature audit JSON from stdin), " +
       "verify-recovered-provenance <archive> <version> <git-head> " +

@@ -225,10 +225,6 @@ jobs:
               --registry=https://registry.npmjs.org/
           )"
 
-          printf '%s\n' "$metadata" |
-            node sdk/typescript/scripts/release-automation.mjs \
-              verify-publication "$archive" "$RELEASE_VERSION" "$RELEASE_SHA"
-
           consumer="$(mktemp -d)"
           trap 'rm -rf "$consumer"' EXIT
           npm install \
@@ -257,6 +253,7 @@ jobs:
                 "$GITHUB_REPOSITORY" \
                 "$RELEASE_RUN_ID" 2>/dev/null
           )"; then
+            verified_run_id="$RELEASE_RUN_ID"
             printf '%s\n' "$verified_provenance"
             echo "Verified npm provenance for the resolved release run."
           else
@@ -305,9 +302,20 @@ jobs:
               exit 1
             fi
 
+            verified_run_id="$original_run_id"
             printf '%s\n' "$verified_provenance"
             echo "Verified protected recovery provenance from its original signing run."
           fi
+
+          printf '%s\n' "$metadata" |
+            CODEX_SECURITY_VERIFIED_PROVENANCE="$verified_provenance" \
+              node sdk/typescript/scripts/release-automation.mjs \
+                verify-github-publication \
+                "$archive" \
+                "$RELEASE_VERSION" \
+                "$RELEASE_SHA" \
+                "$GITHUB_REPOSITORY" \
+                "$verified_run_id"
 
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
 
