@@ -1568,6 +1568,69 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     {
+      kind: "missing tag with GitHub's 404 error body",
+      lookupResponse: JSON.stringify({ message: "Not Found", status: "404" }),
+      status: 0,
+    },
+    {
+      kind: "forbidden tag lookup",
+      lookupResponse: JSON.stringify({ message: "Forbidden", status: "403" }),
+      status: 1,
+    },
+    {
+      kind: "unavailable tag lookup",
+      lookupResponse: "",
+      status: 1,
+    },
+  ])(
+    "handles $kind safely before cutting a release",
+    ({ lookupResponse, status }) => {
+      const script = workflowStepShell(
+        releaseCutWorkflow,
+        "Create the exact merged release tag",
+      );
+      const mock = [
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        '  if [[ "$1" == "repos/test/codex-security/git/ref/tags/npm-v0.1.2" ]]; then',
+        "    printf '%s\\n' \"$MOCK_LOOKUP_RESPONSE\"",
+        "    return 1",
+        "  fi",
+        '  if [[ "$1" != "--method" || "$2" != "POST" ||',
+        '        "$3" != "repos/test/codex-security/git/refs" ||',
+        '        "$4" != "-f" || "$5" != "ref=refs/tags/npm-v0.1.2" ||',
+        '        "$6" != "-f" || "$7" != "sha=$GITHUB_SHA" ||',
+        '        "$8" != "--silent" ]]; then return 65; fi',
+        "  printf 'created exact release tag\\n'",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          GITHUB_SHA: releaseCommit,
+          MOCK_LOOKUP_RESPONSE: lookupResponse,
+          RELEASE_TAG: "npm-v0.1.2",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(status);
+      if (status === 0) {
+        expect(result.stdout).toContain("created exact release tag");
+      } else {
+        expect(result.stderr).toContain(
+          "Unable to query release tag npm-v0.1.2.",
+        );
+        expect(result.stdout).not.toContain("created exact release tag");
+      }
+    },
+  );
+
+  test.each([
+    {
       kind: "existing lightweight tag",
       tagType: "commit",
       tagObject: releaseCommit,
