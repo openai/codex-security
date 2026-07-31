@@ -193,6 +193,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     return decodeXml(
       xml
         .replace(/<\/(?:\w+:)?p\s*>/gu, "\n")
+        .replace(/<(?:\w+:)?br\b[^>]*\/>/gu, "\n")
         .replace(/<(?:\w+:)?tab\b[^>]*\/>/gu, "\t")
         .replace(/<[^>]+>/gu, ""),
     );
