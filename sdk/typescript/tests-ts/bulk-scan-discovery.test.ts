@@ -321,6 +321,22 @@ describe("bulk scan repository discovery", () => {
     );
   });
 
+  test("normalizes configured GitHub host names", async () => {
+    const root = await temporaryDirectory();
+    const { dependencies, prompt, hosts } = discoveryDependencies(root, {
+      host: "GitHub.COM",
+    });
+    prompt.confirms = [true];
+
+    const result = await runBulkScanWizard(dependencies);
+
+    expect(result?.githubHost).toBe("github.com");
+    expect(hosts).toEqual(["github.com"]);
+    expect(await readFile(result!.inputPath, "utf8")).toContain(
+      "https://github.com/acme/payments-api.git",
+    );
+  });
+
   test("requires an existing GitHub sign-in", async () => {
     const root = await temporaryDirectory();
     const { dependencies, requests } = discoveryDependencies(root, {

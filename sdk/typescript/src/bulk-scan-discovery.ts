@@ -139,7 +139,7 @@ export async function runBulkScanWizard(
   }
   signal?.throwIfAborted();
 
-  const githubHost = dependencies.githubHost ?? "github.com";
+  const githubHost = (dependencies.githubHost ?? "github.com").toLowerCase();
   const github = await dependencies.createGitHub(githubHost, signal);
   const owner = await selectGitHubOwner(github, prompt, signal);
   prompt.write("\nFinding active repositories...\n");
