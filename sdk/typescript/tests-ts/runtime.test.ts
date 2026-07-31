@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readlink,
   realpath,
   readdir,
   rm,
@@ -945,6 +946,132 @@ describe("runtime directories and plugin Python boundary", () => {
       ["test-command"],
     );
     expect(result).toEqual({ ok: true });
+  });
+
+  test.each([
+    ["all required draft artifacts", []],
+    ["the manifest draft", ["findings.json", "coverage.json"]],
+    ["the findings draft", ["scan-manifest.json", "coverage.json"]],
+    ["the coverage draft", ["scan-manifest.json", "findings.json"]],
+  ] as const)(
+    "rejects recipe scans when the agent did not create %s",
+    async (_description, present) => {
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const requiredDrafts = [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+      ] as const;
+      const root = await temporaryDirectory("codex-security-missing-drafts-");
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir, { mode: 0o700 });
+      const workbenchOptions = {
+        python: python!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+      };
+      const registration = await runWorkbench(workbenchOptions, [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository,
+          target: { kind: "repository", paths: [] },
+        }),
+      ]);
+      await Promise.all(
+        present.map((filename) =>
+          copyFile(
+            join(PLUGIN_ROOT, "examples", "completed-scan", filename),
+            join(scanDir, filename),
+          ),
+        ),
+      );
+      const missing = requiredDrafts.filter(
+        (filename) => !present.some((candidate) => candidate === filename),
+      );
+
+      await expect(
+        runWorkbench(workbenchOptions, [
+          "complete-scan",
+          "--scan-id",
+          String(registration["scanId"]),
+        ]),
+      ).rejects.toThrow(
+        `Scan agent did not create required draft artifacts: ${missing.join(
+          ", ",
+        )}. Check that the scan agent can run shell commands and write to the scan directory before retrying.`,
+      );
+      expect((await readdir(scanDir)).sort()).toEqual([...present].sort());
+      const stored = await runWorkbench(workbenchOptions, [
+        "get-scan",
+        "--scan-id",
+        String(registration["scanId"]),
+      ]);
+      expect(stored["scan"]).toMatchObject({
+        progress: { status: "running" },
+      });
+    },
+  );
+
+  testPosix("rejects symlinked recipe scan draft artifacts", async () => {
+    const root = await temporaryDirectory("codex-security-symlinked-draft-");
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const workbenchOptions = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+    };
+    const registration = await runWorkbench(workbenchOptions, [
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository,
+        target: { kind: "repository", paths: [] },
+      }),
+    ]);
+    await symlink(
+      join(root, "missing-manifest.json"),
+      join(scanDir, "scan-manifest.json"),
+    );
+
+    await expect(
+      runWorkbench(workbenchOptions, [
+        "complete-scan",
+        "--scan-id",
+        String(registration["scanId"]),
+      ]),
+    ).rejects.toThrow(
+      "scan-manifest.json: expected a regular file inside the scan directory.",
+    );
+    expect(await readlink(join(scanDir, "scan-manifest.json"))).toBe(
+      join(root, "missing-manifest.json"),
+    );
   });
 
   test("preserves recorded artifact paths when archiving a completed scan", async () => {
