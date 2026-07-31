@@ -516,6 +516,47 @@ Progress remains on stderr so JSON output stays machine readable. Network
 failures and rate limits remain retryable; definitive authentication and model
 authorization failures stop immediately.
 
+## Containerized bulk scans
+
+Create `repositories.csv` with one full, immutable Git commit per repository:
+
+```csv
+id,repository,revision
+payments,https://github.com/example/payments.git,0123456789abcdef0123456789abcdef01234567
+```
+
+Once the approved image has been published, prepare private results and
+authentication directories, sign in, and run the Docker Compose configuration
+from the root of the Codex Security repository:
+
+```bash
+mkdir -p results state
+chmod 700 results state
+export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.4
+docker compose pull codex-security
+docker compose run --rm codex-security login --device-auth
+docker compose run --rm codex-security
+```
+
+Reports and resumable scan results are written to `results/`; the reusable
+device login remains in `state/`. For unattended scans, set `OPENAI_API_KEY`
+or `CODEX_API_KEY` instead. Set `GH_TOKEN` or `GITHUB_TOKEN` for private
+GitHub repositories.
+
+On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
+can install the optional, narrowly scoped AppArmor profile once:
+
+```bash
+sudo install -m 0644 docker/codex-security.apparmor /etc/apparmor.d/codex-security-container
+sudo apparmor_parser -r -W /etc/apparmor.d/codex-security-container
+docker compose -f compose.yaml -f compose.apparmor.yaml run --rm codex-security
+```
+
+The override preserves the nonroot user, dropped capabilities,
+no-new-privileges, and hardened seccomp policy. Other Docker hosts do not need
+the profile or override.
+
 ## Local security model
 
 Codex Security runs with your local operating-system permissions. Scan only

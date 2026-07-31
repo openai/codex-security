@@ -705,6 +705,7 @@ export async function validateOutputDir(
         );
       }
       requirePrivateOutputDirectory(metadata, path);
+      await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
       return canonical;
@@ -719,6 +720,7 @@ export async function validateOutputDir(
             relative(parent, path),
           );
           requireModelSafeOutputDir(canonical);
+          await requireSecureOutputAncestry(canonical);
           return canonical;
         }
         break;
@@ -842,6 +844,7 @@ export async function validatePreparedOutputDir(
     );
   }
   requirePrivateOutputDirectory(metadata, path);
+  await requireSecureOutputAncestry(canonical);
   return canonical;
 }
 

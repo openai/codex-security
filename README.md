@@ -63,6 +63,14 @@ console.log(result.reportPath);
 await security.close();
 ```
 
+## Containerized bulk scans
+
+Use the official image and included Docker Compose configuration for
+noninteractive, resumable scans of repositories pinned to immutable Git
+revisions. See the [container quick start](sdk/typescript/README.md#containerized-bulk-scans)
+for authentication, private result storage, and optional Ubuntu AppArmor
+hardening.
+
 For complete command help, runtime defaults, native multi-agent worker limits,
 environment variables, deep-scan configuration, and SDK options, see the
 [package README](sdk/typescript/README.md) and the

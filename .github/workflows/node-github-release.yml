@@ -1,0 +1,602 @@
+name: node-github-release
+
+on:
+  workflow_run:
+    workflows: [node-release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable npm release tag
+        required: true
+        type: string
+      run_id:
+        description: Successful node-release run to use for backfill
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-github-release
+  queue: max
+
+jobs:
+  release:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success'))
+    name: publish verified GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/heads/main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24.15.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Install provenance-capable npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_tools="$RUNNER_TEMP/codex-security-provenance-npm"
+          npm install \
+            --prefix "$npm_tools" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            --registry=https://openai.firewall.socket.dev/npm/ \
+            npm@11.12.1
+
+          if [[ "$("$npm_tools/node_modules/.bin/npm" --version)" != "11.12.1" ]]; then
+            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
+            exit 1
+          fi
+          printf '%s\n' "$npm_tools/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Verify bundled provenance-capable npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(npm --version)" != "11.12.1" ]]; then
+            echo "npm 11.12.1 is required to verify Sigstore attestations." >&2
+            exit 1
+          fi
+
+      - name: Resolve the successful protected release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          TRIGGER_TAG: ${{ github.event.workflow_run.head_branch }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${INPUT_TAG:-${TRIGGER_TAG:-}}"
+          release_run="${INPUT_RUN_ID:-${TRIGGER_RUN_ID:-}}"
+
+          if [[ ! "$release_tag" =~ ^npm-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "GitHub releases require an existing stable npm-vX.Y.Z tag." >&2
+            exit 1
+          fi
+
+          if ! tag_ref="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )"; then
+            echo "GitHub releases require an existing stable npm-vX.Y.Z tag." >&2
+            exit 1
+          fi
+
+          IFS=$'\t' read -r tag_type tag_object <<< "$tag_ref"
+          if [[ ! "$tag_object" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "GitHub releases require a valid Git tag object." >&2
+            exit 1
+          fi
+
+          case "$tag_type" in
+            commit)
+              release_sha="$tag_object"
+              ;;
+            tag)
+              if ! release_sha="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+                  --jq 'if .object.type == "commit" then .object.sha else empty end'
+              )"; then
+                echo "GitHub releases require a tag pointing to a commit." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "GitHub releases require a tag pointing to a commit." >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$release_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "GitHub releases require a tag pointing to a commit." >&2
+            exit 1
+          fi
+
+          if [[ -z "$release_run" ]]; then
+            release_run="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow node-release.yml \
+                --commit "$release_sha" \
+                --limit 20 \
+                --json databaseId,status,conclusion \
+                --jq '[.[] | select(.status == "completed" and .conclusion == "success")] | first | .databaseId // empty'
+            )"
+          fi
+
+          if [[ ! "$release_run" =~ ^[1-9][0-9]*$ ]]; then
+            echo "No successful protected npm release exists for $release_tag." >&2
+            exit 1
+          fi
+
+          run_fields="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$release_run" \
+              --jq '[.name, .status, .conclusion, .head_sha, .head_branch] | @tsv'
+          )"
+          IFS=$'\t' read -r run_name run_status run_conclusion run_sha run_tag <<< "$run_fields"
+
+          if [[ "$run_name" != "node-release" ||
+                "$run_status" != "completed" ||
+                "$run_conclusion" != "success" ||
+                "$run_sha" != "$release_sha" ||
+                "$run_tag" != "$release_tag" ]]; then
+            echo "The release run must successfully publish the exact tagged commit." >&2
+            exit 1
+          fi
+
+          {
+            printf 'tag=%s\n' "$release_tag"
+            printf 'version=%s\n' "${release_tag#npm-v}"
+            printf 'sha=%s\n' "$release_sha"
+            printf 'run-id=%s\n' "$release_run"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download the verified or durable npm release artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ steps.release.outputs.run-id }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if ! gh run download "$RELEASE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name npm-release-tarball \
+            --dir dist; then
+            echo "Release artifact expired; retrieving the public npm tarball."
+            npm pack "@openai/codex-security@$RELEASE_VERSION" \
+              --ignore-scripts \
+              --pack-destination dist \
+              --registry=https://registry.npmjs.org/
+          fi
+
+      - name: Verify the public npm package and signed provenance
+        id: artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ steps.release.outputs.run-id }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          archives=(dist/*.tgz)
+          if (( ${#archives[@]} != 1 )); then
+            echo "Expected exactly one verified npm release tarball." >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+
+          metadata="$(
+            npm view "@openai/codex-security@$RELEASE_VERSION" \
+              name version gitHead dist.integrity dist.attestations \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"
+
+          consumer="$(mktemp -d)"
+          trap 'rm -rf "$consumer"' EXIT
+          npm install \
+            --prefix "$consumer" \
+            --ignore-scripts \
+            --omit=optional \
+            --no-audit \
+            --no-fund \
+            --registry=https://registry.npmjs.org/ \
+            "@openai/codex-security@$RELEASE_VERSION"
+          signature_report="$(
+            npm audit signatures \
+              --prefix "$consumer" \
+              --registry=https://registry.npmjs.org/ \
+              --json \
+              --include-attestations
+          )"
+
+          if verified_provenance="$(
+            printf '%s\n' "$signature_report" |
+              node sdk/typescript/scripts/release-automation.mjs \
+                verify-provenance \
+                "$archive" \
+                "$RELEASE_VERSION" \
+                "$RELEASE_SHA" \
+                "$GITHUB_REPOSITORY" \
+                "$RELEASE_RUN_ID" 2>/dev/null
+          )"; then
+            verified_run_id="$RELEASE_RUN_ID"
+            printf '%s\n' "$verified_provenance"
+            echo "Verified npm provenance for the resolved release run."
+          else
+            recovery_conclusion="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/jobs?per_page=100" \
+                --paginate \
+                --jq '.jobs[] | select(.name == "publish") | .steps[] | select(.name == "Verify recovered npm release provenance") | .conclusion'
+            )"
+            if [[ "$recovery_conclusion" != "success" ]]; then
+              echo "Signed npm provenance must identify the resolved successful release run." >&2
+              exit 1
+            fi
+
+            verified_provenance="$(
+              printf '%s\n' "$signature_report" |
+                node sdk/typescript/scripts/release-automation.mjs \
+                  verify-recovered-provenance \
+                  "$archive" \
+                  "$RELEASE_VERSION" \
+                  "$RELEASE_SHA" \
+                  "$GITHUB_REPOSITORY"
+            )"
+            original_run_id="$(
+              printf '%s\n' "$verified_provenance" |
+                node --input-type=module --eval '
+                  import { readFileSync } from "node:fs";
+                  const provenance = JSON.parse(readFileSync(0, "utf8"));
+                  if (!/^[1-9][0-9]*$/.test(provenance.runId)) {
+                    throw new Error("The signing run must be a valid workflow run.");
+                  }
+                  process.stdout.write(provenance.runId);
+                '
+            )"
+            original_run_fields="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$original_run_id" \
+                --jq '[.name, .status, .head_sha, .head_branch] | @tsv'
+            )"
+            IFS=$'\t' read -r original_name original_status original_sha original_tag <<< "$original_run_fields"
+            if [[ "$original_name" != "node-release" ||
+                  "$original_status" != "completed" ||
+                  "$original_sha" != "$RELEASE_SHA" ||
+                  "$original_tag" != "$RELEASE_TAG" ]]; then
+              echo "Recovered npm provenance must identify the exact protected release." >&2
+              exit 1
+            fi
+
+            verified_run_id="$original_run_id"
+            printf '%s\n' "$verified_provenance"
+            echo "Verified protected recovery provenance from its original signing run."
+          fi
+
+          printf '%s\n' "$metadata" |
+            CODEX_SECURITY_VERIFIED_PROVENANCE="$verified_provenance" \
+              node sdk/typescript/scripts/release-automation.mjs \
+                verify-github-publication \
+                "$archive" \
+                "$RELEASE_VERSION" \
+                "$RELEASE_SHA" \
+                "$GITHUB_REPOSITORY" \
+                "$verified_run_id"
+
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve published release history
+        id: history
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          published_versions="$(
+            npm view @openai/codex-security versions \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"
+          published_github_tags="$(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name'
+          )"
+          reachable_tags=""
+          if git rev-parse "$RELEASE_SHA^" >/dev/null 2>&1; then
+            reachable_tags="$(
+              git tag --merged "$RELEASE_SHA^" \
+                --list 'npm-v*' \
+                --sort=-version:refname
+            )"
+          fi
+
+          history="$(
+            CODEX_SECURITY_PUBLISHED_NPM_VERSIONS="$published_versions" \
+            CODEX_SECURITY_PUBLISHED_GITHUB_TAGS="$published_github_tags" \
+            CODEX_SECURITY_REACHABLE_RELEASE_TAGS="$reachable_tags" \
+              node sdk/typescript/scripts/release-automation.mjs \
+                release-history "$RELEASE_TAG"
+          )"
+
+          previous_tag="$(
+            printf '%s\n' "$history" |
+              node --input-type=module --eval '
+                import { readFileSync } from "node:fs";
+                const history = JSON.parse(readFileSync(0, "utf8"));
+                process.stdout.write(history.previousTag ?? "");
+              '
+          )"
+          make_latest="$(
+            printf '%s\n' "$history" |
+              node --input-type=module --eval '
+                import { readFileSync } from "node:fs";
+                const history = JSON.parse(readFileSync(0, "utf8"));
+                if (typeof history.makeLatest !== "boolean") {
+                  throw new Error("Release latest status must be explicit.");
+                }
+                process.stdout.write(String(history.makeLatest));
+              '
+          )"
+
+          {
+            printf 'previous-tag=%s\n' "$previous_tag"
+            printf 'make-latest=%s\n' "$make_latest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release and generated notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_ARCHIVE: ${{ steps.artifact.outputs.archive }}
+          PREVIOUS_TAG: ${{ steps.history.outputs.previous-tag }}
+          MAKE_LATEST: ${{ steps.history.outputs.make-latest }}
+        run: |
+          set -euo pipefail
+
+          verify_release_tag() {
+            local live_ref live_type live_object live_commit
+            if ! live_ref="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+                --jq '[.object.type, .object.sha] | @tsv'
+            )"; then
+              echo "GitHub release tag must still point to the verified commit." >&2
+              return 1
+            fi
+            IFS=$'\t' read -r live_type live_object <<< "$live_ref"
+            if [[ ! "$live_object" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "GitHub release tag must still point to the verified commit." >&2
+              return 1
+            fi
+
+            case "$live_type" in
+              commit)
+                live_commit="$live_object"
+                ;;
+              tag)
+                if ! live_commit="$(
+                  gh api \
+                    "repos/$GITHUB_REPOSITORY/git/tags/$live_object" \
+                    --jq 'if .object.type == "commit" then .object.sha else empty end'
+                )"; then
+                  echo "GitHub release tag must still point to the verified commit." >&2
+                  return 1
+                fi
+                ;;
+              *)
+                echo "GitHub release tag must still point to the verified commit." >&2
+                return 1
+                ;;
+            esac
+
+            if [[ ! "$live_commit" =~ ^[0-9a-fA-F]{40}$ ||
+                  "$live_commit" != "$RELEASE_SHA" ]]; then
+              echo "GitHub release tag must still point to the verified commit." >&2
+              return 1
+            fi
+          }
+
+          github_release_or_missing() {
+            local endpoint="$1" label="$2" query_status=0 response
+            response="$(gh api --include "$endpoint" 2>/dev/null)" ||
+              query_status=$?
+            printf '%s\n' "$response" |
+              CODEX_SECURITY_RELEASE_QUERY_STATUS="$query_status" \
+                CODEX_SECURITY_RELEASE_LABEL="$label" \
+                node --input-type=module --eval '
+                  import { readFileSync } from "node:fs";
+                  const fail = () => {
+                    throw new Error(
+                      "Unable to resolve the " +
+                        process.env.CODEX_SECURITY_RELEASE_LABEL +
+                        ".",
+                    );
+                  };
+                  const raw = readFileSync(0, "utf8");
+                  const separator = raw.search(/\r?\n\r?\n/u);
+                  const status = /^HTTP\/\d+(?:\.\d+)?\s+(\d{3})(?:\s|$)/u.exec(
+                    raw.slice(0, separator),
+                  );
+                  if (separator < 0 || status == null) fail();
+                  let response;
+                  try {
+                    response = JSON.parse(
+                      raw.slice(separator + (raw[separator] === "\r" ? 4 : 2)),
+                    );
+                  } catch {
+                    fail();
+                  }
+                  if (response == null || typeof response !== "object") fail();
+                  if (process.env.CODEX_SECURITY_RELEASE_QUERY_STATUS === "0") {
+                    if (Number(status[1]) < 200 || Number(status[1]) >= 300) fail();
+                    process.stdout.write(JSON.stringify(response));
+                  } else if (status[1] !== "404") {
+                    fail();
+                  }
+                '
+          }
+
+          existing_release="$(
+            github_release_or_missing \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              "existing GitHub Release"
+          )"
+          if [[ -n "$existing_release" ]]; then
+            asset_name="$(basename "$RELEASE_ARCHIVE")"
+            downloaded_assets="$(mktemp -d)"
+            trap 'rm -rf "$downloaded_assets"' EXIT
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset_name" \
+              --dir "$downloaded_assets"
+
+            downloaded_archive="$downloaded_assets/$asset_name"
+            if [[ ! -f "$downloaded_archive" || -L "$downloaded_archive" ]]; then
+              echo "Expected the exact existing GitHub release asset." >&2
+              exit 1
+            fi
+
+            printf '%s\n' "$existing_release" |
+              node sdk/typescript/scripts/release-automation.mjs \
+                verify-github-release "$RELEASE_ARCHIVE" "$RELEASE_TAG" \
+                "$downloaded_archive"
+
+            notes_args=(
+              --method POST
+              "repos/$GITHUB_REPOSITORY/releases/generate-notes"
+              -f "tag_name=$RELEASE_TAG"
+              -f "target_commitish=$RELEASE_SHA"
+            )
+            if git cat-file -e "$RELEASE_SHA:.github/release.yml" 2>/dev/null; then
+              notes_args+=(-f "configuration_file_path=.github/release.yml")
+            fi
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
+            fi
+            generated_notes="$(gh api "${notes_args[@]}" --jq '.body')"
+            if [[ -z "$generated_notes" ]]; then
+              echo "Generated GitHub release notes must not be empty." >&2
+              exit 1
+            fi
+
+            existing_notes="$(
+              printf '%s\n' "$existing_release" |
+                node --input-type=module --eval '
+                  import { readFileSync } from "node:fs";
+                  const release = JSON.parse(readFileSync(0, "utf8"));
+                  if (release.body != null && typeof release.body !== "string") {
+                    throw new Error("Existing release notes must be a string.");
+                  }
+                  process.stdout.write(release.body ?? "");
+                '
+            )"
+
+            latest_response="$(
+              github_release_or_missing \
+                "repos/$GITHUB_REPOSITORY/releases/latest" \
+                "current Latest GitHub Release"
+            )"
+            current_latest_tag=""
+            if [[ -n "$latest_response" ]]; then
+              current_latest_tag="$(
+                printf '%s\n' "$latest_response" |
+                  node --input-type=module --eval '
+                    import { readFileSync } from "node:fs";
+                    const response = JSON.parse(readFileSync(0, "utf8"));
+                    if (
+                      typeof response.tag_name !== "string" ||
+                      response.tag_name.length === 0
+                    ) {
+                      throw new Error(
+                        "Unable to resolve the current Latest GitHub Release.",
+                      );
+                    }
+                    process.stdout.write(response.tag_name);
+                  '
+              )"
+            fi
+            currently_latest=false
+            if [[ "$current_latest_tag" == "$RELEASE_TAG" ]]; then
+              currently_latest=true
+            fi
+
+            if [[ "$existing_notes" != "$generated_notes" ||
+                  "$currently_latest" != "$MAKE_LATEST" ]]; then
+              verify_release_tag
+              if [[ "$existing_notes" != "$generated_notes" ]]; then
+                printf '%s\n' "$generated_notes" |
+                  gh release edit "$RELEASE_TAG" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --latest="$MAKE_LATEST" \
+                    --notes-file -
+                echo "Updated existing GitHub Release with generated notes."
+              else
+                gh release edit "$RELEASE_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --latest="$MAKE_LATEST"
+              fi
+              if [[ "$currently_latest" != "$MAKE_LATEST" ]]; then
+                echo "Updated existing GitHub Release Latest status."
+              fi
+            else
+              echo "The verified GitHub Release already exists."
+            fi
+            exit 0
+          fi
+
+          release_args=(
+            "$RELEASE_TAG"
+            "$RELEASE_ARCHIVE"
+            --repo "$GITHUB_REPOSITORY"
+            --title "Codex Security $RELEASE_VERSION"
+            --verify-tag
+            --generate-notes
+            --latest="$MAKE_LATEST"
+          )
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            release_args+=(--notes-start-tag "$PREVIOUS_TAG")
+          fi
+
+          verify_release_tag
+          gh release create "${release_args[@]}"
