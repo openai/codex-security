@@ -125,12 +125,14 @@ export function resolveRepositoryPath(repository: string): string {
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<string | null> {
   try {
     const root = await gitOutput(
       repository,
       ["rev-parse", "--show-toplevel"],
       signal,
+      environment,
     );
     return await abortable(() => realpath(root), signal);
   } catch {
@@ -352,11 +354,12 @@ async function gitOutput(
   repository: string,
   args: readonly string[],
   signal?: AbortSignal,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<string> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
-    isolatedGitEnvironment(),
+    isolatedGitEnvironment(environment),
     await outermostGitMarkerRoot(repository, signal),
   );
   if (command === null)
@@ -394,14 +397,16 @@ async function outermostGitMarkerRoot(
   }
 }
 
-function isolatedGitEnvironment(): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
-  for (const name of Object.keys(environment)) {
+function isolatedGitEnvironment(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): NodeJS.ProcessEnv {
+  const isolated = { ...environment };
+  for (const name of Object.keys(isolated)) {
     if (name.toUpperCase().startsWith("GIT_")) {
-      delete environment[name];
+      delete isolated[name];
     }
   }
-  return environment;
+  return isolated;
 }
 
 async function abortable<T>(

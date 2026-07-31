@@ -649,6 +649,47 @@ describe("CLI", () => {
     }
   });
 
+  test("does not run a repository-controlled Git executable when installing a hook", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-hook-git-")),
+    );
+    try {
+      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
+      const unsafeBin = join(root, "node_modules", ".bin");
+      const marker = join(root, "malicious-git-ran");
+      await mkdir(unsafeBin, { recursive: true });
+      await writeFile(
+        join(unsafeBin, "git"),
+        `#!/bin/sh\nprintf 'ran' > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o755 },
+      );
+
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["install-hook", ".", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: root,
+            environment: {
+              ...process.env,
+              PATH: [unsafeBin, process.env["PATH"] ?? ""].join(delimiter),
+            },
+          }),
+        ),
+      ).toBe(0);
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        hook: join(root, ".git", "hooks", "pre-commit"),
+      });
+      expect(stderr.text()).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
