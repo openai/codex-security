@@ -49,6 +49,8 @@ interface ScanCostSnapshot {
   cost: ScanCost | null;
 }
 
+type ScanCostRefreshTask = () => Promise<void>;
+
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
@@ -62,15 +64,21 @@ const MAX_SESSION_EVENT_BYTES = 1 * 1_024 * 1_024;
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
+  readonly #refreshTask: ScanCostRefreshTask;
   readonly #sessions = new Map<string, SessionUsage>();
   #threadId: string | null = null;
   #timer: NodeJS.Timeout | null = null;
-  #pending: Promise<void> = Promise.resolve();
+  #activeRefresh: Promise<void> | null = null;
+  #queuedRefresh: Promise<void> | null = null;
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: number | null = null;
 
-  public constructor(options: ScanCostTrackerOptions) {
+  public constructor(
+    options: ScanCostTrackerOptions,
+    refreshTask?: ScanCostRefreshTask,
+  ) {
     this.#options = options;
+    this.#refreshTask = refreshTask ?? (() => this.#readSessions());
   }
 
   public start(threadId: string): void {
@@ -88,10 +96,12 @@ export class ScanCostTracker {
   }
 
   public async refresh(): Promise<ScanCostSnapshot> {
-    const update = this.#pending.then(async () => {
-      await this.#readSessions();
-    });
-    this.#pending = update.catch(() => {});
+    const update =
+      this.#activeRefresh === null
+        ? this.#startRefresh()
+        : (this.#queuedRefresh ??= this.#activeRefresh
+            .catch(() => {})
+            .then(this.#refreshTask));
     await update;
     return this.#snapshot;
   }
@@ -107,6 +117,31 @@ export class ScanCostTracker {
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
     this.#reportCost(cost);
     return this.#snapshot;
+  }
+
+  #startRefresh(): Promise<void> {
+    const update = Promise.resolve().then(this.#refreshTask);
+    this.#activeRefresh = update;
+    void update.then(
+      () => this.#finishRefresh(update),
+      () => this.#finishRefresh(update),
+    );
+    return update;
+  }
+
+  #finishRefresh(finished: Promise<void>): void {
+    if (this.#activeRefresh !== finished) return;
+    const queued = this.#queuedRefresh;
+    if (queued === null) {
+      this.#activeRefresh = null;
+      return;
+    }
+    this.#activeRefresh = queued;
+    this.#queuedRefresh = null;
+    void queued.then(
+      () => this.#finishRefresh(queued),
+      () => this.#finishRefresh(queued),
+    );
   }
 
   async #readSessions(): Promise<void> {
