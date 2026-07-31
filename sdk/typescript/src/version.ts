@@ -154,12 +154,36 @@ function isNewerVersion(latest: string, current: string): boolean {
   if (candidate[4] === installed[4]) return false;
   if (candidate[4] === undefined) return true;
   if (installed[4] === undefined) return false;
-  return (
-    new Intl.Collator("en", { numeric: true }).compare(
-      candidate[4],
-      installed[4],
-    ) > 0
+  return isNewerPrerelease(candidate[4], installed[4]);
+}
+
+function isNewerPrerelease(candidate: string, installed: string): boolean {
+  const candidateIdentifiers = candidate.split(".");
+  const installedIdentifiers = installed.split(".");
+  const length = Math.max(
+    candidateIdentifiers.length,
+    installedIdentifiers.length,
   );
+
+  for (let index = 0; index < length; index += 1) {
+    const candidateIdentifier = candidateIdentifiers[index];
+    const installedIdentifier = installedIdentifiers[index];
+    if (candidateIdentifier === installedIdentifier) continue;
+    if (candidateIdentifier === undefined) return false;
+    if (installedIdentifier === undefined) return true;
+
+    const candidateIsNumeric = /^\d+$/u.test(candidateIdentifier);
+    const installedIsNumeric = /^\d+$/u.test(installedIdentifier);
+    if (candidateIsNumeric && installedIsNumeric) {
+      return BigInt(candidateIdentifier) > BigInt(installedIdentifier);
+    }
+    if (candidateIsNumeric !== installedIsNumeric) {
+      return !candidateIsNumeric;
+    }
+    return candidateIdentifier > installedIdentifier;
+  }
+
+  return false;
 }
 
 function packageVersions(url: URL): {

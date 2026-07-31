@@ -125,6 +125,46 @@ describe("CLI update notice", () => {
     ).toBeUndefined();
   });
 
+  test("uses SemVer precedence for prerelease identifiers", async () => {
+    const precedence = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+    ];
+
+    for (let index = 1; index < precedence.length; index += 1) {
+      const lower = precedence[index - 1]!;
+      const higher = precedence[index]!;
+      await expect(
+        checkForUpdate({
+          environment: {},
+          currentVersion: lower,
+          fetch: registryResponse(higher),
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        checkForUpdate({
+          environment: {},
+          currentVersion: higher,
+          fetch: registryResponse(lower),
+        }),
+      ).resolves.toBeUndefined();
+    }
+
+    await expect(
+      checkForUpdate({
+        environment: {},
+        currentVersion: "1.0.0-alpha.1",
+        fetch: registryResponse("1.0.0-alpha-1"),
+      }),
+    ).resolves.toBeDefined();
+  });
+
   test("suppresses registry checks in CI or when disabled", async () => {
     let requests = 0;
     const fetchLatest = async () => {
