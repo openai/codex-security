@@ -323,7 +323,6 @@
         "signalfd4",
         "sigprocmask",
         "sigreturn",
-        "socketcall",
         "socketpair",
         "splice",
         "stat",
@@ -392,6 +391,15 @@
       "names": ["socket"],
       "action": "SCMP_ACT_ALLOW",
       "args": [{ "index": 0, "value": 10, "op": "SCMP_CMP_EQ" }]
+    },
+    {
+      "names": ["socket"],
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "AF_NETLINK(16) restricted to NETLINK_ROUTE(0): Bubblewrap's Linux sandbox needs a NETLINK_ROUTE socket to run RTM_NEWLINK/RTM_NEWADDR when it configures the loopback interface inside its own (already-isolated) network namespace during codex sandbox startup.",
+      "args": [
+        { "index": 0, "value": 16, "op": "SCMP_CMP_EQ" },
+        { "index": 2, "value": 0, "op": "SCMP_CMP_EQ" }
+      ]
     },
     {
       "names": ["personality"],
