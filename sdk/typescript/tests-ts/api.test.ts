@@ -867,6 +867,35 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects unsupported authentication modes before runtime initialization", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: { OPENAI_API_KEY: "synthetic-openai-key" },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+    const options = {
+      auth: "unsupported",
+    } as unknown as ScanOptions;
+
+    await expect(client.preflight(repository, options)).rejects.toThrow(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+    await expect(client.run(repository, options)).rejects.toThrow(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
   test("rejects explicit API-key authentication without a configured key before runtime initialization", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

@@ -1712,6 +1712,11 @@ export function scanAuthentication(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
 ): ScanAuthentication {
+  if (auth !== "auto" && auth !== "chatgpt" && auth !== "api-key") {
+    throw new TypeError(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+  }
   if (auth === "chatgpt") {
     return { method: "stored_credentials", verified: false };
   }
