@@ -2001,6 +2001,146 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test.each([
+    [
+      "released continuation v12",
+      "scan execution profiles",
+      "scan continuation threads",
+      true,
+    ],
+    [
+      "historical phase-progress v12",
+      "scan execution profiles",
+      "phase-specific scan progress",
+      true,
+    ],
+    [
+      "unknown v11 plus released continuation v12",
+      "unknown execution profile migration",
+      "scan continuation threads",
+      false,
+    ],
+  ] as const)(
+    "reconciles %s without corrupting migration history",
+    async (_history, profileMigration, followUpMigration, supportedHistory) => {
+      const root = await temporaryDirectory(
+        "codex-security-migration-history-",
+      );
+      const stateDirectory = join(root, "state");
+      await mkdir(stateDirectory);
+      const database = join(stateDirectory, "workbench.sqlite3");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const fixture = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "sys.path.insert(0, sys.argv[1])",
+            "from workbench_schema import MIGRATIONS, sql_statements",
+            "connection = sqlite3.connect(sys.argv[2])",
+            "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
+            "timestamp = '2026-07-30T00:00:00Z'",
+            "for version, name, migration in MIGRATIONS:",
+            "    if version > 10: break",
+            "    for statement in sql_statements(migration): connection.execute(statement)",
+            "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
+            "for table in ('workspaces', 'scans'):",
+            "    connection.execute(f'ALTER TABLE {table} ADD COLUMN execution_model TEXT')",
+            "    connection.execute(f'ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT')",
+            "follow_up = next(item for item in MIGRATIONS if item[1] == sys.argv[4])",
+            "for statement in sql_statements(follow_up[2]): connection.execute(statement)",
+            "connection.executemany('INSERT INTO schema_migrations VALUES (?, ?, ?)', [(11, sys.argv[3], timestamp), (12, sys.argv[4], timestamp)])",
+            "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
+            "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
+            "connection.commit()",
+            "connection.close()",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          database,
+          profileMigration,
+          followUpMigration,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(fixture.status).toBe(0);
+      expect(fixture.stderr).toBe("");
+
+      const upgrade = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          "database-info",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(upgrade.status).toBe(supportedHistory ? 0 : 1);
+      if (!supportedHistory) {
+        expect(upgrade.stderr).toContain(
+          "unsupported execution-profile migration history",
+        );
+      }
+
+      const inspected = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, sqlite3, sys",
+            "connection = sqlite3.connect(sys.argv[1])",
+            "connection.row_factory = sqlite3.Row",
+            "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 20, 25, 26)')}",
+            "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
+            "deep_scan_tables = connection.execute(\"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'\").fetchone()",
+            "print(json.dumps({'migrations': migrations, 'legacyColumnsRenamed': 'legacy_execution_model' in columns, 'deepScanTables': deep_scan_tables is not None}))",
+          ].join("\n"),
+          database,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(inspected.status).toBe(0);
+      expect(inspected.stderr).toBe("");
+      if (!supportedHistory) {
+        expect(JSON.parse(inspected.stdout)).toEqual({
+          migrations: {
+            "11": "unknown execution profile migration",
+            "12": "scan continuation threads",
+            "25": "persist scan completion warnings",
+          },
+          legacyColumnsRenamed: false,
+          deepScanTables: false,
+        });
+        return;
+      }
+
+      expect(JSON.parse(inspected.stdout)).toEqual({
+        migrations: {
+          "11": "deep scan orchestration state",
+          "12": "scan continuation threads",
+          "20": "phase-specific scan progress",
+          "25": "persist scan model settings",
+          "26": "persist scan completion warnings",
+        },
+        legacyColumnsRenamed: true,
+        deepScanTables: true,
+      });
+    },
+  );
+
   test("aligns an existing public CLI database with the maintained plugin schema", async () => {
     const root = await temporaryDirectory("codex-security-public-migrations-");
     const repository = join(root, "repository");

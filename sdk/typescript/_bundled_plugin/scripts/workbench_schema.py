@@ -624,7 +624,27 @@ MIGRATIONS = (
 def normalize_pre_release_migrations(
     connection: sqlite3.Connection, timestamp: str
 ) -> None:
-    normalize_pre_release_execution_profile_migrations(connection, timestamp)
+    execution_migrations = {
+        row["version"]: row["name"]
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (11, 12)"
+        )
+    }
+    supported_execution_migrations = {
+        11: {"deep scan orchestration state", "scan execution profiles"},
+        12: {
+            "scan continuation threads",
+            "dynamic scan execution profiles",
+            "phase-specific scan progress",
+        },
+    }
+    if any(
+        name not in supported_execution_migrations[version]
+        for version, name in execution_migrations.items()
+    ):
+        raise SystemExit(
+            "The Codex Security database has an unsupported execution-profile migration history."
+        )
 
     phase_progress_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 12"
@@ -644,6 +664,8 @@ def normalize_pre_release_migrations(
             "UPDATE schema_migrations SET version = 20 WHERE version = 12 AND name = ?",
             ("phase-specific scan progress",),
         )
+
+    normalize_pre_release_execution_profile_migrations(connection, timestamp)
 
     preflight_progress_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 13"
@@ -718,6 +740,10 @@ def normalize_pre_release_execution_profile_migrations(
         11: "scan execution profiles",
         12: "dynamic scan execution profiles",
     }
+    released_names = {
+        11: "deep scan orchestration state",
+        12: "scan continuation threads",
+    }
     model_migration_name = "persist scan model settings"
     warnings_migration_name = "persist scan completion warnings"
     has_legacy_profile_history = execution_migrations.get(11) == legacy_names[11]
@@ -742,11 +768,20 @@ def normalize_pre_release_execution_profile_migrations(
         return
 
     if (
-        has_legacy_profile_history
-        and execution_migrations.get(12) not in (None, legacy_names[12])
-    ) or (
-        not has_legacy_profile_history
-        and execution_migrations.get(12) == legacy_names[12]
+        any(
+            execution_migrations.get(version)
+            not in (None, released_names[version], legacy_names[version])
+            for version in (11, 12)
+        )
+        or (
+            has_legacy_profile_history
+            and execution_migrations.get(12)
+            not in (None, legacy_names[12], released_names[12])
+        )
+        or (
+            not has_legacy_profile_history
+            and execution_migrations.get(12) == legacy_names[12]
+        )
     ):
         raise SystemExit(
             "The Codex Security database has an unsupported execution-profile migration history."
