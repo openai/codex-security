@@ -690,6 +690,52 @@ describe("CLI", () => {
     }
   });
 
+  test("does not run Git from an enclosing repository when installing a nested hook", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-nested-hook-git-")),
+    );
+    try {
+      execFileSync("git", ["init", "-q", root], { timeout: 10_000 });
+      const nestedRepository = join(root, "nested");
+      await mkdir(nestedRepository);
+      execFileSync("git", ["init", "-q", nestedRepository], {
+        timeout: 10_000,
+      });
+      const unsafeBin = join(root, "node_modules", ".bin");
+      const marker = join(root, "enclosing-malicious-git-ran");
+      await mkdir(unsafeBin, { recursive: true });
+      await writeFile(
+        join(unsafeBin, "git"),
+        `#!/bin/sh\nprintf 'ran' > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o755 },
+      );
+
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["install-hook", nestedRepository, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: root,
+            environment: {
+              ...process.env,
+              PATH: [unsafeBin, process.env["PATH"] ?? ""].join(delimiter),
+            },
+          }),
+        ),
+      ).toBe(0);
+      await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        hook: join(nestedRepository, ".git", "hooks", "pre-commit"),
+      });
+      expect(stderr.text()).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {

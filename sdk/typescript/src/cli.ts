@@ -91,6 +91,7 @@ import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {
   DiffTarget,
   enclosingGitWorktreeRoot,
+  outermostGitMarkerRoot,
   type ScanMode,
   type ScanTarget,
 } from "./targets.js";
@@ -1181,10 +1182,11 @@ export async function main(
             throw new Error(`Not a Git repository: ${repository}`);
           }
           const gitEnvironment = withoutGitEnvironment(environment);
+          const protectedRoot = await outermostGitMarkerRoot(worktreeRoot);
           const git = await resolveTrustedExecutable(
             "git",
             gitEnvironment,
-            worktreeRoot,
+            protectedRoot,
           );
           if (git === null) {
             throw new Error("Git is not available on a trusted PATH.");

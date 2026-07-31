@@ -377,7 +377,7 @@ async function gitOutput(
   return stdout.trim();
 }
 
-async function outermostGitMarkerRoot(
+export async function outermostGitMarkerRoot(
   repository: string,
   signal?: AbortSignal,
 ): Promise<string> {
