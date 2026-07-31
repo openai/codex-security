@@ -324,7 +324,10 @@ describe("CLI authentication", () => {
       let question = "";
       let choices: readonly { label: string; value: string }[] = [];
       const deps = dependencies({
-        environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
+        environment: {
+          OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123",
+          AZURE_OPENAI_API_KEY: "unrelated-azure-key",
+        },
         onTurn: (_repository, options) => {
           selected = (options as ScanOptions).auth;
         },
@@ -475,6 +478,36 @@ describe("CLI authentication", () => {
     );
     expect(stderr.text()).toContain("--auth chatgpt");
     expect(stderr.text()).not.toContain("must not initialize");
+  });
+
+  test("requires the Azure provider key even when an OpenAI key is available", async () => {
+    const stderr = capture();
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "openai-SYNTHETIC_SECRET_123" },
+    });
+    deps.createSecurity = () => {
+      throw new Error("must not initialize Codex Security");
+    };
+
+    expect(
+      await main(
+        [
+          "scan",
+          "--azure-endpoint",
+          "https://security.openai.azure.com",
+          "--model",
+          "security-deployment",
+        ],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "azure model-provider authentication requires AZURE_OPENAI_API_KEY",
+    );
+    expect(stderr.text()).not.toContain("must not initialize");
+    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
   });
 
   test("keeps stored-login status unchanged when no environment key is set", async () => {
@@ -651,6 +684,109 @@ describe("CLI authentication", () => {
     expect(stderr.text()).toContain(
       "To use your ChatGPT sign-in, retry with --auth chatgpt.",
     );
+  });
+
+  test("reports Azure provider authentication without offering ChatGPT credentials", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    let prompts = 0;
+    const deps = dependencies({
+      environment: {
+        AZURE_OPENAI_API_KEY: "azure-SYNTHETIC_SECRET_123",
+        OPENAI_API_KEY: "openai-SYNTHETIC_SECRET_456",
+      },
+    });
+    deps.hasStoredChatGPTSignIn = async () => true;
+    deps.scanAuthenticationPrompt = {
+      isInteractive: () => true,
+      select: async <Value extends string>(
+        _message: string,
+        options: readonly { label: string; value: Value }[],
+      ): Promise<Value> => {
+        prompts += 1;
+        return options[0]!.value;
+      },
+    };
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "api_key",
+          provider: "azure",
+          source: "AZURE_OPENAI_API_KEY",
+          verified: false,
+        });
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        [
+          "scan",
+          "--json",
+          "--azure-endpoint",
+          "https://security.openai.azure.com",
+          "--model",
+          "security-deployment",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(prompts).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "Authentication: API key from AZURE_OPENAI_API_KEY for azure.",
+    );
+    expect(stderr.text()).not.toContain("--auth chatgpt");
+    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+  });
+
+  test("reports Azure authentication failures without leaking credentials or suggesting ChatGPT", async () => {
+    const stderr = capture(false);
+    const deps = dependencies({
+      environment: {
+        AZURE_OPENAI_API_KEY: "azure-SYNTHETIC_SECRET_123",
+      },
+    });
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "api_key",
+          provider: "azure",
+          source: "AZURE_OPENAI_API_KEY",
+          verified: false,
+        });
+        throw new CodexSecurityError(
+          "401 invalid API key azure-SYNTHETIC_SECRET_123",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        [
+          "scan",
+          "--azure-endpoint",
+          "https://security.openai.azure.com",
+          "--model",
+          "security-deployment",
+        ],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "Authentication failed using AZURE_OPENAI_API_KEY for model provider azure.",
+    );
+    expect(stderr.text()).not.toContain("--auth chatgpt");
+    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
   });
 
   test("identifies overriding API keys in noninteractive scan auth failures", async () => {

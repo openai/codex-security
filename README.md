@@ -22,6 +22,19 @@ For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in. Environme
 passed directly to the current scan and are never stored in Codex's credential
 home or system keyring.
 
+Azure OpenAI API-key scans use the Azure deployment name as the model:
+
+```bash
+export AZURE_OPENAI_API_KEY="<your-api-key>"
+npx @openai/codex-security scan . \
+  --azure-endpoint https://my-resource.openai.azure.com \
+  --model my-security-deployment
+```
+
+A resource-root endpoint is normalized to `/openai/v1`.
+Azure OpenAI currently uses environment API-key authentication rather than
+`codex-security login`.
+
 Local sign-in honors Codex's configured credential backend, including a system
 keyring required by a managed device. Codex Security keeps login and scan
 credentials in the same private, persistent state directory.

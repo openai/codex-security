@@ -11,6 +11,7 @@ import {
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
+import { AZURE_OPENAI_PROVIDER_ID } from "../src/config.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -66,6 +67,83 @@ describe("Codex configuration", () => {
     expect(DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"]).toBe("auto");
     expect((await mergedCodexConfig({}))["cli_auth_credentials_store"]).toBe(
       "auto",
+    );
+  });
+
+  test("builds validated Azure OpenAI v1 provider overrides", async () => {
+    const azureConfig = await mergedCodexConfig({
+      azureOpenAI: {
+        endpoint: " https://security-models.openai.azure.com/ ",
+      },
+    });
+    expect(azureConfig).toMatchObject({
+      model_provider: AZURE_OPENAI_PROVIDER_ID,
+      model_providers: {
+        [AZURE_OPENAI_PROVIDER_ID]: {
+          name: "Azure OpenAI",
+          base_url: "https://security-models.openai.azure.com/openai/v1",
+          env_key: "AZURE_OPENAI_API_KEY",
+          wire_api: "responses",
+        },
+      },
+    });
+    expect((azureConfig["features"] as JsonObject)["multi_agent_v2"]).toEqual({
+      enabled: true,
+      max_concurrent_threads_per_session: 9,
+    });
+    for (const endpoint of [
+      "https://security-models.openai.azure.com/openai",
+      "https://security-models.openai.azure.com/openai/v1/",
+    ]) {
+      const merged = await mergedCodexConfig({
+        azureOpenAI: { endpoint },
+      });
+      expect(
+        (
+          (merged["model_providers"] as JsonObject)[
+            AZURE_OPENAI_PROVIDER_ID
+          ] as JsonObject
+        )["base_url"],
+      ).toBe("https://security-models.openai.azure.com/openai/v1");
+    }
+    for (const endpoint of [
+      "not-a-url",
+      "http://security-models.openai.azure.com",
+      "https://user:secret@security-models.openai.azure.com",
+      "https://security-models.openai.azure.com?api-key=secret",
+      "https://security-models.openai.azure.com#fragment",
+      "https://security-models.openai.azure.com/openai/deployments/legacy",
+      "https://security-models.openai.azure.com/unexpected",
+    ]) {
+      await expect(
+        mergedCodexConfig({ azureOpenAI: { endpoint } }),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+    }
+    await expect(
+      mergedCodexConfig({
+        azureOpenAI: {
+          endpoint: "https://security-models.openai.azure.com",
+        },
+        codexOverrides: { model_provider: "existing-provider" },
+      }),
+    ).rejects.toThrow(
+      "azureOpenAI cannot be combined with a codexOverrides model_provider",
+    );
+    await expect(
+      mergedCodexConfig({
+        azureOpenAI: {
+          endpoint: "https://security-models.openai.azure.com",
+        },
+        codexOverrides: {
+          model_providers: {
+            [AZURE_OPENAI_PROVIDER_ID]: {
+              base_url: "https://attacker.example/v1",
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      "azureOpenAI owns its Codex model-provider configuration",
     );
   });
 
@@ -201,6 +279,53 @@ describe("Codex configuration", () => {
             ":root": "read",
             ":workspace_roots": "write",
             [stateDirectory]: "write",
+          },
+        },
+      },
+    });
+  });
+
+  test("keeps the active Azure key out of model-run shell commands", async () => {
+    const stateDirectory = join(tmpdir(), "codex-security-azure-state");
+    const merged = await mergedCodexConfig({
+      azureOpenAI: {
+        endpoint: "https://security-models.openai.azure.com",
+      },
+      codexOverrides: {
+        shell_environment_policy: {
+          exclude: ["EXISTING_SECRET"],
+          ignore_default_excludes: true,
+        },
+        profile: "azure-scan",
+        profiles: {
+          "azure-scan": {
+            model_provider: AZURE_OPENAI_PROVIDER_ID,
+            shell_environment_policy: {
+              exclude: ["PROFILE_SECRET"],
+              include_only: ["AZURE_OPENAI_API_KEY", "PATH"],
+              set: {
+                Azure_OpenAI_Api_Key: "STATIC_SECRET",
+                SAFE_VALUE: "kept",
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(
+      scanRuntimeCodexConfig(merged, stateDirectory, undefined, true),
+    ).toMatchObject({
+      shell_environment_policy: {
+        exclude: ["EXISTING_SECRET", "AZURE_OPENAI_API_KEY"],
+        ignore_default_excludes: true,
+      },
+      profiles: {
+        "azure-scan": {
+          shell_environment_policy: {
+            exclude: ["PROFILE_SECRET", "AZURE_OPENAI_API_KEY"],
+            include_only: ["PATH"],
+            set: { SAFE_VALUE: "kept" },
           },
         },
       },

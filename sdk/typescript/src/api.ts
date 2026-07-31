@@ -13,6 +13,7 @@ import {
   type AccountStatus,
 } from "./auth.js";
 import {
+  AZURE_OPENAI_PROVIDER_ID,
   mergedCodexConfig,
   scanModelConfiguration,
   type CodexSecurityConfig,
@@ -28,6 +29,7 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
+  ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -39,7 +41,11 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
-import { ScanResult, type TurnResultMetadata } from "./result.js";
+import {
+  createScanResult,
+  ScanResult,
+  type TurnResultMetadata,
+} from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import {
   workerStatusFromEvent,
@@ -152,9 +158,16 @@ export type ScanAuthentication =
       method: "api_key";
       source: "OPENAI_API_KEY" | "CODEX_API_KEY";
       verified: false;
+      provider?: never;
     }
   | {
       method: "stored_credentials";
+      verified: false;
+    }
+  | {
+      method: "api_key";
+      provider: "azure";
+      source: "AZURE_OPENAI_API_KEY";
       verified: false;
     };
 
@@ -271,7 +284,9 @@ export class CodexSecurity {
     );
     const configuration = await mergedCodexConfig(this.config);
     const model = scanModelConfiguration(configuration);
-    validateScanCostLimit(options.maxCostUsd, model.model);
+    const azureConfigured = this.config.azureOpenAI !== undefined;
+    const provider = scanModelProvider(configuration, azureConfigured);
+    validateScanCostLimit(options.maxCostUsd, model.model, provider.id);
     const archiveDir =
       options.archiveExisting === true
         ? await planOutputArchive(inputs.outputDir)
@@ -289,6 +304,8 @@ export class CodexSecurity {
       authentication: scanAuthentication(
         this.#dependencies.environment,
         options.auth,
+        configuration,
+        azureConfigured,
       ),
       ...model,
       ...(options.maxCostUsd === undefined
@@ -360,13 +377,21 @@ export class CodexSecurity {
       }
       checkOpen();
 
+      const effectiveConfig = await mergedCodexConfig(this.config);
+      const azureConfigured = this.config.azureOpenAI !== undefined;
       const authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
+        effectiveConfig,
+        azureConfigured,
       );
       const scanEnvironment = selectedScanEnvironment(
         this.#dependencies.environment,
         options.auth,
+      );
+      const localScanEnvironment = withoutProviderApiKey(
+        scanEnvironment,
+        authentication,
       );
       if (
         authentication.method === "stored_credentials" &&
@@ -389,13 +414,18 @@ export class CodexSecurity {
         (path) =>
           requireOutputOutsideRepository(protectedRoot, path, "runtime"),
         options.auth,
+        authentication,
       );
       if (
         runtime === previousRuntime &&
         runtime.persistentCredentialHome === true &&
         this.#dependencies.prepareRuntime === undefined
       ) {
-        await this.#refreshPersistentRuntime(runtime, scanEnvironment, signal);
+        await this.#refreshPersistentRuntime(
+          runtime,
+          localScanEnvironment,
+          signal,
+        );
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
@@ -424,7 +454,8 @@ export class CodexSecurity {
           : null;
       }
       const apiKey =
-        authentication.method === "api_key"
+        authentication.method === "api_key" &&
+        !isProviderApiKeyAuthentication(authentication)
           ? environmentApiKey(this.#dependencies.environment)
           : null;
       if (apiKey !== null) {
@@ -444,7 +475,11 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      if (!runtime.credentialsAvailable && apiKey === null) {
+      if (
+        !runtime.credentialsAvailable &&
+        apiKey === null &&
+        !isProviderApiKeyAuthentication(authentication)
+      ) {
         throw new AuthenticationRequiredError(
           "No credentials were found. Run 'codex-security login', use " +
             "'codex-security login --device-auth' on a remote or headless machine, or set " +
@@ -461,7 +496,7 @@ export class CodexSecurity {
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
         configuredPath: this.config.pythonPath,
-        environment: scanEnvironment,
+        environment: localScanEnvironment,
         protectedRoot,
         signal,
       });
@@ -533,13 +568,13 @@ export class CodexSecurity {
         mode,
         pluginVersion: runtime.plugin.version,
       };
-      const effectiveConfig =
-        runtime.effectiveConfig ?? (await mergedCodexConfig(this.config));
-      const { model } = scanModelConfiguration(effectiveConfig);
-      validateScanCostLimit(options.maxCostUsd, model);
+      const scanConfig = runtime.effectiveConfig ?? effectiveConfig;
+      const { model } = scanModelConfiguration(scanConfig);
+      const modelProvider = scanModelProvider(scanConfig, azureConfigured).id;
+      validateScanCostLimit(options.maxCostUsd, model, modelProvider);
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
-        model,
+        model: modelProvider === "openai" ? model : undefined,
         maxCostUsd: options.maxCostUsd,
         onCost: (cost) => {
           notifyObserver(
@@ -566,7 +601,8 @@ export class CodexSecurity {
         mode,
         expectation.repositoryRevision,
         runtime.plugin.version,
-        effectiveConfig,
+        scanConfig,
+        azureConfigured,
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
@@ -575,7 +611,10 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...selectedScanEnvironment(runtime.environment, options.auth),
+          ...withoutProviderApiKey(
+            selectedScanEnvironment(runtime.environment, options.auth),
+            authentication,
+          ),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -730,7 +769,10 @@ export class CodexSecurity {
         ...pluginExecutionEnvironment(
           python,
           withoutCodexHome(
-            selectedScanEnvironment(runtime.environment, options.auth),
+            withoutProviderApiKey(
+              selectedScanEnvironment(runtime.environment, options.auth),
+              authentication,
+            ),
           ),
         ),
         CODEX_HOME: runtime.codexHome,
@@ -738,9 +780,13 @@ export class CodexSecurity {
       };
       const codex = this.#dependencies.createCodex({
         ...(apiKey === null ? {} : { apiKey }),
-        env: definedEnvironment(
-          selectedScanEnvironment(environment, "chatgpt"),
-        ),
+        env: definedEnvironment({
+          ...selectedScanEnvironment(environment, "chatgpt"),
+          ...providerApiKeyEnvironment(
+            this.#dependencies.environment,
+            authentication,
+          ),
+        }),
         config: {
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
@@ -782,6 +828,8 @@ export class CodexSecurity {
         expectation,
         workbenchValidated: true,
         model,
+        modelProvider: modelProvider === "openai" ? undefined : modelProvider,
+        estimateCost: modelProvider === "openai",
         onThreadStarted: (threadId) => tracker.start(threadId),
         onFinalize: async (usage) => {
           const snapshot = await tracker.stop(usage);
@@ -945,19 +993,41 @@ export class CodexSecurity {
   }
 
   public async account(): Promise<AccountStatus> {
-    return await this.#runOperation(async (runtime, signal) => {
-      const apiKey = environmentApiKey(this.#dependencies.environment);
-      if (apiKey !== null) {
+    return await this.#trackOperation(async () => {
+      const configuration = await mergedCodexConfig(this.config);
+      this.#requireOpen();
+      const provider = scanModelProvider(
+        configuration,
+        this.config.azureOpenAI !== undefined,
+      );
+      if (provider.kind === "environment") {
+        const configured =
+          environmentValue(this.#dependencies.environment, provider.envKey) !==
+          undefined;
         return {
-          authenticated: true,
-          details: "Authenticated with an API key.",
+          authenticated: configured,
+          details: configured
+            ? `Authenticated with an API key from ${provider.envKey} for model provider ${provider.id}.`
+            : `Not authenticated for model provider ${provider.id}; set ${provider.envKey}.`,
         };
       }
-      return await accountStatus(
-        this.#codexCommand(),
-        runtime.environment,
-        signal,
-      );
+      const signal = this.#abortController.signal;
+      const runtime = await this.#ensureRuntime(signal);
+      this.#requireOpen();
+      const apiKey = environmentApiKey(this.#dependencies.environment);
+      const result =
+        apiKey !== null
+          ? {
+              authenticated: true,
+              details: "Authenticated with an API key.",
+            }
+          : await accountStatus(
+              this.#codexCommand(),
+              runtime.environment,
+              signal,
+            );
+      this.#requireOpen();
+      return result;
     });
   }
 
@@ -1072,12 +1142,15 @@ export class CodexSecurity {
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
     auth: ScanAuthMode = "auto",
+    authentication?: ScanAuthentication,
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
     if (this.#runtime !== null) {
       const usePersistentCredentials =
-        scanAuthentication(this.#dependencies.environment, auth).method ===
-        "stored_credentials";
+        (
+          authentication ??
+          scanAuthentication(this.#dependencies.environment, auth)
+        ).method === "stored_credentials";
       if (
         this.#dependencies.prepareRuntime !== undefined ||
         this.#runtime.persistentCredentialHome === undefined ||
@@ -1097,6 +1170,7 @@ export class CodexSecurity {
         temporaryRoot,
         validateLocation,
         auth,
+        authentication,
       );
       this.#runtimePromise = runtimePromise;
       void runtimePromise.catch(() => {
@@ -1140,6 +1214,7 @@ export class CodexSecurity {
         mergedConfig,
         codexSecurityStateDirectory(environment),
         runtime.codexHome,
+        this.config.azureOpenAI !== undefined,
       ),
     );
     await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
@@ -1205,17 +1280,20 @@ export class CodexSecurity {
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
     auth: ScanAuthMode = "auto",
+    authentication?: ScanAuthentication,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
-    const processEnvironment = selectedScanEnvironment(
-      this.#dependencies.environment,
-      auth,
+    const resolvedAuthentication =
+      authentication ??
+      scanAuthentication(this.#dependencies.environment, auth);
+    const processEnvironment = withoutProviderApiKey(
+      selectedScanEnvironment(this.#dependencies.environment, auth),
+      resolvedAuthentication,
     );
     const persistentCredentialHome =
-      scanAuthentication(this.#dependencies.environment, auth).method ===
-      "stored_credentials";
+      resolvedAuthentication.method === "stored_credentials";
     const codexHome = persistentCredentialHome
       ? await prepareCodexSecurityCredentialHome(
           processEnvironment,
@@ -1247,6 +1325,7 @@ export class CodexSecurity {
           mergedConfig,
           codexSecurityStateDirectory(processEnvironment),
           persistentCredentialHome ? codexHome : undefined,
+          this.config.azureOpenAI !== undefined,
         ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
@@ -1260,11 +1339,15 @@ export class CodexSecurity {
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
-      const credentialsAvailable = await initialCredentialsAvailable(
-        processEnvironment,
-        ambientHome,
-        codexHome,
-      );
+      const credentialsAvailable = isProviderApiKeyAuthentication(
+        resolvedAuthentication,
+      )
+        ? false
+        : await initialCredentialsAvailable(
+            processEnvironment,
+            ambientHome,
+            codexHome,
+          );
       return {
         codexHome,
         persistentCredentialHome,
@@ -1339,6 +1422,8 @@ interface ScanEventRunOptions {
   expectation: ScanExpectation;
   workbenchValidated?: boolean;
   model?: string;
+  modelProvider?: string;
+  estimateCost?: boolean;
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onThreadStarted?: (threadId: string) => void;
   onScanStarted?: () => void;
@@ -1451,6 +1536,9 @@ export async function runScanEvents(
         finalResponse,
         usage,
         ...(options.model === undefined ? {} : { model: options.model }),
+        ...(options.modelProvider === undefined
+          ? {}
+          : { modelProvider: options.modelProvider }),
       },
       threadId,
       options.scanDir,
@@ -1458,6 +1546,7 @@ export async function runScanEvents(
       options.expectation,
       options.signal,
       options.workbenchValidated,
+      options.estimateCost,
     );
     if (options.signal.aborted) {
       throw new ScanInterruptedError(
@@ -1561,10 +1650,12 @@ function scanRecipe(
   repositoryRevision: string | null,
   pluginVersion: string,
   effectiveConfig: JsonObject,
+  azureConfigured: boolean,
   failOnSeverity?: SeverityLevel,
   knowledgeBasePaths?: string[],
   maxCostUsd?: number,
 ): JsonObject {
+  const provider = scanModelProvider(effectiveConfig, azureConfigured);
   return {
     repository,
     target: {
@@ -1578,18 +1669,147 @@ function scanRecipe(
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
-    config: scanPreflightCodexConfig(effectiveConfig),
+    config: scanReplayCodexConfig(effectiveConfig, azureConfigured),
+    ...(provider.kind === "openai"
+      ? {}
+      : {
+          azureOpenAI: {
+            endpoint: provider.replayableDefinition["base_url"] as string,
+          },
+        }),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
   };
 }
 
+export function scanReplayCodexConfig(
+  config: JsonObject,
+  azureConfigured = false,
+): JsonObject {
+  const result = scanPreflightCodexConfig(config);
+  const provider = scanModelProvider(config, azureConfigured);
+  if (provider.kind === "openai") return result;
+  const model = config["model"];
+  if (
+    typeof model !== "string" ||
+    model.length === 0 ||
+    model.length > 256 ||
+    /[\u0000-\u001f\u007f]/u.test(model)
+  ) {
+    throw new ConfigurationError(
+      "The Azure deployment name cannot be stored safely for reruns.",
+    );
+  }
+  result["model"] = model;
+  delete result["model_provider"];
+  delete result["model_providers"];
+  return result;
+}
+
+function replayableAzureProviderDefinition(
+  definition: Readonly<JsonObject>,
+): JsonObject {
+  const allowedKeys = new Set([
+    "name",
+    "base_url",
+    "env_key",
+    "wire_api",
+    "request_max_retries",
+    "stream_max_retries",
+    "stream_idle_timeout_ms",
+  ]);
+  if (Object.keys(definition).some((key) => !allowedKeys.has(key))) {
+    throw new ConfigurationError(
+      "The azure model provider contains settings that cannot be stored safely for reruns.",
+    );
+  }
+
+  const replayable: JsonObject = {};
+  const name = definition["name"];
+  if (name !== undefined) {
+    if (
+      typeof name !== "string" ||
+      name.length === 0 ||
+      name.length > 256 ||
+      /[\u0000-\u001f\u007f]/u.test(name)
+    ) {
+      throw new ConfigurationError(
+        "The azure model provider has an invalid name.",
+      );
+    }
+    replayable["name"] = name;
+  }
+  const baseUrl = replayableProviderBaseUrl(definition["base_url"]);
+  if (baseUrl === undefined) {
+    throw new ConfigurationError(
+      "The azure model provider must use an HTTPS /openai/v1 base_url without credentials, query parameters, or a fragment.",
+    );
+  }
+  replayable["base_url"] = baseUrl;
+  replayable["env_key"] = "AZURE_OPENAI_API_KEY";
+  replayable["wire_api"] = "responses";
+  for (const key of [
+    "request_max_retries",
+    "stream_max_retries",
+    "stream_idle_timeout_ms",
+  ]) {
+    const value = definition[key];
+    if (value === undefined) continue;
+    if (
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 0 ||
+      value > 1_000_000
+    ) {
+      throw new ConfigurationError(
+        `The azure model provider has an invalid ${key}.`,
+      );
+    }
+    replayable[key] = value;
+  }
+  return replayable;
+}
+
+function replayableProviderBaseUrl(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 2_048 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    return undefined;
+  }
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== "" ||
+      url.pathname.replace(/\/+$/u, "").toLowerCase() !== "/openai/v1"
+    ) {
+      return undefined;
+    }
+    url.pathname = "/openai/v1";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function validateScanCostLimit(
   maxCostUsd: number | undefined,
   model: string,
+  modelProvider = "openai",
 ): void {
   if (maxCostUsd === undefined) return;
+  if (modelProvider !== "openai") {
+    throw new ConfigurationError(
+      `A scan cost limit is not available for the configured model provider: ${modelProvider}.`,
+    );
+  }
   if (estimateScanCost(model, { input_tokens: 0, output_tokens: 0 }) === null) {
     throw new CodexSecurityError(
       `A scan cost limit is not available for the configured model: ${model}.`,
@@ -1605,6 +1825,7 @@ async function collectResult(
   expectation: ScanExpectation,
   signal: AbortSignal,
   workbenchValidated = false,
+  estimateCost?: boolean,
 ): Promise<ScanResult> {
   const required = [
     "scan-manifest.json",
@@ -1643,21 +1864,55 @@ async function collectResult(
   } catch (error) {
     if (signal.aborted) throw signal.reason ?? error;
   }
-  return new ScanResult({
-    manifest,
-    findings,
-    coverage,
-    scanDir,
-    threadId,
-    turnResult,
-    sarifPath,
-  });
+  return createScanResult(
+    {
+      manifest,
+      findings,
+      coverage,
+      scanDir,
+      threadId,
+      turnResult,
+      sarifPath,
+    },
+    estimateCost,
+  );
 }
 
 export function scanAuthentication(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
+  config?: Readonly<JsonObject>,
+  azureConfigured = false,
 ): ScanAuthentication {
+  const provider =
+    azureConfigured && config === undefined
+      ? {
+          kind: "environment" as const,
+          id: "azure" as const,
+          configId: AZURE_OPENAI_PROVIDER_ID,
+          envKey: "AZURE_OPENAI_API_KEY" as const,
+          replayableDefinition: {},
+        }
+      : scanModelProvider(config, azureConfigured);
+  if (provider.kind === "environment") {
+    if (auth === "chatgpt") {
+      throw new ConfigurationError(
+        `The ${provider.id} model provider does not use ChatGPT credentials. Use '--auth auto' or '--auth api-key'.`,
+      );
+    }
+    if (environmentValue(environment, provider.envKey) === undefined) {
+      throw new AuthenticationRequiredError(
+        `${provider.id} model-provider authentication requires ${provider.envKey}. ` +
+          "Set a valid provider API key or select a provider that uses OpenAI authentication.",
+      );
+    }
+    return {
+      method: "api_key",
+      provider: provider.id,
+      source: provider.envKey,
+      verified: false,
+    };
+  }
   if (auth === "chatgpt") {
     return { method: "stored_credentials", verified: false };
   }
@@ -1673,6 +1928,89 @@ export function scanAuthentication(
     : { method: "api_key", source: key.source, verified: false };
 }
 
+type ScanModelProvider =
+  | { kind: "openai"; id: "openai" }
+  | {
+      kind: "environment";
+      id: "azure";
+      configId: typeof AZURE_OPENAI_PROVIDER_ID;
+      envKey: "AZURE_OPENAI_API_KEY";
+      replayableDefinition: JsonObject;
+    };
+
+function scanModelProvider(
+  config: Readonly<JsonObject> | undefined,
+  azureConfigured = false,
+): ScanModelProvider {
+  if (!azureConfigured || config === undefined) {
+    return { kind: "openai", id: "openai" };
+  }
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const selectedProfile =
+    typeof profileName === "string" &&
+    isRecord(profiles) &&
+    isRecord(profiles[profileName])
+      ? profiles[profileName]
+      : undefined;
+  const rootProvider = config["model_provider"] ?? "openai";
+  if (rootProvider !== AZURE_OPENAI_PROVIDER_ID) {
+    return { kind: "openai", id: "openai" };
+  }
+  const profileProvider = selectedProfile?.["model_provider"];
+  if (
+    profileProvider !== undefined &&
+    profileProvider !== AZURE_OPENAI_PROVIDER_ID
+  ) {
+    throw new ConfigurationError(
+      "The selected Codex profile cannot override the Azure model provider.",
+    );
+  }
+  if (selectedProfile !== undefined) {
+    for (const key of ["model", "model_reasoning_effort"]) {
+      const profileValue = selectedProfile[key];
+      if (profileValue !== undefined && profileValue !== config[key]) {
+        throw new ConfigurationError(
+          `The selected Codex profile cannot override ${key} for Azure.`,
+        );
+      }
+    }
+  }
+  const providers = config["model_providers"];
+  const definition =
+    isRecord(providers) && isRecord(providers[AZURE_OPENAI_PROVIDER_ID])
+      ? providers[AZURE_OPENAI_PROVIDER_ID]
+      : undefined;
+  if (definition === undefined) {
+    throw new ConfigurationError(
+      "The azure model provider is not defined in model_providers.",
+    );
+  }
+  if (definition?.["requires_openai_auth"] === true) {
+    throw new ConfigurationError(
+      "The azure model provider must use AZURE_OPENAI_API_KEY, not OpenAI authentication.",
+    );
+  }
+  if (definition["env_key"] !== "AZURE_OPENAI_API_KEY") {
+    throw new ConfigurationError(
+      "The azure model provider env_key must be AZURE_OPENAI_API_KEY.",
+    );
+  }
+  if (definition["wire_api"] !== "responses") {
+    throw new ConfigurationError(
+      "The azure model provider wire_api must be responses.",
+    );
+  }
+  const replayableDefinition = replayableAzureProviderDefinition(definition);
+  return {
+    kind: "environment",
+    id: "azure",
+    configId: AZURE_OPENAI_PROVIDER_ID,
+    envKey: "AZURE_OPENAI_API_KEY",
+    replayableDefinition,
+  };
+}
+
 function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
@@ -1684,6 +2022,40 @@ function selectedScanEnvironment(
         name.toUpperCase() !== "OPENAI_API_KEY" &&
         name.toUpperCase() !== "CODEX_API_KEY",
     ),
+  );
+}
+
+function withoutProviderApiKey(
+  environment: ProcessEnvironment,
+  authentication: ScanAuthentication,
+): ProcessEnvironment {
+  if (!isProviderApiKeyAuthentication(authentication)) return environment;
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) => name.toUpperCase() !== "AZURE_OPENAI_API_KEY",
+    ),
+  );
+}
+
+function providerApiKeyEnvironment(
+  environment: ProcessEnvironment,
+  authentication: ScanAuthentication,
+): ProcessEnvironment {
+  if (!isProviderApiKeyAuthentication(authentication)) return {};
+  const value = environmentValue(environment, authentication.source);
+  if (value === undefined) {
+    throw new AuthenticationRequiredError(
+      `${authentication.provider} model-provider authentication requires ${authentication.source}.`,
+    );
+  }
+  return { [authentication.source]: value.trim() };
+}
+
+function isProviderApiKeyAuthentication(
+  authentication: ScanAuthentication,
+): authentication is Extract<ScanAuthentication, { provider: "azure" }> {
+  return (
+    authentication.method === "api_key" && authentication.provider === "azure"
   );
 }
 
@@ -1807,9 +2179,26 @@ export function scanRuntimeCodexConfig(
   config: JsonObject,
   stateDirectory: string,
   protectedCredentialHome?: string,
+  azureConfigured = false,
 ): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
+  const provider = scanModelProvider(hardened, azureConfigured);
+  if (provider.kind === "environment") {
+    excludeShellEnvironmentVariable(hardened, provider.envKey);
+    const profileName = hardened["profile"];
+    const profiles = hardened["profiles"];
+    if (
+      typeof profileName === "string" &&
+      isRecord(profiles) &&
+      isRecord(profiles[profileName])
+    ) {
+      excludeShellEnvironmentVariable(
+        profiles[profileName] as JsonObject,
+        provider.envKey,
+      );
+    }
+  }
   const configuredPermissions = isRecord(hardened["permissions"])
     ? hardened["permissions"]
     : {};
@@ -1831,6 +2220,39 @@ export function scanRuntimeCodexConfig(
       },
     },
   };
+}
+
+function excludeShellEnvironmentVariable(
+  config: JsonObject,
+  environmentVariable: string,
+): void {
+  const policy = isRecord(config["shell_environment_policy"])
+    ? ({ ...config["shell_environment_policy"] } as JsonObject)
+    : {};
+  const normalized = environmentVariable.toUpperCase();
+  const excludes = Array.isArray(policy["exclude"])
+    ? policy["exclude"].filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  if (!excludes.some((value) => value.toUpperCase() === normalized)) {
+    excludes.push(environmentVariable);
+  }
+  policy["exclude"] = excludes;
+  if (isRecord(policy["set"])) {
+    policy["set"] = Object.fromEntries(
+      Object.entries(policy["set"]).filter(
+        ([name]) => name.toUpperCase() !== normalized,
+      ),
+    ) as JsonObject;
+  }
+  if (Array.isArray(policy["include_only"])) {
+    policy["include_only"] = policy["include_only"].filter(
+      (value): value is string =>
+        typeof value === "string" && value.toUpperCase() !== normalized,
+    );
+  }
+  config["shell_environment_policy"] = policy;
 }
 
 export function scanPreflightCodexConfig(config: JsonObject): JsonObject {

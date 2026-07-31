@@ -33,7 +33,12 @@ export {
   mergedCodexConfig,
   writeCodexConfig,
 } from "./config.js";
-export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
+export type {
+  AzureOpenAIOptions,
+  CodexSecurityConfig,
+  JsonObject,
+  JsonValue,
+} from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";

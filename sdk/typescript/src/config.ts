@@ -14,12 +14,19 @@ export interface CodexSecurityConfig {
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;
+  azureOpenAI?: AzureOpenAIOptions;
 }
 
 export interface ScanModelConfiguration {
   model: string;
   reasoningEffort: string;
 }
+
+export interface AzureOpenAIOptions {
+  endpoint: string;
+}
+
+export const AZURE_OPENAI_PROVIDER_ID = "codex_security_azure_openai";
 
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "auto",
@@ -40,6 +47,33 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
 };
 
 deepFreezeJson(DEFAULT_CODEX_CONFIG);
+
+export function azureOpenAICodexOverrides(
+  options: AzureOpenAIOptions,
+): JsonObject {
+  if (
+    typeof options !== "object" ||
+    options === null ||
+    typeof options.endpoint !== "string"
+  ) {
+    throw new ConfigurationError(
+      "azureOpenAI.endpoint must be a valid HTTPS URL.",
+    );
+  }
+  const endpoint = normalizeAzureOpenAIEndpoint(options.endpoint);
+  const provider: JsonObject = {
+    name: "Azure OpenAI",
+    base_url: endpoint,
+    env_key: "AZURE_OPENAI_API_KEY",
+    wire_api: "responses",
+  };
+  return {
+    model_provider: AZURE_OPENAI_PROVIDER_ID,
+    model_providers: {
+      [AZURE_OPENAI_PROVIDER_ID]: provider,
+    },
+  };
+}
 
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
@@ -80,6 +114,25 @@ export async function mergedCodexConfig(
         normalizeLegacyWindowsSandboxOverride(profile);
       }
     }
+  }
+  if (config.azureOpenAI !== undefined) {
+    const modelProvider = overrides["model_provider"];
+    if (modelProvider !== undefined) {
+      throw new ConfigurationError(
+        "azureOpenAI cannot be combined with a codexOverrides model_provider.",
+      );
+    }
+    const modelProviders = overrides["model_providers"];
+    if (
+      modelProviders !== undefined &&
+      (!isObject(modelProviders) ||
+        Object.hasOwn(modelProviders, AZURE_OPENAI_PROVIDER_ID))
+    ) {
+      throw new ConfigurationError(
+        "azureOpenAI owns its Codex model-provider configuration.",
+      );
+    }
+    deepMerge(overrides, azureOpenAICodexOverrides(config.azureOpenAI));
   }
   return deepMerge(cloneJson(DEFAULT_CODEX_CONFIG), overrides);
 }
@@ -288,6 +341,46 @@ function deepFreezeJson(value: JsonValue): void {
     deepFreezeJson(item);
   }
   Object.freeze(value);
+}
+
+function normalizeAzureOpenAIEndpoint(value: string): string {
+  const input = value.trim();
+  if (
+    input.length === 0 ||
+    input.length > 2_048 ||
+    /[\u0000-\u001f\u007f]/u.test(input)
+  ) {
+    throw new ConfigurationError(
+      "The Azure OpenAI endpoint must be a valid HTTPS URL.",
+    );
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(input);
+  } catch {
+    throw new ConfigurationError(
+      "The Azure OpenAI endpoint must be a valid HTTPS URL.",
+    );
+  }
+  if (
+    endpoint.protocol !== "https:" ||
+    endpoint.username !== "" ||
+    endpoint.password !== "" ||
+    endpoint.search !== "" ||
+    endpoint.hash !== ""
+  ) {
+    throw new ConfigurationError(
+      "The Azure OpenAI endpoint must be an HTTPS URL without credentials, query parameters, or a fragment.",
+    );
+  }
+  const pathname = endpoint.pathname.replace(/\/+$/u, "");
+  if (!["", "/openai", "/openai/v1"].includes(pathname.toLowerCase())) {
+    throw new ConfigurationError(
+      "The Azure OpenAI endpoint must be a resource URL or end in /openai/v1.",
+    );
+  }
+  endpoint.pathname = "/openai/v1";
+  return endpoint.toString();
 }
 
 function isObject(value: unknown): value is Record<string, JsonValue> {
