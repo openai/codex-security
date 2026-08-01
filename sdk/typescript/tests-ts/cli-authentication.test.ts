@@ -475,6 +475,43 @@ describe("CLI authentication", () => {
     }
   });
 
+  test("never prompts when scans rerun requests machine-readable output", async () => {
+    for (const argv of [
+      ["scans", "rerun", "scan-original", "--json"],
+      ["scans", "rerun", "scan-original", "--format", "jsonl"],
+    ]) {
+      const stderr = capture(true);
+      let prompts = 0;
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-private-key" },
+        onWorkbench: () => ({
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            pluginVersion: "1.2.3",
+            config: {},
+          },
+        }),
+      });
+      deps.hasStoredChatGPTSignIn = async () => true;
+      deps.scanAuthenticationPrompt = {
+        isInteractive: () => true,
+        select: async <Value extends string>(
+          _message: string,
+          options: readonly { label: string; value: Value }[],
+        ): Promise<Value> => {
+          prompts += 1;
+          return options[0]!.value;
+        },
+      };
+
+      expect(await main(argv, capture().stream, stderr.stream, deps)).toBe(0);
+      expect(prompts).toBe(0);
+      expect(stderr.text()).not.toContain("synthetic-private-key");
+    }
+  });
+
   test("rejects explicit API-key authentication before initializing a scan when no key is set", async () => {
     const stderr = capture();
     const deps = dependencies();

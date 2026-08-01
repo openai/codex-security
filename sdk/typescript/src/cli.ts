@@ -877,7 +877,14 @@ export async function main(
         scanId: z.string().min(1).describe("Saved scan identifier."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError }) {
+      async run({ args, error: incurError, format }) {
+        if (format === "md") {
+          errorOutput.write(
+            "codex-security: Markdown output is not supported for scan results.\n",
+          );
+          exitCode = 2;
+          return;
+        }
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
@@ -896,7 +903,12 @@ export async function main(
             exitCode,
           });
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          format !== "json" && format !== "jsonl",
+        );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           return incurError({
