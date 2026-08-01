@@ -373,6 +373,18 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
+  test("accepts RFC 3339 leap-second timestamps", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    manifest["scan"]["completedAt"] = "2016-12-31T23:59:60Z";
+    manifest["scan"]["sealedAt"] = "2016-12-31T23:59:60Z";
+    await writeJson(manifestPath, manifest);
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+  });
+
   test("requires completed and sealed timestamps to match exactly", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");

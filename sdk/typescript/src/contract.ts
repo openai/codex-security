@@ -1192,7 +1192,7 @@ function validRfc3339DateTime(value: string): boolean {
     day < 1 ||
     hour > 23 ||
     minute > 59 ||
-    second > 59 ||
+    second > 60 ||
     offsetHour > 23 ||
     offsetMinute > 59
   ) {
