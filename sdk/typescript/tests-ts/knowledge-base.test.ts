@@ -41,10 +41,14 @@ async function extractedDocuments(path: string): Promise<string[]> {
   );
 }
 
-function docx(text: string, secondLine?: string): Uint8Array {
+function docx(
+  text: string,
+  secondLine?: string,
+  breakElement = "<w:br/>",
+): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r>${secondLine === undefined ? "" : `<w:br/><w:r><w:t>${secondLine}</w:t></w:r>`}</w:p></w:body></w:document>`,
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r>${secondLine === undefined ? "" : `${breakElement}<w:r><w:t>${secondLine}</w:t></w:r>`}</w:p></w:body></w:document>`,
     ),
   });
 }
@@ -115,6 +119,10 @@ describe("scan knowledge bases", () => {
       join(root, "threat-model.docx"),
       docx("SSRF &amp; IDOR", "Review authentication"),
     );
+    await writeFile(
+      join(root, "paired-break.docx"),
+      docx("Authorization", "Review permissions", "<w:br></w:br>"),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.push(knowledgeBase.path);
@@ -122,6 +130,7 @@ describe("scan knowledge bases", () => {
 
     expect(documents).toContain("Payment service boundary");
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
+    expect(documents).toContain("Authorization\nReview permissions\n");
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
