@@ -371,7 +371,7 @@ async function gitOutput(
       env: command.environment,
     },
   );
-  return stdout.trim();
+  return stdout.replace(/\r?\n$/u, "");
 }
 
 async function outermostGitMarkerRoot(
