@@ -269,6 +269,18 @@ export async function requirePrivateCredentialHome(
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
+  await secureWindowsPrivateDirectory(path, "Credential");
+}
+
+async function secureWindowsScanOutput(path: string): Promise<void> {
+  await secureWindowsPrivateDirectory(path, "Scan output");
+}
+
+/** Restrict a Windows directory ACL to the current user, then verify. */
+async function secureWindowsPrivateDirectory(
+  path: string,
+  label: "Credential" | "Scan output",
+): Promise<void> {
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const powershell = join(
     systemRoot,
@@ -279,7 +291,8 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   );
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    "$path = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_CREDENTIAL_ACL_PATH', 'Process')",
+    "$path = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_PRIVATE_ACL_PATH', 'Process')",
+    "$label = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_PRIVATE_ACL_LABEL', 'Process')",
     "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
     "if ($null -eq $identity.User) { throw 'Unable to identify the current Windows user' }",
     "$acl = New-Object System.Security.AccessControl.DirectorySecurity",
@@ -290,9 +303,9 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "$acl.SetAccessRule($rule)",
     "[System.IO.Directory]::SetAccessControl($path, $acl)",
     "$verified = [System.IO.Directory]::GetAccessControl($path)",
-    "if (-not $verified.AreAccessRulesProtected) { throw 'Credential ACL still inherits access rules' }",
+    "if (-not $verified.AreAccessRulesProtected) { throw \"$label ACL still inherits access rules\" }",
     "$unexpected = @($verified.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.User.Value })",
-    "if ($unexpected.Count -ne 0) { throw 'Credential ACL grants access to another identity' }",
+    "if ($unexpected.Count -ne 0) { throw \"$label ACL grants access to another identity\" }",
   ].join("; ");
   await execFile(
     powershell,
@@ -300,7 +313,8 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     {
       env: {
         ...process.env,
-        CODEX_SECURITY_CREDENTIAL_ACL_PATH: path,
+        CODEX_SECURITY_PRIVATE_ACL_PATH: path,
+        CODEX_SECURITY_PRIVATE_ACL_LABEL: label,
       },
       encoding: "utf8",
       windowsHide: true,
@@ -704,7 +718,7 @@ export async function validateOutputDir(
           `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
         );
       }
-      requirePrivateOutputDirectory(metadata, path);
+      await requirePrivateScanOutput(metadata, path);
       await requireSecureOutputAncestry(path);
       const canonical = await realpath(path);
       requireModelSafeOutputDir(canonical);
@@ -829,6 +843,10 @@ export async function prepareOutputDir(
 export async function validatePreparedOutputDir(
   path: string,
   validateLocation?: (path: string) => void,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsOutput?: (path: string) => Promise<void>;
+  } = {},
 ): Promise<string> {
   const metadata = await lstat(path);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
@@ -843,9 +861,37 @@ export async function validatePreparedOutputDir(
       `Scan output directory must be empty: ${path}`,
     );
   }
-  requirePrivateOutputDirectory(metadata, path);
+  await requirePrivateScanOutput(metadata, path, options);
   await requireSecureOutputAncestry(canonical);
   return canonical;
+}
+
+/**
+ * Enforce that scan output stays private to the current user.
+ * On Windows this applies and verifies a current-user-only ACL (same boundary
+ * as credential homes). On POSIX this checks mode/owner.
+ */
+export async function requirePrivateScanOutput(
+  metadata: Pick<Stats, "mode" | "uid">,
+  path: string,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsOutput?: (path: string) => Promise<void>;
+  } = {},
+): Promise<void> {
+  if ((options.platform ?? process.platform) !== "win32") {
+    requirePrivateOutputDirectory(metadata, path);
+    return;
+  }
+
+  try {
+    await (options.secureWindowsOutput ?? secureWindowsScanOutput)(path);
+  } catch (error) {
+    throw new OutputDirectoryError(
+      `Unable to create a private Windows scan output directory: ${path}`,
+      { cause: error },
+    );
+  }
 }
 
 export function requirePrivateOutputDirectory(

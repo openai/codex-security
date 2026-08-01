@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
+import { requirePrivateScanOutput } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -178,6 +179,15 @@ export async function runBulkScanWizard(
   signal?.throwIfAborted();
 
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
+    await chmod(outputDir, 0o700);
+  }
+  const prepared = await lstat(outputDir);
+  if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
+    throw new Error("The scan output must be a real directory.");
+  }
+  const canonical = await realpath(outputDir);
+  await requirePrivateScanOutput(prepared, canonical);
   await writeFile(
     inputPath,
     `${Papa.unparse(

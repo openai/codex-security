@@ -61,11 +61,13 @@ import {
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
+  requirePrivateScanOutput,
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  validatePreparedOutputDir,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -1727,6 +1729,84 @@ describe("runtime directories and plugin Python boundary", () => {
         {
           encoding: "utf8",
           env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
+          timeout: 15_000,
+          windowsHide: true,
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        protected: true,
+        unexpected: 0,
+      });
+    },
+  );
+
+  test("requires a real private-ACL operation for Windows scan output", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "results");
+    await mkdir(output);
+    const metadata = await lstat(output);
+    const secured: string[] = [];
+
+    await requirePrivateScanOutput(metadata, output, {
+      platform: "win32",
+      secureWindowsOutput: async (path) => {
+        secured.push(path);
+      },
+    });
+    expect(secured).toEqual([output]);
+
+    await expect(
+      requirePrivateScanOutput(metadata, output, {
+        platform: "win32",
+        secureWindowsOutput: async () => {
+          throw new Error("ACL could not be secured");
+        },
+      }),
+    ).rejects.toThrow("private Windows scan output directory");
+
+    await expect(
+      validatePreparedOutputDir(output, undefined, {
+        platform: "win32",
+        secureWindowsOutput: async (path) => {
+          secured.push(`prepared:${path}`);
+        },
+      }),
+    ).resolves.toBe(await realpath(output));
+    expect(secured).toContain(`prepared:${output}`);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "creates scan output with a verified current-user-only Windows ACL",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = await prepareOutputDir(
+        join(root, "results"),
+        "example-repo",
+        root,
+      );
+      const powershell = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      );
+      const command = [
+        "$ErrorActionPreference = 'Stop'",
+        "$path = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_TEST_ACL_PATH', 'Process')",
+        "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+        "$acl = [System.IO.Directory]::GetAccessControl($path)",
+        "$unexpected = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $identity })",
+        "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
+      ].join("; ");
+      const result = spawnSync(
+        powershell,
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: output },
           timeout: 15_000,
           windowsHide: true,
         },

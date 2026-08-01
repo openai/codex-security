@@ -18,7 +18,7 @@ import type {
   ScanManifest,
 } from "./models.js";
 import {
-  requirePrivateOutputDirectory,
+  requirePrivateScanOutput,
   requireSecureOutputAncestry,
 } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
@@ -586,7 +586,7 @@ async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(returned, canonical);
+      await requirePrivateScanOutput(returned, canonical);
       await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
@@ -622,7 +622,7 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(current, root.path);
+    await requirePrivateScanOutput(current, root.path);
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);

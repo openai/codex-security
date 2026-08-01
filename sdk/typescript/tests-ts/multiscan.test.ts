@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -622,7 +623,10 @@ describe("multiscan", () => {
       const preserved = join(external, "victim", "keep.txt");
       await mkdir(join(external, "victim"), { recursive: true });
       await writeFile(preserved, "preserved\n");
-      if (directory) await mkdir(paths.output);
+      if (directory) {
+        await mkdir(paths.output, { mode: 0o700 });
+        if (process.platform !== "win32") await chmod(paths.output, 0o700);
+      }
       await symlink(
         external,
         directory ? join(paths.output, directory) : paths.output,
