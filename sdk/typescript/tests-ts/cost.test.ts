@@ -16,7 +16,7 @@ const temporaryDirectories: string[] = [];
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (check()) return;
-    await Promise.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for the cost tracker.");
 }
@@ -150,68 +150,76 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
-  test("coalesces overlapping refreshes and bounds final work", async () => {
-    const releases: Array<() => void> = [];
-    const tracker = new ScanCostTracker(
-      {
-        codexHome: await codexHome(),
-        model: "gpt-5.6-sol",
-      },
-      () => {
-        return new Promise<void>((resolve) => {
-          releases.push(() => resolve());
-        });
-      },
-    );
-    tracker.start("scan-thread");
-
-    const first = tracker.refresh();
-    await waitFor(() => releases.length === 1);
-    const overlapping = [
-      tracker.refresh(),
-      tracker.refresh(),
-      tracker.refresh(),
-    ];
-    const stopped = tracker.stop({
+  test("coalesces overlapping polling ticks and bounds final work", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
       input_tokens: 100,
       output_tokens: 10,
     });
-    await Promise.resolve();
-    expect(releases).toHaveLength(1);
-
-    releases[0]!();
-    await waitFor(() => releases.length >= 2);
-    releases[1]!();
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      await Promise.resolve();
-    }
-    expect(releases).toHaveLength(2);
-
-    const snapshots = await Promise.all([first, ...overlapping]);
-    expect(snapshots.every((snapshot) => snapshot === snapshots[0])).toBe(true);
-    expect((await stopped).cost?.inputTokens).toBe(100);
-  });
-
-  test("recovers after a failed refresh", async () => {
-    let traversals = 0;
-    const tracker = new ScanCostTracker(
-      {
-        codexHome: await codexHome(),
-        model: "gpt-5.6-sol",
-      },
-      async () => {
-        traversals += 1;
-        if (traversals === 1) throw new Error("session read failed");
-      },
-    );
+    const releases: Array<() => void> = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 1,
+    });
+    const refresh = tracker.refresh.bind(tracker);
+    tracker.refresh = async () => {
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return refresh();
+    };
     tracker.start("scan-thread");
 
-    await expect(tracker.refresh()).rejects.toThrow("session read failed");
-    await expect(tracker.refresh()).resolves.toEqual({
-      usage: null,
-      cost: null,
+    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+    expect(releases).toHaveLength(1);
+
+    const stopped = tracker.stop();
+    expect(releases).toHaveLength(2);
+    releases[0]!();
+    releases[1]!();
+
+    expect((await stopped).cost?.inputTokens).toBe(100);
+    expect(releases).toHaveLength(2);
+  });
+
+  test("retries one coalesced poll after a failed refresh", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
     });
+    const errors: string[] = [];
+    let traversals = 0;
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 1,
+      onError: (error) => {
+        if (error instanceof Error) errors.push(error.message);
+      },
+    });
+    const refresh = tracker.refresh.bind(tracker);
+    tracker.refresh = async () => {
+      traversals += 1;
+      if (traversals === 1) {
+        await blocked;
+        throw new Error("session read failed");
+      }
+      return refresh();
+    };
+    tracker.start("scan-thread");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    expect(traversals).toBe(1);
+    release!();
+    await waitFor(() => traversals === 2);
+
+    expect(errors).toEqual(["session read failed"]);
     expect(traversals).toBe(2);
+    expect((await tracker.stop()).cost?.inputTokens).toBe(100);
   });
 
   test("counts the scan and delegated workers without including other scans", async () => {
