@@ -163,6 +163,15 @@ describe("CLI update notice", () => {
         fetch: registryResponse("1.0.0-alpha-1"),
       }),
     ).resolves.toBeDefined();
+
+    const longNumericIdentifier = "9".repeat(4_096);
+    await expect(
+      checkForUpdate({
+        environment: {},
+        currentVersion: `1.0.0-alpha.${longNumericIdentifier}`,
+        fetch: registryResponse(`1.0.0-alpha.1${longNumericIdentifier}`),
+      }),
+    ).resolves.toBeDefined();
   });
 
   test("suppresses registry checks in CI or when disabled", async () => {

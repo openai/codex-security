@@ -175,7 +175,10 @@ function isNewerPrerelease(candidate: string, installed: string): boolean {
     const candidateIsNumeric = /^\d+$/u.test(candidateIdentifier);
     const installedIsNumeric = /^\d+$/u.test(installedIdentifier);
     if (candidateIsNumeric && installedIsNumeric) {
-      return BigInt(candidateIdentifier) > BigInt(installedIdentifier);
+      if (candidateIdentifier.length !== installedIdentifier.length) {
+        return candidateIdentifier.length > installedIdentifier.length;
+      }
+      return candidateIdentifier > installedIdentifier;
     }
     if (candidateIsNumeric !== installedIsNumeric) {
       return !candidateIsNumeric;
