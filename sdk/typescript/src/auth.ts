@@ -461,7 +461,7 @@ export async function runCodex(
 
 function preferredAuthUrl(value: string): string | null {
   for (const match of plainTerminalText(value).matchAll(
-    /https?:\/\/[^\s<>]+/g,
+    /https?:\/\/[^\s<>"']+/g,
   )) {
     const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
     try {

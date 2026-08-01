@@ -109,10 +109,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          existing_ref="$(
-            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-              --jq '[.object.type, .object.sha] | @tsv' 2>/dev/null || true
+          query_status=0
+          tag_response="$(
+            gh api --include \
+              "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null
+          )" || query_status=$?
+
+          IFS=' ' read -r _ response_status _ <<< "$tag_response" || true
+          response_body="$(
+            awk 'body { print } /^\r?$/ { body = 1 }' <<< "$tag_response"
           )"
+
+          if [[ "$query_status" == 0 && "$response_status" =~ ^2[0-9]{2}$ ]]; then
+            if ! existing_ref="$(
+              jq -er '[.object.type, .object.sha] | @tsv' <<< "$response_body"
+            )"; then
+              echo "Unable to query release tag $RELEASE_TAG." >&2
+              exit 1
+            fi
+          elif [[ "$query_status" != 0 && "$response_status" == 404 &&
+                  "$(
+                    jq -r '.status // empty' <<< "$response_body" \
+                      2>/dev/null || true
+                  )" == 404 ]]; then
+            existing_ref=""
+          else
+            echo "Unable to query release tag $RELEASE_TAG." >&2
+            exit 1
+          fi
 
           if [[ -n "$existing_ref" ]]; then
             IFS=$'\t' read -r tag_type tag_object <<< "$existing_ref"
