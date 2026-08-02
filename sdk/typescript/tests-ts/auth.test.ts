@@ -56,6 +56,8 @@ if (args.join(" ") === "login --with-api-key") {
   console.error("Listening on http://[::1]:1455.");
   console.error("Listening on http://[::]:1455.");
   console.error("Listening on http://[::ffff:127.0.0.1]:1455.");
+  console.error("Listening on http://[::ffff:7f00:1]:1455.");
+  console.error("Listening on http://[0:0:0:0:0:0:0:1]:1455.");
   console.error("Listening on http://[::ffff:0.0.0.0]:1455.");
   console.error("Listening on http://[::127.0.0.1]:1455.");
   console.error("Open \\u001b[32mhttps://127.auth.example.test/device\\u001b[0m");
