@@ -246,6 +246,29 @@ describe("customer container entrypoint", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe("--version\n");
   });
+
+  testPosix(
+    "rejects invalid CODEX_SECURITY_GIT_HOST with leading or trailing hyphens",
+    async () => {
+      for (const host of [
+        "-evil.com",
+        "evil.com-",
+        "--flag.com",
+        ".invalid",
+        "invalid.",
+      ]) {
+        const result = await runEntrypoint(["--version"], {
+          GH_TOKEN: "secret-token",
+          CODEX_SECURITY_GIT_HOST: host,
+        });
+
+        expect(result.status).toBe(2);
+        expect(result.stderr).toBe(
+          "codex-security: CODEX_SECURITY_GIT_HOST must be a valid hostname.\n",
+        );
+      }
+    },
+  );
 });
 
 describe("immutable customer container releases", () => {
