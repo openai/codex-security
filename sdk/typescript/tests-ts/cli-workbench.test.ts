@@ -1,5 +1,8 @@
-import { resolve } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import * as os from "node:os";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { describe, expect, mock, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget } from "../src/index.js";
 import { main } from "../src/cli.js";
@@ -55,6 +58,42 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toMatchObject({ repository: "scans" });
+  });
+
+  test("expands ~ in the scans list repository and --scan-root arguments", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-cli-tilde-"));
+    mock.module("node:os", () => ({ ...os, homedir: () => home }));
+    try {
+      const cases: Array<[string[], string[]]> = [
+        [
+          ["scans", "list", "~/project"],
+          ["list-scans", "--repository", resolve(home, "project")],
+        ],
+        [
+          ["scans", "list", "--scan-root", "~/history"],
+          ["list-scans", "--scan-root", resolve(home, "history")],
+        ],
+      ];
+      for (const [argv, expected] of cases) {
+        let invocation: readonly string[] | undefined;
+        const deps = dependencies({
+          onWorkbench: (args) => {
+            invocation = args;
+            return { scans: [] };
+          },
+        });
+        deps.createSecurity = () => {
+          throw new Error("history must not initialize Codex");
+        };
+        expect(await main(argv, capture().stream, capture().stream, deps)).toBe(
+          0,
+        );
+        expect(invocation).toEqual(expected);
+      }
+    } finally {
+      mock.module("node:os", () => os);
+      await rm(home, { recursive: true, force: true });
+    }
   });
 
   test("shows scans and returns cached comparisons with one workbench call", async () => {

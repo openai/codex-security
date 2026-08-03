@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
+import { expandHome } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -160,9 +161,11 @@ export async function runBulkScanWizard(
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
-    await prompt.input(
-      "Where should scan results be saved?",
-      "./security-scans",
+    expandHome(
+      await prompt.input(
+        "Where should scan results be saved?",
+        "./security-scans",
+      ),
     ),
   );
   const inputPath = join(outputDir, "repositories.csv");
