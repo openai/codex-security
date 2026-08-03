@@ -2323,6 +2323,27 @@ describe("CLI", () => {
         address: "10.0.0.5",
       });
     }
+    // JSON leaves an apostrophe unescaped, so a backslash run in front of one carries no
+    // escape level of its own: `\\'` reads both as a value ending in a backslash and as
+    // an apostrophe escaped one nesting level up. The credential must stay redacted
+    // through that apostrophe at every nesting depth.
+    let apostrophe =
+      "password='prefix\\'SYNTHETIC_LEAKED_SUFFIX' address=visible";
+    let apostropheRedacted = "password='[redacted]' address=visible";
+    for (let depth = 0; depth <= 3; depth += 1) {
+      const redacted = redactedErrorMessage(apostrophe);
+      expect(redacted).not.toContain("SYNTHETIC_LEAKED_SUFFIX");
+      expect(redacted).toBe(apostropheRedacted);
+      apostrophe = JSON.stringify(apostrophe);
+      apostropheRedacted = JSON.stringify(apostropheRedacted);
+    }
+    // A single-quoted value that really does end in a backslash produces the same run, so
+    // redaction keeps going instead of releasing the rest of the credential.
+    expect(
+      redactedErrorMessage(
+        JSON.stringify("password='SYNTHETIC_TRAILING\\' address=visible"),
+      ),
+    ).not.toContain("SYNTHETIC_TRAILING");
     for (const separator of ["\n", "\\n"]) {
       expect(
         redactedErrorMessage(

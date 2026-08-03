@@ -57,10 +57,19 @@ function redactQuotedCredentialValues(message: string): string {
       // Requiring the two to be equal treated a value ending in a backslash as an
       // escaped quote, ran past the real delimiter, and swallowed the text after it.
       const slashes = delimiter - preceding;
-      if (
-        slashes >= openingSlashes &&
-        (slashes - openingSlashes) % (2 * (openingSlashes + 1)) === 0
-      ) {
+      // That arithmetic only holds while the enclosing encoding escapes the quote
+      // character, because an escaped quote then costs one backslash less than a
+      // literal one. JSON escapes `"` and `\` but leaves `'` alone, so an unescaped
+      // apostrophe reveals no escape level of its own: `\\'` is both a value ending in
+      // a backslash and an apostrophe escaped one nesting level up. Read it as an
+      // escape, since over-redacting a diagnostic beats emitting the rest of a
+      // credential.
+      const escapeLevelIsKnown = quote === '"' || openingSlashes > 0;
+      const closesValue = escapeLevelIsKnown
+        ? slashes >= openingSlashes &&
+          (slashes - openingSlashes) % (2 * (openingSlashes + 1)) === 0
+        : slashes === 0;
+      if (closesValue) {
         // Emit the delimiter's own escape backslashes only. The rest of the run is the
         // tail of the value being replaced, so it must not survive into the output.
         output += `${message.slice(consumed, assignment.lastIndex)}[redacted]${message.slice(delimiter - openingSlashes, delimiter + 1)}`;
