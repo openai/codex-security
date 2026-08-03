@@ -836,6 +836,27 @@ def _recover_unsealed_findings(
                 parent[field] = normalized
                 normalized_fields.append(label)
 
+            severity = finding.get("severity")
+            if isinstance(severity, dict):
+                change_conditions = severity.get("changeConditions")
+                if (
+                    isinstance(change_conditions, list)
+                    and change_conditions
+                    and all(
+                        isinstance(condition, str) and condition.strip()
+                        for condition in change_conditions
+                    )
+                ):
+                    for condition_index, condition in enumerate(change_conditions):
+                        _require_safe_json_string(
+                            condition,
+                            f"{context}.severity.changeConditions[{condition_index}]",
+                        )
+                    severity["changeConditions"] = " ".join(
+                        condition.strip() for condition in change_conditions
+                    )
+                    normalized_fields.append("severity change conditions")
+
             _populate_unsealed_finding_identities(
                 manifest,
                 {"scanId": scan_id, "findings": [finding]},
