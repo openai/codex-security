@@ -1,6 +1,7 @@
 import {
   copyFile,
   cp,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -1825,7 +1826,13 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["removed", "without deep settings"] as const)(
+  test.each([
+    "removed",
+    "without deep settings",
+    ...(process.platform === "win32"
+      ? []
+      : ["without deep settings and a dangling runtime link"]),
+  ])(
     "clears stale runtime deep-scan configuration when ambient settings are %s",
     async (ambientState) => {
       const root = await temporaryDirectory();
@@ -1835,6 +1842,7 @@ describe("CodexSecurity orchestration", () => {
       const scanDir = join(root, "scan");
       const ambientConfig = join(ambientHome, "codex-security", "config.toml");
       const runtimeConfig = join(runtimeHome, "codex-security", "config.toml");
+      const escapedConfig = join(root, "escaped-config.toml");
       await mkdir(repository);
       await mkdir(join(ambientHome, "codex-security"), { recursive: true });
       await mkdir(runtimeHome);
@@ -1873,11 +1881,17 @@ describe("CodexSecurity orchestration", () => {
       } else {
         await writeFile(ambientConfig, "[other]\nenabled = true\n");
       }
+      if (
+        ambientState === "without deep settings and a dangling runtime link"
+      ) {
+        await rm(runtimeConfig);
+        await symlink(escapedConfig, runtimeConfig);
+      }
 
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "deep scan settings captured",
       );
-      await expect(readFile(runtimeConfig, "utf8")).rejects.toMatchObject({
+      await expect(fsPromises.lstat(runtimeConfig)).rejects.toMatchObject({
         code: "ENOENT",
       });
 
@@ -1886,6 +1900,7 @@ describe("CodexSecurity orchestration", () => {
         "deep scan settings captured",
       );
       expect(await readFile(runtimeConfig, "utf8")).toContain("workers = 7");
+      expect(existsSync(escapedConfig)).toBe(false);
       await client.close();
     },
   );
@@ -1894,6 +1909,7 @@ describe("CodexSecurity orchestration", () => {
     "the same path",
     "a symlink alias",
     "a shared configuration directory",
+    "a shared file identity",
     ...(process.platform === "win32" ? [] : ["a shared configuration file"]),
   ])(
     "preserves ambient configuration when the deep-scan runtime shares it through %s",
@@ -1927,6 +1943,12 @@ describe("CodexSecurity orchestration", () => {
       } else if (configurationAlias === "a shared configuration file") {
         await mkdir(join(ambientHome, "codex-security"), { recursive: true });
         await symlink(
+          configPath,
+          join(ambientHome, "codex-security", "config.toml"),
+        );
+      } else if (configurationAlias === "a shared file identity") {
+        await mkdir(join(ambientHome, "codex-security"), { recursive: true });
+        await link(
           configPath,
           join(ambientHome, "codex-security", "config.toml"),
         );
