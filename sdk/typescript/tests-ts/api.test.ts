@@ -1,4 +1,5 @@
 import {
+  chmod,
   copyFile,
   cp,
   mkdir,
@@ -610,7 +611,7 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const source = join(repository, "src");
     const output = join(root, "scan");
-    await mkdir(source, { recursive: true });
+    await mkdir(source, { recursive: true, mode: 0o700 });
     let runtimeStarted = false;
     const client = new TestClient(
       { pythonPath: "/definitely/missing/python" },
@@ -1283,7 +1284,7 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const normal = join(root, "normal");
     const linked = join(root, "linked");
-    await mkdir(normal);
+    await mkdir(normal, { mode: 0o700 });
     execFileSync("git", ["init", "-q", normal]);
     await writeFile(join(normal, "tracked.txt"), "tracked\n");
     execFileSync("git", ["-C", normal, "add", "."]);
@@ -1308,6 +1309,7 @@ describe("CodexSecurity orchestration", () => {
       "linked",
       linked,
     ]);
+    await chmod(linked, 0o700);
 
     for (const worktree of [normal, linked]) {
       const repository = join(worktree, "packages", "service");
@@ -2609,8 +2611,8 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-codex-home");
     const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(ambientHome);
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(ambientHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     const interpreter =

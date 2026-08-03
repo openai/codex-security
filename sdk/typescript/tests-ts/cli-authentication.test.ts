@@ -570,10 +570,10 @@ describe("CLI authentication", () => {
     const tildeHome = join(root, ".codex-security-home");
     const mountedHome = join(root, "mounted-codex-home");
     const defaultHome = join(root, ".codex");
-    await mkdir(relativeHome, { recursive: true });
-    await mkdir(tildeHome, { recursive: true });
-    await mkdir(mountedHome, { recursive: true });
-    await mkdir(defaultHome, { recursive: true });
+    await mkdir(relativeHome, { recursive: true, mode: 0o700 });
+    await mkdir(tildeHome, { recursive: true, mode: 0o700 });
+    await mkdir(mountedHome, { recursive: true, mode: 0o700 });
+    await mkdir(defaultHome, { recursive: true, mode: 0o700 });
     try {
       for (const [configuredHome, expectedHome, userHome] of [
         [".codex-security-home", relativeHome, root],
