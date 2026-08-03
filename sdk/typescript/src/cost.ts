@@ -77,10 +77,25 @@ export class ScanCostTracker {
     if (this.#threadId !== null) return;
     this.#threadId = threadId;
     if (this.#options.maxCostUsd === undefined) return;
+    let polling = false;
+    let rerun = false;
     const poll = () => {
-      void this.refresh().catch((error: unknown) => {
-        this.#options.onError?.(error);
-      });
+      if (polling) {
+        rerun = true;
+        return;
+      }
+      polling = true;
+      void this.refresh()
+        .catch((error: unknown) => {
+          this.#options.onError?.(error);
+        })
+        .finally(() => {
+          polling = false;
+          if (rerun && this.#timer !== null) {
+            rerun = false;
+            poll();
+          }
+        });
     };
     this.#timer = setInterval(poll, COST_POLL_INTERVAL_MS);
     this.#timer.unref();

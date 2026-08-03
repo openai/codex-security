@@ -15,6 +15,14 @@ import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
 
+async function waitFor(check: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (check()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for the cost tracker.");
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -144,6 +152,78 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test("coalesces overlapping polling ticks and bounds final work", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const releases: Array<() => void> = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 1,
+    });
+    const refresh = tracker.refresh.bind(tracker);
+    tracker.refresh = async () => {
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return refresh();
+    };
+    tracker.start("scan-thread");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+    expect(releases).toHaveLength(1);
+
+    const stopped = tracker.stop();
+    expect(releases).toHaveLength(2);
+    releases[0]!();
+    releases[1]!();
+
+    expect((await stopped).cost?.inputTokens).toBe(100);
+    expect(releases).toHaveLength(2);
+  });
+
+  test("retries one coalesced poll after a failed refresh", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const errors: string[] = [];
+    let traversals = 0;
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 1,
+      onError: (error) => {
+        if (error instanceof Error) errors.push(error.message);
+      },
+    });
+    const refresh = tracker.refresh.bind(tracker);
+    tracker.refresh = async () => {
+      traversals += 1;
+      if (traversals === 1) {
+        await blocked;
+        throw new Error("session read failed");
+      }
+      return refresh();
+    };
+    tracker.start("scan-thread");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    expect(traversals).toBe(1);
+    release!();
+    await waitFor(() => traversals === 2);
+
+    expect(errors).toEqual(["session read failed"]);
+    expect(traversals).toBe(2);
+    expect((await tracker.stop()).cost?.inputTokens).toBe(100);
+  });
+
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
