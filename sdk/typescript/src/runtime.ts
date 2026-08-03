@@ -910,6 +910,14 @@ export async function requireSecureOutputAncestry(
       );
     }
     requireTrustedOutputAncestor(metadata, current, effectiveUid);
+    // Stop once the walk reaches system-administered territory. This check
+    // defends against another unprivileged user replacing scan output through a
+    // shared parent, which requires a parent they can write to. A root-owned
+    // directory, and therefore everything above it, is not something an
+    // unprivileged user can create entries in or repair, so refusing to run
+    // cannot make the host safer. Hosts that leave / group- or world-writable
+    // would otherwise fail every possible output path.
+    if (metadata.uid === 0 && effectiveUid !== 0) return;
     const parent = dirname(current);
     if (parent === current) return;
     current = parent;

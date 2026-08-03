@@ -3522,6 +3522,14 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
                 raise SystemExit(
                     "Scan output parent must not be group- or world-writable without the sticky bit."
                 )
+            # Stop once the walk reaches system-administered territory. Replacing
+            # scan output through a shared parent requires a parent the attacker
+            # can write to, and a root-owned directory is not one an unprivileged
+            # user can create entries in or repair, so refusing to run cannot make
+            # the host safer. Hosts that leave / group- or world-writable would
+            # otherwise fail every possible output path.
+            if parent_metadata.st_uid == 0 and effective_uid != 0:
+                break
     return scan_dir
 
 

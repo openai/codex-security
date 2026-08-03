@@ -2571,6 +2571,76 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "stops the ancestry walk at a root-owned parent on a world-writable root",
+    async () => {
+      // A shared Linux host can leave / at mode 0777 without the sticky bit,
+      // which an unprivileged user cannot repair. The chain is simulated so the
+      // test does not depend on the mode the CI host gives /.
+      const entry = (uid: number, mode: number) =>
+        ({
+          uid,
+          mode,
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        }) as unknown as Awaited<ReturnType<typeof fsPromises.lstat>>;
+      const tree = new Map([
+        ["/", entry(0, 0o40777)],
+        ["/tmp", entry(0, 0o41777)],
+        ["/tmp/state", entry(4242, 0o40700)],
+        ["/tmp/state/scans", entry(4242, 0o40700)],
+        ["/tmp/shared", entry(4242, 0o40777)],
+        ["/rootstate", entry(0, 0o40700)],
+        ["/rootstate/scans", entry(0, 0o40700)],
+      ]);
+      const originalLstat = fsPromises.lstat;
+      const originalRealpath = fsPromises.realpath;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        realpath: async (path: string) => path,
+        lstat: async (path: string) => {
+          const metadata = tree.get(path);
+          if (metadata === undefined) {
+            const error = new Error(
+              `unexpected lstat: ${path}`,
+            ) as NodeJS.ErrnoException;
+            error.code = "ENOENT";
+            throw error;
+          }
+          return metadata;
+        },
+      }));
+      try {
+        // The walk reaches /tmp, which is root-owned and sticky, and stops there
+        // instead of blaming the user for the mode of /.
+        await expect(
+          requireSecureOutputAncestry("/tmp/state/scans/scan-1", 4242),
+        ).resolves.toBeUndefined();
+
+        // A world-writable root is still rejected when it is the actual parent.
+        await expect(
+          requireSecureOutputAncestry("/results", 4242),
+        ).rejects.toThrow("sticky bit");
+
+        // A world-writable parent the user does own is still rejected.
+        await expect(
+          requireSecureOutputAncestry("/tmp/shared/results", 4242),
+        ).rejects.toThrow("sticky bit");
+
+        // Running as root keeps the full walk, because root can repair /.
+        await expect(
+          requireSecureOutputAncestry("/rootstate/scans/scan-1", 0),
+        ).rejects.toThrow("sticky bit");
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+          realpath: originalRealpath,
+        }));
+      }
+    },
+  );
+
   testPosix("rejects sticky shared parents controlled by another user", () => {
     expect(() =>
       requireTrustedOutputAncestor(

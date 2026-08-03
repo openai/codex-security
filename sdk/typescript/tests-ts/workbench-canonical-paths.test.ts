@@ -164,6 +164,62 @@ describe("bundled workbench canonical paths", () => {
     },
   );
 
+  testPosix(
+    "stops the scan parent walk at a root-owned parent on a world-writable root",
+    async () => {
+      const root = await temporaryDirectory();
+      const scanDirectory = join(root, "scan");
+      await mkdir(scanDirectory, { mode: 0o700 });
+      // A shared Linux host can leave / at mode 0777 without the sticky bit,
+      // which an unprivileged user cannot repair. The ancestry is simulated so
+      // the test does not depend on the modes of the real chain above the
+      // temporary directory.
+      const program = [
+        "import json, os, stat, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_db as workbench",
+        "scan_dir = Path(sys.argv[2])",
+        "root_owned = sys.argv[3] == 'root'",
+        "real_lstat = Path.lstat",
+        "euid = os.geteuid()",
+        "class Simulated:",
+        "    def __init__(self, uid, mode):",
+        "        self.st_uid = uid",
+        "        self.st_mode = mode",
+        "parents = list(scan_dir.parents)",
+        "simulated = {p: Simulated(euid, stat.S_IFDIR | 0o700) for p in parents}",
+        "simulated[parents[-1]] = Simulated(0, stat.S_IFDIR | 0o777)",
+        "simulated[parents[-2]] = Simulated(",
+        "    0 if root_owned else euid,",
+        "    stat.S_IFDIR | (0o1777 if root_owned else 0o777),",
+        ")",
+        "def patched(self):",
+        "    if self in simulated:",
+        "        return simulated[self]",
+        "    return real_lstat(self)",
+        "Path.lstat = patched",
+        "try:",
+        "    workbench.require_canonical_scan_directory(scan_dir)",
+        "except SystemExit as error:",
+        "    print(json.dumps({'accepted': False, 'error': str(error)}))",
+        "else:",
+        "    print(json.dumps({'accepted': True}))",
+      ].join("\n");
+
+      // The walk reaches a root-owned sticky parent and stops there instead of
+      // blaming the user for the mode of /.
+      expect(runPythonProbe(program, scanDirectory, "root")).toMatchObject({
+        accepted: true,
+      });
+      // The same chain is still rejected when that parent is one the user owns.
+      expect(runPythonProbe(program, scanDirectory, "user")).toMatchObject({
+        accepted: false,
+        error: expect.stringContaining("sticky bit"),
+      });
+    },
+  );
+
   test("preserves native Windows case-insensitive path comparison", () => {
     expect(runPythonProbe(simulatedPathProbe, "windows")).toMatchObject({
       accepted: true,
