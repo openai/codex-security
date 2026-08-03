@@ -2946,7 +2946,9 @@ async function runScan(
         ? redactedErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
     diagnostic("scan.failed", {
-      classification: classifyConnectionFailure(failure),
+      classification: isLocalScanFailure(failure)
+        ? "local"
+        : classifyConnectionFailure(failure),
       partial_output: scanDir !== null,
     });
     errorOutput.write(`${message}\n`);

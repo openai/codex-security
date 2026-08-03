@@ -2983,9 +2983,15 @@ describe("CLI", () => {
       });
 
       expect(
-        await main(["scan", "."], stdout.stream, stderr.stream, deps),
+        await main(
+          ["scan", ".", "--verbose"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
       ).toBe(2);
       expect(stderr.text()).toContain((failure as Error).message);
+      expect(stderr.text()).toContain('scan.failed classification="local"');
       expect(stderr.text()).not.toContain("cannot access the configured model");
       expect(stderr.text()).not.toContain("Authentication failed");
       expect(stderr.text()).not.toContain("reached its rate limit");
