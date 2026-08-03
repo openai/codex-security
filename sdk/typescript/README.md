@@ -187,7 +187,7 @@ npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --su
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
-npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
+npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
@@ -222,8 +222,9 @@ directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
 
-Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
-searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
+Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
+shares them with every repository. Directories are searched recursively for
+Markdown, text, PDF, and Word (`.docx`) files.
 
 ### Configure deep scans
 
