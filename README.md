@@ -91,6 +91,9 @@ revisions. See the [container quick start](sdk/typescript/README.md#containerize
 for authentication, private result storage, and optional Ubuntu AppArmor
 hardening.
 
+Pass `--knowledge-base PATH` to share security documents with every repository;
+repeat the option for multiple files or directories.
+
 For complete command help, runtime defaults, native multi-agent worker limits,
 environment variables, deep-scan configuration, and SDK options, see the
 [package README](sdk/typescript/README.md) and the

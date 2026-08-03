@@ -681,6 +681,9 @@ describe("CLI", () => {
             "gpt-5.6-terra",
             "--effort",
             "high",
+            "--knowledge-base",
+            "/shared/architecture.pdf",
+            "--knowledge-base=/shared/threat-models",
             "--codex",
             "features.goals=true",
             "--json",
@@ -708,7 +711,13 @@ describe("CLI", () => {
           model_reasoning_effort: "high",
         },
       });
-      expect(scanOptions).toMatchObject({ mode: "deep" });
+      expect(scanOptions).toMatchObject({
+        mode: "deep",
+        knowledgeBasePaths: [
+          "/shared/architecture.pdf",
+          "/shared/threat-models",
+        ],
+      });
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
     } finally {
@@ -767,6 +776,18 @@ describe("CLI", () => {
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
+      ["bulk-scan", "--knowledge-base", "/shared/threat-models"],
+      [
+        "bulk-scan",
+        "--knowledge-base=/shared/architecture.pdf",
+        "--model=gpt-5.6-terra",
+        "--effort",
+        "high",
+        "--codex",
+        "features.goals=true",
+        "--knowledge-base",
+        "/shared/threat-models",
+      ],
     ] as const) {
       const stdout = capture();
       const stderr = capture();
@@ -1852,6 +1873,10 @@ describe("CLI", () => {
         "expected number to be >0",
       ],
       [["scan", ".", "--path="], "--path must not be empty"],
+      [
+        ["bulk-scan", "--knowledge-base="],
+        "--knowledge-base must not be empty",
+      ],
       [["scan", ".", "--model="], "--model must not be empty"],
       [
         ["scan", ".", "--effort", "ultra"],
