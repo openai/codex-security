@@ -1,0 +1,195 @@
+name: node-release-cut
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - sdk/typescript/package.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-release-cut
+  queue: max
+
+jobs:
+  cut:
+    if: github.repository == 'openai/codex-security'
+    name: cut release tag
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+
+      - name: Resolve the stable package version
+        id: release
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Release tags can only be cut from main." >&2
+            exit 1
+          fi
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Release tags can only be cut from commits on main." >&2
+            exit 1
+          fi
+
+          version="$(node sdk/typescript/scripts/release-automation.mjs version sdk/typescript/package.json)"
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            if previous_manifest="$(git show "$BEFORE_SHA:sdk/typescript/package.json" 2>/dev/null)"; then
+              previous_version="$(
+                printf '%s\n' "$previous_manifest" |
+                  node --input-type=module --eval '
+                    import { readFileSync } from "node:fs";
+                    const manifest = JSON.parse(readFileSync(0, "utf8"));
+                    if (typeof manifest.version !== "string") {
+                      throw new Error("The previous package version is missing.");
+                    }
+                    process.stdout.write(manifest.version);
+                  '
+              )"
+              if [[ "$version" == "$previous_version" ]]; then
+                echo "Package version is unchanged; no release is needed."
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              node sdk/typescript/scripts/release-automation.mjs \
+                require-increase "$version" "$previous_version" >/dev/null
+            fi
+          fi
+
+          if ! published_versions="$(
+            npm view @openai/codex-security versions \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"; then
+            published_versions="$(
+              printf '%s\n' "$published_versions" |
+                node sdk/typescript/scripts/release-automation.mjs \
+                  initial-published-versions "$version"
+            )"
+          fi
+          printf '%s\n' "$published_versions" |
+            node sdk/typescript/scripts/release-automation.mjs \
+              require-published-increase "$version" >/dev/null
+
+          {
+            printf 'changed=true\n'
+            printf 'version=%s\n' "$version"
+            printf 'tag=npm-v%s\n' "$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create the exact merged release tag
+        if: steps.release.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          query_status=0
+          tag_response="$(
+            gh api --include \
+              "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" 2>/dev/null
+          )" || query_status=$?
+
+          IFS=' ' read -r _ response_status _ <<< "$tag_response" || true
+          response_body="$(
+            awk 'body { print } /^\r?$/ { body = 1 }' <<< "$tag_response"
+          )"
+
+          if [[ "$query_status" == 0 && "$response_status" =~ ^2[0-9]{2}$ ]]; then
+            if ! existing_ref="$(
+              jq -er '[.object.type, .object.sha] | @tsv' <<< "$response_body"
+            )"; then
+              echo "Unable to query release tag $RELEASE_TAG." >&2
+              exit 1
+            fi
+          elif [[ "$query_status" != 0 && "$response_status" == 404 &&
+                  "$(
+                    jq -r '.status // empty' <<< "$response_body" \
+                      2>/dev/null || true
+                  )" == 404 ]]; then
+            existing_ref=""
+          else
+            echo "Unable to query release tag $RELEASE_TAG." >&2
+            exit 1
+          fi
+
+          if [[ -n "$existing_ref" ]]; then
+            IFS=$'\t' read -r tag_type tag_object <<< "$existing_ref"
+            if [[ ! "$tag_object" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+              exit 1
+            fi
+
+            case "$tag_type" in
+              commit)
+                existing_sha="$tag_object"
+                ;;
+              tag)
+                if ! existing_sha="$(
+                  gh api \
+                    "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
+                    --jq 'if .object.type == "commit" then .object.sha else empty end'
+                )"; then
+                  echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+                exit 1
+                ;;
+            esac
+
+            if [[ ! "$existing_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
+              exit 1
+            fi
+            if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
+              echo "Release tag $RELEASE_TAG already points to a different commit." >&2
+              exit 1
+            fi
+            echo "Release tag $RELEASE_TAG already points to $GITHUB_SHA."
+            exit 0
+          fi
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" \
+            -f "sha=$GITHUB_SHA" \
+            --silent
+
+      - name: Dispatch the protected npm release
+        if: steps.release.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run node-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$RELEASE_TAG"

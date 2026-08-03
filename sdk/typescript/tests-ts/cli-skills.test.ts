@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, test } from "bun:test";
 import {
   main,
@@ -455,6 +457,122 @@ describe("CLI skill commands", () => {
     });
   });
 
+  test("drains and rejects oversized skill events and responses", async () => {
+    let drained = false;
+    async function* oversizedLine(): AsyncGenerator<Buffer> {
+      for (let remaining = 1_024 * 1_024 + 1; remaining > 0; ) {
+        const length = Math.min(64 * 1_024, remaining);
+        yield Buffer.alloc(length, 0x78);
+        remaining -= length;
+      }
+      yield Buffer.from(
+        '\n{"type":"item.completed","item":{"type":"agent_message","text":"must still drain"}}\n',
+      );
+      drained = true;
+    }
+    await expect(readSkillCommandOutput(oversizedLine())).rejects.toThrow(
+      "Codex skill output exceeded the 1 MiB event",
+    );
+    expect(drained).toBe(true);
+
+    async function* oversizedResponse(): AsyncGenerator<Buffer> {
+      yield Buffer.from(
+        `${JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: "x".repeat(256 * 1_024 + 1),
+          },
+        })}\n`,
+      );
+    }
+    await expect(readSkillCommandOutput(oversizedResponse())).rejects.toThrow(
+      "Codex skill output exceeded the 1 MiB event",
+    );
+
+    const stdout = capture();
+    const stderr = capture();
+    await expect(
+      runCodexSkillCommand(
+        [],
+        { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+        {
+          command: process.execPath,
+          prefixArgs: [
+            "-e",
+            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n")',
+          ],
+        },
+      ),
+    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("terminates an oversized skill child that keeps its output open", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const timeout = AbortSignal.timeout(2_500);
+    const invocation = runCodexSkillCommand(
+      [],
+      { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+      {
+        command: process.execPath,
+        prefixArgs: [
+          "-e",
+          'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n");setInterval(()=>{},1000)',
+        ],
+      },
+    );
+
+    await expect(
+      Promise.race([
+        invocation,
+        new Promise<never>((_, reject) => {
+          timeout.addEventListener(
+            "abort",
+            () => reject(new Error("Oversized skill process did not settle.")),
+            { once: true },
+          );
+        }),
+      ]),
+    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("terminates an oversized skill child after it closes its stdout", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const timeout = AbortSignal.timeout(2_500);
+    const invocation = runCodexSkillCommand(
+      [],
+      { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
+      {
+        command: process.execPath,
+        prefixArgs: [
+          "-e",
+          'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n");process.stdout.end();setInterval(()=>{},1000)',
+        ],
+      },
+    );
+
+    await expect(
+      Promise.race([
+        invocation,
+        new Promise<never>((_, reject) => {
+          timeout.addEventListener(
+            "abort",
+            () => reject(new Error("Oversized skill process did not settle.")),
+            { once: true },
+          );
+        }),
+      ]),
+    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toBe("");
+  });
+
   test("summarizes skill failures without echoing credentials or private paths", () => {
     const cases = [
       ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
@@ -527,4 +645,95 @@ describe("CLI skill commands", () => {
       expect(stderr.text()).not.toContain("/private");
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "forces a skill child to settle when it ignores SIGTERM",
+    async () => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "codex-security-skill-signal-"),
+      );
+      const ready = join(directory, "ready");
+      const child = join(directory, "child.mjs");
+      const wrapper = join(directory, "wrapper.mjs");
+      await writeFile(
+        child,
+        `
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const descendant = spawn(
+  process.execPath,
+  ["-e", "setInterval(() => {}, 1000)"],
+  { stdio: ["ignore", "inherit", "inherit"], windowsHide: true },
+);
+writeFileSync(${JSON.stringify(ready)}, JSON.stringify({
+  child: process.pid,
+  descendant: descendant.pid,
+}));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`,
+      );
+      await writeFile(
+        wrapper,
+        `
+import { runCodexSkillCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+const status = await runCodexSkillCommand(
+  [],
+  { command: "validate", stdout: process.stdout, stderr: process.stderr },
+  { command: process.execPath, prefixArgs: [${JSON.stringify(child)}] },
+);
+process.exit(status);
+`,
+      );
+
+      const invocation = spawn(process.execPath, [wrapper], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      let childPids: number[] = [];
+      try {
+        const deadline = Date.now() + 5_000;
+        while (true) {
+          try {
+            const marker = JSON.parse(await Bun.file(ready).text()) as {
+              child: number;
+              descendant: number;
+            };
+            childPids = [marker.child, marker.descendant];
+            break;
+          } catch (error) {
+            if (Date.now() >= deadline) throw error;
+            await delay(25);
+          }
+        }
+        invocation.kill("SIGTERM");
+        const status = await Promise.race([
+          new Promise<number | null>((resolve, reject) => {
+            invocation.once("error", reject);
+            invocation.once("close", resolve);
+          }),
+          delay(5_000).then(() => {
+            throw new Error("CLI skill cancellation did not settle.");
+          }),
+        ]);
+        expect(status).toBe(143);
+      } finally {
+        invocation.kill("SIGKILL");
+        for (const childPid of childPids) {
+          try {
+            process.kill(childPid, "SIGKILL");
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !("code" in error) ||
+              error.code !== "ESRCH"
+            ) {
+              throw error;
+            }
+          }
+        }
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });

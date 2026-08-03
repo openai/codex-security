@@ -1,10 +1,23 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { Codex, type CodexOptions } from "@openai/codex-sdk";
+import {
+  parse as parseToml,
+  stringify as stringifyToml,
+  type TomlTable,
+} from "smol-toml";
 import {
   accountStatus,
   CodexLoginHandle,
@@ -32,6 +45,7 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   type ProtectedScanPathKind,
+  redactedErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -118,7 +132,14 @@ interface PreparedRuntime {
   effectiveConfig?: JsonObject;
 }
 
-export interface ScanOptions {
+export interface DeepScanOptions {
+  workers?: number;
+  subagents?: number;
+  stopAfterNoNew?: number;
+  maxDiscoveryRuns?: number;
+}
+
+export interface ScanOptions extends DeepScanOptions {
   auth?: ScanAuthMode;
   target?: ScanTarget;
   mode?: ScanMode;
@@ -173,7 +194,7 @@ type ScanObserverName =
   | "onWorkerStatus"
   | "onWarning";
 
-export interface ScanPreflight {
+export interface ScanPreflight extends DeepScanOptions {
   repository: string;
   target: NormalizedTarget;
   mode: ScanMode;
@@ -218,6 +239,12 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const DEEP_SCAN_SETTINGS = [
+  ["workers", "workers", 1],
+  ["subagents", "subagents", 0],
+  ["stopAfterNoNew", "stop_after_no_new", 1],
+  ["maxDiscoveryRuns", "max_discovery_runs", 1],
+] as const;
 
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
@@ -281,6 +308,7 @@ export class CodexSecurity {
       repository: inputs.repository,
       target: inputs.target,
       mode: inputs.mode,
+      ...deepScanOptions(options),
       ...(options.knowledgeBasePaths?.length
         ? { knowledgeBasePaths: options.knowledgeBasePaths }
         : {}),
@@ -311,6 +339,7 @@ export class CodexSecurity {
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
+    let scanFailure = false;
     let completionCost: ScanCost | null = null;
     let activeScan: {
       id: string;
@@ -397,8 +426,24 @@ export class CodexSecurity {
       ) {
         await this.#refreshPersistentRuntime(runtime, scanEnvironment, signal);
       }
+      const effectiveConfig =
+        runtime.effectiveConfig ?? (await mergedCodexConfig(this.config));
+      if (runtime.configPath !== undefined) {
+        await writeCodexConfig(
+          runtime.configPath,
+          scanPreflightCodexConfig(effectiveConfig, repo),
+        );
+      }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      if (mode === "deep") {
+        await prepareDeepScanConfig(
+          runtimeHome,
+          this.#dependencies.environment,
+          options,
+          signal,
+        );
+      }
       if (
         options.expectedPluginVersion !== undefined &&
         runtime.plugin.version !== options.expectedPluginVersion
@@ -533,8 +578,6 @@ export class CodexSecurity {
         mode,
         pluginVersion: runtime.plugin.version,
       };
-      const effectiveConfig =
-        runtime.effectiveConfig ?? (await mergedCodexConfig(this.config));
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model);
       const tracker = new ScanCostTracker({
@@ -562,6 +605,7 @@ export class CodexSecurity {
       costTracker = tracker;
       const recipe = scanRecipe(
         repo,
+        protectedRoot,
         normalized,
         mode,
         expectation.repositoryRevision,
@@ -570,6 +614,7 @@ export class CodexSecurity {
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
+        deepScanOptions(options),
       );
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
@@ -832,6 +877,9 @@ export class CodexSecurity {
       }
       return result;
     } catch (error) {
+      // Recorded first: everything below can throw a different error for this same failed
+      // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
+      scanFailure = true;
       const snapshot = await costTracker?.stop().catch(() => null);
       const failure =
         signal.reason instanceof ScanCostLimitExceededError
@@ -843,11 +891,10 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
+            // Redact before truncating: the stored message is read back by
+            // `scans show` and travels inside the results directory.
             "--message",
-            (failure instanceof Error
-              ? failure.message
-              : String(failure)
-            ).slice(0, 2400),
+            redactedErrorMessage(failure).slice(0, 2400),
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
@@ -860,13 +907,37 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      // Removing the temporary scan inputs is best effort. A throw here would replace the
+      // outcome the try and catch blocks already produced, so these failures are reported
+      // as warnings: a scan that failed has to say why it failed, not why its temporary
+      // files outlived it. The whole step is guarded so that a cleanup which rejects, or
+      // throws synchronously, still cannot skip the credential lock release below.
       try {
-        await Promise.all([
+        for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
-        ]);
+        ])) {
+          if (cleanup.status === "rejected") {
+            warnCleanupFailed(options, cleanup.reason);
+          }
+        }
+      } catch (error) {
+        warnCleanupFailed(options, error);
       } finally {
-        await releaseCredentialHome?.();
+        // Releasing the credential home lock is not best effort, so it keeps its own
+        // finally and runs even if reporting the failures above went wrong. The release
+        // only marks itself done once the lock directory is gone, so a failure leaves an
+        // owner.json naming this still-running process; recoverStaleCredentialHomeLock
+        // then refuses to reclaim it because that pid is alive, and later scans in this
+        // process wait on a lock nothing frees. Reporting success while leaving the client
+        // in that state is worse than failing, so the failure is only downgraded to a
+        // warning when the scan already failed and that error is the one worth keeping.
+        try {
+          await releaseCredentialHome?.();
+        } catch (error) {
+          if (!scanFailure) throw error;
+          warnCleanupFailed(options, error);
+        }
       }
     }
   }
@@ -1165,6 +1236,7 @@ export class CodexSecurity {
     options: ScanOptions,
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
+    deepScanOptions(options);
     if (
       options.maxCostUsd !== undefined &&
       (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)
@@ -1305,6 +1377,71 @@ export class CodexSecurity {
   }
 }
 
+function deepScanOptions(options: ScanOptions): DeepScanOptions {
+  const selected: DeepScanOptions = {};
+  for (const [name, , minimum] of DEEP_SCAN_SETTINGS) {
+    const value = options[name];
+    if (value === undefined) continue;
+    if ((options.mode ?? "standard") !== "deep") {
+      throw new CodexSecurityError("Deep scan settings require deep mode.");
+    }
+    if (!Number.isSafeInteger(value) || value < minimum) {
+      throw new CodexSecurityError(
+        `Deep scan ${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer.`,
+      );
+    }
+    selected[name] = value;
+  }
+  return selected;
+}
+
+async function prepareDeepScanConfig(
+  codexHome: string,
+  environment: ProcessEnvironment,
+  options: DeepScanOptions,
+  signal: AbortSignal,
+): Promise<void> {
+  const ambientHome =
+    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
+  const source = join(ambientHome, "codex-security", "config.toml");
+  let configured: TomlTable = {};
+  try {
+    configured = parseToml(
+      await readFile(source, { encoding: "utf8", signal }),
+    );
+  } catch (error) {
+    if (!isRecord(error) || error["code"] !== "ENOENT") {
+      throw new CodexSecurityError(
+        `Cannot read Codex Security configuration at ${source}.`,
+        { cause: error },
+      );
+    }
+  }
+  const existing = configured["deep_scan"];
+  if (existing !== undefined && !isRecord(existing)) {
+    throw new CodexSecurityError(
+      `Codex Security configuration [deep_scan] at ${source} must be a TOML table.`,
+    );
+  }
+  const overrides: TomlTable = {};
+  for (const [name, key] of DEEP_SCAN_SETTINGS) {
+    const value = options[name];
+    if (value !== undefined) overrides[key] = value;
+  }
+  if (existing === undefined && Object.keys(overrides).length === 0) return;
+  const destination = join(codexHome, "codex-security", "config.toml");
+  if (destination === source && Object.keys(overrides).length === 0) return;
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  await writeFile(
+    destination,
+    stringifyToml({
+      ...configured,
+      deep_scan: { ...existing, ...overrides },
+    }),
+    { mode: 0o600, signal },
+  );
+}
+
 export async function initialCredentialsAvailable(
   environment: ProcessEnvironment,
   ambientHome: string,
@@ -1317,6 +1454,28 @@ export async function initialCredentialsAvailable(
   }
   if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
   return await importer(ambientHome, isolatedHome);
+}
+
+// Reports a cleanup failure without letting it decide the result of the scan. Only the
+// message is forwarded, and it reaches the onWarning observer alone: unlike the fail-scan
+// path it is never written to the workbench, so it adds no persisted, unredacted text.
+function warnCleanupFailed(
+  options: Pick<ScanOptions, "onWarning" | "onObserverError">,
+  reason: unknown,
+): void {
+  // This runs where a throw would replace the scan result, so every step is inside the
+  // guard: reading the reason, coercing it, and reading the observers off the options can
+  // each throw for a sufficiently hostile value, and none of them may become the outcome
+  // of the scan. Losing a warning is the correct trade against losing the result.
+  try {
+    const message = String(reason instanceof Error ? reason.message : reason);
+    notifyObserver(
+      "onWarning",
+      options.onWarning,
+      options.onObserverError,
+      `Could not clean up after the Codex Security scan: ${message}`,
+    );
+  } catch {}
 }
 
 async function removeTargetPathsFile(path: string | null): Promise<void> {
@@ -1395,12 +1554,8 @@ export async function runScanEvents(
       } else if (event.type === "turn.completed") {
         status = "completed";
         usage = event["usage"];
-      } else if (
-        event.type === "turn.failed" &&
-        isRecord(event["error"]) &&
-        typeof event["error"]["message"] === "string"
-      ) {
-        throw new CodexSecurityError(event["error"]["message"]);
+      } else if (event.type === "turn.failed") {
+        throw new CodexSecurityError(turnFailureMessage(event["error"]));
       } else if (
         event.type === "error" &&
         typeof event["message"] === "string"
@@ -1499,6 +1654,11 @@ async function scanPrompt(
   return [
     `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
+    ...(mode === "deep"
+      ? [
+          'The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }; never pass targetPath or create another scan.',
+        ]
+      : []),
     ...(skillName === "deep-security-scan"
       ? []
       : [
@@ -1556,6 +1716,7 @@ function targetInstruction(target: NormalizedTarget): string {
 
 function scanRecipe(
   repository: string,
+  activeProjectPath: string,
   target: NormalizedTarget,
   mode: ScanMode,
   repositoryRevision: string | null,
@@ -1564,6 +1725,7 @@ function scanRecipe(
   failOnSeverity?: SeverityLevel,
   knowledgeBasePaths?: string[],
   maxCostUsd?: number,
+  deepScan?: DeepScanOptions,
 ): JsonObject {
   return {
     repository,
@@ -1578,10 +1740,13 @@ function scanRecipe(
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
-    config: scanPreflightCodexConfig(effectiveConfig),
+    config: scanPreflightCodexConfig(effectiveConfig, activeProjectPath),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
+    ...(deepScan === undefined || Object.keys(deepScan).length === 0
+      ? {}
+      : { deepScan: { ...deepScan } }),
   };
 }
 
@@ -1758,6 +1923,21 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
   };
 }
 
+// A failed turn must fail the scan whatever its error payload looks like.
+//
+// Only `error.message` is reused, because that is the single shape the previous
+// code already surfaced. No other shape is forwarded or stringified: this message
+// reaches `fail-scan --message` and is stored in `scans.failure_message` without
+// redaction, so widening what is copied out of the payload would add a new
+// credential-disclosure path to persistent scan history.
+function turnFailureMessage(error: unknown): string {
+  if (isRecord(error) && typeof error["message"] === "string") {
+    const message = error["message"].trim();
+    if (message.length > 0) return error["message"];
+  }
+  return "The Codex Security scan turn failed without a readable error message.";
+}
+
 export function classifyConnectionFailure(
   error: unknown,
 ):
@@ -1833,7 +2013,10 @@ export function scanRuntimeCodexConfig(
   };
 }
 
-export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
+export function scanPreflightCodexConfig(
+  config: JsonObject,
+  activeProjectPath?: string,
+): JsonObject {
   const safeString = (value: unknown, maxLength: number): value is string =>
     typeof value === "string" &&
     value.length > 0 &&
@@ -1903,18 +2086,41 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     }
     return result;
   };
+  const prioritizedEntries = (
+    value: Record<string, unknown>,
+    priority: string | undefined,
+  ): [string, unknown][] => {
+    const entries = Object.entries(value);
+    if (priority === undefined || !Object.hasOwn(value, priority)) {
+      return entries;
+    }
+    return [
+      [priority, value[priority]],
+      ...entries.filter(([key]) => key !== priority),
+    ];
+  };
 
   const result = executionConfig(config);
-  if (safeProfileName(config["profile"])) {
-    result["profile"] = config["profile"];
+  const selectedProfile = safeProfileName(config["profile"])
+    ? config["profile"]
+    : undefined;
+  if (selectedProfile !== undefined) {
+    result["profile"] = selectedProfile;
   }
   const profiles = config["profiles"];
   if (isRecord(profiles)) {
     const sanitized: JsonObject = {};
-    for (const [name, profile] of Object.entries(profiles).slice(0, 256)) {
+    let accepted = 0;
+    for (const [name, profile] of prioritizedEntries(
+      profiles,
+      selectedProfile,
+    )) {
       if (!safeProfileName(name) || !isRecord(profile)) continue;
       const projected = executionConfig(profile as JsonObject);
-      if (Object.keys(projected).length > 0) sanitized[name] = projected;
+      if (Object.keys(projected).length === 0) continue;
+      sanitized[name] = projected;
+      accepted += 1;
+      if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
   }
@@ -1927,13 +2133,34 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   const projects = config["projects"];
   if (isRecord(projects)) {
     const sanitized: JsonObject = {};
-    for (const [path, project] of Object.entries(projects).slice(0, 256)) {
+    let accepted = 0;
+    const activeProjectRoot =
+      activeProjectPath === undefined
+        ? undefined
+        : Object.keys(projects)
+            .filter((path) => {
+              if (!safeString(path, 4096) || !isAbsolute(path)) return false;
+              const remaining = relative(path, activeProjectPath);
+              return (
+                remaining === "" ||
+                (remaining !== ".." &&
+                  !remaining.startsWith(`..${sep}`) &&
+                  !isAbsolute(remaining))
+              );
+            })
+            .sort((left, right) => right.length - left.length)[0];
+    for (const [path, project] of prioritizedEntries(
+      projects,
+      activeProjectRoot ?? activeProjectPath,
+    )) {
       if (!safeString(path, 4096) || !isAbsolute(path) || !isRecord(project)) {
         continue;
       }
       const trust = project["trust_level"];
       if (trust !== "trusted" && trust !== "untrusted") continue;
       sanitized[path] = { trust_level: trust };
+      accepted += 1;
+      if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
   }
