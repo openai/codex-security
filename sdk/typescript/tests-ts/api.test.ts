@@ -1051,6 +1051,88 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("identifies stored credential types without exposing stored secrets", async () => {
+    for (const [storedAuthentication, expected] of [
+      [
+        {
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "sk-proj-SYNTHETIC_STORED_SECRET_123",
+        },
+        {
+          method: "stored_credentials",
+          credentialType: "api_key",
+          verified: false,
+        },
+      ],
+      [
+        {
+          auth_mode: "api_key",
+          OPENAI_API_KEY: "sk-proj-SYNTHETIC_STORED_SECRET_456",
+        },
+        {
+          method: "stored_credentials",
+          credentialType: "api_key",
+          verified: false,
+        },
+      ],
+      [
+        {
+          auth_mode: "chatgpt",
+          tokens: { access_token: "SYNTHETIC_STORED_ACCESS_TOKEN" },
+        },
+        {
+          method: "stored_credentials",
+          credentialType: "chatgpt",
+          verified: false,
+        },
+      ],
+      [
+        { auth_mode: "unknown", token: "SYNTHETIC_UNKNOWN_TOKEN" },
+        { method: "stored_credentials", verified: false },
+      ],
+    ] as const) {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await writeFile(
+        join(codexHome, "auth.json"),
+        JSON.stringify(storedAuthentication),
+      );
+      let selectedAuthentication: ScanAuthentication | undefined;
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("scan did not start");
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(
+        client.run(repository, {
+          outputDir: join(root, "scan"),
+          onAuthentication: (authentication) => {
+            selectedAuthentication = authentication;
+          },
+        }),
+      ).rejects.toThrow("scan did not start");
+      expect(selectedAuthentication).toEqual(expected);
+      expect(JSON.stringify(selectedAuthentication)).not.toContain("SYNTHETIC");
+      await client.close();
+    }
+  });
+
   test("previews an existing output archive without changing files", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -3753,7 +3835,11 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     );
     expect(authentications).toEqual([
       { method: "api_key", source: "OPENAI_API_KEY", verified: false },
-      { method: "stored_credentials", verified: false },
+      {
+        method: "stored_credentials",
+        credentialType: "chatgpt",
+        verified: false,
+      },
     ]);
     expect(selectedApiKeys).toEqual(["synthetic-openai-key", undefined]);
     expect(

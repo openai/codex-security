@@ -9,6 +9,7 @@ export type {
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
+  ScanTrustedAccessStatus,
 } from "./api.js";
 export type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 export { CodexLoginHandle } from "./auth.js";

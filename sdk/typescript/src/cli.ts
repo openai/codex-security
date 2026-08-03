@@ -2724,6 +2724,13 @@ async function runScan(
         }
         progress?.startTimer("Preparing scan");
       },
+      onTrustedAccessStatus: (status) => {
+        if (status === "granted") {
+          errorOutput.write(
+            "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
+          );
+        }
+      },
       onScanStarted: () => {
         progress?.stopTimer();
         progress?.startTimer(runningMessage());

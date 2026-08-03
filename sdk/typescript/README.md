@@ -85,10 +85,10 @@ Pass scan configuration to `security.run(repository, options)` or
 | `signal`                | Cancel a scan with an `AbortSignal`.                                                  |
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
-`onOutputArchived`, `onOutputDirReady`, `onScanStarted`, `onReconnect`,
-`onWorkerStatus`, `onWarning`, and `onObserverError`. Preflight does not start
-the runtime, authenticate, resolve Python, inspect the plugin, or run those
-scan-lifecycle callbacks.
+`onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
+`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
+`onObserverError`. Preflight does not start the runtime, authenticate, resolve
+Python, inspect the plugin, or run those scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -168,6 +168,10 @@ The interactive choice applies only to the current scan and is not persisted.
 When an environment key is configured, ChatGPT login and
 `codex-security login status` identify the effective scan credential source
 without printing its value, including when no stored sign-in exists.
+
+Some cybersecurity requests and protected findings require approval through
+Trusted Access for Cyber. To apply or check your access, visit
+[chatgpt.com/cyber](https://chatgpt.com/cyber).
 
 ## CLI
 

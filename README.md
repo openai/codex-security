@@ -4,7 +4,9 @@
 
 **See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for more details.
 
-> Note: for best results, we recommend that your account is verified for [Trusted Access](https://chatgpt.com/cyber).
+Some cybersecurity requests and protected findings require approval through
+Trusted Access for Cyber. To apply or check your access, visit
+[chatgpt.com/cyber](https://chatgpt.com/cyber).
 
 ## Quick start
 

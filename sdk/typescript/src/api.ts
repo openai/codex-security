@@ -154,6 +154,7 @@ export interface ScanOptions extends DeepScanOptions {
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
+  onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onScanStarted?: () => void;
   onReconnect?: (
     attempt: number,
@@ -176,8 +177,11 @@ export type ScanAuthentication =
     }
   | {
       method: "stored_credentials";
+      credentialType?: "api_key" | "chatgpt";
       verified: false;
     };
+
+export type ScanTrustedAccessStatus = "granted" | "not_granted" | "unknown";
 
 export interface ScanReconnectDetails {
   reason: "rate_limit" | "network" | "authentication" | "authorization";
@@ -190,6 +194,7 @@ type ScanObserverName =
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanStarted"
+  | "onTrustedAccessStatus"
   | "onReconnect"
   | "onWorkerStatus"
   | "onWarning";
@@ -239,6 +244,9 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
+const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
+  "https://openai.com/form/enterprise-trusted-access-for-cyber/";
 const DEEP_SCAN_SETTINGS = [
   ["workers", "workers", 1],
   ["subagents", "subagents", 0],
@@ -389,7 +397,7 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const authentication = scanAuthentication(
+      let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
       );
@@ -496,6 +504,11 @@ export class CodexSecurity {
             "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
+      authentication = await runtimeScanAuthentication(
+        this.#dependencies.environment,
+        runtime.codexHome,
+        options.auth,
+      );
       notifyObserver(
         "onAuthentication",
         options.onAuthentication,
@@ -825,6 +838,7 @@ export class CodexSecurity {
         scanDir,
         pluginRoot: runtime.plugin.installedRoot,
         expectation,
+        authentication,
         workbenchValidated: true,
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
@@ -848,8 +862,10 @@ export class CodexSecurity {
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
+        onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onWorkerStatus: options.onWorkerStatus,
+        onWarning: options.onWarning,
         onObserverError: options.onObserverError,
       });
       checkOpen();
@@ -1496,17 +1512,20 @@ interface ScanEventRunOptions {
   scanDir: string;
   pluginRoot: string;
   expectation: ScanExpectation;
+  authentication?: ScanAuthentication;
   workbenchValidated?: boolean;
   model?: string;
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onThreadStarted?: (threadId: string) => void;
   onScanStarted?: () => void;
+  onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onReconnect?: (
     attempt: number,
     maxAttempts: number,
     details?: ScanReconnectDetails,
   ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
 
@@ -1519,8 +1538,29 @@ export async function runScanEvents(
   let finalResponse = "";
   let usage: unknown = null;
   let lastStreamError: string | null = null;
+  let tacStatusReported = false;
   try {
     for await (const event of options.events) {
+      if (!tacStatusReported) {
+        const tacStatus = trustedAccessStatusFromEvent(event);
+        if (tacStatus !== null) {
+          tacStatusReported = true;
+          notifyObserver(
+            "onTrustedAccessStatus",
+            options.onTrustedAccessStatus,
+            options.onObserverError,
+            tacStatus,
+          );
+          if (tacStatus !== "granted") {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              trustedAccessWarning(tacStatus, options.authentication),
+            );
+          }
+        }
+      }
       const workerStatus = workerStatusFromEvent(event);
       if (workerStatus !== null) {
         notifyObserver(
@@ -1634,6 +1674,88 @@ export async function runScanEvents(
     }
     throw error;
   }
+}
+
+function trustedAccessStatusFromEvent(
+  event: ScanEvent,
+): ScanTrustedAccessStatus | null {
+  if (event.type !== "item.completed" || !isRecord(event["item"])) {
+    return null;
+  }
+
+  const item = event["item"];
+  if (
+    item["type"] !== "mcp_tool_call" ||
+    item["server"] !== "codex_apps" ||
+    item["tool"] !== "get_tac_status"
+  ) {
+    return null;
+  }
+
+  if (item["status"] !== "completed" || !isRecord(item["result"])) {
+    return "unknown";
+  }
+
+  const result = item["result"]["structured_content"];
+  if (
+    !isRecord(result) ||
+    result["schemaVersion"] !== 1 ||
+    !Array.isArray(result["grants"]) ||
+    typeof result["checkedAt"] !== "string" ||
+    Number.isNaN(Date.parse(result["checkedAt"])) ||
+    result["stale"] !== false
+  ) {
+    return "unknown";
+  }
+
+  const status = result["status"];
+  if (
+    status !== "granted" &&
+    status !== "not_granted" &&
+    status !== "unknown"
+  ) {
+    return "unknown";
+  }
+  if (
+    result["grants"].some((grant) => !isTrustedAccessGrant(grant)) ||
+    (status === "granted") !== result["grants"].length > 0
+  ) {
+    return "unknown";
+  }
+  return status;
+}
+
+function isTrustedAccessGrant(grant: unknown): boolean {
+  if (!isRecord(grant)) return false;
+  const level = grant["level"];
+  const source = grant["source"];
+  return (
+    (source === "user" && (level === "tac1" || level === "tac2")) ||
+    (source === "current_account" &&
+      (level === "tac1" || level === "tac3" || level === "government"))
+  );
+}
+
+function trustedAccessWarning(
+  status: Exclude<ScanTrustedAccessStatus, "granted">,
+  authentication?: ScanAuthentication,
+): string {
+  const apiOrganization =
+    authentication?.method === "api_key" ||
+    (authentication?.method === "stored_credentials" &&
+      authentication.credentialType === "api_key");
+  const applicationUrl = apiOrganization
+    ? ORGANIZATIONAL_TRUSTED_ACCESS_URL
+    : PERSONAL_TRUSTED_ACCESS_URL;
+  if (status === "not_granted") {
+    const account = apiOrganization ? "your API organization" : "your account";
+    return `Some cybersecurity requests or findings may be refused because ${account} does not have Trusted Access for Cyber. Apply at ${applicationUrl}.`;
+  }
+  const access = apiOrganization
+    ? "Trusted Access for Cyber for your API organization"
+    : "your Trusted Access for Cyber status";
+  const action = apiOrganization ? "your organization's access" : "your access";
+  return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${action} or apply at ${applicationUrl}.`;
 }
 
 async function scanPrompt(
@@ -1836,6 +1958,34 @@ export function scanAuthentication(
   return key === null
     ? { method: "stored_credentials", verified: false }
     : { method: "api_key", source: key.source, verified: false };
+}
+
+async function runtimeScanAuthentication(
+  environment: ProcessEnvironment,
+  codexHome: string,
+  auth: ScanAuthMode = "auto",
+): Promise<ScanAuthentication> {
+  const authentication = scanAuthentication(environment, auth);
+  if (authentication.method !== "stored_credentials") return authentication;
+
+  try {
+    const stored = JSON.parse(
+      await readFile(join(codexHome, "auth.json"), "utf8"),
+    ) as unknown;
+    if (!isRecord(stored)) return authentication;
+
+    const mode = stored["auth_mode"];
+    if (mode === "apikey" || mode === "api_key") {
+      return { ...authentication, credentialType: "api_key" };
+    }
+    if (mode === "chatgpt") {
+      return { ...authentication, credentialType: "chatgpt" };
+    }
+  } catch {
+    return authentication;
+  }
+
+  return authentication;
 }
 
 function selectedScanEnvironment(

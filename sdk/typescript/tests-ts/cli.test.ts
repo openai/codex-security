@@ -265,6 +265,18 @@ describe("CLI", () => {
     const readme = await readFile(new URL("../README.md", import.meta.url), {
       encoding: "utf8",
     });
+    const publicReadme = await readFile(
+      new URL("../../../README.md", import.meta.url),
+      { encoding: "utf8" },
+    );
+
+    for (const documentation of [readme, publicReadme]) {
+      expect(documentation).toContain(
+        "Some cybersecurity requests and protected findings require approval through\n" +
+          "Trusted Access for Cyber. To apply or check your access, visit\n" +
+          "[chatgpt.com/cyber](https://chatgpt.com/cyber).",
+      );
+    }
 
     for (const setting of [
       "OPENAI_API_KEY",
@@ -2460,6 +2472,107 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "codex-security: warning: Repository HEAD changed while the scan was running; results were saved for the original revision.",
     );
+  });
+
+  test("prints granted trusted cyber access without warning or corrupting JSON scans", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onTrustedAccessStatus?.("granted");
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
+    );
+    expect(stderr.text()).not.toContain("warning:");
+  });
+
+  test("prints trusted cyber access guidance without failing or corrupting JSON scans", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber.",
+    );
+    expect(stderr.text()).toContain("Apply at https://chatgpt.com/cyber.");
+  });
+
+  test("prints unverified trusted cyber access guidance without corrupting JSON scans", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified.",
+    );
+    expect(stderr.text()).toContain(
+      "Check your access or apply at https://chatgpt.com/cyber.",
+    );
+  });
+
+  test("prints organizational trusted cyber access guidance without corrupting JSON scans", async () => {
+    for (const warning of [
+      "Some cybersecurity requests or findings may be refused because your API organization does not have Trusted Access for Cyber. Apply at https://openai.com/form/enterprise-trusted-access-for-cyber/.",
+      "Some cybersecurity requests or findings may be refused because Trusted Access for Cyber for your API organization could not be verified. Check your organization's access or apply at https://openai.com/form/enterprise-trusted-access-for-cyber/.",
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onWarning?.(warning);
+          return fakeResult();
+        },
+        close: async () => {},
+        preflight: async () => fakePreflight(),
+      });
+
+      expect(
+        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain(`codex-security: warning: ${warning}\n`);
+      expect(stderr.text()).not.toContain("chatgpt.com/cyber");
+    }
   });
 
   test("reports isolated observer failures without failing the scan", async () => {

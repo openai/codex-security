@@ -4,8 +4,10 @@ import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { runScanEvents } from "../../src/api.js";
 import type {
+  ScanAuthentication,
   ScanOptions,
   ScanReconnectDetails,
+  ScanTrustedAccessStatus,
   ScanWorkerStatus,
 } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
@@ -76,6 +78,9 @@ export function runEvents(
   onWorkerStatus?: (status: ScanWorkerStatus) => void,
   onScanStarted?: () => void,
   onObserverError?: (observer: ScanObserverName, error: unknown) => void,
+  onWarning?: (warning: string) => void,
+  onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void,
+  authentication?: ScanAuthentication,
 ): ReturnType<typeof runScanEvents> {
   return runScanEvents({
     thread: {
@@ -88,10 +93,13 @@ export function runEvents(
     signal: abortController.signal,
     scanDir,
     pluginRoot: PLUGIN_ROOT,
+    authentication,
     model: "gpt-5.6-sol",
     onScanStarted,
+    onTrustedAccessStatus,
     onReconnect,
     onWorkerStatus,
+    onWarning,
     onObserverError,
     expectation: {
       repository: "/repository",
