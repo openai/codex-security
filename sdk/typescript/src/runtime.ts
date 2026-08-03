@@ -418,9 +418,20 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
     }
   }
 
-  if (isRecord(owner) && typeof owner["pid"] === "number") {
+  // Only a positive integer names a process. `process.kill` reads 0 as the caller's own
+  // process group and -1 as every process it may signal, so both always report a live
+  // owner and would hold the lock open forever, and a fractional or out-of-range value
+  // makes it throw an argument error that is neither ESRCH nor EPERM and escapes raw.
+  // An owner that cannot be identified is treated like a missing one, so the age check
+  // below still reclaims the lock.
+  const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
+  if (
+    typeof ownerPid === "number" &&
+    Number.isSafeInteger(ownerPid) &&
+    ownerPid > 0
+  ) {
     try {
-      process.kill(owner["pid"], 0);
+      process.kill(ownerPid, 0);
       return false;
     } catch (error) {
       if (nodeErrorCode(error) !== "ESRCH") {

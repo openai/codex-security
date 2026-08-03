@@ -15,6 +15,7 @@ import {
   stat,
   symlink,
   truncate,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -1630,6 +1631,44 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(lock)).toBe(true);
     await release();
     expect(existsSync(lock)).toBe(false);
+  });
+
+  test("recovers credential-home locks whose owner names no process", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    // `process.kill` reads 0 as the caller's own process group and -1 as every process
+    // it may signal, so both report a live owner forever, and a fractional pid makes it
+    // throw an argument error instead. None of them identifies a process holding this
+    // lock, so an aged lock naming one has to be reclaimed like any other stale lock.
+    for (const pid of [0, -1, 0.5, 2 ** 53]) {
+      await mkdir(lock, { mode: 0o700 });
+      await writeFile(
+        join(lock, "owner.json"),
+        `${JSON.stringify({ pid, token: "unidentifiable-owner" })}\n`,
+        { mode: 0o600 },
+      );
+      const aged = new Date(Date.now() - 10 * 60_000);
+      await utimes(lock, aged, aged);
+
+      // An owner that is treated as live is waited on forever, so the acquisition is
+      // bounded here to fail the test rather than hang it.
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 5_000);
+      try {
+        const release = await acquireCodexSecurityCredentialHomeLock(
+          home,
+          abort.signal,
+        );
+        expect(existsSync(lock)).toBe(true);
+        await release();
+      } finally {
+        clearTimeout(timer);
+      }
+      expect(existsSync(lock)).toBe(false);
+    }
   });
 
   test("prevents ambient credential imports after an explicit logout", async () => {
