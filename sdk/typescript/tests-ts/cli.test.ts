@@ -2278,6 +2278,26 @@ describe("CLI", () => {
       }
       expect(decoded).toEqual({ password: "[redacted]" });
     }
+    // A value ending in a backslash escapes the backslash, not the delimiter that
+    // follows it, so the delimiter must still close the value and leave the rest of
+    // the diagnostic intact.
+    let trailing: string | { password: string; address: string } = {
+      password: "secret\\",
+      address: "10.0.0.5",
+    };
+    for (let depth = 1; depth <= 3; depth += 1) {
+      trailing = JSON.stringify(trailing);
+      const redacted = redactedErrorMessage(trailing);
+      expect(redacted).not.toContain("secret");
+      let decoded: unknown = redacted;
+      for (let layer = 0; layer < depth; layer += 1) {
+        decoded = JSON.parse(decoded as string);
+      }
+      expect(decoded).toEqual({
+        password: "[redacted]",
+        address: "10.0.0.5",
+      });
+    }
     for (const separator of ["\n", "\\n"]) {
       expect(
         redactedErrorMessage(

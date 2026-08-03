@@ -51,8 +51,19 @@ function redactQuotedCredentialValues(message: string): string {
       while (preceding > position && message[preceding - 1] === "\\") {
         preceding -= 1;
       }
-      if (delimiter - preceding === openingSlashes) {
-        output += `${message.slice(consumed, assignment.lastIndex)}[redacted]${message.slice(preceding, delimiter + 1)}`;
+      // A delimiter carries the same escape backslashes as the opening quote, and each
+      // literal backslash ending the value adds one whole escape level in front of them,
+      // so the run closes the value whenever it exceeds the opening by complete levels.
+      // Requiring the two to be equal treated a value ending in a backslash as an
+      // escaped quote, ran past the real delimiter, and swallowed the text after it.
+      const slashes = delimiter - preceding;
+      if (
+        slashes >= openingSlashes &&
+        (slashes - openingSlashes) % (2 * (openingSlashes + 1)) === 0
+      ) {
+        // Emit the delimiter's own escape backslashes only. The rest of the run is the
+        // tail of the value being replaced, so it must not survive into the output.
+        output += `${message.slice(consumed, assignment.lastIndex)}[redacted]${message.slice(delimiter - openingSlashes, delimiter + 1)}`;
         consumed = delimiter + 1;
         assignment.lastIndex = consumed;
         closed = true;
