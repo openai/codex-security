@@ -63,6 +63,7 @@ def git_command(
             full_command,
             check=False,
             capture_output=True,
+            encoding="utf-8" if text else None,
             env=environment,
             text=text,
         )

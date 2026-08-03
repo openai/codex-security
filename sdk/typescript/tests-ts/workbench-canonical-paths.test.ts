@@ -129,6 +129,35 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  testWindows("decodes non-ASCII Git worktree paths as UTF-8", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "репозиторий");
+    await mkdir(repository);
+    const initialized = Bun.spawnSync(["git", "init", repository], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(initialized.exitCode).toBe(0);
+
+    expect(
+      runPythonProbe(
+        [
+          "import json, locale, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "locale.getencoding = lambda: 'cp1252'",
+          "repository, pathspec = target.git_worktree_context(Path(sys.argv[2]))",
+          "print(json.dumps({'repository': str(repository), 'pathspec': pathspec}))",
+        ].join("\n"),
+        repository,
+      ),
+    ).toEqual({
+      repository: await realpath(repository),
+      pathspec: ".",
+    });
+  });
+
   testPosix(
     "rejects private scan directories under insecure shared parents",
     async () => {
