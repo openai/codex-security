@@ -475,6 +475,10 @@ checkout so a fixed vulnerability can be checked again.
 cause; `scans match --all` matches all completed scans of the current repository,
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
+Automatic history matching loads at most 64 scan pairs per workbench page and
+32 findings or 512 KiB per finding page. Each model comparison receives one
+bounded page from each scan; cross-page matches are reconciled before the pair
+is saved. Match results larger than 1 MiB are rejected with an actionable error.
 
 `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
 root cause, reuses saved matches, and reports findings as new, persisting,

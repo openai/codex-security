@@ -82,6 +82,7 @@ import {
 import {
   matchScanFindings,
   type ScanComparisonInput,
+  type ScanComparisonResult,
 } from "./scan-comparison.js";
 import {
   renderScanHistory,
@@ -270,19 +271,28 @@ interface ExportArguments {
   pythonPath?: string;
 }
 
-interface MatchingBatch {
+interface MatchingPair {
   afterScanId: string;
-  afterFindings: ScanComparisonInput["after"];
-  beforeScans: { scanId: string; findings: ScanComparisonInput["before"] }[];
+  beforeScanId: string;
 }
 
-type MatchingPlan = JsonObject & {
+type MatchingPlanPage = JsonObject & {
+  nextOffset: number | null;
+  pairs: (JsonObject & MatchingPair)[];
   repository: string;
   scanCount: number;
   unavailableScans: number;
   skippedPairs: number;
-  batches: (JsonObject & MatchingBatch)[];
 };
+
+type MatchingInputPage = JsonObject & {
+  findings: ScanComparisonInput["before"];
+  nextOffset: number | null;
+  scanId: string;
+  totalFindings: number;
+};
+
+const MAX_MATCH_RESULT_BYTES = 1024 * 1024;
 
 interface SkillCommandOutput {
   readonly command: "validate" | "patch";
@@ -2086,72 +2096,60 @@ async function matchAllScans(
   dependencies: CliDependencies,
   force: boolean,
 ): Promise<JsonObject> {
-  const result = (await dependencies.runWorkbench([
-    "list-unmatched-scan-pairs",
-    "--repository",
-    dependencies.currentDirectory(),
-    ...(force ? ["--force"] : []),
-  ])) as MatchingPlan;
-  const { repository, scanCount, unavailableScans, skippedPairs, batches } =
-    result;
-
+  let repository = dependencies.currentDirectory();
+  let scanCount = 0;
+  let unavailableScans = 0;
+  let skippedPairs = 0;
   let matchedPairs = 0;
   let findingMatches = 0;
-  for (const { afterScanId, afterFindings, beforeScans } of batches) {
-    const before = beforeScans.flatMap(({ findings }) => findings);
-    const matching =
-      before.length === 0 || afterFindings.length === 0
-        ? { matches: [], uncertain: [] }
-        : await dependencies.matchFindings(
-            { before, after: afterFindings },
-            { allowHistoricalUncertainty: true },
-          );
-    const comparisons = beforeScans.map(({ scanId, findings }) => {
-      const beforeIds = new Set(
-        findings.map(({ occurrenceId }) => occurrenceId),
+  let offset = 0;
+  let firstPage = true;
+  while (true) {
+    const page = (await dependencies.runWorkbench([
+      "list-unmatched-scan-pairs",
+      "--repository",
+      dependencies.currentDirectory(),
+      "--offset",
+      String(offset),
+      ...(force ? ["--force"] : []),
+    ])) as MatchingPlanPage;
+    if (firstPage) {
+      ({ repository, scanCount, unavailableScans, skippedPairs } = page);
+      firstPage = false;
+    }
+    for (const { beforeScanId, afterScanId } of page.pairs) {
+      const matching = await matchScanPairInBatches(
+        dependencies,
+        beforeScanId,
+        afterScanId,
       );
-      const matches = matching.matches.flatMap((match) => {
-        const beforeOccurrenceIds = match.beforeOccurrenceIds.filter((id) =>
-          beforeIds.has(id),
-        );
-        return beforeOccurrenceIds.length === 0
-          ? []
-          : [{ ...match, beforeOccurrenceIds }];
-      });
-      const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
-        beforeIds.has(beforeOccurrenceId),
-      );
-      const matchedAfter = new Set(
-        matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
-      );
-      if (
-        uncertain.some(({ afterOccurrenceId }) =>
-          matchedAfter.has(afterOccurrenceId),
-        )
-      ) {
-        throw new CodexSecurityError(
-          "Scan matching returned conflicting confirmed and uncertain findings.",
-        );
+      const serialized = JSON.stringify(matching);
+      if (Buffer.byteLength(serialized) > MAX_MATCH_RESULT_BYTES) {
+        throw oversizedAutomaticMatchError();
       }
-      return { scanId, matches, uncertain };
-    });
-    for (const { scanId, matches, uncertain } of comparisons) {
       await dependencies.runWorkbench([
         "save-scan-comparison",
         "--before-scan-id",
-        scanId,
+        beforeScanId,
         "--after-scan-id",
         afterScanId,
         "--matches-json",
-        JSON.stringify({ matches, uncertain }),
+        serialized,
       ]);
       matchedPairs += 1;
-      findingMatches += matches.reduce(
+      findingMatches += matching.matches.reduce(
         (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
           count + beforeOccurrenceIds.length * afterOccurrenceIds.length,
         0,
       );
     }
+    if (page.nextOffset === null) break;
+    if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset) {
+      throw new CodexSecurityError(
+        "Scan matching returned an invalid pagination cursor.",
+      );
+    }
+    offset = page.nextOffset;
   }
   return {
     repository,
@@ -2160,6 +2158,194 @@ async function matchAllScans(
     matchedPairs,
     skippedPairs,
     findingMatches,
+  };
+}
+
+async function matchScanPairInBatches(
+  dependencies: CliDependencies,
+  beforeScanId: string,
+  afterScanId: string,
+): Promise<ScanComparisonResult> {
+  let beforePage = await matchingInputPage(dependencies, beforeScanId, 0);
+  const firstAfterPage = await matchingInputPage(dependencies, afterScanId, 0);
+  if (
+    beforePage.findings.length === 0 ||
+    firstAfterPage.findings.length === 0
+  ) {
+    return { matches: [], uncertain: [] };
+  }
+
+  const confirmed: ScanComparisonResult["matches"] = [];
+  const uncertain = new Map<
+    string,
+    ScanComparisonResult["uncertain"][number]
+  >();
+  let retainedBytes = 0;
+  while (true) {
+    let afterPage = firstAfterPage;
+    while (true) {
+      const result = await dependencies.matchFindings(
+        {
+          before: beforePage.findings,
+          after: afterPage.findings,
+        },
+        { allowHistoricalUncertainty: true },
+      );
+      retainedBytes += Buffer.byteLength(JSON.stringify(result));
+      if (retainedBytes > MAX_MATCH_RESULT_BYTES) {
+        throw oversizedAutomaticMatchError();
+      }
+      confirmed.push(...result.matches);
+      for (const candidate of result.uncertain) {
+        const key = JSON.stringify([
+          candidate.beforeOccurrenceId,
+          candidate.afterOccurrenceId,
+        ]);
+        const existing = uncertain.get(key);
+        if (existing === undefined || candidate.reason < existing.reason) {
+          uncertain.set(key, candidate);
+        }
+      }
+      if (afterPage.nextOffset === null) break;
+      afterPage = await matchingInputPage(
+        dependencies,
+        afterScanId,
+        afterPage.nextOffset,
+      );
+    }
+    if (beforePage.nextOffset === null) break;
+    beforePage = await matchingInputPage(
+      dependencies,
+      beforeScanId,
+      beforePage.nextOffset,
+    );
+  }
+  return reconcileMatchingBatches(confirmed, [...uncertain.values()]);
+}
+
+function oversizedAutomaticMatchError(): CodexSecurityError {
+  return new CodexSecurityError(
+    "Automatic scan matching produced more than 1 MiB of match data. Review this scan pair manually.",
+  );
+}
+
+async function matchingInputPage(
+  dependencies: CliDependencies,
+  scanId: string,
+  offset: number,
+): Promise<MatchingInputPage> {
+  const page = (await dependencies.runWorkbench([
+    "get-scan-matching-inputs",
+    "--scan-id",
+    scanId,
+    "--offset",
+    String(offset),
+  ])) as MatchingInputPage;
+  if (
+    page.scanId !== scanId ||
+    !Array.isArray(page.findings) ||
+    (page.nextOffset !== null &&
+      (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset))
+  ) {
+    throw new CodexSecurityError(
+      "Scan matching returned an invalid finding page.",
+    );
+  }
+  return page;
+}
+
+function reconcileMatchingBatches(
+  confirmed: ScanComparisonResult["matches"],
+  uncertain: ScanComparisonResult["uncertain"],
+): ScanComparisonResult {
+  const parents = new Map<string, string>();
+  const find = (value: string): string => {
+    const parent = parents.get(value);
+    if (parent === undefined) {
+      parents.set(value, value);
+      return value;
+    }
+    if (parent === value) return value;
+    const root = find(parent);
+    parents.set(value, root);
+    return root;
+  };
+  const union = (left: string, right: string): void => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) {
+      parents.set(
+        leftRoot < rightRoot ? rightRoot : leftRoot,
+        leftRoot < rightRoot ? leftRoot : rightRoot,
+      );
+    }
+  };
+  for (const match of confirmed) {
+    const nodes = [
+      ...match.beforeOccurrenceIds.map((id) => `before:${id}`),
+      ...match.afterOccurrenceIds.map((id) => `after:${id}`),
+    ];
+    for (const node of nodes.slice(1)) union(nodes[0]!, node);
+  }
+
+  const groups = new Map<
+    string,
+    {
+      before: Set<string>;
+      after: Set<string>;
+      reasons: Set<string>;
+    }
+  >();
+  for (const match of confirmed) {
+    const root = find(`before:${match.beforeOccurrenceIds[0]!}`);
+    const group = groups.get(root) ?? {
+      before: new Set(),
+      after: new Set(),
+      reasons: new Set(),
+    };
+    match.beforeOccurrenceIds.forEach((id) => group.before.add(id));
+    match.afterOccurrenceIds.forEach((id) => group.after.add(id));
+    group.reasons.add(match.reason);
+    groups.set(root, group);
+  }
+  const matches = [...groups.values()]
+    .map(({ before, after, reasons }) => ({
+      beforeOccurrenceIds: [...before].sort(),
+      afterOccurrenceIds: [...after].sort(),
+      confidence: "high" as const,
+      reason: [...reasons].sort()[0]!,
+    }))
+    .sort(
+      (left, right) =>
+        left.beforeOccurrenceIds[0]!.localeCompare(
+          right.beforeOccurrenceIds[0]!,
+        ) ||
+        left.afterOccurrenceIds[0]!.localeCompare(right.afterOccurrenceIds[0]!),
+    );
+  const matchedBefore = new Set(
+    matches.flatMap(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
+  );
+  const matchedAfter = new Set(
+    matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
+  );
+  if (
+    uncertain.some(
+      ({ beforeOccurrenceId, afterOccurrenceId }) =>
+        matchedBefore.has(beforeOccurrenceId) ||
+        matchedAfter.has(afterOccurrenceId),
+    )
+  ) {
+    throw new CodexSecurityError(
+      "Scan matching returned conflicting confirmed and uncertain findings.",
+    );
+  }
+  return {
+    matches,
+    uncertain: uncertain.sort(
+      (left, right) =>
+        left.beforeOccurrenceId.localeCompare(right.beforeOccurrenceId) ||
+        left.afterOccurrenceId.localeCompare(right.afterOccurrenceId),
+    ),
   };
 }
 

@@ -247,21 +247,11 @@ describe("CLI workbench", () => {
 
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
-    const batches = [
-      {
-        afterScanId: "scan-b",
-        afterFindings: [finding("b")],
-        beforeScans: [{ scanId: "scan-a", findings: [finding("a")] }],
-      },
-      {
-        afterScanId: "scan-c",
-        afterFindings: [finding("c"), finding("c-shared")],
-        beforeScans: [
-          { scanId: "scan-a", findings: [finding("a")] },
-          { scanId: "scan-b", findings: [finding("b")] },
-        ],
-      },
-    ];
+    const findings = new Map([
+      ["scan-a", [finding("a")]],
+      ["scan-b", [finding("b")]],
+      ["scan-c", [finding("c"), finding("c-shared")]],
+    ]);
     const calls: Array<readonly string[]> = [];
     let matcherCalls = 0;
     const stdout = capture();
@@ -274,66 +264,96 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench: (args): JsonObject => {
             calls.push(args);
-            return args[0] === "list-unmatched-scan-pairs"
-              ? {
-                  repository: "/current/repository",
-                  scanCount: 5,
-                  unavailableScans: 2,
-                  skippedPairs: 1,
-                  batches,
-                }
-              : {};
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                repository: "/current/repository",
+                scanCount: 5,
+                unavailableScans: 2,
+                skippedPairs: 1,
+                nextOffset: null,
+                pairs: [
+                  { beforeScanId: "scan-a", afterScanId: "scan-b" },
+                  { beforeScanId: "scan-a", afterScanId: "scan-c" },
+                  { beforeScanId: "scan-b", afterScanId: "scan-c" },
+                ],
+              };
+            }
+            if (args[0] === "get-scan-matching-inputs") {
+              const scanId = args[2]!;
+              return {
+                scanId,
+                findings: findings.get(scanId)!,
+                nextOffset: null,
+                totalFindings: findings.get(scanId)!.length,
+              };
+            }
+            return {};
           },
           onMatch: async (input) => {
             matcherCalls += 1;
-            return input.after[0]?.occurrenceId === "b"
-              ? {
-                  matches: [
-                    {
-                      beforeOccurrenceIds: ["a"],
-                      afterOccurrenceIds: ["b"],
-                      confidence: "high",
-                      reason: "Same root cause.",
-                    },
-                  ],
-                  uncertain: [],
-                }
-              : {
-                  matches: [
-                    {
-                      beforeOccurrenceIds: ["a", "b"],
-                      afterOccurrenceIds: ["c"],
-                      confidence: "high",
-                      reason: "Same root cause.",
-                    },
-                    {
-                      beforeOccurrenceIds: ["a"],
-                      afterOccurrenceIds: ["c-shared"],
-                      confidence: "high",
-                      reason: "Same root cause.",
-                    },
-                  ],
-                  uncertain: [
-                    {
-                      beforeOccurrenceId: "b",
-                      afterOccurrenceId: "c-shared",
-                      reason: "Possibly the same root cause.",
-                    },
-                  ],
-                };
+            const before = input.before[0]?.occurrenceId;
+            const after = input.after[0]?.occurrenceId;
+            if (before === "a" && after === "b") {
+              return {
+                matches: [
+                  {
+                    beforeOccurrenceIds: ["a"],
+                    afterOccurrenceIds: ["b"],
+                    confidence: "high",
+                    reason: "Same root cause.",
+                  },
+                ],
+                uncertain: [],
+              };
+            }
+            if (before === "a" && after === "c") {
+              return {
+                matches: [
+                  {
+                    beforeOccurrenceIds: ["a"],
+                    afterOccurrenceIds: ["c"],
+                    confidence: "high",
+                    reason: "Same root cause.",
+                  },
+                  {
+                    beforeOccurrenceIds: ["a"],
+                    afterOccurrenceIds: ["c-shared"],
+                    confidence: "high",
+                    reason: "Same root cause.",
+                  },
+                ],
+                uncertain: [],
+              };
+            }
+            return {
+              matches: [
+                {
+                  beforeOccurrenceIds: ["b"],
+                  afterOccurrenceIds: ["c"],
+                  confidence: "high",
+                  reason: "Same root cause.",
+                },
+              ],
+              uncertain: [],
+            };
           },
         }),
       ),
     ).toBe(0);
-    expect(matcherCalls).toBe(2);
+    expect(matcherCalls).toBe(3);
     expect(calls[0]).toEqual([
       "list-unmatched-scan-pairs",
       "--repository",
       "/current/repository",
+      "--offset",
+      "0",
       "--force",
     ]);
+    const saves = calls.filter(
+      ([command]) => command === "save-scan-comparison",
+    );
     expect(
-      calls.slice(1).map((args) => ({
+      saves.map((args) => ({
         before: args[2],
         after: args[4],
         result: JSON.parse(args[6]!),
@@ -345,8 +365,10 @@ describe("CLI workbench", () => {
         after: "scan-c",
         result: {
           matches: [
-            { beforeOccurrenceIds: ["a"], afterOccurrenceIds: ["c"] },
-            { beforeOccurrenceIds: ["a"], afterOccurrenceIds: ["c-shared"] },
+            {
+              beforeOccurrenceIds: ["a"],
+              afterOccurrenceIds: ["c", "c-shared"],
+            },
           ],
           uncertain: [],
         },
@@ -356,7 +378,7 @@ describe("CLI workbench", () => {
         after: "scan-c",
         result: {
           matches: [{ beforeOccurrenceIds: ["b"] }],
-          uncertain: [{ beforeOccurrenceId: "b" }],
+          uncertain: [],
         },
       },
     ]);
@@ -370,31 +392,183 @@ describe("CLI workbench", () => {
     });
   });
 
+  test("pages match-all history and reconciles bounded finding batches", async () => {
+    const calls: Array<readonly string[]> = [];
+    const matcherInputs: Array<{
+      before: string[];
+      after: string[];
+    }> = [];
+    const pages = new Map([
+      ["before:0", { findings: [{ occurrenceId: "b-1" }], nextOffset: 1 }],
+      ["before:1", { findings: [{ occurrenceId: "b-2" }], nextOffset: null }],
+      ["after:0", { findings: [{ occurrenceId: "a-1" }], nextOffset: 1 }],
+      ["after:1", { findings: [{ occurrenceId: "a-2" }], nextOffset: null }],
+    ]);
+    const stdout = capture();
+
+    expect(
+      await main(
+        ["scans", "match", "--all", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "list-unmatched-scan-pairs") {
+              const offset = Number(args[4]);
+              return {
+                repository: "/repo",
+                scanCount: 2,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: offset === 0 ? 64 : null,
+                pairs:
+                  offset === 0
+                    ? []
+                    : [{ beforeScanId: "before", afterScanId: "after" }],
+              };
+            }
+            if (args[0] === "get-scan-matching-inputs") {
+              const scanId = args[2]!;
+              const offset = Number(args[4]);
+              return {
+                scanId,
+                totalFindings: 2,
+                ...pages.get(`${scanId}:${offset}`)!,
+              };
+            }
+            return {};
+          },
+          onMatch: async (input) => {
+            const before = input.before.map(({ occurrenceId }) => occurrenceId);
+            const after = input.after.map(({ occurrenceId }) => occurrenceId);
+            matcherInputs.push({ before, after });
+            if (
+              (before[0] === "b-1" && after[0] === "a-1") ||
+              (before[0] === "b-1" && after[0] === "a-2") ||
+              (before[0] === "b-2" && after[0] === "a-2")
+            ) {
+              return {
+                matches: [
+                  {
+                    beforeOccurrenceIds: before,
+                    afterOccurrenceIds: after,
+                    confidence: "high",
+                    reason: `${before[0]} matches ${after[0]}`,
+                  },
+                ],
+                uncertain: [],
+              };
+            }
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(
+      calls
+        .filter(([command]) => command === "list-unmatched-scan-pairs")
+        .map((args) => args[4]),
+    ).toEqual(["0", "64"]);
+    expect(matcherInputs).toEqual([
+      { before: ["b-1"], after: ["a-1"] },
+      { before: ["b-1"], after: ["a-2"] },
+      { before: ["b-2"], after: ["a-1"] },
+      { before: ["b-2"], after: ["a-2"] },
+    ]);
+    const save = calls.find(([command]) => command === "save-scan-comparison")!;
+    expect(JSON.parse(save[6]!)).toEqual({
+      matches: [
+        {
+          beforeOccurrenceIds: ["b-1", "b-2"],
+          afterOccurrenceIds: ["a-1", "a-2"],
+          confidence: "high",
+          reason: "b-1 matches a-1",
+        },
+      ],
+      uncertain: [],
+    });
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      matchedPairs: 1,
+      findingMatches: 4,
+    });
+  });
+
+  test("rejects oversized accumulated match-all results before persistence", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stderr = capture();
+    expect(
+      await main(
+        ["scans", "match", "--all"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                repository: "/repo",
+                scanCount: 2,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: null,
+                pairs: [{ beforeScanId: "before", afterScanId: "after" }],
+              };
+            }
+            const scanId = args[2]!;
+            return {
+              scanId,
+              findings: [{ occurrenceId: scanId }],
+              nextOffset: null,
+              totalFindings: 1,
+            };
+          },
+          onMatch: async () => ({
+            matches: [
+              {
+                beforeOccurrenceIds: ["before"],
+                afterOccurrenceIds: ["after"],
+                confidence: "high",
+                reason: "x".repeat(1024 * 1024),
+              },
+            ],
+            uncertain: [],
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("more than 1 MiB");
+    expect(calls.some(([command]) => command === "save-scan-comparison")).toBe(
+      false,
+    );
+  });
+
   test("saves empty comparisons without starting Codex", async () => {
     const calls: Array<readonly string[]> = [];
     const deps = dependencies({
       onWorkbench: (args): JsonObject => {
         calls.push(args);
-        return args[0] === "list-unmatched-scan-pairs"
-          ? {
-              repository: "/repo",
-              scanCount: 2,
-              unavailableScans: 0,
-              skippedPairs: 0,
-              batches: [
-                {
-                  afterScanId: "after",
-                  afterFindings: [],
-                  beforeScans: [
-                    {
-                      scanId: "before",
-                      findings: [{ occurrenceId: "before" }],
-                    },
-                  ],
-                },
-              ],
-            }
-          : {};
+        if (args[0] === "list-unmatched-scan-pairs") {
+          return {
+            repository: "/repo",
+            scanCount: 2,
+            unavailableScans: 0,
+            skippedPairs: 0,
+            nextOffset: null,
+            pairs: [{ beforeScanId: "before", afterScanId: "after" }],
+          };
+        }
+        if (args[0] === "get-scan-matching-inputs") {
+          const scanId = args[2]!;
+          return {
+            scanId,
+            findings: scanId === "before" ? [{ occurrenceId: "before" }] : [],
+            nextOffset: null,
+            totalFindings: scanId === "before" ? 1 : 0,
+          };
+        }
+        return {};
       },
     });
     deps.matchFindings = async () => {
@@ -409,7 +583,8 @@ describe("CLI workbench", () => {
         deps,
       ),
     ).toBe(0);
-    expect(JSON.parse(calls[1]![6]!)).toEqual({ matches: [], uncertain: [] });
+    const save = calls.find(([command]) => command === "save-scan-comparison")!;
+    expect(JSON.parse(save[6]!)).toEqual({ matches: [], uncertain: [] });
   });
 
   test("does not save conflicting confirmed and uncertain matches", async () => {
@@ -423,22 +598,28 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench: (args): JsonObject => {
             calls.push(args);
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                repository: "/repo",
+                scanCount: 2,
+                unavailableScans: 0,
+                skippedPairs: 0,
+                nextOffset: null,
+                pairs: [{ beforeScanId: "before", afterScanId: "after" }],
+              };
+            }
+            const scanId = args[2]!;
             return {
-              batches: [
-                {
-                  afterScanId: "after",
-                  afterFindings: [{ occurrenceId: "after" }],
-                  beforeScans: [
-                    {
-                      scanId: "before",
-                      findings: [
-                        { occurrenceId: "confirmed" },
-                        { occurrenceId: "uncertain" },
-                      ],
-                    },
-                  ],
-                },
-              ],
+              scanId,
+              findings:
+                scanId === "before"
+                  ? [
+                      { occurrenceId: "confirmed" },
+                      { occurrenceId: "uncertain" },
+                    ]
+                  : [{ occurrenceId: "after" }],
+              nextOffset: null,
+              totalFindings: scanId === "before" ? 2 : 1,
             };
           },
           onMatch: async () => ({
@@ -462,7 +643,9 @@ describe("CLI workbench", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("conflicting confirmed and uncertain");
-    expect(calls).toHaveLength(1);
+    expect(calls.some(([command]) => command === "save-scan-comparison")).toBe(
+      false,
+    );
   });
 
   test("force recomputes saved matches", async () => {

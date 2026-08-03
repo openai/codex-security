@@ -3,6 +3,7 @@
 import argparse
 import fnmatch
 import json
+import math
 import os
 import sqlite3
 from pathlib import Path, PurePosixPath
@@ -10,7 +11,12 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from report_projection import SEVERITY_ORDER
-from workbench_constants import FINDINGS_PAGE_MAX
+from workbench_constants import (
+    FINDINGS_PAGE_MAX,
+    MATCHING_FINDING_PAGE_MAX,
+    MATCHING_INPUT_PAGE_BYTES,
+    MATCHING_PAIR_PAGE_MAX,
+)
 from workbench_target import git_output
 
 
@@ -271,7 +277,6 @@ def list_unmatched_scan_pairs(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
     *,
-    backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
@@ -302,46 +307,116 @@ def list_unmatched_scan_pairs(
         (row["before_scan_id"], row["after_scan_id"])
         for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
     }
-    batches = []
-    skipped = 0
-    backfilled: set[str] = set()
-    for index, after in enumerate(available):
-        previous = [
-            before
-            for before in available[:index]
-            if args.force or (before["id"], after["id"]) not in saved_pairs
-        ]
-        skipped += index - len(previous)
-        if not previous:
-            continue
-        for scan in (*previous, after):
-            if scan["id"] not in backfilled:
-                backfill_finding_details(connection, scan)
-                backfilled.add(scan["id"])
-        batches.append(
-            {
-                "afterFindings": [
-                    _matching_input(row) for row in _scan_findings(connection, after["id"]).values()
-                ],
-                "afterScanId": after["id"],
-                "beforeScans": [
-                    {
-                        "findings": [
-                            _matching_input(row)
-                            for row in _scan_findings(connection, before["id"]).values()
-                        ],
-                        "scanId": before["id"],
-                    }
-                    for before in previous
-                ],
-            }
+    available_indexes = {scan["id"]: index for index, scan in enumerate(available)}
+    skipped = (
+        0
+        if args.force
+        else sum(
+            1
+            for before_id, after_id in saved_pairs
+            if before_id in available_indexes
+            and after_id in available_indexes
+            and available_indexes[before_id] < available_indexes[after_id]
         )
+    )
+    pair_count = len(available) * (len(available) - 1) // 2
+    page_end = min(args.offset + MATCHING_PAIR_PAGE_MAX, pair_count)
+    pair_index = min(args.offset, pair_count)
+    after_index = (1 + math.isqrt(1 + 8 * pair_index)) // 2
+    before_index = pair_index - after_index * (after_index - 1) // 2
+    pairs = []
+    while pair_index < page_end:
+        before = available[before_index]
+        after = available[after_index]
+        if args.force or (before["id"], after["id"]) not in saved_pairs:
+            pairs.append(
+                {
+                    "afterScanId": after["id"],
+                    "beforeScanId": before["id"],
+                }
+            )
+        pair_index += 1
+        before_index += 1
+        if before_index == after_index:
+            after_index += 1
+            before_index = 0
     return {
-        "batches": batches,
+        "nextOffset": page_end if page_end < pair_count else None,
+        "pairs": pairs,
         "repository": str(repository),
         "scanCount": len(selected),
         "skippedPairs": skipped,
         "unavailableScans": len(selected) - len(available),
+    }
+
+
+def get_scan_matching_inputs(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None],
+) -> dict[str, Any]:
+    scan = require_scan(connection, args.scan_id)
+    if scan["status"] != "complete":
+        raise SystemExit("Only completed scans can be matched.")
+    read_coverage(scan)
+    backfill_finding_details(connection, scan)
+    if connection.execute(
+        """
+        SELECT 1
+        FROM finding_occurrences
+        WHERE scan_id = ? AND length(CAST(details_json AS BLOB)) > ?
+        LIMIT 1
+        """,
+        (scan["id"], MATCHING_INPUT_PAGE_BYTES),
+    ).fetchone():
+        raise SystemExit(
+            "A scan finding exceeds the 512 KiB automatic matching input limit."
+        )
+    total_findings = connection.execute(
+        "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ?",
+        (scan["id"],),
+    ).fetchone()[0]
+    rows = _scan_finding_page(
+        connection,
+        scan["id"],
+        offset=args.offset,
+        limit=MATCHING_FINDING_PAGE_MAX,
+    )
+    findings = []
+    encoded_bytes = 2
+    next_offset = min(args.offset, total_findings)
+    for row in rows:
+        finding = _matching_input(row)
+        item_bytes = len(
+            json.dumps(
+                finding,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        if item_bytes > MATCHING_INPUT_PAGE_BYTES:
+            raise SystemExit(
+                "A scan finding exceeds the 512 KiB automatic matching input limit."
+            )
+        separator_bytes = 1 if findings else 0
+        if encoded_bytes + separator_bytes + item_bytes > MATCHING_INPUT_PAGE_BYTES:
+            if not findings:
+                raise SystemExit(
+                    "A scan finding exceeds the 512 KiB automatic matching input limit."
+                )
+            break
+        findings.append(finding)
+        encoded_bytes += separator_bytes + item_bytes
+        next_offset += 1
+    return {
+        "findings": findings,
+        "nextOffset": next_offset if next_offset < total_findings else None,
+        "scanId": scan["id"],
+        "totalFindings": total_findings,
     }
 
 
@@ -781,10 +856,42 @@ def _scan_findings(connection: sqlite3.Connection, scan_id: str) -> dict[str, sq
         FROM finding_occurrences AS occurrences
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         WHERE occurrences.scan_id = ?
+        ORDER BY occurrences.id
         """,
         (scan_id,),
     )
     return {row["finding_id"]: row for row in rows}
+
+
+def _scan_finding_page(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    *,
+    offset: int,
+    limit: int,
+) -> list[sqlite3.Row]:
+    return list(
+        connection.execute(
+            """
+            SELECT occurrences.*,
+                COALESCE(triage.status, 'open') AS triage_status, triage.close_reason,
+                (
+                    SELECT locations.relative_path
+                    FROM finding_locations AS locations
+                    WHERE locations.occurrence_id = occurrences.id
+                    ORDER BY CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
+                        locations.sort_order
+                    LIMIT 1
+                ) AS relative_path
+            FROM finding_occurrences AS occurrences
+            LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+            WHERE occurrences.scan_id = ?
+            ORDER BY occurrences.id
+            LIMIT ? OFFSET ?
+            """,
+            (scan_id, limit, offset),
+        )
+    )
 
 
 def scan_covers_path(
