@@ -1,5 +1,6 @@
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -12,6 +13,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 
 const temporaryDirectories: string[] = [];
+const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(async () => {
   await Promise.all(
@@ -334,6 +336,41 @@ describe("live scan cost tracking", () => {
     });
   });
 
+  testPosix(
+    "keeps tracking after an unreadable unrelated session is reported",
+    async () => {
+      const home = await codexHome();
+      const unrelated = await writeSession(home, "unrelated-thread", {
+        input_tokens: 99,
+        output_tokens: 1,
+      });
+      await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      await chmod(unrelated, 0o000);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+      });
+      tracker.start("scan-thread");
+
+      try {
+        await expect(tracker.refresh()).rejects.toThrow();
+        expect((await tracker.refresh()).cost).toMatchObject({
+          inputTokens: 100,
+          outputTokens: 10,
+        });
+        expect((await tracker.stop()).cost).toMatchObject({
+          inputTokens: 100,
+          outputTokens: 10,
+        });
+      } finally {
+        await chmod(unrelated, 0o600);
+      }
+    },
+  );
+
   test("reports a changed running cost only once", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
@@ -375,4 +412,38 @@ describe("live scan cost tracking", () => {
       },
     });
   });
+
+  testPosix(
+    "falls back to the completed turn when session logs cannot be read",
+    async () => {
+      const home = await codexHome();
+      const unrelated = await writeSession(home, "unrelated-thread", {
+        input_tokens: 99,
+        output_tokens: 1,
+      });
+      await chmod(unrelated, 0o000);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-luna",
+      });
+      const usage = { input_tokens: 1_000, output_tokens: 20 };
+      tracker.start("scan-thread");
+
+      try {
+        expect(await tracker.stop(usage)).toEqual({
+          usage,
+          cost: {
+            model: "gpt-5.6-luna",
+            inputTokens: 1_000,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 20,
+            estimatedUsd: 0.00112,
+          },
+        });
+      } finally {
+        await chmod(unrelated, 0o600);
+      }
+    },
+  );
 });

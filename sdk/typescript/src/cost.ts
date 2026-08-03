@@ -101,7 +101,9 @@ export class ScanCostTracker {
       clearInterval(this.#timer);
       this.#timer = null;
     }
-    await this.refresh();
+    try {
+      await this.refresh();
+    } catch {}
     if (this.#snapshot.usage !== null) return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
@@ -207,6 +209,7 @@ async function readSessionUsage(
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
+    quarantineSession(session);
     throw error;
   }
   try {
@@ -223,15 +226,19 @@ async function readSessionUsage(
       try {
         readSessionChunk(buffer.subarray(0, bytesRead), session);
       } catch (error) {
-        session.unreadable = true;
-        session.pendingLine = [];
-        session.pendingLineBytes = 0;
+        quarantineSession(session);
         throw error;
       }
     }
   } finally {
     await file.close();
   }
+}
+
+function quarantineSession(session: SessionUsage): void {
+  session.unreadable = true;
+  session.pendingLine = [];
+  session.pendingLineBytes = 0;
 }
 
 function readSessionChunk(contents: Buffer, session: SessionUsage): void {
