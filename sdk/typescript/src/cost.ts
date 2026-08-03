@@ -56,6 +56,17 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-luna": [1_000, 100, 1_250, 6_000],
 };
 
+// Open failures that keep failing until the file itself changes. Every other
+// code (EMFILE, ENFILE, EIO and friends) is treated as transient and retried.
+const PERMANENT_ACCESS_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EPERM",
+  "EISDIR",
+  "ELOOP",
+  "ENAMETOOLONG",
+  "ENOTDIR",
+]);
+
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 const MAX_SESSION_EVENT_BYTES = 1 * 1_024 * 1_024;
@@ -116,11 +127,23 @@ export class ScanCostTracker {
       clearInterval(this.#timer);
       this.#timer = null;
     }
+    let refreshed = true;
     try {
       await this.refresh();
-    } catch {}
-    if (this.#snapshot.usage !== null) return this.#snapshot;
+    } catch {
+      refreshed = false;
+    }
+    if (refreshed && this.#snapshot.usage !== null) return this.#snapshot;
+    // This refresh failed, so the snapshot predates the completed turn. The
+    // caller's own usage is authoritative for the scan thread, so it has to be
+    // able to win; keeping the stale snapshot would hide spend from `onCost`.
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
+    if (
+      this.#snapshot.usage !== null &&
+      !chargesMore(cost, this.#snapshot.cost)
+    ) {
+      return this.#snapshot;
+    }
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
     this.#reportCost(cost);
     return this.#snapshot;
@@ -224,7 +247,10 @@ async function readSessionUsage(
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
-    quarantineSession(session);
+    // A process-wide shortage such as EMFILE clears on its own, so quarantining
+    // would stop observing this session's usage for the rest of the scan. Only
+    // a persistent, file-specific access failure earns a permanent quarantine.
+    if (isPermanentAccessError(error)) quarantineSession(session);
     throw error;
   }
   try {
@@ -377,6 +403,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function isPermanentAccessError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const code = error["code"];
+  return typeof code === "string" && PERMANENT_ACCESS_ERROR_CODES.has(code);
+}
+
+function chargesMore(
+  cost: ScanCost | null,
+  previous: ScanCost | null,
+): boolean {
+  if (cost === null) return false;
+  return previous === null || cost.estimatedUsd > previous.estimatedUsd;
 }
 
 export function estimateScanCost(
