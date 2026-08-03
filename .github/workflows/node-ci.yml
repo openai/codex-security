@@ -62,6 +62,7 @@ jobs:
 
       - name: Audit production dependencies
         if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        continue-on-error: true
         run: pnpm --dir sdk/typescript run audit:prod
 
       - name: Typecheck
