@@ -331,6 +331,10 @@ describe("multiscan", () => {
 
   test("limits simultaneous checkouts to the requested worker count", async () => {
     const paths = await fixture();
+    const knowledgeBasePaths = [
+      join(paths.root, "architecture.md"),
+      "shared/threat-model.md",
+    ];
     const sources = await Promise.all(
       ["one", "two", "three"].map((name) => repository(paths.root, name)),
     );
@@ -352,6 +356,7 @@ describe("multiscan", () => {
       release = resolve;
     });
     const security = client(async (_repository, scanOptions = {}) => {
+      expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
       active += 1;
       maximum = Math.max(maximum, active);
       if (active === 2) release();
@@ -362,6 +367,7 @@ describe("multiscan", () => {
     const summary = await runMultiscan(
       options(paths, security, {
         workers: 2,
+        knowledgeBasePaths,
         createSecurity: () => {
           created += 1;
           let running = false;
@@ -444,6 +450,23 @@ describe("multiscan", () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
     const secret = "sk-proj-SYNTHETIC_MULTISCAN_SECRET_123";
+    const knowledgeBasePaths = ["architecture.md"];
+    const proxyUrl =
+      "https://SYNTHETIC_USER:SYNTHETIC_MULTISCAN_PASSWORD@proxy.test/v1/responses";
+    const queryUrl =
+      "https://proxy.test/v1/responses?api_key=SYNTHETIC_MULTISCAN_QUERY_123&safe=1";
+    const shortAuthorization = "Bearer abc123";
+    const suffixedSecret = "SYNTHETIC_SUFFIXED_CLIENT_SECRET_123";
+    const suffixedToken = "SYNTHETIC_SUFFIXED_ACCESS_TOKEN_123";
+    const suffixedQuery = "SYNTHETIC_SUFFIXED_QUERY_SECRET_123";
+    const quotedSecret = "SYNTHETIC correct horse battery staple";
+    const opaqueAuthorization = "SYNTHETIC opaque authorization secret";
+    const npmAuthorization = "SYNTHETIC_NPM_AUTH_VALUE_123";
+    const customAuthorization = "SYNTHETIC_CUSTOM_AUTHORIZATION_123";
+    const suffixedAuthorization = "SYNTHETIC_SUFFIXED_AUTHORIZATION_123";
+    const paddedAuthorization = "SYNTHETIC_PADDED_AUTHORIZATION_TOKEN==";
+    const keyedAuthorization = "SYNTHETIC_KEYED_AUTHORIZATION_SECRET_123";
+    const camelCaseSecret = "SYNTHETIC_CAMEL_CASE_CLIENT_SECRET_123";
     await writeFile(
       paths.input,
       `id,repository,revision\nretry,${source.path},${source.revision}\n`,
@@ -454,10 +477,16 @@ describe("multiscan", () => {
       options(
         paths,
         client(async (_repository, scanOptions = {}) => {
+          expect(scanOptions.knowledgeBasePaths).toEqual(knowledgeBasePaths);
           attempts += 1;
-          if (attempts === 1) throw new Error(`temporary failure ${secret}`);
+          if (attempts === 1) {
+            throw new Error(
+              `temporary failure ${secret} ${shortAuthorization} client_secret_value=${suffixedSecret} access_token_value=${suffixedToken} ${JSON.stringify({ client_secret_value: quotedSecret })} authorization="${opaqueAuthorization}" _auth=${npmAuthorization} Authorization: ApiKey ${customAuthorization} client_authorization_value=ApiKey ${suffixedAuthorization} auth=ApiKey ${paddedAuthorization} Authorization: Custom key=${keyedAuthorization} clientSecretValue=${camelCaseSecret} sending request for url (${proxyUrl}) and ${queryUrl}&client_secret_value=${suffixedQuery}`,
+            );
+          }
           return await completedScan(scanOptions.outputDir!);
         }),
+        { knowledgeBasePaths },
       ),
     );
 
@@ -467,7 +496,23 @@ describe("multiscan", () => {
       { id: "retry", status: "failed", attempt: 1 },
       { id: "retry", status: "completed", attempt: 2 },
     ]);
-    expect(await readFile(summary.resultsPath, "utf8")).not.toContain(secret);
+    const ledger = await readFile(summary.resultsPath, "utf8");
+    expect(ledger).not.toContain(secret);
+    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_PASSWORD");
+    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_QUERY_123");
+    expect(ledger).not.toContain(suffixedSecret);
+    expect(ledger).not.toContain(suffixedToken);
+    expect(ledger).not.toContain(suffixedQuery);
+    expect(ledger).not.toContain(quotedSecret);
+    expect(ledger).not.toContain(opaqueAuthorization);
+    expect(ledger).not.toContain(npmAuthorization);
+    expect(ledger).not.toContain(customAuthorization);
+    expect(ledger).not.toContain(suffixedAuthorization);
+    expect(ledger).not.toContain(paddedAuthorization);
+    expect(ledger).not.toContain(keyedAuthorization);
+    expect(ledger).not.toContain(camelCaseSecret);
+    expect(ledger).not.toContain(shortAuthorization);
+    expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
