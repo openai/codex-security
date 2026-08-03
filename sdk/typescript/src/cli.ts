@@ -1279,6 +1279,10 @@ export async function main(
           .describe(
             "Resumable results directory; required with a repository CSV.",
           ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe("Read shared security docs for every repository."),
         workers: z
           .number()
           .int()
@@ -1350,13 +1354,15 @@ export async function main(
               if (
                 argument === "--model" ||
                 argument === "--effort" ||
-                argument === "--codex"
+                argument === "--codex" ||
+                argument === "--knowledge-base"
               ) {
                 optionIndex += 2;
               } else if (
                 argument.startsWith("--model=") ||
                 argument.startsWith("--effort=") ||
-                argument.startsWith("--codex=")
+                argument.startsWith("--codex=") ||
+                argument.startsWith("--knowledge-base=")
               ) {
                 optionIndex += 1;
               } else {
@@ -1365,7 +1371,7 @@ export async function main(
             }
             if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE]' to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1397,6 +1403,7 @@ export async function main(
             workers: options.workers,
             mode: options.mode,
             maxAttempts: options.maxAttempts,
+            knowledgeBasePaths: options.knowledgeBase,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
