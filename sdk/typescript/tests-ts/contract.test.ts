@@ -698,6 +698,86 @@ describe("canonical scan contract", () => {
     ).resolves.toBeDefined();
   });
 
+  async function sealDerivedDocuments(
+    scanDir: string,
+    { sealWriteup = true }: { sealWriteup?: boolean } = {},
+  ): Promise<void> {
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const findingsPath = join(scanDir, "findings.json");
+    const manifest = await readJson(manifestPath);
+    const findings = await readJson(findingsPath);
+    manifest["scan"]["hardening"] = { portfolioPath: "hardening/hardening.md" };
+    findings["findings"][0]["writeup"] = {
+      reportPath: "findings/report/report.md",
+    };
+    await mkdir(join(scanDir, "hardening"));
+    await mkdir(join(scanDir, "findings", "report"), { recursive: true });
+    await writeFile(join(scanDir, "hardening", "hardening.md"), "hardening\n");
+    await writeFile(
+      join(scanDir, "findings", "report", "report.md"),
+      "report\n",
+    );
+    // List them the way the bundled producer now does.
+    manifest["scan"]["artifacts"].push({
+      path: "hardening/hardening.md",
+      sha256: "",
+      mediaType: "text/markdown",
+    });
+    if (sealWriteup) {
+      manifest["scan"]["artifacts"].push({
+        path: "findings/report/report.md",
+        sha256: "",
+        mediaType: "text/markdown",
+      });
+    }
+    await writeJson(manifestPath, manifest);
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+  }
+
+  test("rejects a write-up replaced after the seal covered it", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+
+    await writeFile(
+      join(scanDir, "findings", "report", "report.md"),
+      "replaced wholesale\n",
+    );
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed or is missing");
+  });
+
+  test("rejects a hardening portfolio replaced after the seal covered it", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir);
+
+    await writeFile(
+      join(scanDir, "hardening", "hardening.md"),
+      "replaced wholesale\n",
+    );
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed or is missing");
+  });
+
+  test("rejects a referenced write-up left out of the sealed artifacts", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, { sealWriteup: false });
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(
+      "Derived document is missing from sealed artifacts: findings/report/report.md",
+    );
+  });
+
   test.each([
     "accepts whitespace in schema-only minLength contract fields",
     "accepts representative schema-only minLength fields in each contract document",

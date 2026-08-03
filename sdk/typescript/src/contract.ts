@@ -446,24 +446,47 @@ async function validateSeal(
     }
   }
 
+  const derivedDocuments: Array<{ path: string; context: string }> = [];
   for (const [index, finding] of findings.findings.entries()) {
     const writeup = finding.writeup;
     if (writeup === undefined) continue;
-    const file = await openCheckedScanFile(
-      scanDir,
-      writeup.reportPath,
-      `findings[${index}].writeup.reportPath`,
-      signal,
-      expectedRoot,
-    );
-    await file.close();
+    derivedDocuments.push({
+      path: writeup.reportPath,
+      context: `findings[${index}].writeup.reportPath`,
+    });
   }
   const hardening = manifest.scan.hardening;
   if (hardening !== undefined) {
+    derivedDocuments.push({
+      path: hardening.portfolioPath,
+      context: "manifest.scan.hardening.portfolioPath",
+    });
+  }
+
+  // A producer that seals derived documents lists them in scan.artifacts, where
+  // the loop above already verified their digests. Require every referenced
+  // document to be one of those artifacts, so a write-up cannot be replaced
+  // after sealing while the scan still loads as intact. Manifests sealed before
+  // derived documents were sealed list none of them, and keep the existence
+  // check they were sealed with rather than becoming unloadable.
+  const sealsDerivedDocuments = derivedDocuments.some((document) =>
+    artifactPaths.has(safeRelativePath(document.path, document.context)),
+  );
+  for (const document of derivedDocuments) {
+    throwIfAborted(signal);
+    if (sealsDerivedDocuments) {
+      const normalized = safeRelativePath(document.path, document.context);
+      if (!artifactPaths.has(normalized)) {
+        throw new ContractValidationError(
+          `Derived document is missing from sealed artifacts: ${document.path}`,
+        );
+      }
+      continue;
+    }
     const file = await openCheckedScanFile(
       scanDir,
-      hardening.portfolioPath,
-      "manifest.scan.hardening.portfolioPath",
+      document.path,
+      document.context,
       signal,
       expectedRoot,
     );
