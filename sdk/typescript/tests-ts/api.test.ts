@@ -1594,6 +1594,9 @@ describe("CodexSecurity orchestration", () => {
     expect(result.threadId).toBe("thread-1");
     expect(scanStarted).toBe(true);
     expect(warnings).toEqual([completionWarning]);
+    // A stale-tree warning is invisible to CI unless the machine-readable result carries it.
+    expect(result.warnings).toEqual([completionWarning]);
+    expect(result.toJSON()["warnings"]).toEqual([completionWarning]);
     expect(reconnects).toEqual([[2, 5]]);
     const startedAt = (codexOptions as CodexOptions | null)?.env?.[
       "CODEX_SECURITY_STARTED_AT"
