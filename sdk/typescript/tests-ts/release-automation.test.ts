@@ -1476,6 +1476,109 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     {
+      scenario: "a successful version-increase commit",
+      event: "workflow_run",
+      previousVersion: "0.1.5",
+      currentVersion: "0.1.6",
+      publishedVersions: ["0.1.5"],
+      changed: true,
+    },
+    {
+      scenario: "a successful fix after the version-increase commit failed CI",
+      event: "workflow_run",
+      previousVersion: "0.1.6",
+      currentVersion: "0.1.6",
+      publishedVersions: ["0.1.5"],
+      changed: true,
+    },
+    {
+      scenario: "an unchanged version that has already been published",
+      event: "workflow_run",
+      previousVersion: "0.1.5",
+      currentVersion: "0.1.5",
+      publishedVersions: ["0.1.5"],
+      changed: false,
+    },
+    {
+      scenario: "a manually dispatched unpublished version",
+      event: "workflow_dispatch",
+      previousVersion: "0.1.5",
+      currentVersion: "0.1.6",
+      publishedVersions: ["0.1.5"],
+      changed: true,
+    },
+  ])(
+    "resolves $scenario against its published npm history",
+    ({
+      event,
+      previousVersion,
+      currentVersion,
+      publishedVersions,
+      changed,
+    }) => {
+      const script = workflowStepShell(
+        releaseCutWorkflow,
+        "Resolve the stable package version",
+      );
+      const mocks = [
+        "git() {",
+        '  case "$1" in',
+        "    fetch|merge-base) return 0 ;;",
+        "    rev-parse) printf '%s\\n' \"$MOCK_PREVIOUS_SHA\" ;;",
+        '    show) printf \'{"version":"%s"}\\n\' "$MOCK_PREVIOUS_VERSION" ;;',
+        "    *) return 64 ;;",
+        "  esac",
+        "}",
+        "node() {",
+        '  if [[ "${2:-}" == "version" ]]; then',
+        "    printf '%s\\n' \"$MOCK_RELEASE_VERSION\"",
+        "    return 0",
+        "  fi",
+        '  command node "$@"',
+        "}",
+        "npm() { printf '%s\\n' \"$MOCK_PUBLISHED_VERSIONS\"; }",
+      ].join("\n");
+      const workspace = mkdtempSync(
+        join(tmpdir(), "codex-security-release-cut-"),
+      );
+
+      try {
+        const outputPath = join(workspace, "outputs");
+        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+          cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GITHUB_EVENT_NAME: event,
+            GITHUB_OUTPUT: outputPath,
+            GITHUB_REF: "refs/heads/main",
+            GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            MOCK_PREVIOUS_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            MOCK_PREVIOUS_VERSION: previousVersion,
+            MOCK_PUBLISHED_VERSIONS: JSON.stringify(publishedVersions),
+            MOCK_RELEASE_VERSION: currentVersion,
+            RELEASE_SHA: releaseCommit,
+          },
+          timeout: 10_000,
+        });
+
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+
+        const outputs = readFileSync(outputPath, "utf8");
+        expect(outputs).toContain(`changed=${changed}`);
+        if (changed) {
+          expect(outputs).toContain(`version=${currentVersion}`);
+          expect(outputs).toContain(`tag=npm-v${currentVersion}`);
+        }
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    {
       workflow: "release cut",
       version: "0.1.0",
       errorCode: "E404",
@@ -1566,6 +1669,121 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
+  test("creates the release tag at the successful CI commit", () => {
+    const script = workflowStepShell(
+      releaseCutWorkflow,
+      "Create the exact merged release tag",
+    );
+    const mock = [
+      "gh() {",
+      '  if [[ "$1" != "api" ]]; then return 64; fi',
+      "  shift",
+      '  if [[ "$1" == "--include" ]]; then',
+      "    printf 'HTTP/2.0 404 Mock\\nContent-Type: application/json\\n\\n'",
+      '    printf \'%s\\n\' \'{"message":"Not Found","status":"404"}\'',
+      "    return 1",
+      "  fi",
+      '  if [[ "$1" != "--method" || "$2" != "POST" ||',
+      '        "$3" != "repos/test/codex-security/git/refs" ||',
+      '        "$4" != "-f" || "$5" != "ref=refs/tags/npm-v0.1.2" ||',
+      '        "$6" != "-f" || "$7" != "sha=$RELEASE_SHA" ||',
+      '        "$8" != "--silent" ]]; then return 65; fi',
+      "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
+      "}",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        RELEASE_SHA: releaseCommit,
+        RELEASE_TAG: "npm-v0.1.2",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`created tag at ${releaseCommit}`);
+  });
+
+  test.each([
+    {
+      kind: "missing tag with GitHub's 404 error body",
+      lookupResponse: JSON.stringify({ message: "Not Found", status: "404" }),
+      lookupHttpStatus: "404",
+      status: 0,
+    },
+    {
+      kind: "forbidden tag lookup",
+      lookupResponse: JSON.stringify({ message: "Forbidden", status: "403" }),
+      lookupHttpStatus: "403",
+      status: 1,
+    },
+    {
+      kind: "malformed missing-tag response",
+      lookupResponse: "not JSON",
+      lookupHttpStatus: "404",
+      status: 1,
+    },
+    {
+      kind: "unavailable tag lookup",
+      lookupResponse: "",
+      lookupHttpStatus: "",
+      status: 1,
+    },
+  ])(
+    "handles $kind safely before cutting a release",
+    ({ lookupResponse, lookupHttpStatus, status }) => {
+      const script = workflowStepShell(
+        releaseCutWorkflow,
+        "Create the exact merged release tag",
+      );
+      const mock = [
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        '  if [[ "$1" == "--include" &&',
+        '        "$2" == "repos/test/codex-security/git/ref/tags/npm-v0.1.2" ]]; then',
+        '    if [[ -n "$MOCK_LOOKUP_HTTP_STATUS" ]]; then',
+        "      printf 'HTTP/2.0 %s Mock\\nContent-Type: application/json\\n\\n%s\\n' \\",
+        '        "$MOCK_LOOKUP_HTTP_STATUS" "$MOCK_LOOKUP_RESPONSE"',
+        "    fi",
+        "    return 1",
+        "  fi",
+        '  if [[ "$1" != "--method" || "$2" != "POST" ||',
+        '        "$3" != "repos/test/codex-security/git/refs" ||',
+        '        "$4" != "-f" || "$5" != "ref=refs/tags/npm-v0.1.2" ||',
+        '        "$6" != "-f" || "$7" != "sha=$GITHUB_SHA" ||',
+        '        "$8" != "--silent" ]]; then return 65; fi',
+        "  printf 'created exact release tag\\n'",
+        "}",
+      ].join("\n");
+      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          GITHUB_SHA: releaseCommit,
+          MOCK_LOOKUP_HTTP_STATUS: lookupHttpStatus,
+          MOCK_LOOKUP_RESPONSE: lookupResponse,
+          RELEASE_TAG: "npm-v0.1.2",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(status);
+      if (status === 0) {
+        expect(result.stdout).toContain("created exact release tag");
+      } else {
+        expect(result.stderr).toContain(
+          "Unable to query release tag npm-v0.1.2.",
+        );
+        expect(result.stdout).not.toContain("created exact release tag");
+      }
+    },
+  );
+
   test.each([
     {
       kind: "existing lightweight tag",
@@ -1599,10 +1817,17 @@ describe("GitHub release workflow safeguards", () => {
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
         "  shift",
+        '  if [[ "$1" == "--include" ]]; then',
+        "    shift",
+        '    if [[ "$1" != "repos/test/codex-security/git/ref/tags/npm-v0.1.2" ]]; then',
+        "      return 65",
+        "    fi",
+        "    printf 'HTTP/2.0 200 OK\\nContent-Type: application/json\\n\\n'",
+        '    printf \'{"object":{"type":"%s","sha":"%s"}}\\n\' \\',
+        '      "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
+        "    return 0",
+        "  fi",
         '  case "$1" in',
-        '    "repos/test/codex-security/git/ref/tags/npm-v0.1.2")',
-        '      printf \'%s\\t%s\\n\' "$MOCK_TAG_TYPE" "$MOCK_TAG_OBJECT"',
-        "      ;;",
         "    repos/test/codex-security/git/tags/*)",
         "      printf '%s\\n' \"$MOCK_PEELED_COMMIT\"",
         "      ;;",

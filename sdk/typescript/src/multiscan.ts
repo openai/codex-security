@@ -49,6 +49,7 @@ export interface MultiscanOptions {
   inputPath: string;
   outputDir: string;
   githubHost?: string;
+  knowledgeBasePaths?: string[];
   workers: number;
   mode: ScanMode;
   maxAttempts: number;
@@ -181,6 +182,9 @@ async function runCampaign(
           }
           const result = await security.run(checkout, {
             ...(task.scope === undefined ? {} : { target: [task.scope] }),
+            ...(options.knowledgeBasePaths?.length
+              ? { knowledgeBasePaths: options.knowledgeBasePaths }
+              : {}),
             mode: task.mode,
             outputDir: scanDir,
             ...(options.signal === undefined ? {} : { signal: options.signal }),

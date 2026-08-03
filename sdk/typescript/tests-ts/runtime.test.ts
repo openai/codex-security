@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readlink,
   realpath,
   readdir,
   rename,
@@ -1856,6 +1857,517 @@ describe("runtime directories and plugin Python boundary", () => {
       ["test-command"],
     );
     expect(result).toEqual({ ok: true });
+  });
+
+  test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
+    const root = await temporaryDirectory("codex-security-legacy-migrations-");
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    const scanDirectory = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(stateDirectory);
+    await mkdir(scanDirectory, { mode: 0o700 });
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const fixture = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_schema import MIGRATIONS, sql_statements",
+          "repository = Path(sys.argv[2])",
+          "connection = sqlite3.connect(Path(sys.argv[3]) / 'workbench.sqlite3')",
+          "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
+          "timestamp = '2026-07-09T00:00:00Z'",
+          "for version, name, migration in MIGRATIONS:",
+          "    if version > 10: break",
+          "    for statement in sql_statements(migration): connection.execute(statement)",
+          "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
+          "for table in ('workspaces', 'scans'):",
+          "    connection.execute(f'ALTER TABLE {table} ADD COLUMN execution_model TEXT CHECK (execution_model IS NULL OR length(execution_model) BETWEEN 1 AND 128)')",
+          "    connection.execute(f'ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT CHECK ((reasoning_effort IS NULL OR length(reasoning_effort) BETWEEN 1 AND 64) AND ((execution_model IS NULL) = (reasoning_effort IS NULL)))')",
+          "connection.executemany('INSERT INTO schema_migrations VALUES (?, ?, ?)', [(11, 'scan execution profiles', timestamp), (12, 'dynamic scan execution profiles', timestamp)])",
+          "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
+          "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
+          "connection.execute('INSERT INTO workspaces (id, target_path, thread_id, execution_model, reasoning_effort, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', ('legacy-workspace', str(repository), 'legacy-thread', 'gpt-workspace', 'medium', timestamp, timestamp))",
+          "connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, execution_model, reasoning_effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('legacy-scan', 'legacy-workspace', str(repository), 'legacy-revision', '.', 'standard', str(repository / 'legacy-scan'), 'complete', 'reporting', timestamp, timestamp, timestamp, 'gpt-legacy', 'high'))",
+          "connection.execute('UPDATE scans SET completion_warnings_json = ? WHERE id = ?', ('[\"legacy warning\"]', 'legacy-scan'))",
+          "connection.commit()",
+          "connection.close()",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        repository,
+        stateDirectory,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(fixture.status).toBe(0);
+    expect(fixture.stderr).toBe("");
+
+    const registration = await runWorkbench(
+      {
+        python: python!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      },
+      [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDirectory,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository,
+          target: { kind: "repository", paths: [] },
+        }),
+      ],
+    );
+    expect(registration["scanId"]).toBeString();
+
+    const upgraded = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sqlite3, sys",
+          "connection = sqlite3.connect(sys.argv[1])",
+          "connection.row_factory = sqlite3.Row",
+          "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
+          "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 25, 26)')}",
+          "profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()",
+          "workspace_profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort FROM workspaces WHERE id = ?', ('legacy-workspace',)).fetchone()",
+          "warnings = connection.execute('SELECT completion_warnings_json FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()[0]",
+          "connection.execute('UPDATE scans SET model = ?, reasoning_effort = NULL WHERE id = ?', ('gpt-current', sys.argv[2]))",
+          "connection.execute('UPDATE scans SET reasoning_effort = ? WHERE id = ?', ('high', sys.argv[2]))",
+          "current_profile = connection.execute('SELECT legacy_execution_model, legacy_reasoning_effort, model, reasoning_effort FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
+          "deep_scan_tables = connection.execute(\"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'\").fetchone()",
+          "print(json.dumps({'columns': sorted(columns & {'deep_scan_owner_thread_id', 'continuation_thread_id', 'model', 'reasoning_effort', 'completion_warnings_json', 'legacy_execution_model', 'legacy_reasoning_effort'}), 'migrations': migrations, 'profile': dict(profile), 'workspaceProfile': dict(workspace_profile), 'warnings': json.loads(warnings), 'currentProfile': dict(current_profile), 'deepScanTables': deep_scan_tables is not None}))",
+        ].join("\n"),
+        join(stateDirectory, "workbench.sqlite3"),
+        String(registration["scanId"]),
+      ],
+      { encoding: "utf8" },
+    );
+    expect(upgraded.status).toBe(0);
+    expect(upgraded.stderr).toBe("");
+    expect(JSON.parse(upgraded.stdout)).toEqual({
+      columns: [
+        "completion_warnings_json",
+        "continuation_thread_id",
+        "deep_scan_owner_thread_id",
+        "legacy_execution_model",
+        "legacy_reasoning_effort",
+        "model",
+        "reasoning_effort",
+      ],
+      migrations: {
+        "11": "deep scan orchestration state",
+        "12": "scan continuation threads",
+        "25": "persist scan model settings",
+        "26": "persist scan completion warnings",
+      },
+      profile: {
+        legacy_execution_model: "gpt-legacy",
+        legacy_reasoning_effort: "high",
+        model: "gpt-legacy",
+        reasoning_effort: "high",
+      },
+      workspaceProfile: {
+        legacy_execution_model: "gpt-workspace",
+        legacy_reasoning_effort: "medium",
+      },
+      warnings: ["legacy warning"],
+      currentProfile: {
+        legacy_execution_model: null,
+        legacy_reasoning_effort: null,
+        model: "gpt-current",
+        reasoning_effort: "high",
+      },
+      deepScanTables: true,
+    });
+  });
+
+  test.each([
+    [
+      "released continuation v12",
+      "scan execution profiles",
+      "scan continuation threads",
+      true,
+    ],
+    [
+      "historical phase-progress v12",
+      "scan execution profiles",
+      "phase-specific scan progress",
+      true,
+    ],
+    [
+      "unknown v11 plus released continuation v12",
+      "unknown execution profile migration",
+      "scan continuation threads",
+      false,
+    ],
+  ] as const)(
+    "reconciles %s without corrupting migration history",
+    async (_history, profileMigration, followUpMigration, supportedHistory) => {
+      const root = await temporaryDirectory(
+        "codex-security-migration-history-",
+      );
+      const stateDirectory = join(root, "state");
+      await mkdir(stateDirectory);
+      const database = join(stateDirectory, "workbench.sqlite3");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const fixture = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "sys.path.insert(0, sys.argv[1])",
+            "from workbench_schema import MIGRATIONS, sql_statements",
+            "connection = sqlite3.connect(sys.argv[2])",
+            "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
+            "timestamp = '2026-07-30T00:00:00Z'",
+            "for version, name, migration in MIGRATIONS:",
+            "    if version > 10: break",
+            "    for statement in sql_statements(migration): connection.execute(statement)",
+            "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
+            "for table in ('workspaces', 'scans'):",
+            "    connection.execute(f'ALTER TABLE {table} ADD COLUMN execution_model TEXT')",
+            "    connection.execute(f'ALTER TABLE {table} ADD COLUMN reasoning_effort TEXT')",
+            "follow_up = next(item for item in MIGRATIONS if item[1] == sys.argv[4])",
+            "for statement in sql_statements(follow_up[2]): connection.execute(statement)",
+            "connection.executemany('INSERT INTO schema_migrations VALUES (?, ?, ?)', [(11, sys.argv[3], timestamp), (12, sys.argv[4], timestamp)])",
+            "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
+            "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
+            "connection.commit()",
+            "connection.close()",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          database,
+          profileMigration,
+          followUpMigration,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(fixture.status).toBe(0);
+      expect(fixture.stderr).toBe("");
+
+      const upgrade = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          "database-info",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(upgrade.status).toBe(supportedHistory ? 0 : 1);
+      if (!supportedHistory) {
+        expect(upgrade.stderr).toContain(
+          "unsupported execution-profile migration history",
+        );
+      }
+
+      const inspected = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, sqlite3, sys",
+            "connection = sqlite3.connect(sys.argv[1])",
+            "connection.row_factory = sqlite3.Row",
+            "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 20, 25, 26)')}",
+            "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
+            "deep_scan_tables = connection.execute(\"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deep_scan_runs'\").fetchone()",
+            "print(json.dumps({'migrations': migrations, 'legacyColumnsRenamed': 'legacy_execution_model' in columns, 'deepScanTables': deep_scan_tables is not None}))",
+          ].join("\n"),
+          database,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(inspected.status).toBe(0);
+      expect(inspected.stderr).toBe("");
+      if (!supportedHistory) {
+        expect(JSON.parse(inspected.stdout)).toEqual({
+          migrations: {
+            "11": "unknown execution profile migration",
+            "12": "scan continuation threads",
+            "25": "persist scan completion warnings",
+          },
+          legacyColumnsRenamed: false,
+          deepScanTables: false,
+        });
+        return;
+      }
+
+      expect(JSON.parse(inspected.stdout)).toEqual({
+        migrations: {
+          "11": "deep scan orchestration state",
+          "12": "scan continuation threads",
+          "20": "phase-specific scan progress",
+          "25": "persist scan model settings",
+          "26": "persist scan completion warnings",
+        },
+        legacyColumnsRenamed: true,
+        deepScanTables: true,
+      });
+    },
+  );
+
+  test("aligns an existing public CLI database with the maintained plugin schema", async () => {
+    const root = await temporaryDirectory("codex-security-public-migrations-");
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    const scanDirectory = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(stateDirectory);
+    await mkdir(scanDirectory, { mode: 0o700 });
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const fixture = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sqlite3, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "from workbench_schema import MIGRATIONS, sql_statements",
+          "repository = Path(sys.argv[2])",
+          "connection = sqlite3.connect(Path(sys.argv[3]) / 'workbench.sqlite3')",
+          "connection.execute('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)')",
+          "timestamp = '2026-07-30T00:00:00Z'",
+          "for version, name, migration in MIGRATIONS:",
+          "    if version > 24: break",
+          "    for statement in sql_statements(migration): connection.execute(statement)",
+          "    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (version, name, timestamp))",
+          "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]'\")",
+          "connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)', (25, 'persist scan completion warnings', timestamp))",
+          "connection.execute('INSERT INTO workspaces (id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?)', ('legacy-workspace', str(repository), timestamp, timestamp))",
+          "connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, completion_warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('legacy-scan', 'legacy-workspace', str(repository), 'legacy-revision', '.', 'standard', str(repository / 'legacy-scan'), 'complete', 'reporting', timestamp, timestamp, timestamp, '[\"existing warning\"]'))",
+          "connection.commit()",
+          "connection.close()",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        repository,
+        stateDirectory,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(fixture.status).toBe(0);
+    expect(fixture.stderr).toBe("");
+
+    const registration = await runWorkbench(
+      {
+        python: python!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      },
+      [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDirectory,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository,
+          target: { kind: "repository", paths: [] },
+        }),
+      ],
+    );
+    expect(registration["scanId"]).toBeString();
+
+    const upgraded = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sqlite3, sys",
+          "connection = sqlite3.connect(sys.argv[1])",
+          "connection.row_factory = sqlite3.Row",
+          "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
+          "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (25, 26)')}",
+          "warnings = connection.execute('SELECT completion_warnings_json FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()[0]",
+          "print(json.dumps({'columns': sorted(columns & {'model', 'reasoning_effort', 'completion_warnings_json'}), 'migrations': migrations, 'warnings': json.loads(warnings)}))",
+        ].join("\n"),
+        join(stateDirectory, "workbench.sqlite3"),
+      ],
+      { encoding: "utf8" },
+    );
+    expect(upgraded.status).toBe(0);
+    expect(upgraded.stderr).toBe("");
+    expect(JSON.parse(upgraded.stdout)).toEqual({
+      columns: ["completion_warnings_json", "model", "reasoning_effort"],
+      migrations: {
+        "25": "persist scan model settings",
+        "26": "persist scan completion warnings",
+      },
+      warnings: ["existing warning"],
+    });
+  });
+
+  test.each([
+    ["all required draft artifacts", []],
+    ["the manifest draft", ["findings.json", "coverage.json"]],
+    ["the findings draft", ["scan-manifest.json", "coverage.json"]],
+    ["the coverage draft", ["scan-manifest.json", "findings.json"]],
+  ] as const)(
+    "rejects recipe scans when the agent did not create %s",
+    async (_description, present) => {
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const requiredDrafts = [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+      ] as const;
+      const root = await temporaryDirectory("codex-security-missing-drafts-");
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir, { mode: 0o700 });
+      const workbenchOptions = {
+        python: python!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+      };
+      const registration = await runWorkbench(workbenchOptions, [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository,
+          target: { kind: "repository", paths: [] },
+        }),
+      ]);
+      await Promise.all(
+        present.map((filename) =>
+          copyFile(
+            join(PLUGIN_ROOT, "examples", "completed-scan", filename),
+            join(scanDir, filename),
+          ),
+        ),
+      );
+      const missing = requiredDrafts.filter(
+        (filename) => !present.some((candidate) => candidate === filename),
+      );
+
+      await expect(
+        runWorkbench(workbenchOptions, [
+          "complete-scan",
+          "--scan-id",
+          String(registration["scanId"]),
+        ]),
+      ).rejects.toThrow(
+        `Scan agent did not create required draft artifacts: ${missing.join(
+          ", ",
+        )}. Check that the scan agent can run shell commands and write to the scan directory before retrying.`,
+      );
+      expect((await readdir(scanDir)).sort()).toEqual([...present].sort());
+      const stored = await runWorkbench(workbenchOptions, [
+        "get-scan",
+        "--scan-id",
+        String(registration["scanId"]),
+      ]);
+      expect(stored["scan"]).toMatchObject({
+        progress: { status: "running" },
+      });
+    },
+  );
+
+  testPosix("rejects symlinked recipe scan draft artifacts", async () => {
+    const root = await temporaryDirectory("codex-security-symlinked-draft-");
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const workbenchOptions = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+    };
+    const registration = await runWorkbench(workbenchOptions, [
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository,
+        target: { kind: "repository", paths: [] },
+      }),
+    ]);
+    await symlink(
+      join(root, "missing-manifest.json"),
+      join(scanDir, "scan-manifest.json"),
+    );
+
+    await expect(
+      runWorkbench(workbenchOptions, [
+        "complete-scan",
+        "--scan-id",
+        String(registration["scanId"]),
+      ]),
+    ).rejects.toThrow(
+      "scan-manifest.json: expected a regular file inside the scan directory.",
+    );
+    expect(await readlink(join(scanDir, "scan-manifest.json"))).toBe(
+      join(root, "missing-manifest.json"),
+    );
   });
 
   test("preserves recorded artifact paths when archiving a completed scan", async () => {
