@@ -2809,6 +2809,34 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
 
+  testPosix("preserves an explicit virtualenv Python launcher", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const systemBin = join(root, "system", "bin");
+    const virtualenvBin = join(root, "venv", "bin");
+    const systemPython = join(systemBin, "python3");
+    const virtualenvPython = join(virtualenvBin, "python");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(systemBin, { recursive: true }),
+      mkdir(virtualenvBin, { recursive: true }),
+    ]);
+    await writeFile(
+      systemPython,
+      '#!/bin/sh\ncase "$0" in */venv/bin/python) ;; *) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(systemPython, 0o700);
+    await symlink(systemPython, virtualenvPython);
+
+    await expect(
+      resolvePluginPython({
+        configuredPath: virtualenvPython,
+        environment: { PATH: "" },
+        protectedRoot: repository,
+      }),
+    ).resolves.toBe(virtualenvPython);
+  });
+
   testPosix(
     "does not load repository-controlled Python startup code",
     async () => {
@@ -2838,7 +2866,7 @@ describe("runtime directories and plugin Python boundary", () => {
           environment,
           protectedRoot: repository,
         }),
-      ).toBe(await realpath(interpreter));
+      ).toBe(interpreter);
       expect(existsSync(marker)).toBe(false);
     },
   );

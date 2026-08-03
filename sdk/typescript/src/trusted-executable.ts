@@ -65,7 +65,11 @@ export async function resolveTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      executable ??= pathLike ? canonical : current.path;
+      // Explicit launchers outside the protected root retain invocation semantics
+      // such as Python virtualenv selection. Repository-local links still execute
+      // only the canonical target that passed the trust check.
+      executable ??=
+        pathLike && isWithin(root, current.path) ? canonical : current.path;
     } catch {
       continue;
     }
