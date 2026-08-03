@@ -119,6 +119,14 @@ async function runCampaign(
         join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
       (await hasArtifacts(receipt.outputDir))
     ) {
+      // A skipped task never reaches the worker's removal below, so a checkout
+      // that survived a failed cleanup would linger for every later run. Retry
+      // the removal here, still best effort and without touching the receipt
+      // this task already earned, so resuming reclaims the clone it left.
+      await rm(join(output, "checkouts", task.id), {
+        recursive: true,
+        force: true,
+      }).catch(() => undefined);
       completed += 1;
     } else {
       pending.push(task);
@@ -205,8 +213,9 @@ async function runCampaign(
           // The removal failure travels with that outcome instead, so the attempt
           // keeps the status its scan earned and a leftover checkout is still
           // reported. The next attempt removes the checkout again inside the try
-          // above, so a leftover that outlives this run fails there rather than
-          // being scanned as if it were fresh.
+          // above, and a resume that skips this task removes it before counting
+          // the task as done, so a leftover that outlives this run is retried
+          // rather than kept or scanned as if it were fresh.
           cleanup = await rm(checkout, { recursive: true, force: true }).then(
             () => undefined,
             (error: unknown) =>

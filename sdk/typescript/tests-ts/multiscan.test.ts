@@ -509,6 +509,48 @@ describe("multiscan", () => {
     }
   });
 
+  test("removes a checkout left behind by a completed scan's failed cleanup", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "leftover");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nleftover,${source.path},${source.revision}\n`,
+    );
+    let scanned = false;
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      scanned = true;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const restore = await unremovableCheckout(
+      join(paths.output, "checkouts", "leftover"),
+      () => scanned,
+    );
+    let first: Awaited<ReturnType<typeof runMultiscan>>;
+    try {
+      first = await runMultiscan(options(paths, security, { maxAttempts: 1 }));
+    } finally {
+      restore();
+    }
+
+    expect(first).toMatchObject({ total: 1, completed: 1, failed: 0 });
+    expect(await readdir(join(paths.output, "checkouts"))).toEqual([
+      "leftover",
+    ]);
+
+    const resumed = await runMultiscan(
+      options(paths, security, { maxAttempts: 1 }),
+    );
+
+    expect(resumed).toMatchObject({ total: 1, completed: 1, skipped: 1 });
+    expect(scans).toBe(1);
+    expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
+    expect(await results(first.resultsPath)).toMatchObject([
+      { id: "leftover", status: "completed", attempt: 1 },
+    ]);
+  });
+
   test("rejects another supervisor and recovers a crashed owner's checkout", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "exclusive");
