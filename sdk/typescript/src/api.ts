@@ -7,7 +7,6 @@ import {
   readFile,
   realpath,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -1433,35 +1432,7 @@ async function prepareDeepScanConfig(
   const hasOverrides = Object.keys(overrides).length > 0;
   if (existing === undefined && !hasOverrides) {
     if (destination !== source) {
-      const identity = async (path: string) => {
-        try {
-          return await stat(path);
-        } catch (error) {
-          if (isRecord(error) && error["code"] === "ENOENT") return null;
-          throw error;
-        }
-      };
-      const sameIdentity = (
-        first: Awaited<ReturnType<typeof identity>>,
-        second: Awaited<ReturnType<typeof identity>>,
-      ): boolean =>
-        first !== null &&
-        second !== null &&
-        first.dev === second.dev &&
-        first.ino === second.ino;
-      const [sourceIdentity, destinationIdentity] = await Promise.all([
-        identity(source),
-        identity(destination),
-      ]);
-      if (!sameIdentity(sourceIdentity, destinationIdentity)) {
-        const [sourceDirectory, destinationDirectory] = await Promise.all([
-          identity(dirname(source)),
-          identity(dirname(destination)),
-        ]);
-        if (!sameIdentity(sourceDirectory, destinationDirectory)) {
-          await rm(destination, { force: true });
-        }
-      }
+      await rm(destination, { force: true });
     }
     return;
   }

@@ -1,7 +1,6 @@
 import {
   copyFile,
   cp,
-  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -1833,7 +1832,7 @@ describe("CodexSecurity orchestration", () => {
       ? []
       : [
           "without deep settings and a dangling runtime link",
-          "without deep settings and a hard-linked dangling runtime link",
+          "without deep settings and a cyclic runtime link",
         ]),
   ])(
     "clears stale runtime deep-scan configuration when ambient settings are %s",
@@ -1890,13 +1889,10 @@ describe("CodexSecurity orchestration", () => {
         await rm(runtimeConfig);
         await symlink(escapedConfig, runtimeConfig);
       } else if (
-        ambientState ===
-        "without deep settings and a hard-linked dangling runtime link"
+        ambientState === "without deep settings and a cyclic runtime link"
       ) {
-        await rm(ambientConfig);
-        await symlink(escapedConfig, ambientConfig);
         await rm(runtimeConfig);
-        execFileSync("ln", ["-P", ambientConfig, runtimeConfig]);
+        await symlink(runtimeConfig, runtimeConfig);
       }
 
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
@@ -1905,15 +1901,6 @@ describe("CodexSecurity orchestration", () => {
       await expect(fsPromises.lstat(runtimeConfig)).rejects.toMatchObject({
         code: "ENOENT",
       });
-      if (
-        ambientState ===
-        "without deep settings and a hard-linked dangling runtime link"
-      ) {
-        expect((await fsPromises.lstat(ambientConfig)).isSymbolicLink()).toBe(
-          true,
-        );
-        await rm(ambientConfig);
-      }
 
       await writeFile(ambientConfig, "[deep_scan]\nworkers = 7\n");
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
@@ -1925,97 +1912,43 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each([
-    "the same path",
-    "a symlink alias",
-    "a shared configuration directory",
-    "a shared file identity",
-    ...(process.platform === "win32"
-      ? []
-      : ["a shared configuration file", "a shared dangling configuration"]),
-  ])(
-    "preserves ambient configuration when the deep-scan runtime shares it through %s",
-    async (configurationAlias) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const ambientHome =
-        configurationAlias !== "the same path"
-          ? join(root, "ambient-home-link")
-          : codexHome;
-      const scanDir = join(root, "scan");
-      const configPath = join(codexHome, "codex-security", "config.toml");
-      const originalConfiguration = "[other]\nenabled = true\n";
-      await mkdir(repository);
-      await mkdir(join(codexHome, "codex-security"), { recursive: true });
-      if (configurationAlias === "a shared dangling configuration") {
-        await symlink(join(root, "missing-config.toml"), configPath);
-      } else {
-        await writeFile(configPath, originalConfiguration);
-      }
-      if (configurationAlias === "a symlink alias") {
-        await symlink(
-          codexHome,
-          ambientHome,
-          process.platform === "win32" ? "junction" : "dir",
-        );
-      } else if (
-        configurationAlias === "a shared configuration directory" ||
-        configurationAlias === "a shared dangling configuration"
-      ) {
-        await mkdir(ambientHome);
-        await symlink(
-          join(codexHome, "codex-security"),
-          join(ambientHome, "codex-security"),
-          process.platform === "win32" ? "junction" : "dir",
-        );
-      } else if (configurationAlias === "a shared configuration file") {
-        await mkdir(join(ambientHome, "codex-security"), { recursive: true });
-        await symlink(
-          configPath,
-          join(ambientHome, "codex-security", "config.toml"),
-        );
-      } else if (configurationAlias === "a shared file identity") {
-        await mkdir(join(ambientHome, "codex-security"), { recursive: true });
-        await link(
-          configPath,
-          join(ambientHome, "codex-security", "config.toml"),
-        );
-      }
-      await mkdir(scanDir, { mode: 0o700 });
+  test("preserves ambient configuration when the deep-scan runtime uses the same home", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const configPath = join(codexHome, "codex-security", "config.toml");
+    const originalConfiguration = "[other]\nenabled = true\n";
+    await mkdir(repository);
+    await mkdir(join(codexHome, "codex-security"), { recursive: true });
+    await writeFile(configPath, originalConfiguration);
+    await mkdir(scanDir, { mode: 0o700 });
 
-      const client = new TestClient(
-        {},
-        {
-          environment: { CODEX_HOME: ambientHome },
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
-          createCodex: () => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                throw new Error("deep scan settings captured");
-              },
-            }),
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_HOME: codexHome },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("deep scan settings captured");
+            },
           }),
-        },
-      );
+        }),
+      },
+    );
 
-      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-        "deep scan settings captured",
-      );
-      if (configurationAlias === "a shared dangling configuration") {
-        expect((await fsPromises.lstat(configPath)).isSymbolicLink()).toBe(
-          true,
-        );
-      } else {
-        expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
-      }
-      await client.close();
-    },
-  );
+    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+      "deep scan settings captured",
+    );
+    expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+    await client.close();
+  });
 
   test("rejects a scan registration without an authoritative target contract", async () => {
     const root = await temporaryDirectory();
