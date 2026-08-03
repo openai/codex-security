@@ -19,10 +19,25 @@ import {
 } from "../src/runtime.js";
 import {
   capture,
-  dependencies,
+  dependencies as cliDependencies,
   fakePreflight,
   fakeResult,
 } from "./support/cli.js";
+
+function dependencies(
+  options: Parameters<typeof cliDependencies>[0] = {},
+): ReturnType<typeof cliDependencies> {
+  return cliDependencies({
+    ...options,
+    environment: {
+      CODEX_SECURITY_STATE_DIR: join(
+        tmpdir(),
+        `codex-security-cli-authentication-${process.pid}`,
+      ),
+      ...options.environment,
+    },
+  });
+}
 
 describe("CLI authentication", () => {
   test("delegates login and logout without overriding managed credential storage", async () => {
@@ -55,7 +70,12 @@ describe("CLI authentication", () => {
 
   test("uses the same stable credential home for login, status, and logout", async () => {
     const stateDirectory = join(tmpdir(), "codex-security-managed-auth-state");
-    const expectedHome = join(stateDirectory, "codex-home");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    const expectedHome = await realpath(
+      await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      }),
+    );
 
     for (const argv of [["login"], ["login", "status"], ["logout"]] as const) {
       const stdout = capture();

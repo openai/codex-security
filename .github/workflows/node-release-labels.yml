@@ -1,0 +1,135 @@
+name: node-release-labels
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-release-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  categorize:
+    if: github.repository == 'openai/codex-security'
+    name: categorize release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Categorize pull request without checking out its code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          release_note_label() {
+            case "$1" in
+              feat:* | feat\(*\):* | feat!:* | feat\(*\)!:*)
+                printf '%s\n' enhancement
+                ;;
+              fix:* | fix\(*\):* | fix!:* | fix\(*\)!:*)
+                printf '%s\n' bug
+                ;;
+              docs:* | docs\(*\):* | docs!:* | docs\(*\)!:*)
+                printf '%s\n' documentation
+                ;;
+              release:* | release\(*\):* | release!:* | release\(*\)!:* | test:* | test\(*\):* | test!:* | test\(*\)!:*)
+                printf '%s\n' skip-release-notes
+                ;;
+              *)
+                return 0
+                ;;
+            esac
+          }
+
+          current_title="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER" \
+              --jq '.title'
+          )"
+          label="$(release_note_label "$current_title")"
+          current_labels="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+              --jq '.[].name'
+          )"
+
+          preserve_skip_label=false
+          while IFS= read -r current_label; do
+            if [[ "$current_label" == "skip-release-notes" ]]; then
+              skip_label_actors="$(
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline?per_page=100" \
+                  --paginate \
+                  --jq '.[] | select(.event == "labeled" and .label.name == "skip-release-notes") | if (.actor.login // "") == "" then "__unattributed__" else .actor.login end'
+              )"
+              skip_label_actor=""
+              while IFS= read -r event_actor; do
+                skip_label_actor="$event_actor"
+              done <<< "$skip_label_actors"
+
+              if [[ "$skip_label_actor" != "github-actions[bot]" ]]; then
+                echo "Preserving existing skip-release-notes label."
+                preserve_skip_label=true
+              fi
+              break
+            fi
+          done <<< "$current_labels"
+
+          label_already_present=false
+          while IFS= read -r current_label; do
+            case "$current_label" in
+              enhancement | bug | documentation | skip-release-notes)
+                if [[ "$current_label" == "skip-release-notes" &&
+                      "$preserve_skip_label" == true ]]; then
+                  if [[ "$current_label" == "$label" ]]; then
+                    label_already_present=true
+                  fi
+                elif [[ "$current_label" != "$label" ]]; then
+                  gh api --method DELETE \
+                    "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$current_label" \
+                    --silent
+                else
+                  label_already_present=true
+                fi
+                ;;
+            esac
+          done <<< "$current_labels"
+
+          if [[ -z "$label" ]]; then
+            echo "No automatic release-note category applies."
+            exit 0
+          fi
+
+          if [[ "$label_already_present" == true ]]; then
+            echo "The current release-note category is already applied."
+            exit 0
+          fi
+
+          if [[ "$label" == "skip-release-notes" ]]; then
+            if ! gh api \
+              "repos/$GITHUB_REPOSITORY/labels/skip-release-notes" \
+              --silent >/dev/null 2>&1; then
+              if ! gh api --method POST "repos/$GITHUB_REPOSITORY/labels" \
+                -f name=skip-release-notes \
+                -f color=ededed \
+                -f description="Omit internal changes from generated release notes" \
+                --silent >/dev/null 2>&1; then
+                gh api \
+                  "repos/$GITHUB_REPOSITORY/labels/skip-release-notes" \
+                  --silent >/dev/null
+              fi
+            fi
+          fi
+
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
+            -f "labels[]=$label" \
+            --silent

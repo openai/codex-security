@@ -42,6 +42,12 @@
       "remediation": "Normalize destinations and reject entries that escape the extraction root.",
       "validation": null,
       "attackPath": null,
+      "remediationTests": [
+        "Assert that extracting an archive entry named `../escape.txt` fails without writing outside the extraction root."
+      ],
+      "preventiveControls": [
+        "Route all archive extraction through one helper that normalizes and validates destination paths."
+      ],
       "provenance": {
         "source": "local_plugin"
       },

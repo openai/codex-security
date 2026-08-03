@@ -1,4 +1,4 @@
-import { cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
@@ -31,6 +31,7 @@ export function createApiTestFixtures() {
       await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
         recursive: true,
       });
+      await chmod(scanDir, 0o700);
       await writeFile(join(scanDir, "report.md"), "# Scan report\n");
       return scanDir;
     },
