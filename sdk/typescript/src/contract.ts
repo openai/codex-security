@@ -586,8 +586,9 @@ async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      await requirePrivateScanOutput(returned, canonical);
-      await requireSecureOutputAncestry(canonical);
+      const secured = await requirePrivateScanOutput(returned, canonical);
+      await requireSecureOutputAncestry(secured.path);
+      return { path: secured.path, metadata: secured.metadata };
     } catch (error) {
       throw new ContractValidationError(
         error instanceof Error
@@ -596,7 +597,6 @@ async function requireScanRoot(
         { cause: error },
       );
     }
-    return { path: canonical, metadata: returned };
   } catch (error) {
     throwIfAborted(signal);
     if (error instanceof ContractValidationError) throw error;
@@ -622,8 +622,14 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    await requirePrivateScanOutput(current, root.path);
-    await requireSecureOutputAncestry(root.path);
+    const secured = await requirePrivateScanOutput(current, root.path);
+    if (
+      secured.metadata.dev !== root.metadata.dev ||
+      secured.metadata.ino !== root.metadata.ino
+    ) {
+      throw new Error("scan directory changed while reading");
+    }
+    await requireSecureOutputAncestry(secured.path);
   } catch (error) {
     throwIfAborted(signal);
     throw new ContractValidationError(

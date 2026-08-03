@@ -1749,12 +1749,14 @@ describe("runtime directories and plugin Python boundary", () => {
     const metadata = await lstat(output);
     const secured: string[] = [];
 
-    await requirePrivateScanOutput(metadata, output, {
-      platform: "win32",
-      secureWindowsOutput: async (path) => {
-        secured.push(path);
-      },
-    });
+    await expect(
+      requirePrivateScanOutput(metadata, output, {
+        platform: "win32",
+        secureWindowsOutput: async (path) => {
+          secured.push(path);
+        },
+      }),
+    ).resolves.toMatchObject({ path: await realpath(output) });
     expect(secured).toEqual([output]);
 
     await expect(
@@ -1775,6 +1777,25 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).resolves.toBe(await realpath(output));
     expect(secured).toContain(`prepared:${output}`);
+  });
+
+  test("rejects a scan output directory replaced during Windows ACL hardening", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "results");
+    await mkdir(output, { mode: 0o700 });
+    if (process.platform !== "win32") await chmod(output, 0o700);
+    const metadata = await lstat(output);
+
+    await expect(
+      requirePrivateScanOutput(metadata, output, {
+        platform: "win32",
+        secureWindowsOutput: async () => {
+          await rename(output, join(root, "stolen"));
+          await mkdir(output, { recursive: true, mode: 0o700 });
+          if (process.platform !== "win32") await chmod(output, 0o700);
+        },
+      }),
+    ).rejects.toThrow("Scan output directory was replaced");
   });
 
   test.skipIf(process.platform !== "win32")(

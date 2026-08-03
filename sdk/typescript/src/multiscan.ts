@@ -257,16 +257,13 @@ async function ensureOutputDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   let prepared = await lstat(path);
   if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
-    throw new Error(
-      "Multiscan output must be a non-symlink directory.",
-    );
+    throw new Error("Multiscan output must be a non-symlink directory.");
   }
-  if (process.platform !== "win32" && (prepared.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (prepared.mode & 0o777) !== 0o700) {
     await chmod(path, 0o700);
     prepared = await lstat(path);
   }
-  const canonical = await realpath(path);
-  await requirePrivateScanOutput(prepared, canonical);
+  await requirePrivateScanOutput(prepared, path);
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {

@@ -303,9 +303,9 @@ async function secureWindowsPrivateDirectory(
     "$acl.SetAccessRule($rule)",
     "[System.IO.Directory]::SetAccessControl($path, $acl)",
     "$verified = [System.IO.Directory]::GetAccessControl($path)",
-    "if (-not $verified.AreAccessRulesProtected) { throw \"$label ACL still inherits access rules\" }",
+    'if (-not $verified.AreAccessRulesProtected) { throw "$label ACL still inherits access rules" }',
     "$unexpected = @($verified.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.User.Value })",
-    "if ($unexpected.Count -ne 0) { throw \"$label ACL grants access to another identity\" }",
+    'if ($unexpected.Count -ne 0) { throw "$label ACL grants access to another identity" }',
   ].join("; ");
   await execFile(
     powershell,
@@ -718,11 +718,9 @@ export async function validateOutputDir(
           `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
         );
       }
-      await requirePrivateScanOutput(metadata, path);
-      await requireSecureOutputAncestry(path);
-      const canonical = await realpath(path);
-      requireModelSafeOutputDir(canonical);
-      return canonical;
+      const secured = await requirePrivateScanOutput(metadata, path);
+      await requireSecureOutputAncestry(secured.path);
+      return secured.path;
     }
 
     let parent = dirname(path);
@@ -861,27 +859,31 @@ export async function validatePreparedOutputDir(
       `Scan output directory must be empty: ${path}`,
     );
   }
-  await requirePrivateScanOutput(metadata, path, options);
-  await requireSecureOutputAncestry(canonical);
-  return canonical;
+  const secured = await requirePrivateScanOutput(metadata, path, options);
+  await requireSecureOutputAncestry(secured.path);
+  return secured.path;
 }
 
 /**
  * Enforce that scan output stays private to the current user.
  * On Windows this applies and verifies a current-user-only ACL (same boundary
- * as credential homes). On POSIX this checks mode/owner.
+ * as credential homes), then re-binds the path to the same directory identity.
+ * On POSIX this checks mode/owner and re-binds the canonical path.
  */
 export async function requirePrivateScanOutput(
-  metadata: Pick<Stats, "mode" | "uid">,
+  metadata: Stats,
   path: string,
   options: {
     platform?: NodeJS.Platform;
     secureWindowsOutput?: (path: string) => Promise<void>;
   } = {},
-): Promise<void> {
+): Promise<{ path: string; metadata: Stats }> {
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
+  }
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
-    return;
+    return await bindPrivateScanOutputPath(path, metadata);
   }
 
   try {
@@ -892,6 +894,44 @@ export async function requirePrivateScanOutput(
       { cause: error },
     );
   }
+  return await bindPrivateScanOutputPath(path, metadata);
+}
+
+async function bindPrivateScanOutputPath(
+  path: string,
+  expected: Pick<Stats, "dev" | "ino">,
+): Promise<{ path: string; metadata: Stats }> {
+  let after: Stats;
+  try {
+    after = await lstat(path);
+  } catch (error) {
+    throw new OutputDirectoryError(
+      `Unable to inspect scan output directory: ${path}`,
+      { cause: error },
+    );
+  }
+  if (!after.isDirectory() || after.isSymbolicLink()) {
+    throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
+  }
+  if (after.dev !== expected.dev || after.ino !== expected.ino) {
+    throw new OutputDirectoryError(
+      `Scan output directory was replaced: ${path}`,
+    );
+  }
+  const canonical = await realpath(path);
+  requireModelSafeOutputDir(canonical);
+  const canonicalMetadata = await lstat(canonical);
+  if (
+    !canonicalMetadata.isDirectory() ||
+    canonicalMetadata.isSymbolicLink() ||
+    canonicalMetadata.dev !== expected.dev ||
+    canonicalMetadata.ino !== expected.ino
+  ) {
+    throw new OutputDirectoryError(
+      `Scan output directory was replaced: ${canonical}`,
+    );
+  }
+  return { path: canonical, metadata: canonicalMetadata };
 }
 
 export function requirePrivateOutputDirectory(

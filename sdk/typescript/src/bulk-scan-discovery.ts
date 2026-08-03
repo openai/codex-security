@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
@@ -181,16 +181,13 @@ export async function runBulkScanWizard(
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
   let prepared = await lstat(outputDir);
   if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
-    throw new Error(
-      "The scan output must be a non-symlink directory.",
-    );
+    throw new Error("The scan output must be a non-symlink directory.");
   }
-  if (process.platform !== "win32" && (prepared.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (prepared.mode & 0o777) !== 0o700) {
     await chmod(outputDir, 0o700);
     prepared = await lstat(outputDir);
   }
-  const canonical = await realpath(outputDir);
-  await requirePrivateScanOutput(prepared, canonical);
+  await requirePrivateScanOutput(prepared, outputDir);
   await writeFile(
     inputPath,
     `${Papa.unparse(
