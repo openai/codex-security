@@ -1094,19 +1094,45 @@ def _populate_unsealed_manifest_envelope(
 
     target = scan.get("target")
     if isinstance(target, dict):
-        _populate_unsealed_target_binding(target, completion_binding["target"])
+        _populate_unsealed_target_binding(
+            target,
+            completion_binding["target"],
+            completion_binding.get("allowedTargetKinds"),
+        )
 
     scope = scan.get("scope")
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
 
 
+def _populate_unsealed_target_kind(target: dict[str, Any], allowed_kinds: Any) -> None:
+    """Adopt the registered target kind when the workbench allows exactly one.
+
+    The scan prompt tells the agent to copy CODEX_SECURITY_TARGET_KIND verbatim rather
+    than infer the kind from the checkout, because only the workbench knows how the
+    target was registered. A draft that infers it anyway used to discard the whole
+    completed scan at the seal step. A clean worktree is the common way to hit this:
+    the workbench registers it as git_revision, while the checkout still looks like a
+    worktree to the agent. The kind carries no draft-owned information when the
+    registration allows a single value, so take that value instead of failing.
+    """
+
+    if not isinstance(allowed_kinds, list) or len(allowed_kinds) != 1:
+        return
+    registered_kind = allowed_kinds[0]
+    if not isinstance(registered_kind, str) or target.get("kind") == registered_kind:
+        return
+    target["kind"] = registered_kind
+
+
 def _populate_unsealed_target_binding(
     target: dict[str, Any],
     target_binding: dict[str, Any],
+    allowed_kinds: Any = None,
 ) -> None:
     """Replace workbench-owned target coordinates without retaining incompatible drafts."""
 
+    _populate_unsealed_target_kind(target, allowed_kinds)
     target_kind = target.get("kind")
     required_coordinates = (
         TARGET_REQUIRED_COORDINATE_FIELDS.get(target_kind, set())

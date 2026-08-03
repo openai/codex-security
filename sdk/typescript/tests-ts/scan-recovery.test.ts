@@ -315,6 +315,33 @@ describe("malformed scan artifact recovery", () => {
     }
   });
 
+  test("seals a clean worktree draft that inferred the worktree target kind", async () => {
+    const fixture = await startDraftScan("clean");
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const draft = await readJson<{
+      scan: { target: { kind: string; snapshotDigest?: string } };
+    }>(manifestPath);
+    draft.scan.target.kind = "git_worktree";
+    draft.scan.target.snapshotDigest = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
+    await writeJson(manifestPath, draft);
+    const revision = spawnSync(
+      "git",
+      ["-C", fixture.repository, "rev-parse", "HEAD"],
+      { encoding: "utf8" },
+    );
+    expect(revision.status, revision.stderr).toBe(0);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    const sealed = await readJson<{
+      scan: { target: { kind: string; revision: string } };
+    }>(manifestPath);
+    expect(sealed.scan.target.kind).toBe("git_revision");
+    expect(sealed.scan.target.revision).toBe(revision.stdout.trim());
+    expect(sealed.scan.target).not.toHaveProperty("snapshotDigest");
+  });
+
   test("seals a prepared scan without publishing it before acceptance", async () => {
     const fixture = await startDraftScan();
 
