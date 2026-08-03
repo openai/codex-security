@@ -60,7 +60,7 @@ if (args.join(" ") === "login --with-api-key") {
   console.error("Listening on http://[0:0:0:0:0:0:0:1]:1455.");
   console.error("Listening on http://[::ffff:0.0.0.0]:1455.");
   console.error("Listening on http://[::127.0.0.1]:1455.");
-  console.error("Open \\u001b[32mhttps://127.auth.example.test/device\\u001b[0m");
+  console.error('Open "\\u001b[32mhttps://127.auth.example.test/device\\u001b[0m"');
   console.error("Enter this one-time code");
   console.error("\\u001b[36m8356-V2EGR\\u001b[0m");
   process.exit(0);
@@ -169,7 +169,7 @@ setInterval(() => {}, 1000);
     await expect(logout(command, process.env)).resolves.toBeUndefined();
   });
 
-  test("captures interactive login metadata and completion", async () => {
+  test("captures quoted interactive login metadata and completion", async () => {
     const command = await fakeCodex();
     let succeeded = false;
     const handle = new CodexLoginHandle(
