@@ -1432,13 +1432,20 @@ async function prepareDeepScanConfig(
   const hasOverrides = Object.keys(overrides).length > 0;
   if (existing === undefined && !hasOverrides) {
     if (destination !== source) {
-      const canonicalAmbientHome = await realpath(ambientHome).catch(
-        (error: unknown) => {
-          if (isRecord(error) && error["code"] === "ENOENT") return null;
-          throw error;
-        },
+      const [canonicalSource, canonicalDestination] = await Promise.all(
+        [source, destination].map(async (path) => {
+          try {
+            return await realpath(path);
+          } catch (error) {
+            if (isRecord(error) && error["code"] === "ENOENT") return null;
+            throw error;
+          }
+        }),
       );
-      if (canonicalAmbientHome !== codexHome) {
+      if (
+        canonicalDestination !== null &&
+        canonicalSource !== canonicalDestination
+      ) {
         await rm(destination, { force: true });
       }
     }

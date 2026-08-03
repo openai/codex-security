@@ -1890,14 +1890,19 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(["the same path", "a symlink alias"] as const)(
-    "preserves ambient configuration when the deep-scan runtime shares its home through %s",
-    async (homeAlias) => {
+  test.each([
+    "the same path",
+    "a symlink alias",
+    "a shared configuration directory",
+    ...(process.platform === "win32" ? [] : ["a shared configuration file"]),
+  ])(
+    "preserves ambient configuration when the deep-scan runtime shares it through %s",
+    async (configurationAlias) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
       const ambientHome =
-        homeAlias === "a symlink alias"
+        configurationAlias !== "the same path"
           ? join(root, "ambient-home-link")
           : codexHome;
       const scanDir = join(root, "scan");
@@ -1905,15 +1910,28 @@ describe("CodexSecurity orchestration", () => {
       const originalConfiguration = "[other]\nenabled = true\n";
       await mkdir(repository);
       await mkdir(join(codexHome, "codex-security"), { recursive: true });
-      if (ambientHome !== codexHome) {
+      await writeFile(configPath, originalConfiguration);
+      if (configurationAlias === "a symlink alias") {
         await symlink(
           codexHome,
           ambientHome,
           process.platform === "win32" ? "junction" : "dir",
         );
+      } else if (configurationAlias === "a shared configuration directory") {
+        await mkdir(ambientHome);
+        await symlink(
+          join(codexHome, "codex-security"),
+          join(ambientHome, "codex-security"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      } else if (configurationAlias === "a shared configuration file") {
+        await mkdir(join(ambientHome, "codex-security"), { recursive: true });
+        await symlink(
+          configPath,
+          join(ambientHome, "codex-security", "config.toml"),
+        );
       }
       await mkdir(scanDir, { mode: 0o700 });
-      await writeFile(configPath, originalConfiguration);
 
       const client = new TestClient(
         {},
