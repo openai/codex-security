@@ -127,11 +127,13 @@ describe("scan target normalization", () => {
   test.skipIf(process.platform === "win32")(
     "preserves trailing whitespace in Git worktree paths",
     async () => {
-      const repo = await repository("repo ");
-      expect(await enclosingGitWorktreeRoot(repo)).toBe(await realpath(repo));
-      await expect(
-        normalizeTarget(repo, DiffTarget.refs({ base: "HEAD" })),
-      ).resolves.toMatchObject({ kind: "refs" });
+      for (const suffix of [" ", "\r"]) {
+        const repo = await repository(`repo${suffix}`);
+        expect(await enclosingGitWorktreeRoot(repo)).toBe(await realpath(repo));
+        await expect(
+          normalizeTarget(repo, DiffTarget.refs({ base: "HEAD" })),
+        ).resolves.toMatchObject({ kind: "refs" });
+      }
     },
   );
 
