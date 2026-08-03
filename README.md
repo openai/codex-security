@@ -16,6 +16,7 @@ npm install @openai/codex-security
 npx @openai/codex-security login
 npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
+npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in. Environment API keys are
@@ -58,6 +59,13 @@ import { CodexSecurity } from "@openai/codex-security";
 
 const security = new CodexSecurity();
 const result = await security.run(".");
+await security.run(".", {
+  mode: "deep",
+  workers: 2,
+  subagents: 0,
+  stopAfterNoNew: 3,
+  maxDiscoveryRuns: 10,
+});
 
 console.log(result.reportPath);
 await security.close();
