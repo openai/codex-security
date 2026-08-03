@@ -548,6 +548,12 @@ describe("CLI workbench", () => {
               pluginVersion: "1.2.3",
               failOnSeverity: "high",
               knowledgeBasePaths: ["/original/security.md"],
+              deepScan: {
+                workers: 2,
+                subagents: 0,
+                stopAfterNoNew: 3,
+                maxDiscoveryRuns: 10,
+              },
               config: savedConfig,
             },
           }),
@@ -563,6 +569,10 @@ describe("CLI workbench", () => {
       expectedPluginVersion: "1.2.3",
       failureSeverity: "high",
       knowledgeBasePaths: ["/original/security.md"],
+      workers: 2,
+      subagents: 0,
+      stopAfterNoNew: 3,
+      maxDiscoveryRuns: 10,
     });
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =

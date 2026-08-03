@@ -1,10 +1,23 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { chmod, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { Codex, type CodexOptions } from "@openai/codex-sdk";
+import {
+  parse as parseToml,
+  stringify as stringifyToml,
+  type TomlTable,
+} from "smol-toml";
 import {
   accountStatus,
   CodexLoginHandle,
@@ -119,7 +132,14 @@ interface PreparedRuntime {
   effectiveConfig?: JsonObject;
 }
 
-export interface ScanOptions {
+export interface DeepScanOptions {
+  workers?: number;
+  subagents?: number;
+  stopAfterNoNew?: number;
+  maxDiscoveryRuns?: number;
+}
+
+export interface ScanOptions extends DeepScanOptions {
   auth?: ScanAuthMode;
   target?: ScanTarget;
   mode?: ScanMode;
@@ -174,7 +194,7 @@ type ScanObserverName =
   | "onWorkerStatus"
   | "onWarning";
 
-export interface ScanPreflight {
+export interface ScanPreflight extends DeepScanOptions {
   repository: string;
   target: NormalizedTarget;
   mode: ScanMode;
@@ -219,6 +239,12 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const DEEP_SCAN_SETTINGS = [
+  ["workers", "workers", 1],
+  ["subagents", "subagents", 0],
+  ["stopAfterNoNew", "stop_after_no_new", 1],
+  ["maxDiscoveryRuns", "max_discovery_runs", 1],
+] as const;
 
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
@@ -282,6 +308,7 @@ export class CodexSecurity {
       repository: inputs.repository,
       target: inputs.target,
       mode: inputs.mode,
+      ...deepScanOptions(options),
       ...(options.knowledgeBasePaths?.length
         ? { knowledgeBasePaths: options.knowledgeBasePaths }
         : {}),
@@ -409,6 +436,14 @@ export class CodexSecurity {
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      if (mode === "deep") {
+        await prepareDeepScanConfig(
+          runtimeHome,
+          this.#dependencies.environment,
+          options,
+          signal,
+        );
+      }
       if (
         options.expectedPluginVersion !== undefined &&
         runtime.plugin.version !== options.expectedPluginVersion
@@ -579,6 +614,7 @@ export class CodexSecurity {
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
+        deepScanOptions(options),
       );
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
@@ -1200,6 +1236,7 @@ export class CodexSecurity {
     options: ScanOptions,
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
+    deepScanOptions(options);
     if (
       options.maxCostUsd !== undefined &&
       (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)
@@ -1338,6 +1375,71 @@ export class CodexSecurity {
   #requireOpen(): void {
     if (this.#closed) throw new CodexSecurityError("CodexSecurity is closed.");
   }
+}
+
+function deepScanOptions(options: ScanOptions): DeepScanOptions {
+  const selected: DeepScanOptions = {};
+  for (const [name, , minimum] of DEEP_SCAN_SETTINGS) {
+    const value = options[name];
+    if (value === undefined) continue;
+    if ((options.mode ?? "standard") !== "deep") {
+      throw new CodexSecurityError("Deep scan settings require deep mode.");
+    }
+    if (!Number.isSafeInteger(value) || value < minimum) {
+      throw new CodexSecurityError(
+        `Deep scan ${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer.`,
+      );
+    }
+    selected[name] = value;
+  }
+  return selected;
+}
+
+async function prepareDeepScanConfig(
+  codexHome: string,
+  environment: ProcessEnvironment,
+  options: DeepScanOptions,
+  signal: AbortSignal,
+): Promise<void> {
+  const ambientHome =
+    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
+  const source = join(ambientHome, "codex-security", "config.toml");
+  let configured: TomlTable = {};
+  try {
+    configured = parseToml(
+      await readFile(source, { encoding: "utf8", signal }),
+    );
+  } catch (error) {
+    if (!isRecord(error) || error["code"] !== "ENOENT") {
+      throw new CodexSecurityError(
+        `Cannot read Codex Security configuration at ${source}.`,
+        { cause: error },
+      );
+    }
+  }
+  const existing = configured["deep_scan"];
+  if (existing !== undefined && !isRecord(existing)) {
+    throw new CodexSecurityError(
+      `Codex Security configuration [deep_scan] at ${source} must be a TOML table.`,
+    );
+  }
+  const overrides: TomlTable = {};
+  for (const [name, key] of DEEP_SCAN_SETTINGS) {
+    const value = options[name];
+    if (value !== undefined) overrides[key] = value;
+  }
+  if (existing === undefined && Object.keys(overrides).length === 0) return;
+  const destination = join(codexHome, "codex-security", "config.toml");
+  if (destination === source && Object.keys(overrides).length === 0) return;
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  await writeFile(
+    destination,
+    stringifyToml({
+      ...configured,
+      deep_scan: { ...existing, ...overrides },
+    }),
+    { mode: 0o600, signal },
+  );
 }
 
 export async function initialCredentialsAvailable(
@@ -1552,6 +1654,11 @@ async function scanPrompt(
   return [
     `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
+    ...(mode === "deep"
+      ? [
+          'The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }; never pass targetPath or create another scan.',
+        ]
+      : []),
     ...(skillName === "deep-security-scan"
       ? []
       : [
@@ -1618,6 +1725,7 @@ function scanRecipe(
   failOnSeverity?: SeverityLevel,
   knowledgeBasePaths?: string[],
   maxCostUsd?: number,
+  deepScan?: DeepScanOptions,
 ): JsonObject {
   return {
     repository,
@@ -1636,6 +1744,9 @@ function scanRecipe(
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
+    ...(deepScan === undefined || Object.keys(deepScan).length === 0
+      ? {}
+      : { deepScan: { ...deepScan } }),
   };
 }
 
