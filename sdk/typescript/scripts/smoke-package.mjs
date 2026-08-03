@@ -212,12 +212,6 @@ try {
   );
   assert.equal(installedManifest.name, packageManifest.name);
   assert.equal(installedManifest.version, packageManifest.version);
-  const installedReadme = await readFile(
-    join(installedRoot, "README.md"),
-    "utf8",
-  );
-  assert.match(installedReadme, /\bauthentication\s+tokens\b/u);
-  assert.match(installedReadme, /\btoken\s+counts\b/u);
 
   assert.deepEqual(
     await pluginFiles(join(installedRoot, "_bundled_plugin")),
@@ -266,17 +260,17 @@ try {
     "npm must create the published codex-security executable shim.",
   );
 
-  function runInstalledCli(...args) {
+  function runInstalledCli(argument) {
     const options = { cwd: consumer, capture: true };
     if (process.platform === "win32") {
       return run(
         process.env.ComSpec ?? "cmd.exe",
-        ["/d", "/s", "/c", `""${shim}" ${args.join(" ")}"`],
+        ["/d", "/s", "/c", `""${shim}" ${argument}"`],
         { ...options, windowsVerbatimArguments: true },
       );
     }
 
-    return run(shim, args, options);
+    return run(shim, [argument], options);
   }
 
   const version = runInstalledCli("--version");
@@ -284,12 +278,6 @@ try {
 
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
-
-  const scanHelp = runInstalledCli("scan", "--help");
-  assert.match(scanHelp, /--verbose\b/u);
-  assert.match(scanHelp, /CODEX_SECURITY_LOG_LEVEL=debug/u);
-  assert.match(scanHelp, /\bLOG_LEVEL=debug\b/u);
-  assert.match(scanHelp, /as a fallback/u);
 
   console.log(
     `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, and ${expectedPluginFiles.length} bundled plugin files.`,

@@ -181,8 +181,6 @@ npx @openai/codex-security scan /path/to/repository --diff origin/main --json
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
 npx @openai/codex-security scan /path/to/repository --verbose
-CODEX_SECURITY_LOG_LEVEL=debug npx @openai/codex-security scan /path/to/repository
-LOG_LEVEL=debug npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
@@ -336,22 +334,21 @@ values.
 
 ### Environment variables
 
-The following environment variables configure the CLI, the SDK, or both.
-Diagnostic log levels apply to the CLI only.
+The CLI and SDK recognize the following user-configurable environment:
 
-| Variable                                                                    | Effect                                                                                           |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                                |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics; takes precedence over `LOG_LEVEL`.            |
-| `LOG_LEVEL`                                                                 | CLI-only Promptfoo-compatible fallback; set to `debug` when the product-specific level is unset. |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                    |
-| `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`.    |
-| `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                      |
-| `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                        |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                              |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                                |
-| `CI`                                                                        | Disable interactive update notices in automated environments.                                    |
-| `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                   |
+| Variable                                                                    | Effect                                                                                        |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics.                                            |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
+| `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
+| `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
+| `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                     |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                           |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                             |
+| `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
+| `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
 
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
 the managed Codex runtime, and finally `python3` or `python` from `PATH`.
@@ -380,18 +377,10 @@ useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
 
 Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print redacted
-lifecycle diagnostics to stderr. Promptfoo-compatible `LOG_LEVEL=debug` also
-enables verbose output. If both environment variables are set,
-`CODEX_SECURITY_LOG_LEVEL` takes precedence; `--verbose` always enables verbose
-output. Diagnostics include CLI and runtime versions, the selected credential
-source, selected Codex profile, effective model and reasoning effort, prepared
-scan output, worker phases and capacity, classified connection retries,
-redacted scan warnings, cost updates, input, cached-input, cache-write, and
-output token counts, completion, and runtime cleanup. API keys, authentication
-tokens, and raw provider messages are not printed. Use `--verbose --json` or
-`CODEX_SECURITY_LOG_LEVEL=debug` with `--json` in CI to capture diagnostics
-without changing the JSON scan result on stdout, or `--verbose --dry-run` to
-inspect unverified local scan configuration without starting Codex.
+lifecycle, authentication, progress, and cost diagnostics to stderr.
+`LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
+Credentials and raw provider messages remain redacted, and structured JSON
+results remain on stdout.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use

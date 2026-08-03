@@ -1542,9 +1542,6 @@ describe("CLI", () => {
     ).toBe(0);
     expect(help.text()).toContain("Usage: codex-security scan [repository]");
     expect(help.text()).toContain("--verbose");
-    expect(help.text()).toContain("CODEX_SECURITY_LOG_LEVEL=debug");
-    expect(help.text()).toMatch(/\bLOG_LEVEL=debug\b/u);
-    expect(help.text()).toContain("as a fallback");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
     expect(help.text()).toContain("--model <string>");

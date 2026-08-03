@@ -55,23 +55,15 @@ incomplete or their original location was not reviewed.
 
 ## Verbose diagnostics
 
-Add `--verbose` to print redacted scan lifecycle diagnostics to stderr:
+Add `--verbose` to print redacted scan diagnostics to stderr:
 
 ```bash
 npx @openai/codex-security scan . --verbose
 ```
 
-For CI or repeated invocations, set the product-specific log level instead:
-
-```bash
-CODEX_SECURITY_LOG_LEVEL=debug npx @openai/codex-security scan .
-```
-
-Promptfoo-compatible `LOG_LEVEL=debug` also enables verbose diagnostics.
-`CODEX_SECURITY_LOG_LEVEL` takes precedence; `--verbose` always enables logging.
-Structured JSON results remain on stdout. Diagnostics may include token counts
-and estimated cost; API keys, authentication tokens, and raw provider messages
-remain redacted.
+`CODEX_SECURITY_LOG_LEVEL=debug` also enables diagnostics;
+`LOG_LEVEL=debug` is its fallback. JSON results remain on stdout, and
+credentials and raw provider messages remain redacted.
 
 ## TypeScript SDK
 

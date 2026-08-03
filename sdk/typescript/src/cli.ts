@@ -922,9 +922,7 @@ export async function main(
           verbose: z
             .boolean()
             .default(false)
-            .describe(
-              "Print redacted scan lifecycle diagnostics to stderr; CODEX_SECURITY_LOG_LEVEL=debug (or LOG_LEVEL=debug as a fallback) also enables this.",
-            ),
+            .describe("Print redacted scan diagnostics to stderr."),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -2391,22 +2389,6 @@ function sanitizeDiagnosticValue(value: unknown): string {
   );
 }
 
-function writeVerboseDiagnostic(
-  output: Writable,
-  event: string,
-  fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
-): void {
-  const attributes = Object.entries(fields).flatMap(([name, value]) => {
-    if (value === undefined) return [];
-    const safe =
-      typeof value === "string" ? sanitizeDiagnosticValue(value) : value;
-    return [`${name}=${JSON.stringify(safe)}`];
-  });
-  output.write(
-    `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
-  );
-}
-
 async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
@@ -2436,11 +2418,19 @@ async function runScan(
     event: string,
     fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
   ): void => {
-    if (verbose) {
-      writeAboveProgress(() =>
-        writeVerboseDiagnostic(errorOutput, event, fields),
+    if (!verbose) return;
+    const attributes = Object.entries(fields).flatMap(([name, value]) =>
+      value === undefined
+        ? []
+        : [
+            `${name}=${JSON.stringify(typeof value === "string" ? sanitizeDiagnosticValue(value) : value)}`,
+          ],
+    );
+    writeAboveProgress(() => {
+      errorOutput.write(
+        `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
       );
-    }
+    });
   };
   const preparationAbortController = new AbortController();
   const signalListener = (signal: SignalName) => () => {
@@ -2503,36 +2493,12 @@ async function runScan(
           arguments_.effort,
         ),
     };
-    const configuredProfiles = config.codexOverrides?.["profiles"];
     const selectedProfileName = config.codexOverrides?.["profile"];
-    const selectedProfileValue =
-      typeof selectedProfileName === "string" &&
-      configuredProfiles !== undefined &&
-      isJsonObject(configuredProfiles)
-        ? configuredProfiles[selectedProfileName]
-        : undefined;
-    const selectedProfile =
-      selectedProfileValue !== undefined && isJsonObject(selectedProfileValue)
-        ? selectedProfileValue
-        : undefined;
-    const profileModel = selectedProfile?.["model"];
-    const profileReasoningEffort = selectedProfile?.["model_reasoning_effort"];
-    const configuredModel =
-      typeof profileModel === "string"
-        ? profileModel
-        : config.codexOverrides?.["model"];
-    const configuredReasoningEffort =
-      typeof profileReasoningEffort === "string"
-        ? profileReasoningEffort
-        : config.codexOverrides?.["model_reasoning_effort"];
-    effectiveModel =
-      typeof configuredModel === "string"
-        ? configuredModel
-        : arguments_.model ?? DEFAULT_SCAN_MODEL_CONFIGURATION.model;
-    effectiveReasoningEffort =
-      typeof configuredReasoningEffort === "string"
-        ? configuredReasoningEffort
-        : arguments_.effort ?? DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
+    ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
+      scanModelConfiguration({
+        ...DEFAULT_CODEX_CONFIG,
+        ...config.codexOverrides,
+      }));
     let auth = arguments_.auth;
     selectedAuthentication = scanAuthentication(dependencies.environment, auth);
     if (
