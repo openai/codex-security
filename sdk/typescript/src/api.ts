@@ -1428,9 +1428,13 @@ async function prepareDeepScanConfig(
     const value = options[name];
     if (value !== undefined) overrides[key] = value;
   }
-  if (existing === undefined && Object.keys(overrides).length === 0) return;
   const destination = join(codexHome, "codex-security", "config.toml");
-  if (destination === source && Object.keys(overrides).length === 0) return;
+  const hasOverrides = Object.keys(overrides).length > 0;
+  if (existing === undefined && !hasOverrides) {
+    if (destination !== source) await rm(destination, { force: true });
+    return;
+  }
+  if (destination === source && !hasOverrides) return;
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   await writeFile(
     destination,

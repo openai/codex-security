@@ -1825,6 +1825,109 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each(["removed", "without deep settings"] as const)(
+    "clears stale runtime deep-scan configuration when ambient settings are %s",
+    async (ambientState) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const ambientHome = join(root, "ambient-home");
+      const runtimeHome = join(root, "runtime-home");
+      const scanDir = join(root, "scan");
+      const ambientConfig = join(ambientHome, "codex-security", "config.toml");
+      const runtimeConfig = join(runtimeHome, "codex-security", "config.toml");
+      await mkdir(repository);
+      await mkdir(join(ambientHome, "codex-security"), { recursive: true });
+      await mkdir(runtimeHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(
+        ambientConfig,
+        "[deep_scan]\nworkers = 5\n[other]\nenabled = true\n",
+      );
+
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_HOME: ambientHome },
+          prepareRuntime: async () => preparedRuntime(runtimeHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(
+        client.run(repository, { mode: "deep", workers: 2 }),
+      ).rejects.toThrow("deep scan settings captured");
+      expect(await readFile(runtimeConfig, "utf8")).toContain("workers = 2");
+
+      if (ambientState === "removed") {
+        await rm(ambientConfig);
+      } else {
+        await writeFile(ambientConfig, "[other]\nenabled = true\n");
+      }
+
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      await expect(readFile(runtimeConfig, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      await writeFile(ambientConfig, "[deep_scan]\nworkers = 7\n");
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      expect(await readFile(runtimeConfig, "utf8")).toContain("workers = 7");
+      await client.close();
+    },
+  );
+
+  test("preserves ambient configuration when the deep-scan runtime shares its home", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const configPath = join(codexHome, "codex-security", "config.toml");
+    const originalConfiguration = "[other]\nenabled = true\n";
+    await mkdir(repository);
+    await mkdir(join(codexHome, "codex-security"), { recursive: true });
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(configPath, originalConfiguration);
+
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_HOME: codexHome },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("deep scan settings captured");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+      "deep scan settings captured",
+    );
+    expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+    await client.close();
+  });
+
   test("rejects a scan registration without an authoritative target contract", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
