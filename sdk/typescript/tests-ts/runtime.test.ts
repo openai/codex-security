@@ -1640,10 +1640,11 @@ describe("runtime directories and plugin Python boundary", () => {
     });
     const lock = join(home, ".codex-security-scan.lock");
     // `process.kill` reads 0 as the caller's own process group and -1 as every process
-    // it may signal, so both report a live owner forever, and a fractional pid makes it
+    // it may signal, so both report a live owner forever, and a fractional pid, a pid
+    // just past the signed 32-bit range, or one past the safe-integer range makes it
     // throw an argument error instead. None of them identifies a process holding this
     // lock, so an aged lock naming one has to be reclaimed like any other stale lock.
-    for (const pid of [0, -1, 0.5, 2 ** 53]) {
+    for (const pid of [0, -1, 0.5, 2 ** 31, 2 ** 53]) {
       await mkdir(lock, { mode: 0o700 });
       await writeFile(
         join(lock, "owner.json"),

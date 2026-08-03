@@ -64,6 +64,9 @@ const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
+// `process.kill` narrows its pid to a 32-bit signed integer and rejects anything that
+// does not survive the round trip, so a larger value can never name a process.
+const MAX_PROCESS_ID = 2_147_483_647;
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -418,17 +421,18 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
     }
   }
 
-  // Only a positive integer names a process. `process.kill` reads 0 as the caller's own
-  // process group and -1 as every process it may signal, so both always report a live
-  // owner and would hold the lock open forever, and a fractional or out-of-range value
-  // makes it throw an argument error that is neither ESRCH nor EPERM and escapes raw.
-  // An owner that cannot be identified is treated like a missing one, so the age check
-  // below still reclaims the lock.
+  // Only a positive integer within the pid range names a process. `process.kill` reads 0
+  // as the caller's own process group and -1 as every process it may signal, so both
+  // always report a live owner and would hold the lock open forever, and a fractional or
+  // out-of-range value makes it throw an argument error that is neither ESRCH nor EPERM
+  // and escapes raw. An owner that cannot be identified is treated like a missing one, so
+  // the age check below still reclaims the lock.
   const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
   if (
     typeof ownerPid === "number" &&
-    Number.isSafeInteger(ownerPid) &&
-    ownerPid > 0
+    Number.isInteger(ownerPid) &&
+    ownerPid > 0 &&
+    ownerPid <= MAX_PROCESS_ID
   ) {
     try {
       process.kill(ownerPid, 0);
