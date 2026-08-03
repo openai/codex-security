@@ -1433,9 +1433,9 @@ async function prepareDeepScanConfig(
   const hasOverrides = Object.keys(overrides).length > 0;
   if (existing === undefined && !hasOverrides) {
     if (destination !== source) {
-      const identity = async (path: string, followSymlinks: boolean) => {
+      const identity = async (path: string) => {
         try {
-          return await (followSymlinks ? stat(path) : lstat(path));
+          return await stat(path);
         } catch (error) {
           if (isRecord(error) && error["code"] === "ENOENT") return null;
           throw error;
@@ -1450,15 +1450,15 @@ async function prepareDeepScanConfig(
         first.dev === second.dev &&
         first.ino === second.ino;
       const [sourceIdentity, destinationIdentity] = await Promise.all([
-        identity(source, true),
-        identity(destination, true),
+        identity(source),
+        identity(destination),
       ]);
       if (!sameIdentity(sourceIdentity, destinationIdentity)) {
-        const [sourceEntry, destinationEntry] = await Promise.all([
-          identity(source, false),
-          identity(destination, false),
+        const [sourceDirectory, destinationDirectory] = await Promise.all([
+          identity(dirname(source)),
+          identity(dirname(destination)),
         ]);
-        if (!sameIdentity(sourceEntry, destinationEntry)) {
+        if (!sameIdentity(sourceDirectory, destinationDirectory)) {
           await rm(destination, { force: true });
         }
       }

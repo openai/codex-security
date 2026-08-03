@@ -1831,7 +1831,10 @@ describe("CodexSecurity orchestration", () => {
     "without deep settings",
     ...(process.platform === "win32"
       ? []
-      : ["without deep settings and a dangling runtime link"]),
+      : [
+          "without deep settings and a dangling runtime link",
+          "without deep settings and a hard-linked dangling runtime link",
+        ]),
   ])(
     "clears stale runtime deep-scan configuration when ambient settings are %s",
     async (ambientState) => {
@@ -1886,6 +1889,14 @@ describe("CodexSecurity orchestration", () => {
       ) {
         await rm(runtimeConfig);
         await symlink(escapedConfig, runtimeConfig);
+      } else if (
+        ambientState ===
+        "without deep settings and a hard-linked dangling runtime link"
+      ) {
+        await rm(ambientConfig);
+        await symlink(escapedConfig, ambientConfig);
+        await rm(runtimeConfig);
+        execFileSync("ln", ["-P", ambientConfig, runtimeConfig]);
       }
 
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
@@ -1894,6 +1905,15 @@ describe("CodexSecurity orchestration", () => {
       await expect(fsPromises.lstat(runtimeConfig)).rejects.toMatchObject({
         code: "ENOENT",
       });
+      if (
+        ambientState ===
+        "without deep settings and a hard-linked dangling runtime link"
+      ) {
+        expect((await fsPromises.lstat(ambientConfig)).isSymbolicLink()).toBe(
+          true,
+        );
+        await rm(ambientConfig);
+      }
 
       await writeFile(ambientConfig, "[deep_scan]\nworkers = 7\n");
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
