@@ -35,7 +35,12 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
-import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
+import {
+  DEFAULT_CODEX_CONFIG,
+  FIREWORKS_CODEX_PROVIDER,
+  OPENROUTER_CODEX_PROVIDER,
+  scanModelConfiguration,
+} from "../src/config.js";
 import {
   FakeSignals,
   REDACTED_CREDENTIALS,
@@ -115,6 +120,7 @@ describe("CLI", () => {
           model: { type: "string" },
           verbose: { type: "boolean" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
+          provider: { enum: ["openai", "openrouter", "fireworks"] },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
@@ -725,6 +731,81 @@ describe("CLI", () => {
     }
   });
 
+  test.each([
+    [
+      "OpenRouter",
+      "openrouter",
+      "anthropic/claude-sonnet-4.5",
+      OPENROUTER_CODEX_PROVIDER,
+    ],
+    [
+      "Fireworks AI",
+      "fireworks",
+      "accounts/fireworks/models/qwen3-235b-a22b",
+      FIREWORKS_CODEX_PROVIDER,
+    ],
+  ] as const)(
+    "routes bulk scans through %s",
+    async (_name, provider, model, providerConfig) => {
+      const root = await mkdtemp(join(tmpdir(), `codex-security-${provider}-`));
+      try {
+        await multiscanInventory(root);
+        let config: CodexSecurityConfig | undefined;
+        const missingModelError = capture();
+        expect(
+          await main(
+            [
+              "bulk-scan",
+              "repositories.csv",
+              "--output-dir",
+              "results",
+              "--provider",
+              provider,
+            ],
+            capture().stream,
+            missingModelError.stream,
+            dependencies({
+              currentDirectory: root,
+              onConfig: (value) => (config = value),
+            }),
+          ),
+        ).toBe(2);
+        expect(missingModelError.text()).toContain(
+          `--model is required when using --provider ${provider}`,
+        );
+        expect(config).toBeUndefined();
+        expect(
+          await main(
+            [
+              "bulk-scan",
+              "repositories.csv",
+              "--output-dir",
+              "results",
+              "--provider",
+              provider,
+              "--model",
+              model,
+              "--json",
+            ],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              currentDirectory: root,
+              onConfig: (value) => (config = value),
+            }),
+          ),
+        ).toBe(0);
+        expect(config?.codexOverrides).toMatchObject({
+          model,
+          model_provider: provider,
+          model_providers: { [provider]: providerConfig },
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("preserves the bulk-scan failure summary and redacts progress errors", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
@@ -787,6 +868,15 @@ describe("CLI", () => {
         "features.goals=true",
         "--knowledge-base",
         "/shared/threat-models",
+      ],
+      ["bulk-scan", "--provider", "openrouter"],
+      ["bulk-scan", "--provider=openrouter", "--model", "openai/gpt-5.4"],
+      ["bulk-scan", "--provider", "fireworks"],
+      [
+        "bulk-scan",
+        "--provider=fireworks",
+        "--model",
+        "accounts/fireworks/models/qwen3-235b-a22b",
       ],
     ] as const) {
       const stdout = capture();
@@ -1578,6 +1668,7 @@ describe("CLI", () => {
     expect(help.text()).toContain("--stop-after-no-new <number>");
     expect(help.text()).toContain("--max-discovery-runs <number>");
     expect(help.text()).toContain("--model <string>");
+    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
@@ -1596,7 +1687,6 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra --effort high",
     );
-    expect(help.text()).not.toContain("--provider");
     expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).not.toContain("codex-security scan . --path src,tests");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
@@ -1644,7 +1734,7 @@ describe("CLI", () => {
     );
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).not.toContain("--provider");
+    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
     expect(stderr.text()).toBe("");
   });
 
@@ -1689,6 +1779,49 @@ describe("CLI", () => {
       expect(config?.codexOverrides).toEqual(expected);
     }
   });
+
+  test.each([
+    [
+      "OpenRouter",
+      "openrouter",
+      "anthropic/claude-sonnet-4.5",
+      "google/gemini-2.5-pro",
+      OPENROUTER_CODEX_PROVIDER,
+    ],
+    [
+      "Fireworks AI",
+      "fireworks",
+      "accounts/fireworks/models/gpt-oss-120b",
+      "accounts/fireworks/models/llama-v3p3-70b-instruct",
+      FIREWORKS_CODEX_PROVIDER,
+    ],
+  ] as const)(
+    "routes scans through %s",
+    async (_name, provider, selectedModel, codexModel, providerConfig) => {
+      for (const [options, expectedModel] of [
+        [[`--provider=${provider}`, "--model", selectedModel], selectedModel],
+        [
+          ["--provider", provider, "--codex", `model="${codexModel}"`],
+          codexModel,
+        ],
+      ] as const) {
+        let config: CodexSecurityConfig | undefined;
+        expect(
+          await main(
+            ["scan", ".", ...options],
+            capture().stream,
+            capture().stream,
+            dependencies({ onConfig: (value) => (config = value) }),
+          ),
+        ).toBe(0);
+        expect(config?.codexOverrides).toEqual({
+          model: expectedModel,
+          model_provider: provider,
+          model_providers: { [provider]: providerConfig },
+        });
+      }
+    },
+  );
 
   test("parses repeatable options and every scan target through Incur", async () => {
     const pathOutput = capture();
@@ -1805,6 +1938,19 @@ describe("CLI", () => {
         "high",
       ),
     ).toThrow("--effort conflicts with --codex model_reasoning_effort");
+    for (const provider of ["openrouter", "fireworks"] as const) {
+      expect(() =>
+        parseCodexOverrides([], undefined, undefined, provider),
+      ).toThrow(`--model is required when using --provider ${provider}`);
+      expect(() =>
+        parseCodexOverrides(
+          ['model_provider="other"'],
+          undefined,
+          undefined,
+          provider,
+        ),
+      ).toThrow("--provider conflicts with --codex model_provider");
+    }
   });
 
   test("redacts malformed and bounded --codex overrides", () => {
@@ -1878,6 +2024,14 @@ describe("CLI", () => {
         "--knowledge-base must not be empty",
       ],
       [["scan", ".", "--model="], "--model must not be empty"],
+      [
+        ["scan", ".", "--provider", "openrouter"],
+        "--model is required when using --provider openrouter",
+      ],
+      [
+        ["scan", ".", "--provider", "fireworks"],
+        "--model is required when using --provider fireworks",
+      ],
       [
         ["scan", ".", "--effort", "ultra"],
         "--effort must be minimal, low, medium, high, or xhigh",
