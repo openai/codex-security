@@ -66,6 +66,18 @@ jobs:
 
           version="$(node sdk/typescript/scripts/release-automation.mjs version sdk/typescript/package.json)"
 
+          if ! published_versions="$(
+            npm view @openai/codex-security versions \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"; then
+            published_versions="$(
+              printf '%s\n' "$published_versions" |
+                node sdk/typescript/scripts/release-automation.mjs \
+                  initial-published-versions "$version"
+            )"
+          fi
+
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]] &&
              previous_sha="$(git rev-parse "$RELEASE_SHA^" 2>/dev/null)"; then
             if previous_manifest="$(git show "$previous_sha:sdk/typescript/package.json" 2>/dev/null)"; then
@@ -81,26 +93,23 @@ jobs:
                   '
               )"
               if [[ "$version" == "$previous_version" ]]; then
-                echo "Package version is unchanged; no release is needed."
-                echo "changed=false" >> "$GITHUB_OUTPUT"
-                exit 0
+                release_mode="$(
+                  printf '%s\n' "$published_versions" |
+                    node sdk/typescript/scripts/release-automation.mjs \
+                      release-mode "$version"
+                )"
+                if [[ "$release_mode" == "recover" ]]; then
+                  echo "Package version is unchanged and already published."
+                  echo "changed=false" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+              else
+                node sdk/typescript/scripts/release-automation.mjs \
+                  require-increase "$version" "$previous_version" >/dev/null
               fi
-              node sdk/typescript/scripts/release-automation.mjs \
-                require-increase "$version" "$previous_version" >/dev/null
             fi
           fi
 
-          if ! published_versions="$(
-            npm view @openai/codex-security versions \
-              --json \
-              --registry=https://registry.npmjs.org/
-          )"; then
-            published_versions="$(
-              printf '%s\n' "$published_versions" |
-                node sdk/typescript/scripts/release-automation.mjs \
-                  initial-published-versions "$version"
-            )"
-          fi
           printf '%s\n' "$published_versions" |
             node sdk/typescript/scripts/release-automation.mjs \
               require-published-increase "$version" >/dev/null
