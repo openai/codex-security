@@ -604,6 +604,14 @@ MIGRATIONS = (
     ),
     (
         25,
+        "persist scan model settings",
+        """
+        ALTER TABLE scans ADD COLUMN model TEXT;
+        ALTER TABLE scans ADD COLUMN reasoning_effort TEXT;
+        """,
+    ),
+    (
+        26,
         "persist scan completion warnings",
         """
         ALTER TABLE scans
@@ -613,7 +621,31 @@ MIGRATIONS = (
 )
 
 
-def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
+def normalize_pre_release_migrations(
+    connection: sqlite3.Connection, timestamp: str
+) -> None:
+    execution_migrations = {
+        row["version"]: row["name"]
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (11, 12)"
+        )
+    }
+    supported_execution_migrations = {
+        11: {"deep scan orchestration state", "scan execution profiles"},
+        12: {
+            "scan continuation threads",
+            "dynamic scan execution profiles",
+            "phase-specific scan progress",
+        },
+    }
+    if any(
+        name not in supported_execution_migrations[version]
+        for version, name in execution_migrations.items()
+    ):
+        raise SystemExit(
+            "The Codex Security database has an unsupported execution-profile migration history."
+        )
+
     phase_progress_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 12"
     ).fetchone()
@@ -632,6 +664,8 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
             "UPDATE schema_migrations SET version = 20 WHERE version = 12 AND name = ?",
             ("phase-specific scan progress",),
         )
+
+    normalize_pre_release_execution_profile_migrations(connection, timestamp)
 
     preflight_progress_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 13"
@@ -691,6 +725,135 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
         (2, "persist capability preflight summaries", timestamp),
     )
+
+
+def normalize_pre_release_execution_profile_migrations(
+    connection: sqlite3.Connection, timestamp: str
+) -> None:
+    execution_migrations = {
+        row["version"]: row["name"]
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (11, 12, 25, 26)"
+        )
+    }
+    legacy_names = {
+        11: "scan execution profiles",
+        12: "dynamic scan execution profiles",
+    }
+    released_names = {
+        11: "deep scan orchestration state",
+        12: "scan continuation threads",
+    }
+    model_migration_name = "persist scan model settings"
+    warnings_migration_name = "persist scan completion warnings"
+    has_legacy_profile_history = execution_migrations.get(11) == legacy_names[11]
+    has_public_warnings_history = (
+        execution_migrations.get(25) == warnings_migration_name
+    )
+
+    scan_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(scans)")
+    }
+    workspace_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")
+    }
+    has_legacy_profile_columns = (
+        "execution_model" in scan_columns or "execution_model" in workspace_columns
+    )
+    if not (
+        has_legacy_profile_history
+        or has_public_warnings_history
+        or has_legacy_profile_columns
+    ):
+        return
+
+    if (
+        any(
+            execution_migrations.get(version)
+            not in (None, released_names[version], legacy_names[version])
+            for version in (11, 12)
+        )
+        or (
+            has_legacy_profile_history
+            and execution_migrations.get(12)
+            not in (None, legacy_names[12], released_names[12])
+        )
+        or (
+            not has_legacy_profile_history
+            and execution_migrations.get(12) == legacy_names[12]
+        )
+    ):
+        raise SystemExit(
+            "The Codex Security database has an unsupported execution-profile migration history."
+        )
+
+    expected_legacy_columns = {"execution_model", "reasoning_effort"}
+    renamed_legacy_columns = {
+        "legacy_execution_model",
+        "legacy_reasoning_effort",
+    }
+    if has_legacy_profile_columns and (
+        not expected_legacy_columns.issubset(scan_columns)
+        or not expected_legacy_columns.issubset(workspace_columns)
+        or renamed_legacy_columns.intersection(scan_columns)
+        or renamed_legacy_columns.intersection(workspace_columns)
+    ):
+        raise SystemExit(
+            "The Codex Security database has an unsupported execution-profile migration history."
+        )
+    if has_legacy_profile_history and not has_legacy_profile_columns:
+        raise SystemExit(
+            "The Codex Security database has an unsupported execution-profile migration history."
+        )
+
+    if has_public_warnings_history:
+        if execution_migrations.get(26) is not None:
+            raise SystemExit(
+                "The Codex Security database has an unsupported pre-release migration history."
+            )
+        connection.execute(
+            "UPDATE schema_migrations SET version = 26 WHERE version = 25 AND name = ?",
+            (warnings_migration_name,),
+        )
+        execution_migrations.pop(25)
+
+    if execution_migrations.get(25) not in (None, model_migration_name):
+        raise SystemExit(
+            "The Codex Security database has an unsupported execution-profile migration history."
+        )
+
+    # Keep the historical values and constraints for recovery while moving
+    # them out of the namespace used by the current independent scan settings.
+    for table in ("workspaces", "scans") if has_legacy_profile_columns else ():
+        connection.execute(
+            f"ALTER TABLE {table} RENAME COLUMN execution_model TO legacy_execution_model"
+        )
+        connection.execute(
+            f"ALTER TABLE {table} RENAME COLUMN reasoning_effort TO legacy_reasoning_effort"
+        )
+    add_column_if_missing(connection, "scans", "model", "TEXT")
+    add_column_if_missing(connection, "scans", "reasoning_effort", "TEXT")
+    if has_legacy_profile_columns:
+        connection.execute(
+            """
+            UPDATE scans
+            SET model = COALESCE(model, legacy_execution_model),
+                reasoning_effort = legacy_reasoning_effort
+            WHERE legacy_execution_model IS NOT NULL
+                OR legacy_reasoning_effort IS NOT NULL
+            """
+        )
+    if has_legacy_profile_history:
+        for version, name in legacy_names.items():
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE version = ? AND name = ?",
+                (version, name),
+            )
+    if execution_migrations.get(25) is None:
+        connection.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+            (25, model_migration_name, timestamp),
+        )
 
 
 def add_column_if_missing(
