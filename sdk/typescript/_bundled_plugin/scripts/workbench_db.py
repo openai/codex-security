@@ -1414,7 +1414,28 @@ def complete_scan_locked(
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
     if scan["recipe_json"] is not None:
-        manifest = read_json_object(artifact_path(scan_dir, ARTIFACTS["manifest"], required=True))
+        draft_artifacts: dict[str, Path] = {}
+        missing_drafts = []
+        for file_name in (
+            ARTIFACTS["manifest"],
+            ARTIFACTS["findings"],
+            ARTIFACTS["coverage"],
+        ):
+            try:
+                (scan_dir / file_name).lstat()
+            except FileNotFoundError:
+                missing_drafts.append(file_name)
+                continue
+            draft_path = artifact_path(scan_dir, file_name, required=True)
+            if draft_path is not None:
+                draft_artifacts[file_name] = draft_path
+        if missing_drafts:
+            raise SystemExit(
+                "Scan agent did not create required draft artifacts: "
+                f"{', '.join(missing_drafts)}. Check that the scan agent can run shell "
+                "commands and write to the scan directory before retrying."
+            )
+        manifest = read_json_object(draft_artifacts[ARTIFACTS["manifest"]])
         manifest_scan = manifest.get("scan")
         if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
             completion_binding["startedAt"] = manifest_scan.get("startedAt")
@@ -3469,6 +3490,38 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         scan_dir
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
+    # Re-check privacy on every resolution so a mid-scan rename/replace under a
+    # shared parent cannot substitute another user's forged artifact tree.
+    if os.name != "nt":
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise SystemExit(
+                "Scan directory must not be accessible to other users (chmod 700)."
+            )
+        geteuid = getattr(os, "geteuid", None)
+        effective_uid = geteuid() if geteuid is not None else None
+        if effective_uid is not None and metadata.st_uid != effective_uid:
+            raise SystemExit("Scan directory must be owned by the current user.")
+        for parent in scan_dir.parents:
+            try:
+                parent_metadata = parent.lstat()
+            except OSError as exc:
+                raise SystemExit("Scan output parent could not be inspected.") from exc
+            if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
+                parent_metadata.st_mode
+            ):
+                raise SystemExit("Scan output parent must be a non-symlink directory.")
+            if effective_uid is not None and parent_metadata.st_uid not in {
+                0,
+                effective_uid,
+            }:
+                raise SystemExit("Scan output parent must have a trusted owner.")
+            if (
+                stat.S_IMODE(parent_metadata.st_mode) & 0o022
+                and not parent_metadata.st_mode & stat.S_ISVTX
+            ):
+                raise SystemExit(
+                    "Scan output parent must not be group- or world-writable without the sticky bit."
+                )
     return scan_dir
 
 

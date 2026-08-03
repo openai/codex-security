@@ -183,10 +183,11 @@ npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/r
 npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
+npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
-npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4
+npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
@@ -221,8 +222,40 @@ directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
 
-Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
-searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
+Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
+shares them with every repository. Directories are searched recursively for
+Markdown, text, PDF, and Word (`.docx`) files.
+
+### Configure deep scans
+
+For `scan --mode deep`, `--workers` limits concurrent discovery workers,
+`--subagents` controls each worker's subagents, `--stop-after-no-new` stops after
+that many runs find no new issues, and `--max-discovery-runs` limits total runs.
+These options are also available on SDK scans:
+
+```ts
+await security.run("/path/to/repository", {
+  mode: "deep",
+  workers: 2,
+  subagents: 0,
+  stopAfterNoNew: 3,
+  maxDiscoveryRuns: 10,
+});
+```
+
+Set defaults in `~/.codex/codex-security/config.toml`, or under `$CODEX_HOME`
+when it is configured. Explicit CLI and SDK settings override these defaults:
+
+```toml
+[deep_scan]
+workers = 2
+subagents = 0
+stop_after_no_new = 3
+max_discovery_runs = 10
+```
+
+`scan --workers` controls discovery workers within one deep scan;
+`bulk-scan --workers` controls how many repositories are scanned concurrently.
 
 On macOS/Linux, an existing output directory must be private to the current
 user (`chmod 700`).
@@ -380,7 +413,9 @@ including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit.
+already in progress can finish above the limit. Cost tracking accepts Codex
+session events up to 1 MiB; an oversized event stops the scan because its
+running cost can no longer be verified safely.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -513,6 +548,47 @@ Terminals and noninteractive CI logs also show how to retry with
 Progress remains on stderr so JSON output stays machine readable. Network
 failures and rate limits remain retryable; definitive authentication and model
 authorization failures stop immediately.
+
+## Containerized bulk scans
+
+Create `repositories.csv` with one full, immutable Git commit per repository:
+
+```csv
+id,repository,revision
+payments,https://github.com/example/payments.git,0123456789abcdef0123456789abcdef01234567
+```
+
+Once the approved image has been published, prepare private results and
+authentication directories, sign in, and run the Docker Compose configuration
+from the root of the Codex Security repository:
+
+```bash
+mkdir -p results state
+chmod 700 results state
+export CODEX_SECURITY_USER="$(id -u):$(id -g)"
+export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.4
+docker compose pull codex-security
+docker compose run --rm codex-security login --device-auth
+docker compose run --rm codex-security
+```
+
+Reports and resumable scan results are written to `results/`; the reusable
+device login remains in `state/`. For unattended scans, set `OPENAI_API_KEY`
+or `CODEX_API_KEY` instead. Set `GH_TOKEN` or `GITHUB_TOKEN` for private
+GitHub repositories.
+
+On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
+can install the optional, narrowly scoped AppArmor profile once:
+
+```bash
+sudo install -m 0644 docker/codex-security.apparmor /etc/apparmor.d/codex-security-container
+sudo apparmor_parser -r -W /etc/apparmor.d/codex-security-container
+docker compose -f compose.yaml -f compose.apparmor.yaml run --rm codex-security
+```
+
+The override preserves the nonroot user, dropped capabilities,
+no-new-privileges, and hardened seccomp policy. Other Docker hosts do not need
+the profile or override.
 
 ## Local security model
 

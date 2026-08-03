@@ -1,4 +1,5 @@
 import {
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -13,6 +14,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 const testCaseSensitive = process.platform === "linux" ? test : test.skip;
+const testPosix = process.platform === "win32" ? test.skip : test;
 const testWindows = process.platform === "win32" ? test : test.skip;
 
 const simulatedPathProbe = [
@@ -127,6 +129,41 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  testPosix(
+    "rejects private scan directories under insecure shared parents",
+    async () => {
+      const root = await temporaryDirectory();
+      const scanDirectory = join(root, "scan");
+      await mkdir(scanDirectory, { mode: 0o700 });
+      await chmod(root, 0o777);
+
+      try {
+        expect(
+          runPythonProbe(
+            [
+              "import json, sys",
+              "from pathlib import Path",
+              "sys.path.insert(0, sys.argv[1])",
+              "import workbench_db as workbench",
+              "try:",
+              "    workbench.require_canonical_scan_directory(Path(sys.argv[2]))",
+              "except SystemExit as error:",
+              "    print(json.dumps({'accepted': False, 'error': str(error)}))",
+              "else:",
+              "    print(json.dumps({'accepted': True}))",
+            ].join("\n"),
+            scanDirectory,
+          ),
+        ).toMatchObject({
+          accepted: false,
+          error: expect.stringContaining("sticky bit"),
+        });
+      } finally {
+        await chmod(root, 0o700);
+      }
+    },
+  );
+
   test("preserves native Windows case-insensitive path comparison", () => {
     expect(runPythonProbe(simulatedPathProbe, "windows")).toMatchObject({
       accepted: true,
