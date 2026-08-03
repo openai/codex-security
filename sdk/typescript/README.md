@@ -16,10 +16,11 @@ npx @openai/codex-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
-later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scanning and
-exporting findings also require Python 3.10 or later. If you use Python 3.10,
-install the `tomli` package. Select another interpreter with `--python`,
-`pythonPath`, or `PYTHON` when needed.
+later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scans, bulk
+scans, exports, scan-history commands, and saved-finding commands also require
+Python 3.10 or later. If you use Python 3.10, install the `tomli` package.
+Scan, bulk-scan, and export commands accept `--python`; the SDK accepts
+`pythonPath`; and every Python-backed command honors `PYTHON`.
 
 When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
@@ -222,6 +223,12 @@ directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
 
+Working-tree snapshots include files from untracked nested Git repositories so
+saved scans and remediation checkouts retain the selected source content.
+Initialized Git submodules must have clean worktrees because their recorded
+commit, rather than uncommitted submodule changes, defines the parent
+repository snapshot.
+
 Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
 searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
 
@@ -284,7 +291,7 @@ configuration. Each scan starts with a private runtime and these Codex
 defaults:
 
 ```toml
-cli_auth_credentials_store = "file"
+cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 
@@ -436,8 +443,10 @@ id,repository,revision,scope,mode
 service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef01234567,src,standard
 ```
 
-`--workers` limits concurrent scans and `--max-attempts` retries failures.
-Results remain under `--output-dir`; rerun the same command to resume.
+`--workers` limits concurrent scans and defaults to `4`. `--max-attempts`
+controls how many times each pending repository can be attempted during one
+command invocation and defaults to `1`. Results remain under `--output-dir`;
+rerun the same command to resume.
 
 ### Scan history and reruns
 
@@ -450,10 +459,12 @@ scan configuration, results, coverage, and artifact locations. Add
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
 
-Scan history uses the existing Codex Security workbench database at
-`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
-`CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
-are never stored in the scan configuration.
+Scan history uses the Codex Security workbench database at
+`$CODEX_SECURITY_STATE_DIR/workbench.sqlite3` when that override is set.
+Otherwise, it uses
+`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`, with `CODEX_HOME`
+defaulting to `~/.codex`. Scan credentials are never stored in the scan
+configuration.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the
