@@ -3901,7 +3901,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     await writeFile(
       fakeCodex,
       `
-import { appendFileSync, writeSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 
 const args = process.argv.slice(2).join(" ");
 if (args === "login --with-api-key") {
@@ -3913,11 +3913,10 @@ if (args === "login --with-api-key") {
     appendFileSync(${JSON.stringify(keyLog)}, apiKey);
   }
 } else if (args === "login") {
-  writeSync(2, "Open https://auth.example.test/login\\n");
+  console.error("Open https://auth.example.test/login");
 } else {
   process.exitCode = 2;
 }
-process.exit(process.exitCode ?? 0);
 `,
     );
     let codexOptions: CodexOptions | null = null;

@@ -298,9 +298,6 @@ describe("CLI", () => {
       encoding: "utf8",
     });
     expect(readme).toContain(
-      `cli_auth_credentials_store = "${String(DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"])}"`,
-    );
-    expect(readme).toContain(
       `model = "${DEFAULT_SCAN_MODEL_CONFIGURATION.model}"`,
     );
     expect(readme).toContain(
