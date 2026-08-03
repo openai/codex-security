@@ -30,6 +30,8 @@ type Finding = Record<string, unknown> & {
     explanation: string;
   }>;
   writeup?: unknown;
+  remediationTests?: unknown;
+  preventiveControls?: unknown;
 };
 
 type FindingsDocument = {
@@ -676,6 +678,74 @@ describe("malformed scan artifact recovery", () => {
       expect(
         recovered.find((finding) => finding?.identity.anchor === anchor),
       ).not.toHaveProperty("writeup");
+    }
+  });
+
+  test("keeps findings while removing malformed remediation guidance", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+    const valid = document.findings[0]!;
+
+    const cases: Array<
+      [string, "remediationTests" | "preventiveControls", unknown]
+    > = [
+      [
+        "valid-remediation-tests",
+        "remediationTests",
+        ["Add a regression test."],
+      ],
+      ["prose-remediation-tests", "remediationTests", "Add a regression test."],
+      [
+        "object-remediation-tests",
+        "remediationTests",
+        [{ description: "Add a regression test." }],
+      ],
+      [
+        "prose-preventive-controls",
+        "preventiveControls",
+        "Centralize validation.",
+      ],
+    ];
+    for (const [anchor, field, value] of cases) {
+      const finding = structuredClone(valid);
+      finding.identity.anchor = anchor;
+      finding[field] = value;
+      document.findings.push(finding);
+    }
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(5);
+    expect(completed.warnings).toHaveLength(3);
+    expect(
+      completed.warnings.filter((warning) =>
+        warning.startsWith("Skipped malformed remediationTests for finding"),
+      ),
+    ).toHaveLength(2);
+    expect(
+      completed.warnings.filter((warning) =>
+        warning.startsWith("Skipped malformed preventiveControls for finding"),
+      ),
+    ).toHaveLength(1);
+    const recovered = (await readJson<FindingsDocument>(path)).findings;
+    expect(
+      recovered.find(
+        (finding) => finding?.identity.anchor === "valid-remediation-tests",
+      )?.remediationTests,
+    ).toEqual(["Add a regression test."]);
+    for (const [anchor, field] of [
+      ["prose-remediation-tests", "remediationTests"],
+      ["object-remediation-tests", "remediationTests"],
+      ["prose-preventive-controls", "preventiveControls"],
+    ] as const) {
+      const finding = recovered.find(
+        (candidate) => candidate?.identity.anchor === anchor,
+      );
+      expect(finding).toBeDefined();
+      expect(finding).not.toHaveProperty(field);
     }
   });
 

@@ -28,7 +28,9 @@ interface ScanTokenUsage {
 
 interface SessionUsage {
   offset: number;
-  remainder: Buffer;
+  pendingLine: Buffer[];
+  pendingLineBytes: number;
+  unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
   usage: ScanTokenUsage | null;
@@ -56,6 +58,7 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
+const MAX_SESSION_EVENT_BYTES = 1 * 1_024 * 1_024;
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
@@ -108,6 +111,7 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
+    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
     )) {
@@ -115,14 +119,21 @@ export class ScanCostTracker {
       if (session === undefined) {
         session = {
           offset: 0,
-          remainder: Buffer.alloc(0),
+          pendingLine: [],
+          pendingLineBytes: 0,
+          unreadable: false,
           threadId: null,
           parentThreadId: null,
           usage: null,
         };
         this.#sessions.set(path, session);
       }
-      await readSessionUsage(path, session);
+      try {
+        await readSessionUsage(path, session);
+      } catch (error) {
+        if (session.threadId === null) throw error;
+        unreadable.push({ session, error });
+      }
     }
 
     const included = new Set([this.#threadId]);
@@ -140,6 +151,9 @@ export class ScanCostTracker {
           changed = true;
         }
       }
+    }
+    for (const { session, error } of unreadable) {
+      if (included.has(session.threadId!)) throw error;
     }
 
     let usage: ScanTokenUsage | null = null;
@@ -187,6 +201,7 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
 ): Promise<void> {
+  if (session.unreadable) return;
   let file;
   try {
     file = await open(path, "r");
@@ -205,24 +220,51 @@ async function readSessionUsage(
       );
       if (bytesRead === 0) return;
       session.offset += bytesRead;
-      const contents = Buffer.concat([
-        session.remainder,
-        buffer.subarray(0, bytesRead),
-      ]);
-      let lineStart = 0;
-      while (true) {
-        const lineEnd = contents.indexOf(0x0a, lineStart);
-        if (lineEnd === -1) break;
-        readSessionEvent(
-          contents.subarray(lineStart, lineEnd).toString("utf8"),
-          session,
-        );
-        lineStart = lineEnd + 1;
+      try {
+        readSessionChunk(buffer.subarray(0, bytesRead), session);
+      } catch (error) {
+        session.unreadable = true;
+        session.pendingLine = [];
+        session.pendingLineBytes = 0;
+        throw error;
       }
-      session.remainder = Buffer.from(contents.subarray(lineStart));
     }
   } finally {
     await file.close();
+  }
+}
+
+function readSessionChunk(contents: Buffer, session: SessionUsage): void {
+  let lineStart = 0;
+  while (lineStart < contents.length) {
+    const newline = contents.indexOf(0x0a, lineStart);
+    const lineEnd = newline === -1 ? contents.length : newline;
+    const fragment = contents.subarray(lineStart, lineEnd);
+    const lineBytes = session.pendingLineBytes + fragment.length;
+    if (lineBytes > MAX_SESSION_EVENT_BYTES) {
+      throw new Error("Codex session event exceeds the 1 MiB safety limit.");
+    }
+
+    if (newline === -1) {
+      if (fragment.length > 0) {
+        session.pendingLine.push(Buffer.from(fragment));
+        session.pendingLineBytes = lineBytes;
+      }
+      return;
+    }
+
+    if (session.pendingLineBytes === 0) {
+      readSessionEvent(fragment.toString("utf8"), session);
+    } else {
+      if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
+      readSessionEvent(
+        Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
+        session,
+      );
+      session.pendingLine = [];
+      session.pendingLineBytes = 0;
+    }
+    lineStart = newline + 1;
   }
 }
 

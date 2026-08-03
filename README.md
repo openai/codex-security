@@ -15,6 +15,8 @@ Node.js 26.x; Python 3.10 or later; and access to Codex Security.
 npm install @openai/codex-security
 npx @openai/codex-security login
 npx @openai/codex-security scan .
+npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
+npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
@@ -24,9 +26,6 @@ stored in Codex's credential home or system keyring.
 Local sign-in honors Codex's configured credential backend, including a system
 keyring required by a managed device. Codex Security keeps login and scan
 credentials in the same private, persistent state directory.
-
-To select a different model and reasoning effort, add
-`--model gpt-5.6-terra --effort high` to a scan.
 
 If both a ChatGPT sign-in and an API key are available, interactive scans ask
 which credential to use. CI and other noninteractive scans keep the existing
@@ -72,10 +71,25 @@ import { CodexSecurity } from "@openai/codex-security";
 
 const security = new CodexSecurity();
 const result = await security.run(".");
+await security.run(".", {
+  mode: "deep",
+  workers: 2,
+  subagents: 0,
+  stopAfterNoNew: 3,
+  maxDiscoveryRuns: 10,
+});
 
 console.log(result.reportPath);
 await security.close();
 ```
+
+## Containerized bulk scans
+
+Use the official image and included Docker Compose configuration for
+noninteractive, resumable scans of repositories pinned to immutable Git
+revisions. See the [container quick start](sdk/typescript/README.md#containerized-bulk-scans)
+for authentication, private result storage, and optional Ubuntu AppArmor
+hardening.
 
 For complete command help, runtime defaults, native multi-agent worker limits,
 environment variables, deep-scan configuration, and SDK options, see the
