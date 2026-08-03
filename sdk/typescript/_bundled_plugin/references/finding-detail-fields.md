@@ -23,7 +23,7 @@ The finding detail view is a decision-focused projection of the canonical findin
 - dataflow source, meaningful transformations, dangerous sink, and concrete outcome;
 - realistic attacker, entry point, access requirements, preconditions, and attacker outcome;
 - severity rationale plus the specific evidence that would raise or lower the rating;
-- the minimal remediation invariant, regression tests, and preventive controls.
+- the minimal remediation invariant (`remediation`, a single string), plus `remediationTests` and `preventiveControls`, each an array of short strings with one regression test or preventive control per entry.
 
 Keep background exposition, alternate exploit research, full PoC instructions, representative command output, and long source walkthroughs in the detailed write-up. Do not copy them into canonical fields merely to make the workspace report longer. The workspace should stay self-contained enough to support triage while avoiding duplicated or speculative prose.
 
@@ -155,7 +155,15 @@ The following shape shows how to encode the `environment/add` reserved-environme
     "limitations": [
       "This overwrite does not directly execute code on the victim host."
     ]
-  }
+  },
+  "remediation": "Reuse the startup reserved-ID check inside `EnvironmentManager::upsert_environment()` so the runtime mutation path rejects the reserved `local` identifier.",
+  "remediationTests": [
+    "Assert that `environment/add` with `environmentId: \"local\"` returns a protocol error.",
+    "Assert that `default_environment()` still resolves the manager-owned local runtime after a rejected upsert."
+  ],
+  "preventiveControls": [
+    "Centralize reserved-identifier validation so every environment mutation path shares one guard."
+  ]
 }
 ```
 
