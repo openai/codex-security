@@ -13,7 +13,7 @@ export const BUNDLED_PLUGIN_VERSION = "0.1.14" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
 const VERSION_PATTERN =
-  /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
 export interface UpdateNotice {
   readonly currentVersion: string;
@@ -144,10 +144,20 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
 function isNewerVersion(latest: string, current: string): boolean {
   const candidate = VERSION_PATTERN.exec(latest);
   const installed = VERSION_PATTERN.exec(current);
-  if (candidate === null || installed === null) return false;
+  if (
+    candidate === null ||
+    installed === null ||
+    !isValidPrerelease(candidate[4]) ||
+    !isValidPrerelease(installed[4])
+  ) {
+    return false;
+  }
 
   for (let index = 1; index <= 3; index += 1) {
-    const difference = Number(candidate[index]) - Number(installed[index]);
+    const difference = compareNumericIdentifiers(
+      candidate[index]!,
+      installed[index]!,
+    );
     if (difference !== 0) return difference > 0;
   }
 
@@ -175,10 +185,9 @@ function isNewerPrerelease(candidate: string, installed: string): boolean {
     const candidateIsNumeric = /^\d+$/u.test(candidateIdentifier);
     const installedIsNumeric = /^\d+$/u.test(installedIdentifier);
     if (candidateIsNumeric && installedIsNumeric) {
-      if (candidateIdentifier.length !== installedIdentifier.length) {
-        return candidateIdentifier.length > installedIdentifier.length;
-      }
-      return candidateIdentifier > installedIdentifier;
+      return (
+        compareNumericIdentifiers(candidateIdentifier, installedIdentifier) > 0
+      );
     }
     if (candidateIsNumeric !== installedIsNumeric) {
       return !candidateIsNumeric;
@@ -187,6 +196,30 @@ function isNewerPrerelease(candidate: string, installed: string): boolean {
   }
 
   return false;
+}
+
+function isValidPrerelease(value: string | undefined): boolean {
+  return (
+    value === undefined ||
+    value
+      .split(".")
+      .every(
+        (identifier) =>
+          !/^\d+$/u.test(identifier) ||
+          identifier === "0" ||
+          !identifier.startsWith("0"),
+      )
+  );
+}
+
+function compareNumericIdentifiers(
+  candidate: string,
+  installed: string,
+): number {
+  if (candidate.length !== installed.length) {
+    return candidate.length > installed.length ? 1 : -1;
+  }
+  return candidate === installed ? 0 : candidate > installed ? 1 : -1;
 }
 
 function packageVersions(url: URL): {

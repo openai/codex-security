@@ -102,6 +102,10 @@ describe("CLI update notice", () => {
       ["0.1.0", "0.1.0", false],
       ["0.2.0", "0.1.0", false],
       ["0.2.0", "not-a-version", false],
+      ["1.0.0", "01.0.0", false],
+      ["1.0.0-alpha.1", "1.0.0-alpha.01", false],
+      ["1.0.0", "1.0.0-alpha..1", false],
+      ["1.0.0", "1.0.0+build..1", false],
       ["0.2.0", "0.2.0-beta.1", false],
       ["0.2.0-beta.2", "0.2.0-beta.1", false],
       ["0.2.0-beta.1", "0.2.0-beta.2", true],
@@ -170,6 +174,15 @@ describe("CLI update notice", () => {
         environment: {},
         currentVersion: `1.0.0-alpha.${longNumericIdentifier}`,
         fetch: registryResponse(`1.0.0-alpha.1${longNumericIdentifier}`),
+      }),
+    ).resolves.toBeDefined();
+
+    const longCoreTail = "0".repeat(4_095);
+    await expect(
+      checkForUpdate({
+        environment: {},
+        currentVersion: `1${longCoreTail}.0.0`,
+        fetch: registryResponse(`2${longCoreTail}.0.0`),
       }),
     ).resolves.toBeDefined();
   });
