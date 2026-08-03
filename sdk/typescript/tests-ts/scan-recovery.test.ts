@@ -18,7 +18,7 @@ type Finding = Record<string, unknown> & {
   ruleId: string;
   identity: { anchor: string; instance?: string };
   summary: string;
-  severity: { level: string };
+  severity: { level: string; changeConditions?: unknown };
   confidence: { level: string };
   locations: Array<{ path: string }>;
   codeEvidence?: Array<{
@@ -422,6 +422,64 @@ describe("malformed scan artifact recovery", () => {
       fixture.scanId,
     ]);
     expect((saved["scan"] as ScanSummary).warnings).toEqual([warning]);
+  });
+
+  test("normalizes severity change-condition lists without losing findings", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+    document.findings[0]!.severity.changeConditions = [
+      "Raise if the vulnerable path becomes internet-reachable.",
+      "Lower if the input is constrained before parsing.",
+    ];
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(1);
+    expect(completed.warnings).toEqual([
+      "Recovered finding 1: normalized severity change conditions.",
+    ]);
+    const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
+    expect(recovered.severity.changeConditions).toBe(
+      "Raise if the vulnerable path becomes internet-reachable. " +
+        "Lower if the input is constrained before parsing.",
+    );
+    const coverage = await readJson<CoverageDocument>(
+      join(fixture.scanDir, "coverage.json"),
+    );
+    expect(coverage.completeness).toBe("complete");
+  });
+
+  test("rejects severity change-condition lists with malformed entries", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+    const valid = document.findings[0]!;
+
+    for (const [anchor, conditions] of [
+      ["empty-severity-conditions", []],
+      ["blank-severity-condition", ["  "]],
+      ["mixed-severity-conditions", ["Valid condition.", 1]],
+      ["surrogate-severity-condition", ["\uD800"]],
+    ] as const) {
+      const finding = structuredClone(valid);
+      finding.identity.anchor = anchor;
+      finding.severity.changeConditions = conditions;
+      document.findings.push(finding);
+    }
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.findingCount).toBe(1);
+    expect(completed.warnings).toHaveLength(4);
+    expect(
+      completed.warnings.every((warning) =>
+        warning.includes("severity.changeConditions"),
+      ),
+    ).toBe(true);
   });
 
   test("keeps valid findings and skips malformed or duplicate findings", async () => {
