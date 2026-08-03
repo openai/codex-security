@@ -1910,7 +1910,9 @@ describe("CodexSecurity orchestration", () => {
     "a symlink alias",
     "a shared configuration directory",
     "a shared file identity",
-    ...(process.platform === "win32" ? [] : ["a shared configuration file"]),
+    ...(process.platform === "win32"
+      ? []
+      : ["a shared configuration file", "a shared dangling configuration"]),
   ])(
     "preserves ambient configuration when the deep-scan runtime shares it through %s",
     async (configurationAlias) => {
@@ -1926,14 +1928,21 @@ describe("CodexSecurity orchestration", () => {
       const originalConfiguration = "[other]\nenabled = true\n";
       await mkdir(repository);
       await mkdir(join(codexHome, "codex-security"), { recursive: true });
-      await writeFile(configPath, originalConfiguration);
+      if (configurationAlias === "a shared dangling configuration") {
+        await symlink(join(root, "missing-config.toml"), configPath);
+      } else {
+        await writeFile(configPath, originalConfiguration);
+      }
       if (configurationAlias === "a symlink alias") {
         await symlink(
           codexHome,
           ambientHome,
           process.platform === "win32" ? "junction" : "dir",
         );
-      } else if (configurationAlias === "a shared configuration directory") {
+      } else if (
+        configurationAlias === "a shared configuration directory" ||
+        configurationAlias === "a shared dangling configuration"
+      ) {
         await mkdir(ambientHome);
         await symlink(
           join(codexHome, "codex-security"),
@@ -1977,7 +1986,13 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "deep scan settings captured",
       );
-      expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+      if (configurationAlias === "a shared dangling configuration") {
+        expect((await fsPromises.lstat(configPath)).isSymbolicLink()).toBe(
+          true,
+        );
+      } else {
+        expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+      }
       await client.close();
     },
   );
