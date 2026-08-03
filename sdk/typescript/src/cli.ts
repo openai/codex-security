@@ -2573,8 +2573,8 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 function sanitizeDiagnosticValue(value: unknown): string {
   return redactedErrorMessage(value)
     .replaceAll(
-      /(\b(?:tenant(?:[_-]?id)?|org(?:anization)?(?:[_-]?id)?|project(?:[_-]?id)?|(?:x[_-]?)?(?:request|trace|correlation)[_-]?id)\b(?:\\?["'])?\s*[:=]\s*)(?!\[redacted\])(?:(['"])(?:\\.|(?!\2)[^\\])*(?:\2|$)|[^\s"',;&}\]]+)/giu,
-      "$1$2[redacted]$2",
+      /(\b(?:tenant(?:[_-]?id)?|org(?:anization)?(?:[_-]?id)?|project(?:[_-]?id)?|(?:x[_-]?)?(?:request|trace|correlation)[_-]?id)\b(?:\\*["'])?\s*[:=]\s*)(?!\[redacted\])(?:(\\*)(['"])(?:(?!(?<!\\)\2\3)(?:\\.|[^\\]))*(?:(?<!\\)\2\3|$)|[^\s"',;&}\]]+)/giu,
+      "$1$2$3[redacted]$2$3",
     )
     .replaceAll(/[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu, " ");
 }

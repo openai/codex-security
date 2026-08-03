@@ -2683,6 +2683,39 @@ describe("CLI", () => {
         ],
       },
       {
+        message: `Provider failed for ${JSON.stringify({
+          payload: JSON.stringify({
+            tenant: 'tenant-"private" suffix',
+            organizationId: "org-private",
+            projectId: "project-private",
+            requestId: "req-private",
+            traceId: "trace-private",
+            correlationId: "correlation-private",
+          }),
+        })}`,
+        identifiers: [
+          "tenant-",
+          "private",
+          "suffix",
+          "org-private",
+          "project-private",
+          "req-private",
+          "trace-private",
+          "correlation-private",
+        ],
+      },
+      {
+        message: `Provider failed for ${JSON.stringify({
+          payload: JSON.stringify({
+            nested: JSON.stringify({
+              tenant: "tenant-private",
+              requestId: "req-private",
+            }),
+          }),
+        })}`,
+        identifiers: ["tenant-private", "req-private"],
+      },
+      {
         message:
           "Provider failed for https://api.example.test?tenant=tenant-private&project=project-private&request_id=req-private",
         identifiers: ["tenant-private", "project-private", "req-private"],
@@ -2729,6 +2762,14 @@ describe("CLI", () => {
         run: async (_repository, options) => {
           options?.onWarning?.(
             'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
+          );
+          options?.onWarning?.(
+            `Provider warning ${JSON.stringify({
+              payload: JSON.stringify({
+                organizationId: "organization private",
+                requestId: "request private",
+              }),
+            })}`,
           );
           return fakeResult();
         },
