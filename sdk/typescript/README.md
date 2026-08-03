@@ -183,6 +183,7 @@ npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/r
 npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
+npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
@@ -223,6 +224,37 @@ to
 
 Repeat `--knowledge-base PATH` for multiple files or directories. Directories are
 searched recursively for Markdown, text, PDF, and Word (`.docx`) files.
+
+### Configure deep scans
+
+For `scan --mode deep`, `--workers` limits concurrent discovery workers,
+`--subagents` controls each worker's subagents, `--stop-after-no-new` stops after
+that many runs find no new issues, and `--max-discovery-runs` limits total runs.
+These options are also available on SDK scans:
+
+```ts
+await security.run("/path/to/repository", {
+  mode: "deep",
+  workers: 2,
+  subagents: 0,
+  stopAfterNoNew: 3,
+  maxDiscoveryRuns: 10,
+});
+```
+
+Set defaults in `~/.codex/codex-security/config.toml`, or under `$CODEX_HOME`
+when it is configured. Explicit CLI and SDK settings override these defaults:
+
+```toml
+[deep_scan]
+workers = 2
+subagents = 0
+stop_after_no_new = 3
+max_discovery_runs = 10
+```
+
+`scan --workers` controls discovery workers within one deep scan;
+`bulk-scan --workers` controls how many repositories are scanned concurrently.
 
 On macOS/Linux, an existing output directory must be private to the current
 user (`chmod 700`).
