@@ -847,6 +847,11 @@ def _recover_unsealed_findings(
                         for condition in change_conditions
                     )
                 ):
+                    for condition_index, condition in enumerate(change_conditions):
+                        _require_safe_json_string(
+                            condition,
+                            f"{context}.severity.changeConditions[{condition_index}]",
+                        )
                     severity["changeConditions"] = " ".join(
                         condition.strip() for condition in change_conditions
                     )

@@ -462,6 +462,7 @@ describe("malformed scan artifact recovery", () => {
       ["empty-severity-conditions", []],
       ["blank-severity-condition", ["  "]],
       ["mixed-severity-conditions", ["Valid condition.", 1]],
+      ["surrogate-severity-condition", ["\uD800"]],
     ] as const) {
       const finding = structuredClone(valid);
       finding.identity.anchor = anchor;
@@ -473,7 +474,7 @@ describe("malformed scan artifact recovery", () => {
     const completed = await completeScan(fixture);
 
     expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(3);
+    expect(completed.warnings).toHaveLength(4);
     expect(
       completed.warnings.every((warning) =>
         warning.includes("severity.changeConditions"),
