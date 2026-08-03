@@ -179,12 +179,15 @@ export async function runBulkScanWizard(
   signal?.throwIfAborted();
 
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
-    await chmod(outputDir, 0o700);
-  }
-  const prepared = await lstat(outputDir);
+  let prepared = await lstat(outputDir);
   if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
-    throw new Error("The scan output must be a real directory.");
+    throw new Error(
+      "The scan output must be a non-symlink directory.",
+    );
+  }
+  if (process.platform !== "win32" && (prepared.mode & 0o077) !== 0) {
+    await chmod(outputDir, 0o700);
+    prepared = await lstat(outputDir);
   }
   const canonical = await realpath(outputDir);
   await requirePrivateScanOutput(prepared, canonical);

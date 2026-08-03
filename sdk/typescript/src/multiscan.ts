@@ -255,12 +255,15 @@ async function ensureOutputDirectory(path: string): Promise<void> {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
   await mkdir(path, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32" && (process.umask() & 0o700) !== 0) {
-    await chmod(path, 0o700);
-  }
-  const prepared = await lstat(path);
+  let prepared = await lstat(path);
   if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
-    throw new Error("Multiscan output directories must not be symbolic links.");
+    throw new Error(
+      "Multiscan output must be a non-symlink directory.",
+    );
+  }
+  if (process.platform !== "win32" && (prepared.mode & 0o077) !== 0) {
+    await chmod(path, 0o700);
+    prepared = await lstat(path);
   }
   const canonical = await realpath(path);
   await requirePrivateScanOutput(prepared, canonical);
