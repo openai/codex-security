@@ -40,6 +40,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import { writeCodexConfig, type JsonObject } from "../src/config.js";
+import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
@@ -687,6 +688,45 @@ describe("CodexSecurity orchestration", () => {
     await expect(client.preflight(repository)).resolves.toMatchObject({
       model: "configured-model",
       reasoningEffort: "high",
+    });
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
+  test("reports selected profile model and reasoning during local-only preflight", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          profile: "review",
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "low",
+          profiles: {
+            review: {
+              model: "gpt-5.6-terra",
+              model_reasoning_effort: "high",
+            },
+          },
+        },
+      },
+      {
+        environment: {},
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { maxCostUsd: 5 }),
+    ).resolves.toMatchObject({
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      maxCostUsd: 5,
     });
     expect(runtimeStarted).toBe(false);
     await client.close();
@@ -2177,6 +2217,93 @@ describe("CodexSecurity orchestration", () => {
       );
       await client.close();
     }
+  });
+
+  test("uses selected profile pricing for live and persisted scan cost", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+
+    const usage = {
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      output_tokens: 3,
+      reasoning_output_tokens: 1,
+    };
+    const expectedCost = estimateScanCost("gpt-5.6-terra", usage);
+    expect(expectedCost).not.toBeNull();
+    if (expectedCost === null) throw new Error("Missing selected-model price");
+
+    const costs: ScanCost[] = [];
+    const commands: Array<readonly string[]> = [];
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          profile: "review",
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "low",
+          profiles: {
+            review: {
+              model: "gpt-5.6-terra",
+              model_reasoning_effort: "high",
+            },
+          },
+        },
+      },
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    const result = await client.run(repository, {
+      maxCostUsd: 1,
+      onCost: (cost) => costs.push({ ...cost }),
+    });
+
+    expect(result.turnResult.model).toBe("gpt-5.6-terra");
+    expect(result.cost).toEqual(expectedCost);
+    expect(costs).toEqual([expectedCost]);
+
+    const completion = commands.find((args) => args[0] === "complete-scan");
+    expect(completion).toBeDefined();
+    const costIndex = completion?.indexOf("--cost-json") ?? -1;
+    expect(costIndex).toBeGreaterThan(0);
+    expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toEqual(
+      expectedCost,
+    );
+
+    await client.close();
   });
 
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {

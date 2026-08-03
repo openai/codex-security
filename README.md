@@ -19,9 +19,9 @@ npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
 ```
 
-For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in. Environment API keys are
-passed directly to the current scan and are never stored in Codex's credential
-home or system keyring.
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
+Environment API keys are passed directly to the current scan and are never
+stored in Codex's credential home or system keyring.
 
 Local sign-in honors Codex's configured credential backend, including a system
 keyring required by a managed device. Codex Security keeps login and scan
@@ -51,6 +51,18 @@ directory outside the repository.
 root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is
 incomplete or their original location was not reviewed.
+
+## Verbose diagnostics
+
+Add `--verbose` to print redacted scan diagnostics to stderr:
+
+```bash
+npx @openai/codex-security scan . --verbose
+```
+
+`CODEX_SECURITY_LOG_LEVEL=debug` also enables diagnostics;
+`LOG_LEVEL=debug` is its fallback. JSON results remain on stdout, and
+credentials and provider identifiers remain redacted.
 
 ## TypeScript SDK
 
