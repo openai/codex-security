@@ -32,6 +32,7 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   scanAuthentication,
+  type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
@@ -173,6 +174,9 @@ const VALUE_OPTIONS = new Set([
   "--fail-on-severity",
   "--max-cost",
   "--workers",
+  "--subagents",
+  "--stop-after-no-new",
+  "--max-discovery-runs",
   "--max-attempts",
   "--export-format",
   "--output",
@@ -200,7 +204,34 @@ function effortOption() {
     );
 }
 
-interface ScanArguments {
+const DEEP_SCAN_OPTION_SCHEMAS = {
+  workers: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum concurrent deep-scan discovery workers."),
+  subagents: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Subagents available to each deep-scan worker."),
+  stopAfterNoNew: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Stop after this many runs find no new issues."),
+  maxDiscoveryRuns: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum deep-scan discovery runs."),
+};
+
+interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
   repository?: string;
   paths: string[];
@@ -998,6 +1029,7 @@ export async function main(
             .enum(["standard", "deep"])
             .default("standard")
             .describe("Scan mode; deep supports repository and path targets."),
+          ...DEEP_SCAN_OPTION_SCHEMAS,
           model: optionValue("--model")
             .optional()
             .describe(
@@ -1062,6 +1094,15 @@ export async function main(
           (options) =>
             !options.archiveExisting || options.outputDir !== undefined,
           { message: "--archive-existing requires --output-dir." },
+        )
+        .refine(
+          (options) =>
+            options.mode === "deep" ||
+            (options.workers === undefined &&
+              options.subagents === undefined &&
+              options.stopAfterNoNew === undefined &&
+              options.maxDiscoveryRuns === undefined),
+          { message: "Deep scan settings require --mode deep." },
         ),
       examples: [
         { args: { repository: "." } },
@@ -1101,6 +1142,10 @@ export async function main(
             head: options.head,
             base: options.base,
             mode: options.mode,
+            workers: options.workers,
+            subagents: options.subagents,
+            stopAfterNoNew: options.stopAfterNoNew,
+            maxDiscoveryRuns: options.maxDiscoveryRuns,
             model: options.model,
             effort: options.effort,
             outputDir: options.outputDir,
@@ -1227,6 +1272,10 @@ export async function main(
           .describe(
             "Resumable results directory; required with a repository CSV.",
           ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe("Read shared security docs for every repository."),
         workers: z
           .number()
           .int()
@@ -1298,13 +1347,15 @@ export async function main(
               if (
                 argument === "--model" ||
                 argument === "--effort" ||
-                argument === "--codex"
+                argument === "--codex" ||
+                argument === "--knowledge-base"
               ) {
                 optionIndex += 2;
               } else if (
                 argument.startsWith("--model=") ||
                 argument.startsWith("--effort=") ||
-                argument.startsWith("--codex=")
+                argument.startsWith("--codex=") ||
+                argument.startsWith("--knowledge-base=")
               ) {
                 optionIndex += 1;
               } else {
@@ -1313,7 +1364,7 @@ export async function main(
             }
             if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE]' to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1345,6 +1396,7 @@ export async function main(
             workers: options.workers,
             mode: options.mode,
             maxAttempts: options.maxAttempts,
+            knowledgeBasePaths: options.knowledgeBase,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -1835,6 +1887,24 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains an invalid cost limit.",
     );
   }
+  const deepScan = z
+    .object(DEEP_SCAN_OPTION_SCHEMAS)
+    .optional()
+    .safeParse(recipe["deepScan"]);
+  if (!deepScan.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid deep scan settings.",
+    );
+  }
+  if (
+    mode !== "deep" &&
+    deepScan.data !== undefined &&
+    Object.keys(deepScan.data).length > 0
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains deep scan settings for a standard scan.",
+    );
+  }
   return {
     repository,
     paths,
@@ -1844,6 +1914,7 @@ function scanArgumentsFromRecipe(
     head: kind === "refs" ? head ?? "HEAD" : undefined,
     base: kind === "working_tree" ? reference : undefined,
     mode,
+    ...deepScan.data,
     archiveExisting: false,
     codex: [],
     codexOverrides: config,
@@ -2615,6 +2686,10 @@ async function runScan(
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       mode: arguments_.mode,
+      workers: arguments_.workers,
+      subagents: arguments_.subagents,
+      stopAfterNoNew: arguments_.stopAfterNoNew,
+      maxDiscoveryRuns: arguments_.maxDiscoveryRuns,
       outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,

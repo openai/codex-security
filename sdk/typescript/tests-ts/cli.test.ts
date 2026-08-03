@@ -108,6 +108,10 @@ describe("CLI", () => {
         properties: {
           path: { type: "array" },
           mode: { enum: ["standard", "deep"] },
+          workers: { type: "integer" },
+          subagents: { type: "integer" },
+          stopAfterNoNew: { type: "integer" },
+          maxDiscoveryRuns: { type: "integer" },
           model: { type: "string" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
@@ -670,6 +674,9 @@ describe("CLI", () => {
             "gpt-5.6-terra",
             "--effort",
             "high",
+            "--knowledge-base",
+            "/shared/architecture.pdf",
+            "--knowledge-base=/shared/threat-models",
             "--codex",
             "features.goals=true",
             "--json",
@@ -697,7 +704,13 @@ describe("CLI", () => {
           model_reasoning_effort: "high",
         },
       });
-      expect(scanOptions).toMatchObject({ mode: "deep" });
+      expect(scanOptions).toMatchObject({
+        mode: "deep",
+        knowledgeBasePaths: [
+          "/shared/architecture.pdf",
+          "/shared/threat-models",
+        ],
+      });
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
     } finally {
@@ -756,6 +769,18 @@ describe("CLI", () => {
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
+      ["bulk-scan", "--knowledge-base", "/shared/threat-models"],
+      [
+        "bulk-scan",
+        "--knowledge-base=/shared/architecture.pdf",
+        "--model=gpt-5.6-terra",
+        "--effort",
+        "high",
+        "--codex",
+        "features.goals=true",
+        "--knowledge-base",
+        "/shared/threat-models",
+      ],
     ] as const) {
       const stdout = capture();
       const stderr = capture();
@@ -1462,6 +1487,10 @@ describe("CLI", () => {
     expect(help.text()).toContain("Usage: codex-security scan [repository]");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
+    expect(help.text()).toContain("--workers <number>");
+    expect(help.text()).toContain("--subagents <number>");
+    expect(help.text()).toContain("--stop-after-no-new <number>");
+    expect(help.text()).toContain("--max-discovery-runs <number>");
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
@@ -1592,6 +1621,14 @@ describe("CLI", () => {
           "--knowledge-base=/shared/threat-models",
           "--mode",
           "deep",
+          "--workers",
+          "2",
+          "--subagents",
+          "0",
+          "--stop-after-no-new",
+          "3",
+          "--max-discovery-runs",
+          "10",
           "--plugin-path",
           "plugin.zip",
           "--python=/managed/python",
@@ -1612,6 +1649,10 @@ describe("CLI", () => {
     expect(pathOptions).toMatchObject({
       target: ["src", "--fixtures"],
       knowledgeBasePaths: ["/shared/architecture.pdf", "/shared/threat-models"],
+      workers: 2,
+      subagents: 0,
+      stopAfterNoNew: 3,
+      maxDiscoveryRuns: 10,
     });
     expect(pathConfig).toMatchObject({
       pluginPath: "plugin.zip",
@@ -1725,7 +1766,31 @@ describe("CLI", () => {
       [["scan", ".", "--base", "HEAD"], "--base requires --working-tree"],
       [["scan", ".", "--archive-existing"], "requires --output-dir"],
       [["scan", ".", "--max-cost=0"], "expected number to be >0"],
+      [
+        ["scan", ".", "--workers", "2"],
+        "Deep scan settings require --mode deep",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--workers", "0"],
+        "expected number to be >0",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--subagents", "-1"],
+        "expected number to be >=0",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--stop-after-no-new", "0"],
+        "expected number to be >0",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--max-discovery-runs", "0"],
+        "expected number to be >0",
+      ],
       [["scan", ".", "--path="], "--path must not be empty"],
+      [
+        ["bulk-scan", "--knowledge-base="],
+        "--knowledge-base must not be empty",
+      ],
       [["scan", ".", "--model="], "--model must not be empty"],
       [
         ["scan", ".", "--effort", "ultra"],

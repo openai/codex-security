@@ -729,6 +729,55 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("validates deep scan settings before initializing the runtime", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, {
+        mode: "deep",
+        workers: 2,
+        subagents: 0,
+        stopAfterNoNew: 3,
+        maxDiscoveryRuns: 10,
+      }),
+    ).resolves.toMatchObject({
+      mode: "deep",
+      workers: 2,
+      subagents: 0,
+      stopAfterNoNew: 3,
+      maxDiscoveryRuns: 10,
+    });
+    await expect(client.preflight(repository, { workers: 1 })).rejects.toThrow(
+      "Deep scan settings require deep mode",
+    );
+    for (const invalid of [
+      { workers: 0 },
+      { workers: 1.5 },
+      { subagents: -1 },
+      { stopAfterNoNew: 0 },
+      { maxDiscoveryRuns: Number.POSITIVE_INFINITY },
+    ]) {
+      await expect(
+        client.preflight(repository, { mode: "deep", ...invalid }),
+      ).rejects.toThrow("integer");
+    }
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
   test("validates knowledge-base documents before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1693,6 +1742,85 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_TARGET_KIND: "git_worktree",
       CODEX_SECURITY_TARGET_REVISION: "cafebabe",
       CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: TEST_SNAPSHOT_DIGEST,
+    });
+    await client.close();
+  });
+
+  test("applies deep scan overrides over the user's existing settings", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-home");
+    const codexHome = join(root, "runtime-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(join(ambientHome, "codex-security"), { recursive: true });
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(
+      join(ambientHome, "codex-security", "config.toml"),
+      [
+        "[deep_scan]",
+        "workers = 5",
+        "subagents = 2",
+        "stop_after_no_new = 7",
+        "max_discovery_runs = 60",
+        "[other]",
+        "enabled = true",
+        "",
+      ].join("\n"),
+    );
+    let recipe: Record<string, unknown> | undefined;
+    const client = new TestClient(
+      {},
+      {
+        environment: { CODEX_HOME: ambientHome },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          if (args[0] !== "register-cli-scan") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+          return mockScanRegistration(args);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              throw new Error("deep scan settings captured");
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        mode: "deep",
+        workers: 2,
+        subagents: 0,
+        maxDiscoveryRuns: 10,
+      }),
+    ).rejects.toThrow("deep scan settings captured");
+    const configuration = await readFile(
+      join(codexHome, "codex-security", "config.toml"),
+      "utf8",
+    );
+    expect(configuration).toContain("workers = 2");
+    expect(configuration).toContain("subagents = 0");
+    expect(configuration).toContain("stop_after_no_new = 7");
+    expect(configuration).toContain("max_discovery_runs = 10");
+    expect(configuration).toContain("[other]");
+    expect(configuration).toContain("enabled = true");
+    expect(recipe).toMatchObject({
+      mode: "deep",
+      deepScan: { workers: 2, subagents: 0, maxDiscoveryRuns: 10 },
     });
     await client.close();
   });
@@ -3207,6 +3335,9 @@ describe("CodexSecurity orchestration", () => {
       "prompt captured",
     );
     expect(prompt).toContain("$codex-security:deep-security-scan");
+    expect(prompt).toContain(
+      'start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }',
+    );
     expect(prompt).not.toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
