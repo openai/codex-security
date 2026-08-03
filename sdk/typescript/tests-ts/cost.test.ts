@@ -13,6 +13,14 @@ import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 
 const temporaryDirectories: string[] = [];
 
+async function waitFor(check: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (check()) return;
+    await Promise.resolve();
+  }
+  throw new Error("Timed out waiting for the cost tracker.");
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -142,6 +150,70 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test("coalesces overlapping refreshes and bounds final work", async () => {
+    const releases: Array<() => void> = [];
+    const tracker = new ScanCostTracker(
+      {
+        codexHome: await codexHome(),
+        model: "gpt-5.6-sol",
+      },
+      () => {
+        return new Promise<void>((resolve) => {
+          releases.push(() => resolve());
+        });
+      },
+    );
+    tracker.start("scan-thread");
+
+    const first = tracker.refresh();
+    await waitFor(() => releases.length === 1);
+    const overlapping = [
+      tracker.refresh(),
+      tracker.refresh(),
+      tracker.refresh(),
+    ];
+    const stopped = tracker.stop({
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    await Promise.resolve();
+    expect(releases).toHaveLength(1);
+
+    releases[0]!();
+    await waitFor(() => releases.length >= 2);
+    releases[1]!();
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(releases).toHaveLength(2);
+
+    const snapshots = await Promise.all([first, ...overlapping]);
+    expect(snapshots.every((snapshot) => snapshot === snapshots[0])).toBe(true);
+    expect((await stopped).cost?.inputTokens).toBe(100);
+  });
+
+  test("recovers after a failed refresh", async () => {
+    let traversals = 0;
+    const tracker = new ScanCostTracker(
+      {
+        codexHome: await codexHome(),
+        model: "gpt-5.6-sol",
+      },
+      async () => {
+        traversals += 1;
+        if (traversals === 1) throw new Error("session read failed");
+      },
+    );
+    tracker.start("scan-thread");
+
+    await expect(tracker.refresh()).rejects.toThrow("session read failed");
+    await expect(tracker.refresh()).resolves.toEqual({
+      usage: null,
+      cost: null,
+    });
+    expect(traversals).toBe(2);
+  });
+
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
