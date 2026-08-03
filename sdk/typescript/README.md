@@ -412,7 +412,7 @@ Progress and summaries use stderr; structured scan results remain on stdout.
 Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print redacted
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Credentials and raw provider messages remain redacted, and structured JSON
+Credentials and provider identifiers remain redacted, and structured JSON
 results remain on stdout.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,

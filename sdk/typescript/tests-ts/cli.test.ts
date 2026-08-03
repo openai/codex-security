@@ -2647,8 +2647,112 @@ describe("CLI", () => {
     expect(failureDiagnostic).toContain("partial_output=false");
     expect(failureDiagnostic).not.toContain("tenant-private");
     expect(failureDiagnostic).not.toContain("req-internal");
-    expect(stderr.text()).toContain("tenant=tenant-private");
+    expect(stderr.text()).toContain("Provider failed for");
+    expect(stderr.text()).not.toContain("tenant-private");
+    expect(stderr.text()).not.toContain("req-internal");
     expect(stdout.text()).toBe("");
+  });
+
+  test("redacts provider identifier variants in scan failures", async () => {
+    const cases = [
+      {
+        message:
+          "Provider failed for TENANT_ID=tenant-private ORGANIZATION_ID=organization-private ORG_ID=org-private PROJECT_ID=project-private project-id=project-hyphen-private",
+        identifiers: [
+          "tenant-private",
+          "organization-private",
+          "org-private",
+          "project-private",
+          "project-hyphen-private",
+        ],
+      },
+      {
+        message:
+          "Provider failed for x-request-id:req-private Trace-ID=trace-private correlationId=correlation-private",
+        identifiers: ["req-private", "trace-private", "correlation-private"],
+      },
+      {
+        message:
+          'Provider failed for {"tenant":"tenant private","organizationId":"organization private","projectId":"project private","requestId":"request private","traceId":"trace private"}',
+        identifiers: [
+          "tenant private",
+          "organization private",
+          "project private",
+          "request private",
+          "trace private",
+        ],
+      },
+      {
+        message:
+          "Provider failed for https://api.example.test?tenant=tenant-private&project=project-private&request_id=req-private",
+        identifiers: ["tenant-private", "project-private", "req-private"],
+      },
+    ];
+
+    for (const { message, identifiers } of cases) {
+      for (const verbose of [false, true]) {
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies();
+        deps.createSecurity = () => ({
+          run: async () => {
+            throw new CodexSecurityError(message);
+          },
+          preflight: async () => fakePreflight(),
+          close: async () => {},
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--json", ...(verbose ? ["--verbose"] : [])],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain("Provider failed for");
+        expect(stderr.text()).toContain("[redacted]");
+        for (const identifier of identifiers) {
+          expect(stderr.text()).not.toContain(identifier);
+        }
+      }
+    }
+  });
+
+  test("redacts provider identifiers from scanner warnings", async () => {
+    for (const verbose of [false, true]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onWarning?.(
+            'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
+          );
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          ["scan", ".", "--json", ...(verbose ? ["--verbose"] : [])],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain(
+        "codex-security: warning: Provider warning",
+      );
+      expect(stderr.text()).toContain("[redacted]");
+      expect(stderr.text()).not.toContain("organization private");
+      expect(stderr.text()).not.toContain("request private");
+      expect(stderr.text()).not.toContain("tenant-private");
+    }
   });
 
   test("prevents Unicode line separators from forging verbose diagnostics", async () => {
@@ -2782,7 +2886,9 @@ describe("CLI", () => {
     expect(observerDiagnostic).toContain('classification="unknown"');
     expect(observerDiagnostic).not.toContain("tenant-private");
     expect(observerDiagnostic).not.toContain("req-internal");
-    expect(stderr.text()).toContain("tenant=tenant-private");
+    expect(stderr.text()).toContain("Observer failed for");
+    expect(stderr.text()).not.toContain("tenant-private");
+    expect(stderr.text()).not.toContain("req-internal");
   });
 
   test("excludes cleanup failure context from verbose diagnostics", async () => {
@@ -2816,7 +2922,9 @@ describe("CLI", () => {
       expect(diagnostic).not.toContain("req-internal");
     }
 
-    expect(stderr.text()).toContain("tenant=tenant-private");
+    expect(stderr.text()).toContain("Cleanup failed for");
+    expect(stderr.text()).not.toContain("tenant-private");
+    expect(stderr.text()).not.toContain("req-internal");
     expect(stdout.text()).toBe("");
   });
 
@@ -2929,6 +3037,7 @@ describe("CLI", () => {
       "sandbox-exec: sandbox_apply: Operation not permitted during network setup.",
       "network failure ECONNRESET while connecting to the model.",
       "request timed out while reading the scanner response.",
+      "Local scan failed: project_directory=/tmp/project tenant_count=2 request_index=3.",
     ]) {
       const stdout = capture();
       const stderr = capture();

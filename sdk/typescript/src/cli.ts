@@ -2571,10 +2571,12 @@ async function runExport(
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function sanitizeDiagnosticValue(value: unknown): string {
-  return redactedErrorMessage(value).replaceAll(
-    /[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu,
-    " ",
-  );
+  return redactedErrorMessage(value)
+    .replaceAll(
+      /(\b(?:tenant(?:[_-]?id)?|org(?:anization)?(?:[_-]?id)?|project(?:[_-]?id)?|(?:x[_-]?)?(?:request|trace|correlation)[_-]?id)\b(?:\\?["'])?\s*[:=]\s*)(?!\[redacted\])(?:(['"])(?:\\.|(?!\2)[^\\])*(?:\2|$)|[^\s"',;&}\]]+)/giu,
+      "$1$2[redacted]$2",
+    )
+    .replaceAll(/[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu, " ");
 }
 
 async function runScan(
@@ -3090,7 +3092,7 @@ function scanFailureMessage(
   // appending it. That is deliberate: upstream authentication and authorization
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
-  if (isLocalScanFailure(error)) return redactedErrorMessage(error);
+  if (isLocalScanFailure(error)) return sanitizeDiagnosticValue(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
       return authentication?.method === "api_key"
@@ -3110,7 +3112,7 @@ function scanFailureMessage(
     case "network_error":
     case "timeout":
     case "unknown":
-      return redactedErrorMessage(error);
+      return sanitizeDiagnosticValue(error);
   }
 }
 
