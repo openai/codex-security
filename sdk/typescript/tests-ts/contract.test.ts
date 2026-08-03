@@ -525,6 +525,30 @@ describe("canonical scan contract", () => {
         },
         "scan.target.remote",
       ],
+      [
+        "newline-smuggled remote",
+        (manifest) => {
+          manifest["scan"]["target"]["remote"] =
+            "https://example.com\nhttps://evil.example.net";
+        },
+        "canonical absolute URL",
+      ],
+      [
+        "carriage-return-smuggled remote",
+        (manifest) => {
+          manifest["scan"]["target"]["remote"] =
+            "https://example.com\rhttps://evil.example.net";
+        },
+        "canonical absolute URL",
+      ],
+      [
+        "tab-smuggled remote",
+        (manifest) => {
+          manifest["scan"]["target"]["remote"] =
+            "https://example.com\thttps://evil.example.net";
+        },
+        "canonical absolute URL",
+      ],
     ];
 
     for (const [_name, mutate, expected] of cases) {
@@ -544,6 +568,19 @@ describe("canonical scan contract", () => {
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
       ).rejects.toThrow(expected);
     }
+  });
+
+  test("accepts a canonical remote URL without control characters", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    manifest["scan"]["target"]["remote"] = "https://github.com/example/repo";
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDir);
+    const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(contract.manifest.scan.target.remote).toBe(
+      "https://github.com/example/repo",
+    );
   });
 
   test("accepts distinct finding siblings and Unicode target identities", async () => {
