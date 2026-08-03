@@ -193,6 +193,7 @@ npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
 npx @openai/codex-security scans rerun SCAN_ID
+npx @openai/codex-security scans rerun SCAN_ID --verbose
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
@@ -478,7 +479,8 @@ a false positive and explain why. Later scans dismiss a matching finding only
 when the same reason still applies.
 
 `scans rerun SCAN_ID` repeats the original configuration against the current
-checkout so a fixed vulnerability can be checked again.
+checkout so a fixed vulnerability can be checked again. Add `--verbose` to
+inspect the rerun configuration, progress, and cost.
 
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
 cause; `scans match --all` matches all completed scans of the current repository,

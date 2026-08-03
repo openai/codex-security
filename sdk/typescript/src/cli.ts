@@ -62,6 +62,7 @@ import {
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
   redactedErrorMessage,
+  ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
@@ -877,8 +878,14 @@ export async function main(
       args: z.object({
         scanId: z.string().min(1).describe("Saved scan identifier."),
       }),
+      options: z.object({
+        verbose: z
+          .boolean()
+          .default(false)
+          .describe("Print scan diagnostics to stderr."),
+      }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError }) {
+      async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
@@ -897,7 +904,12 @@ export async function main(
             exitCode,
           });
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
+        const outcome = await runScan(
+          { ...scanArguments, verbose: options.verbose },
+          errorOutput,
+          dependencies,
+          format !== "json" && format !== "jsonl",
+        );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           return incurError({
@@ -2732,6 +2744,11 @@ async function runScan(
       codex_version: CODEX_EXECUTABLE_VERSION,
       codex_sdk_version: CODEX_SDK_VERSION,
       mode: arguments_.mode,
+      workers: arguments_.workers,
+      subagents: arguments_.subagents,
+      stop_after_no_new: arguments_.stopAfterNoNew,
+      max_discovery_runs: arguments_.maxDiscoveryRuns,
+      max_cost_usd: arguments_.maxCostUsd,
       target:
         arguments_.paths.length > 0
           ? "paths"
@@ -2950,15 +2967,22 @@ async function runScan(
     };
   }
   if (failed) {
+    const costLimitFailure =
+      failure instanceof ScanCostLimitExceededError ? failure : undefined;
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? redactedErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
     diagnostic("scan.failed", {
-      classification: isLocalScanFailure(failure)
-        ? "local"
-        : classifyConnectionFailure(failure),
+      classification:
+        costLimitFailure !== undefined
+          ? "cost_limit_exceeded"
+          : isLocalScanFailure(failure)
+            ? "local"
+            : classifyConnectionFailure(failure),
       partial_output: scanDir !== null,
+      max_cost_usd: costLimitFailure?.maxCostUsd,
+      estimated_usd: costLimitFailure?.cost.estimatedUsd,
     });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {

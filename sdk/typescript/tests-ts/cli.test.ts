@@ -120,6 +120,20 @@ describe("CLI", () => {
       },
     });
 
+    const rerunSchema = capture();
+    expect(
+      await main(
+        ["scans", "rerun", "--schema", "--format", "json"],
+        rerunSchema.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(rerunSchema.text())).toMatchObject({
+      args: { properties: { scanId: { type: "string" } } },
+      options: { properties: { verbose: { type: "boolean" } } },
+    });
+
     const matchSchema = capture();
     expect(
       await main(
@@ -1376,6 +1390,46 @@ describe("CLI", () => {
     }
   });
 
+  test("keeps structured scan reruns noninteractive even when stderr is a terminal", async () => {
+    for (const options of [
+      ["--json"],
+      ["--format", "json"],
+      ["--format", "jsonl"],
+    ]) {
+      const stdout = capture();
+      const stderr = capture(true);
+      let timers = 0;
+      const deps = dependencies({
+        onWorkbench: () => ({
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+          },
+        }),
+      });
+      deps.setInterval = () => {
+        timers += 1;
+        return {} as NodeJS.Timeout;
+      };
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original", ...options],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain("Preparing scan");
+      expect(stderr.text()).not.toContain("\u001B");
+      expect(stderr.text()).not.toContain("\r");
+      expect(timers).toBe(0);
+    }
+  });
+
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
       ["validate", ["finding"]],
@@ -2175,6 +2229,52 @@ describe("CLI", () => {
     );
   });
 
+  test("includes deep scan controls and the cost limit in verbose configuration", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--mode",
+          "deep",
+          "--workers",
+          "2",
+          "--subagents",
+          "0",
+          "--stop-after-no-new",
+          "3",
+          "--max-discovery-runs",
+          "4",
+          "--max-cost",
+          "0.5",
+          "--verbose",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+
+    const configuration = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.configuration"),
+      );
+
+    expect(configuration).toContain('mode="deep"');
+    expect(configuration).toContain("workers=2");
+    expect(configuration).toContain("subagents=0");
+    expect(configuration).toContain("stop_after_no_new=3");
+    expect(configuration).toContain("max_discovery_runs=4");
+    expect(configuration).toContain("max_cost_usd=0.5");
+  });
+
   test("includes selected reasoning effort in verbose scan diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -2316,6 +2416,39 @@ describe("CLI", () => {
     );
     expect(stderr.text()).toContain('model="gpt-original"');
     expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("accepts an explicit verbose flag for saved scan reruns", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {
+                model: "gpt-original",
+                model_reasoning_effort: "high",
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+    expect(stderr.text()).toContain('model="gpt-original"');
   });
 
   test("reports selected profile settings for verbose scan reruns", async () => {
@@ -3750,6 +3883,45 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
     );
+  });
+
+  test("classifies exceeded scan budgets in verbose failure diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const cost = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    }).cost!;
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onOutputDirReady?.("/tmp/scan");
+        throw new ScanCostLimitExceededError(0.005, cost, "/tmp/scan");
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.005"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+
+    const failure = stderr
+      .text()
+      .split("\n")
+      .find((line) => line.startsWith("codex-security: debug: scan.failed"));
+
+    expect(failure).toContain('classification="cost_limit_exceeded"');
+    expect(failure).toContain("partial_output=true");
+    expect(failure).toContain("max_cost_usd=0.005");
+    expect(failure).toContain("estimated_usd=0.00625");
   });
 
   test("accepts a scan at its estimated cost limit", async () => {
