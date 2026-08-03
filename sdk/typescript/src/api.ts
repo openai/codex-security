@@ -1431,7 +1431,17 @@ async function prepareDeepScanConfig(
   const destination = join(codexHome, "codex-security", "config.toml");
   const hasOverrides = Object.keys(overrides).length > 0;
   if (existing === undefined && !hasOverrides) {
-    if (destination !== source) await rm(destination, { force: true });
+    if (destination !== source) {
+      const canonicalAmbientHome = await realpath(ambientHome).catch(
+        (error: unknown) => {
+          if (isRecord(error) && error["code"] === "ENOENT") return null;
+          throw error;
+        },
+      );
+      if (canonicalAmbientHome !== codexHome) {
+        await rm(destination, { force: true });
+      }
+    }
     return;
   }
   if (destination === source && !hasOverrides) return;

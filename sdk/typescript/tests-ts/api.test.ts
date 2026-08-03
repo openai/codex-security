@@ -1890,43 +1890,57 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("preserves ambient configuration when the deep-scan runtime shares its home", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    const configPath = join(codexHome, "codex-security", "config.toml");
-    const originalConfiguration = "[other]\nenabled = true\n";
-    await mkdir(repository);
-    await mkdir(join(codexHome, "codex-security"), { recursive: true });
-    await mkdir(scanDir, { mode: 0o700 });
-    await writeFile(configPath, originalConfiguration);
+  test.each(["the same path", "a symlink alias"] as const)(
+    "preserves ambient configuration when the deep-scan runtime shares its home through %s",
+    async (homeAlias) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const ambientHome =
+        homeAlias === "a symlink alias"
+          ? join(root, "ambient-home-link")
+          : codexHome;
+      const scanDir = join(root, "scan");
+      const configPath = join(codexHome, "codex-security", "config.toml");
+      const originalConfiguration = "[other]\nenabled = true\n";
+      await mkdir(repository);
+      await mkdir(join(codexHome, "codex-security"), { recursive: true });
+      if (ambientHome !== codexHome) {
+        await symlink(
+          codexHome,
+          ambientHome,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(configPath, originalConfiguration);
 
-    const client = new TestClient(
-      {},
-      {
-        environment: { CODEX_HOME: codexHome },
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              throw new Error("deep scan settings captured");
-            },
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_HOME: ambientHome },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
           }),
-        }),
-      },
-    );
+        },
+      );
 
-    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-      "deep scan settings captured",
-    );
-    expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
-    await client.close();
-  });
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+      await client.close();
+    },
+  );
 
   test("rejects a scan registration without an authoritative target contract", async () => {
     const root = await temporaryDirectory();
