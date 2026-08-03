@@ -86,6 +86,37 @@ def worktree_content_digest(target: Path) -> str:
     return worktree_content_digest_for_context(repository, pathspec)
 
 
+def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
+    """Digest the committed changes a diff scan reviews.
+
+    Mirrors worktree_content_digest for a base..head range. The two revisions
+    already pin the content, but the contract requires git_diff targets to carry
+    a snapshotDigest, and computing it here keeps the value deterministic and
+    verifiable instead of leaving the scan agent to invent one.
+    """
+
+    repository, pathspec = git_worktree_context(target)
+    tracked = git_bytes(
+        repository,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        base,
+        head,
+        "--",
+        pathspec,
+    )
+    if tracked is None:
+        raise SystemExit("Could not snapshot the selected committed changes.")
+    digest = hashlib.sha256()
+    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    update_digest_field(digest, b"tracked-diff", tracked)
+    return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
+
+
 def worktree_content_digest_for_context(
     repository: Path,
     pathspec: str,
