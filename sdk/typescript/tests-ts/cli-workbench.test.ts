@@ -517,6 +517,37 @@ describe("CLI workbench", () => {
     }
   });
 
+  test("rejects Markdown rerun output like scan does", async () => {
+    const stderr = capture();
+    let started = false;
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original", "--format", "md"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onRun: () => {
+            started = true;
+          },
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              pluginVersion: "1.2.3",
+              config: {},
+            },
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(started).toBe(false);
+    expect(stderr.text()).toContain(
+      "Markdown output is not supported for scan results.",
+    );
+  });
+
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     let config: CodexSecurityConfig | undefined;
     let repository: string | undefined;
