@@ -1,10 +1,10 @@
 name: node-release-cut
 
 on:
-  push:
+  workflow_run:
+    workflows: ["node-ci"]
+    types: [completed]
     branches: [main]
-    paths:
-      - sdk/typescript/package.json
   workflow_dispatch:
 
 permissions:
@@ -16,12 +16,18 @@ concurrency:
 
 jobs:
   cut:
-    if: github.repository == 'openai/codex-security'
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'))
     name: cut release tag
     runs-on: ubuntu-latest
     permissions:
       actions: write
       contents: write
+    env:
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
     steps:
       - name: Checkout repository
@@ -29,6 +35,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
@@ -39,10 +46,9 @@ jobs:
       - name: Resolve the stable package version
         id: release
         shell: bash
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
+          RELEASE_SHA="${RELEASE_SHA:-$GITHUB_SHA}"
 
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "Release tags can only be cut from main." >&2
@@ -53,31 +59,12 @@ jobs:
             echo "Release tags can only be cut from commits on main." >&2
             exit 1
           fi
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+            echo "Release tags can only be cut from commits on main." >&2
+            exit 1
+          fi
 
           version="$(node sdk/typescript/scripts/release-automation.mjs version sdk/typescript/package.json)"
-
-          if [[ "$GITHUB_EVENT_NAME" == "push" && "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            if previous_manifest="$(git show "$BEFORE_SHA:sdk/typescript/package.json" 2>/dev/null)"; then
-              previous_version="$(
-                printf '%s\n' "$previous_manifest" |
-                  node --input-type=module --eval '
-                    import { readFileSync } from "node:fs";
-                    const manifest = JSON.parse(readFileSync(0, "utf8"));
-                    if (typeof manifest.version !== "string") {
-                      throw new Error("The previous package version is missing.");
-                    }
-                    process.stdout.write(manifest.version);
-                  '
-              )"
-              if [[ "$version" == "$previous_version" ]]; then
-                echo "Package version is unchanged; no release is needed."
-                echo "changed=false" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-              node sdk/typescript/scripts/release-automation.mjs \
-                require-increase "$version" "$previous_version" >/dev/null
-            fi
-          fi
 
           if ! published_versions="$(
             npm view @openai/codex-security versions \
@@ -90,6 +77,39 @@ jobs:
                   initial-published-versions "$version"
             )"
           fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]] &&
+             previous_sha="$(git rev-parse "$RELEASE_SHA^" 2>/dev/null)"; then
+            if previous_manifest="$(git show "$previous_sha:sdk/typescript/package.json" 2>/dev/null)"; then
+              previous_version="$(
+                printf '%s\n' "$previous_manifest" |
+                  node --input-type=module --eval '
+                    import { readFileSync } from "node:fs";
+                    const manifest = JSON.parse(readFileSync(0, "utf8"));
+                    if (typeof manifest.version !== "string") {
+                      throw new Error("The previous package version is missing.");
+                    }
+                    process.stdout.write(manifest.version);
+                  '
+              )"
+              if [[ "$version" == "$previous_version" ]]; then
+                release_mode="$(
+                  printf '%s\n' "$published_versions" |
+                    node sdk/typescript/scripts/release-automation.mjs \
+                      release-mode "$version"
+                )"
+                if [[ "$release_mode" == "recover" ]]; then
+                  echo "Package version is unchanged and already published."
+                  echo "changed=false" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+              else
+                node sdk/typescript/scripts/release-automation.mjs \
+                  require-increase "$version" "$previous_version" >/dev/null
+              fi
+            fi
+          fi
+
           printf '%s\n' "$published_versions" |
             node sdk/typescript/scripts/release-automation.mjs \
               require-published-increase "$version" >/dev/null
@@ -108,6 +128,7 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
+          RELEASE_SHA="${RELEASE_SHA:-$GITHUB_SHA}"
 
           query_status=0
           tag_response="$(
@@ -169,17 +190,17 @@ jobs:
               echo "Release tag $RELEASE_TAG does not identify a valid commit." >&2
               exit 1
             fi
-            if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
+            if [[ "$existing_sha" != "$RELEASE_SHA" ]]; then
               echo "Release tag $RELEASE_TAG already points to a different commit." >&2
               exit 1
             fi
-            echo "Release tag $RELEASE_TAG already points to $GITHUB_SHA."
+            echo "Release tag $RELEASE_TAG already points to $RELEASE_SHA."
             exit 0
           fi
 
           gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
             -f "ref=refs/tags/$RELEASE_TAG" \
-            -f "sha=$GITHUB_SHA" \
+            -f "sha=$RELEASE_SHA" \
             --silent
 
       - name: Dispatch the protected npm release
