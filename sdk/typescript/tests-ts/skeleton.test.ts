@@ -84,6 +84,19 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
+  test("keeps production dependency audits non-blocking in CI and releases", async () => {
+    for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
+      const workflow = await readFile(
+        new URL(`../../../.github/workflows/${workflowName}`, import.meta.url),
+        "utf8",
+      );
+
+      expect(workflow).toMatch(
+        /- name: Audit production dependencies\n(?:\s+if: [^\n]+\n)?\s+continue-on-error: true\n\s+run: (?:sfw )?pnpm --dir sdk\/typescript run audit:prod/u,
+      );
+    }
+  });
+
   test("exposes canonical finding and hardening fields with public types", () => {
     const finding = {} as Finding;
     const scan = {} as ScanRecord;
