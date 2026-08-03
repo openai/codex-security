@@ -57,7 +57,7 @@ describe("CLI launcher", () => {
       expect(child.status).toBe(2);
       expect(child.stdout).toBe("");
       expect(child.stderr).toBe(
-        `codex-security: working directory is unavailable: ${REDACTED_CREDENTIALS}\n`,
+        `working directory is unavailable: ${REDACTED_CREDENTIALS}\n`,
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -183,7 +183,7 @@ describe("CLI launcher", () => {
       expect([failed.status, failed.stdout, failed.stderr]).toEqual([
         2,
         "",
-        "codex-security: working directory is unavailable\n",
+        "working directory is unavailable\n",
       ]);
     } finally {
       await rm(root, { recursive: true, force: true });
