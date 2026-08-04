@@ -1491,7 +1491,9 @@ def complete_scan_locked(
         except BaseException:
             connection.rollback()
             raise
-        return scan_context(connection, scan["id"])
+        context = scan_context(connection, scan["id"])
+        context["targetWarnings"] = target_warnings
+        return context
 
     if cost_json is None:
         measured_usage = scan_usage.collect_scan_usage(
