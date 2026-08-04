@@ -59,6 +59,70 @@ async function reseal(scanDir: string): Promise<void> {
   await writeJson(manifestPath, manifest);
 }
 
+// Drives the bundled producer's own remote validator so the seal-time rule and
+// the load-time rule in src/contract.ts stay in agreement.
+const producerRemoteProbe = [
+  "import json, sys",
+  "sys.path.insert(0, sys.argv[1])",
+  "import finalize_scan_contract as finalizer",
+  "verdicts = {}",
+  "for remote in json.load(sys.stdin):",
+  "    try:",
+  "        finalizer._validate_remote(remote, 'scan.target.remote')",
+  "    except finalizer.ContractError as error:",
+  "        verdicts[remote] = str(error)",
+  "    else:",
+  "        verdicts[remote] = ''",
+  "print(json.dumps(verdicts))",
+].join("\n");
+
+function producerRemoteVerdicts(remotes: string[]): Record<string, string> {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(python).not.toBeNull();
+  if (python === null) {
+    throw new Error(
+      "A Python interpreter is required for producer contract tests.",
+    );
+  }
+  const result = Bun.spawnSync(
+    [
+      python,
+      "-I",
+      "-B",
+      "-c",
+      producerRemoteProbe,
+      join(PLUGIN_ROOT, "scripts"),
+    ],
+    {
+      stdin: new TextEncoder().encode(JSON.stringify(remotes)),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  expect(new TextDecoder().decode(result.stderr)).toBe("");
+  expect(result.exitCode).toBe(0);
+  return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
+    string,
+    string
+  >;
+}
+
+async function loaderAcceptsRemote(remote: string): Promise<boolean> {
+  const scanDir = await copyExample();
+  const manifestPath = join(scanDir, "scan-manifest.json");
+  const manifest = await readJson(manifestPath);
+  manifest["scan"]["target"]["remote"] = remote;
+  await writeJson(manifestPath, manifest);
+  await reseal(scanDir);
+  try {
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    return true;
+  } catch (error) {
+    if (error instanceof ContractValidationError) return false;
+    throw error;
+  }
+}
+
 function setFindingIdentity(
   manifest: Record<string, any>,
   finding: Record<string, any>,
@@ -581,6 +645,42 @@ describe("canonical scan contract", () => {
     expect(contract.manifest.scan.target.remote).toBe(
       "https://github.com/example/repo",
     );
+  });
+
+  test("seals and loads the same set of remote URLs", async () => {
+    const unsafeRemotes = [
+      "https://example.com\nhttps://evil.example.net",
+      "https://example.com\thttps://evil.example.net",
+      "https://example.com\rhttps://evil.example.net",
+      "https://example.com\u2028https://evil.example.net",
+      "https://example.com\u2029https://evil.example.net",
+      "https://example.com\u0000/example/repo",
+      "https://example.com\u007f/example/repo",
+      "https://example.com\u0085/example/repo",
+    ];
+    const safeRemotes = [
+      "https://github.com/example/repo",
+      "https://github.com/example/repo.git",
+      "https://xn--e1afmkfd.xn--p1ai/example/repo.git",
+      "https://пример.рф/example/repo.git",
+      "https://github.com:443/example/repo.git",
+      "https://git.example.com:8443/example/repo.git",
+      "https://GitHub.COM/Example/Repo.git",
+      "git+ssh://github.com/example/repo.git",
+      "ssh://git.example.com/example/repo.git",
+      "https://[2001:db8::1]/example/repo.git",
+      "https://example.com/example/re%20po.git",
+    ];
+    const producer = producerRemoteVerdicts([...unsafeRemotes, ...safeRemotes]);
+
+    for (const remote of unsafeRemotes) {
+      expect(producer[remote]).toContain("canonical absolute URL");
+      expect(await loaderAcceptsRemote(remote)).toBe(false);
+    }
+    for (const remote of safeRemotes) {
+      expect(producer[remote]).toBe("");
+      expect(await loaderAcceptsRemote(remote)).toBe(true);
+    }
   });
 
   test("accepts distinct finding siblings and Unicode target identities", async () => {
