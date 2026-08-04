@@ -119,6 +119,28 @@ describe("plugin runtime preparation", () => {
     ).toBe(true);
   });
 
+  test("rejects control characters in bundled artifact paths and candidate IDs", async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(
+          PLUGIN_ROOT,
+          "schemas",
+          "definitions",
+          "artifact-common.schema.json",
+        ),
+        "utf8",
+      ),
+    ) as { $defs: Record<string, { pattern: string }> };
+
+    for (const name of ["repositoryPath", "candidateId"]) {
+      const pattern = new RegExp(schema.$defs[name]!.pattern, "u");
+      expect(pattern.test("safe-path")).toBe(true);
+      for (const control of ["\u0000", "\u0001", "\u001f", "\u007f"]) {
+        expect(pattern.test(`safe${control}path`)).toBe(false);
+      }
+    }
+  });
+
   test("projects only the unchanged external payload from the source checkout", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");

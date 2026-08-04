@@ -9,7 +9,7 @@ import re
 import sqlite3
 import sys
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
@@ -36,7 +36,21 @@ def optional_text(value: str | None, *, maximum: int | None = None) -> str | Non
     return normalized or None
 
 
-def require_close_reason(close_reason: str | None, note: str | None) -> None:
+def sqlite_busy(error: sqlite3.OperationalError) -> bool:
+    return "locked" in str(error).lower() or "busy" in str(error).lower()
+
+
+def path_within_scope(path: str, scope: str) -> bool:
+    candidate = PurePosixPath(path)
+    requested = PurePosixPath(scope)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    if requested == PurePosixPath("."):
+        return True
+    return candidate == requested or requested in candidate.parents
+
+
+def require_close_note(close_reason: str | None, note: str | None) -> None:
     if note is None and close_reason == "false_positive":
         raise SystemExit("Explain why this finding is a false positive.")
     if note is None and close_reason == "wont_fix":

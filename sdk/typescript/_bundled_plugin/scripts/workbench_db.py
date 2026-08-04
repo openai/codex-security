@@ -24,15 +24,14 @@ from typing import Any
 
 try:
     import fcntl as posix_file_lock
-except ModuleNotFoundError:  # pragma: no cover - exercised through the Windows lock test.
+except ModuleNotFoundError:  # pragma: no cover
     posix_file_lock = None
 
 try:
     import msvcrt as windows_file_lock
-except ModuleNotFoundError:  # pragma: no cover - msvcrt is only available on Windows.
+except ModuleNotFoundError:  # pragma: no cover
     windows_file_lock = None
 
-# Plugin hosts may enable safe-path isolation.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deep_scan_workbench as deep_scan
 import workbench_native_indexes as native_indexes
@@ -123,9 +122,11 @@ from workbench_validation import (
     capability_preflight_json,
     optional_text,
     parse_scan_cost,
-    require_close_reason,
+    path_within_scope,
+    require_close_note,
     require_occurrence,
     require_uuid,
+    sqlite_busy,
 )
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
@@ -190,7 +191,6 @@ def acquire_completion_file_lock(descriptor: int) -> None:
     if windows_file_lock is None:
         raise SystemExit("Scan completion requires operating-system file locking support.")
 
-    # Retry seeding and locking the first byte.
     while os.fstat(descriptor).st_size == 0:
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:
@@ -240,10 +240,6 @@ def connect() -> sqlite3.Connection:
                 raise
             time.sleep(0.05 * (2**attempt))
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
-
-
-def sqlite_busy(error: sqlite3.OperationalError) -> bool:
-    return "locked" in str(error).lower() or "busy" in str(error).lower()
 
 
 def setup_preference(connection: sqlite3.Connection) -> dict[str, bool]:
@@ -557,8 +553,6 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
 
 
 def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[str, Any]:
-    """Return deterministic draft fields owned by the selected workbench scan."""
-
     contract = scan_contract(scan)
     target_contract = contract["target"]
     plugin_manifest = read_json_object(
@@ -668,16 +662,6 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             include_path, requested_scope
         ):
             raise SystemExit("scan-manifest.json scope must stay inside the workbench scan scope.")
-
-
-def path_within_scope(path: str, scope: str) -> bool:
-    candidate = PurePosixPath(path)
-    requested = PurePosixPath(scope)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    if requested == PurePosixPath("."):
-        return True
-    return candidate == requested or requested in candidate.parents
 
 
 def require_scope(scope: str, mode: str, target: Path) -> str:
@@ -1179,6 +1163,18 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
 def start_prompt_only_scan(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
+    return _start_prompt_driven_scan(connection, args, headless_standard=False)
+
+
+def start_headless_standard_scan(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    return _start_prompt_driven_scan(connection, args, headless_standard=True)
+
+
+def _start_prompt_driven_scan(
+    connection: sqlite3.Connection, args: argparse.Namespace, *, headless_standard: bool
+) -> dict[str, Any]:
     thread_id = optional_text(args.thread_id, maximum=512)
     if thread_id is None:
         raise SystemExit("thread-id is required.")
@@ -1208,7 +1204,7 @@ def start_prompt_only_scan(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        if not setup_preference(connection)["skipSetupUi"]:
+        if not headless_standard and not setup_preference(connection)["skipSetupUi"]:
             raise SystemExit(
                 "Prompt-only scanning requires the persisted setup UI opt-out preference."
             )
@@ -1244,7 +1240,13 @@ def start_prompt_only_scan(
                 AND scans.target_snapshot_digest IS ? AND scans.target_device = ?
                 AND scans.target_inode = ? AND scans.status = 'running'
                 AND scans.handoff_status = 'delivered'
-                AND scans.handoff_claim_token IS NULL
+                AND (
+                    (? = 0 AND scans.handoff_claim_token IS NULL)
+                    OR (
+                        ? = 1 AND scans.handoff_claim_token IS NOT NULL
+                        AND scans.continuation_thread_id = ?
+                    )
+                )
             ORDER BY scans.updated_at DESC, scans.started_at DESC, scans.id LIMIT 1
             """,
             (
@@ -1256,11 +1258,28 @@ def start_prompt_only_scan(
                 target_summary,
                 *diff_identity,
                 *target_identity,
+                int(headless_standard),
+                int(headless_standard),
+                thread_id,
             ),
         ).fetchone()
         if existing is not None:
             connection.commit()
             return {**scan_context(connection, existing["id"]), "startDisposition": "joined"}
+        if headless_standard and not setup_preference(connection)["skipSetupUi"]:
+            pending = connection.execute(
+                """
+                SELECT 1 FROM workspaces
+                WHERE thread_id = ? AND target_path = ? AND default_scope = ?
+                    AND default_mode = 'standard' AND active_scan_id IS NULL LIMIT 1
+                """,
+                (thread_id, target_path, scope),
+            ).fetchone()
+            if pending is not None:
+                raise SystemExit(
+                    "A matching Codex Security setup workspace is waiting for Start scan. "
+                    "Finish that setup and retry with its scanId."
+                )
         target_root.mkdir(parents=True, exist_ok=True)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
@@ -1306,6 +1325,18 @@ def start_prompt_only_scan(
             model=args.model,
             reasoning_effort=args.reasoning_effort,
         )
+        if headless_standard:
+            claimed = connection.execute(
+                """
+                UPDATE scans
+                SET handoff_claim_token = ?, continuation_thread_id = ?
+                WHERE id = ? AND status = 'running' AND handoff_status = 'delivered'
+                    AND handoff_claim_token IS NULL AND continuation_thread_id IS NULL
+                """,
+                (str(uuid.uuid4()), thread_id, scan_id),
+            )
+            if claimed.rowcount != 1:
+                raise SystemExit("Codex Security headless scan ownership could not be recorded.")
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -3606,6 +3637,8 @@ def main() -> None:
             result = start_scan(connection, args)
         elif args.command == "start-prompt-only-scan":
             result = start_prompt_only_scan(connection, args)
+        elif args.command == "start-headless-standard-scan":
+            result = start_headless_standard_scan(connection, args)
         elif args.command == "begin-deep-scan":
             result = deep_scan.begin_deep_scan(connection, args)
         elif args.command == "get-deep-scan":

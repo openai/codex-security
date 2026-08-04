@@ -618,6 +618,22 @@ MIGRATIONS = (
         ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';
         """,
     ),
+    (
+        27,
+        "persist deep scan consecutive discovery failures",
+        """
+        ALTER TABLE deep_scan_runs
+        ADD COLUMN stop_after_consecutive_errors INTEGER NOT NULL DEFAULT 1
+            CHECK (stop_after_consecutive_errors >= 1);
+
+        ALTER TABLE deep_scan_runs
+        ADD COLUMN consecutive_errors INTEGER NOT NULL DEFAULT 0
+            CHECK (consecutive_errors >= 0);
+
+        UPDATE deep_scan_runs
+        SET stop_after_consecutive_errors = stop_after_no_new;
+        """,
+    ),
 )
 
 

@@ -134,6 +134,23 @@ def parse_args(description: str) -> argparse.Namespace:
     start_prompt_only_scan.add_argument("--model")
     start_prompt_only_scan.add_argument("--reasoning-effort")
 
+    start_headless_standard_scan = subparsers.add_parser("start-headless-standard-scan")
+    start_headless_standard_scan.add_argument("--thread-id", required=True)
+    start_headless_standard_scan.add_argument("--target-path", required=True)
+    start_headless_standard_scan.add_argument("--scope", required=True)
+    start_headless_standard_scan.add_argument("--target-summary")
+    start_headless_standard_scan.add_argument("--user-context")
+    start_headless_standard_scan.add_argument("--scan-root")
+    start_headless_standard_scan.add_argument("--model")
+    start_headless_standard_scan.add_argument("--reasoning-effort")
+    start_headless_standard_scan.set_defaults(
+        mode="standard",
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+    )
+
     deep_scan.register_subcommands(subparsers, positive_int)
 
     get_scan = subparsers.add_parser("get-scan")
