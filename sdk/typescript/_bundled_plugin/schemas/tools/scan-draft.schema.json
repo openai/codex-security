@@ -467,6 +467,9 @@
               "id": {
                 "$ref": "#/$defs/text"
               },
+              "candidateId": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+              },
               "reason": {
                 "$ref": "#/$defs/text"
               },
@@ -478,7 +481,6 @@
               }
             },
             "required": [
-              "id",
               "reason"
             ],
             "additionalProperties": true
@@ -487,19 +489,26 @@
         "openQuestions": {
           "type": "array",
           "items": {
-            "type": "object",
-            "properties": {
-              "question": {
+            "anyOf": [
+              {
                 "$ref": "#/$defs/text"
               },
-              "followUpPrompt": {
-                "$ref": "#/$defs/text"
+              {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "followUpPrompt": {
+                    "$ref": "#/$defs/text"
+                  }
+                },
+                "required": [
+                  "question"
+                ],
+                "additionalProperties": true
               }
-            },
-            "required": [
-              "question"
-            ],
-            "additionalProperties": true
+            ]
           }
         }
       },
