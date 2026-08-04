@@ -2120,7 +2120,11 @@ describe("runtime directories and plugin Python boundary", () => {
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          "[System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH).GetSecurityDescriptorSddlForm('All')",
+          [
+            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
+            "$principals = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
+            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; principals = $principals } | ConvertTo-Json -Compress",
+          ].join("; "),
         ],
         {
           encoding: "utf8",
@@ -2129,13 +2133,17 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       );
       expect(descriptor.status).toBe(0);
-      expect(inspectWindowsCredentialAcl(descriptor.stdout, sid!)).toEqual({
-        owner: expect.any(String),
-        protected: true,
-        grantsCurrentUserAccess: true,
-        untrustedPrincipals: [],
-        deniedPrincipals: [],
-      });
+      const access = JSON.parse(descriptor.stdout) as {
+        protected: boolean;
+        principals: string[];
+      };
+      expect(access.protected).toBe(true);
+      expect(access.principals).toEqual(
+        expect.arrayContaining([sid!, "S-1-5-18", "S-1-5-32-544"]),
+      );
+      expect(new Set(access.principals)).toEqual(
+        new Set([sid!, "S-1-5-18", "S-1-5-32-544"]),
+      );
     },
   );
 
@@ -2236,7 +2244,9 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test.skipIf(process.platform !== "win32")(
+  test.skipIf(
+    process.platform !== "win32" || process.env["GITHUB_ACTIONS"] !== "true",
+  )(
     "prepares managed credential homes under constrained PowerShell",
     async () => {
       const root = await temporaryDirectory();
@@ -2249,124 +2259,172 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       const constrainedEnvironment = {
         ...process.env,
-        __PSLockdownPolicy: "4",
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
         PSModulePath: join(root, "untrusted-or-incompatible-modules"),
         PSMODULEPATH: join(root, "uppercase-untrusted-modules"),
       };
-      const mode = spawnSync(
+      const registry = join(dirname(dirname(dirname(powershell))), "reg.exe");
+      const policyKey =
+        "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
+      const policyName = "__PSLockdownPolicy";
+      const original = spawnSync(
         powershell,
         [
           "-NoLogo",
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          "$ExecutionContext.SessionState.LanguageMode",
+          "[pscustomobject]@{ value = [Environment]::GetEnvironmentVariable('__PSLockdownPolicy', 'Machine') } | ConvertTo-Json -Compress",
         ],
-        {
-          encoding: "utf8",
-          env: constrainedEnvironment,
-          timeout: 15_000,
-          windowsHide: true,
-        },
-      );
-      expect(mode.status).toBe(0);
-      expect(mode.stdout.trim()).toBe("ConstrainedLanguage");
-
-      const oldImplementation = spawnSync(
-        powershell,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "$ErrorActionPreference = 'Stop'; New-Object System.Security.AccessControl.DirectorySecurity",
-        ],
-        {
-          encoding: "utf8",
-          env: constrainedEnvironment,
-          timeout: 15_000,
-          windowsHide: true,
-        },
-      );
-      expect(oldImplementation.status).not.toBe(0);
-
-      const trustedPowerShellEnvironment = {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([name]) => name.toUpperCase() !== "PSMODULEPATH",
-          ),
-        ),
-        PSModulePath: join(dirname(powershell), "Modules"),
-      };
-      const guest = spawnSync(
-        powershell,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          [
-            "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LGG:SYD:(A;;GA;;;SY)'",
-            "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor",
-            "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner",
-            "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
-          ].join(" | "),
-        ],
-        {
-          encoding: "utf8",
-          env: trustedPowerShellEnvironment,
-          timeout: 15_000,
-          windowsHide: true,
-        },
-      );
-      expect(guest.status).toBe(0);
-      expect(guest.stdout.trim()).toMatch(/^S-1-(?:\d+-)*501$/u);
-      const home = join(root, "state", "codex-home");
-      await mkdir(home, { recursive: true });
-      const foreignGrant = spawnSync(
-        join(dirname(dirname(dirname(powershell))), "icacls.exe"),
-        [home, "/grant", `*${guest.stdout.trim()}:(OI)(CI)R`],
         { encoding: "utf8", timeout: 15_000, windowsHide: true },
       );
-      expect(foreignGrant.status).toBe(0);
+      expect(original.status).toBe(0);
+      const originalPolicy = (
+        JSON.parse(original.stdout) as {
+          value: string | null;
+        }
+      ).value;
+      const enabled = spawnSync(
+        registry,
+        ["add", policyKey, "/v", policyName, "/t", "REG_SZ", "/d", "4", "/f"],
+        { encoding: "utf8", timeout: 15_000, windowsHide: true },
+      );
+      expect(enabled.status).toBe(0);
 
-      const fixtureModule = join(root, "runtime-node-fixture.mjs");
-      const build = spawnSync(
-        process.execPath,
-        [
-          "build",
-          fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
-          "--target=node",
-          "--format=esm",
-          `--outfile=${fixtureModule}`,
-        ],
-        { encoding: "utf8", timeout: 30_000, windowsHide: true },
-      );
-      expect(build.status).toBe(0);
-      const selectedNode = spawnSync("node", ["-p", "process.execPath"], {
-        encoding: "utf8",
-        timeout: 15_000,
-        windowsHide: true,
-      });
-      expect(selectedNode.status).toBe(0);
-      const fixture = spawnSync(
-        selectedNode.stdout.trim(),
-        [
-          "--input-type=module",
-          "--eval",
-          `import { prepareCodexSecurityCredentialHome } from ${JSON.stringify(pathToFileURL(fixtureModule).href)}; await prepareCodexSecurityCredentialHome();`,
-        ],
-        {
+      try {
+        const mode = spawnSync(
+          powershell,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ExecutionContext.SessionState.LanguageMode",
+          ],
+          {
+            encoding: "utf8",
+            env: constrainedEnvironment,
+            timeout: 15_000,
+            windowsHide: true,
+          },
+        );
+        expect(mode.status).toBe(0);
+        expect(mode.stdout.trim()).toBe("ConstrainedLanguage");
+
+        const oldImplementation = spawnSync(
+          powershell,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference = 'Stop'; New-Object System.Security.AccessControl.DirectorySecurity",
+          ],
+          {
+            encoding: "utf8",
+            env: constrainedEnvironment,
+            timeout: 15_000,
+            windowsHide: true,
+          },
+        );
+        expect(oldImplementation.status).not.toBe(0);
+
+        const trustedPowerShellEnvironment = {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+            ),
+          ),
+          PSModulePath: join(dirname(powershell), "Modules"),
+        };
+        const guest = spawnSync(
+          powershell,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            [
+              "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LGG:SYD:(A;;GA;;;SY)'",
+              "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor",
+              "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner",
+              "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+            ].join(" | "),
+          ],
+          {
+            encoding: "utf8",
+            env: trustedPowerShellEnvironment,
+            timeout: 15_000,
+            windowsHide: true,
+          },
+        );
+        expect(guest.status).toBe(0);
+        expect(guest.stdout.trim()).toMatch(/^S-1-(?:\d+-)*501$/u);
+        const home = join(root, "state", "codex-home");
+        await mkdir(home, { recursive: true });
+        const foreignGrant = spawnSync(
+          join(dirname(dirname(dirname(powershell))), "icacls.exe"),
+          [home, "/grant", `*${guest.stdout.trim()}:(OI)(CI)R`],
+          { encoding: "utf8", timeout: 15_000, windowsHide: true },
+        );
+        expect(foreignGrant.status).toBe(0);
+
+        const fixtureModule = join(root, "runtime-node-fixture.mjs");
+        const build = spawnSync(
+          process.execPath,
+          [
+            "build",
+            fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
+            "--target=node",
+            "--format=esm",
+            `--outfile=${fixtureModule}`,
+          ],
+          { encoding: "utf8", timeout: 30_000, windowsHide: true },
+        );
+        expect(build.status).toBe(0);
+        const selectedNode = spawnSync("node", ["-p", "process.execPath"], {
           encoding: "utf8",
-          env: constrainedEnvironment,
-          timeout: 30_000,
+          timeout: 15_000,
           windowsHide: true,
-        },
-      );
-      expect(fixture.stderr).toBe("");
-      expect(fixture.status).toBe(0);
-      expect(existsSync(home)).toBe(true);
+        });
+        expect(selectedNode.status).toBe(0);
+        const fixture = spawnSync(
+          selectedNode.stdout.trim(),
+          [
+            "--input-type=module",
+            "--eval",
+            `import { prepareCodexSecurityCredentialHome } from ${JSON.stringify(pathToFileURL(fixtureModule).href)}; await prepareCodexSecurityCredentialHome();`,
+          ],
+          {
+            encoding: "utf8",
+            env: constrainedEnvironment,
+            timeout: 30_000,
+            windowsHide: true,
+          },
+        );
+        expect(fixture.stderr).toBe("");
+        expect(fixture.status).toBe(0);
+        expect(existsSync(home)).toBe(true);
+      } finally {
+        const restore = spawnSync(
+          registry,
+          originalPolicy === null
+            ? ["delete", policyKey, "/v", policyName, "/f"]
+            : [
+                "add",
+                policyKey,
+                "/v",
+                policyName,
+                "/t",
+                "REG_SZ",
+                "/d",
+                originalPolicy,
+                "/f",
+              ],
+          { encoding: "utf8", timeout: 15_000, windowsHide: true },
+        );
+        expect(restore.status).toBe(0);
+      }
     },
   );
 
