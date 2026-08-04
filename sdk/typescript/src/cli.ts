@@ -3030,11 +3030,11 @@ async function runScan(
   const blockingCount = result.findings.findings.filter(({ severity }) =>
     blockingSeverities.has(severity.level),
   ).length;
-  const incomplete = result.coverage.completeness !== "complete";
   const scanData =
     targetWarnings.length === 0
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
+  const incomplete = result.coverage.completeness !== "complete";
   progress?.stage("Scan complete");
   printScanSummary(
     result,
