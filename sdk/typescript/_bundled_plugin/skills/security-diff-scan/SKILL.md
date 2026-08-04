@@ -106,6 +106,7 @@ Follow this plan in order. Do not skip ahead to a later phase until the current 
   - Write the derived report to `findings/<slug>/<slug>.md` with supporting PoC files under `findings/<slug>/poc/`. Verify the report is a regular file, then set that finding's `writeup.reportPath` to the matching safe relative path. Do not add the derived report to the sealed artifact list.
   - After every write-up is ready, run `$propose-security-hardening` once over the complete finding collection, detailed write-ups, threat model, coverage, and relevant source. Write its portfolio to `hardening/hardening.md`, its structured analysis to `hardening/hardening.json`, and any proposals and diagrams below `hardening/`. Verify `hardening/hardening.md` is a regular file, then set `scan.hardening.portfolioPath` to the fixed relative path `hardening/hardening.md`. Do not add these derived files to the sealed artifact list. Skip this step and omit `scan.hardening` when there are no reportable findings.
   - Complete the scan once, after all write-ups, hardening guidance, and canonical JSON are ready, so finalization projects the validated JSON and derived-document links into `report.md`. In the terminal/chat workflow without `complete_codex_security_scan`, run `python <plugin_dir>/scripts/finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>` directly.
+  - After `complete_codex_security_scan` succeeds, include its returned measured total, input, and cached input token counts in the final response. Label partial coverage explicitly; if measurement is unavailable, say so instead of reporting zero or estimating.
 
 ## Phase Scope
 
@@ -157,7 +158,7 @@ This keeps diff scans precise while avoiding the common failure mode where one r
 
 ## Final Output
 
-Populate all final report semantics in the canonical manifest, findings, and coverage JSON using `../../references/final-report.md`. Generate one detailed `vulnerability-writeup` for every reportable finding, then run `propose-security-hardening` once over the complete collection and record the safe derived-document paths. Complete the scan once after both stages; finalization owns `report.md` generation. Emit Codex app review directives from the completed canonical findings. Commit scans use this same final-output contract because they are a diff-scan target type.
+Populate all final report semantics in the canonical manifest, findings, and coverage JSON using `../../references/final-report.md`. Generate one detailed `vulnerability-writeup` for every reportable finding, then run `propose-security-hardening` once over the complete collection and record the safe derived-document paths. Complete the scan once after both stages; finalization owns `report.md` generation. After successful MCP completion, retrieve measured token usage once and include it with the completed report. Emit Codex app review directives from the completed canonical findings. Commit scans use this same final-output contract because they are a diff-scan target type.
 
 ## Hard Rules
 

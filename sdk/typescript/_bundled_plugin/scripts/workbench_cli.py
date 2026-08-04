@@ -142,7 +142,6 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_scan_feedback = subparsers.add_parser("get-scan-feedback")
     get_scan_feedback.add_argument("--scan-id", required=True)
-
     list_scans = subparsers.add_parser("list-scans")
     list_scans.add_argument("--query")
     list_scans.add_argument("--target-id")
@@ -224,6 +223,7 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan.add_argument("--scan-id", required=True)
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
+    complete_scan.add_argument("--thread-id")
 
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)

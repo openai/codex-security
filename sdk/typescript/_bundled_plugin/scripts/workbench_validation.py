@@ -5,11 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sqlite3
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_constants import (
     MAX_CAPABILITY_PREFLIGHT_INPUT_JSON_BYTES,
     MAX_CAPABILITY_PREFLIGHT_PERSISTED_JSON_BYTES,
@@ -43,6 +47,90 @@ def reject_nonstandard_json_number(value: str) -> None:
     raise ValueError(f"invalid JSON number {value}")
 
 
+SCAN_USAGE_TOKEN_KEYS = (
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+)
+
+
+def _valid_legacy_scan_cost(cost: object) -> bool:
+    token_keys = ("inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens")
+    return (
+        isinstance(cost, dict)
+        and isinstance(cost.get("model"), str)
+        and bool(cost["model"])
+        and all(type(cost.get(key)) is int and cost[key] >= 0 for key in token_keys)
+        and cost["cachedInputTokens"] + cost["cacheWriteInputTokens"] <= cost["inputTokens"]
+        and type(cost.get("estimatedUsd")) in (int, float)
+        and math.isfinite(cost["estimatedUsd"])
+        and cost["estimatedUsd"] >= 0
+    )
+
+
+def _valid_scan_token_counts(usage: object) -> bool:
+    return (
+        isinstance(usage, dict)
+        and set(usage) == set(SCAN_USAGE_TOKEN_KEYS)
+        and all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+        and usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] <= usage["inputTokens"]
+    )
+
+
+def _valid_measured_scan_usage(usage: object) -> bool:
+    if not isinstance(usage, dict):
+        return False
+    coverage = usage.get("coverage")
+    thread_count = usage.get("threadCount")
+    if (
+        coverage not in {"complete", "partial", "unavailable"}
+        or usage.get("source") != "codex_rollout"
+        or type(thread_count) is not int
+        or thread_count < 0
+    ):
+        return False
+    warnings = usage.get("warnings", [])
+    if (
+        not isinstance(warnings, list)
+        or len(warnings) > 32
+        or any(
+            not isinstance(warning, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", warning) is None
+            for warning in warnings
+        )
+        or len(set(warnings)) != len(warnings)
+    ):
+        return False
+    if coverage == "unavailable":
+        return thread_count == 0 and set(usage).issubset(
+            {"coverage", "source", "threadCount", "warnings"}
+        )
+
+    allowed_keys = {
+        "coverage",
+        "source",
+        "threadCount",
+        "missingThreadCount",
+        "warnings",
+        *SCAN_USAGE_TOKEN_KEYS,
+    }
+    if thread_count == 0 or not set(usage).issubset(allowed_keys):
+        return False
+    counts = {key: usage.get(key) for key in SCAN_USAGE_TOKEN_KEYS}
+    if not _valid_scan_token_counts(counts):
+        return False
+    missing = usage.get("missingThreadCount", 0)
+    if type(missing) is not int or missing < 0:
+        return False
+    if coverage == "complete" and (warnings or missing):
+        return False
+    if coverage == "partial" and not (warnings or missing):
+        return False
+    return True
+
+
 def parse_scan_cost(value: str | None) -> str | None:
     if value is None:
         return None
@@ -52,17 +140,15 @@ def parse_scan_cost(value: str | None) -> str | None:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:
         raise SystemExit("Scan cost must be a valid JSON object.") from exc
-    token_keys = ("inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens")
-    if (
-        not isinstance(cost, dict)
-        or not isinstance(cost.get("model"), str)
-        or not cost["model"]
-        or any(type(cost.get(key)) is not int or cost[key] < 0 for key in token_keys)
-        or cost["cachedInputTokens"] + cost["cacheWriteInputTokens"] > cost["inputTokens"]
-        or type(cost.get("estimatedUsd")) not in (int, float)
-        or not math.isfinite(cost["estimatedUsd"])
-        or cost["estimatedUsd"] < 0
-    ):
+    if isinstance(cost, dict) and "usage" in cost:
+        if (
+            not set(cost).issubset({"usage", "cost"})
+            or not _valid_measured_scan_usage(cost["usage"])
+            or "cost" in cost
+            and not _valid_legacy_scan_cost(cost["cost"])
+        ):
+            raise SystemExit("Scan cost includes invalid measured token usage.")
+    elif not _valid_legacy_scan_cost(cost):
         raise SystemExit(
             "Scan cost must include a model, nonnegative token counts, and an estimated USD amount."
         )

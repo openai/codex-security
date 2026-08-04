@@ -33,6 +33,7 @@ Resolve the shared paths in `../../references/scan-artifacts.md`, apply relevant
    ```
 
    The finalizer generates `report.md` and SARIF. Do not edit either by hand. Detailed write-ups and hardening plans are optional.
+7. After `complete_codex_security_scan` succeeds, include its returned measured total, input, and cached input token counts in the final response. Explicitly label partial coverage; if measurement is unavailable, say so rather than reporting zero or estimating. In terminal/chat hosts, report only measured completion metadata when available.
 
 ## Detection Notes
 

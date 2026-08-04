@@ -5,12 +5,16 @@ import fnmatch
 import json
 import os
 import sqlite3
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
+from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output
 
 
@@ -221,7 +225,7 @@ def list_scans(
             {
                 "completedAt": row["completed_at"],
                 "continuationThreadId": row["continuation_thread_id"],
-                **({"cost": json.loads(row["cost_json"])} if row["cost_json"] else {}),
+                **stored_scan_cost_fields(row["cost_json"]),
                 "findingCount": row["finding_count"],
                 "handoffStatus": row["handoff_status"],
                 "mode": row["mode"],

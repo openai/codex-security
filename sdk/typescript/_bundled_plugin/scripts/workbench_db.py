@@ -39,6 +39,7 @@ import workbench_native_indexes as native_indexes
 import workbench_progress as progress
 import workbench_remediation as remediation
 import workbench_scan_history as scan_history
+import workbench_scan_usage as scan_usage
 from filesystem_identity import serialize_filesystem_identity as serialize_filesystem_identity
 from filesystem_identity import (
     stored_filesystem_identity_matches as stored_filesystem_identity_matches,
@@ -1357,7 +1358,12 @@ def complete_scan(
     cost_json = None if prepare_only else parse_scan_cost(args.cost_json)
     with scan_completion_lock(scan_id):
         return complete_scan_locked(
-            connection, scan_id, args.claim_token, cost_json, prepare_only=prepare_only
+            connection,
+            scan_id,
+            args.claim_token,
+            cost_json,
+            prepare_only=prepare_only,
+            thread_id=getattr(args, "thread_id", None),
         )
 
 
@@ -1368,6 +1374,7 @@ def complete_scan_locked(
     cost_json: str | None,
     *,
     prepare_only: bool = False,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1469,6 +1476,15 @@ def complete_scan_locked(
             connection.rollback()
             raise
         return scan_context(connection, scan["id"])
+
+    if cost_json is None:
+        measured_usage = scan_usage.collect_scan_usage(
+            connection,
+            scan,
+            thread_id=thread_id,
+            completed_at=completion_timestamp,
+        )
+        cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = manifest["scan"]["completedAt"]
@@ -1738,6 +1754,7 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
+        message = optional_text(args.message, maximum=2400)
         updated = connection.execute(
             """
             UPDATE scans
@@ -1745,22 +1762,11 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
                 cost_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (
-                optional_text(args.message, maximum=2400),
-                timestamp,
-                timestamp,
-                cost_json,
-                scan["id"],
-            ),
+            (message, timestamp, timestamp, cost_json, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be marked failed.")
-        deep_scan.fail_from_parent_scan(
-            connection,
-            scan["id"],
-            optional_text(args.message, maximum=2400),
-            timestamp,
-        )
+        deep_scan.fail_from_parent_scan(connection, scan["id"], message, timestamp)
         progress_updated = connection.execute(
             "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
             (timestamp, scan["id"]),
@@ -3006,11 +3012,7 @@ def scan_result(
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
-        **(
-            {"cost": json.loads(scan["cost_json"], parse_constant=reject_non_finite_json)}
-            if scan["cost_json"] is not None
-            else {}
-        ),
+        **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
