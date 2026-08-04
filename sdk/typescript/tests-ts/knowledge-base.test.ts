@@ -10,9 +10,10 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
 
@@ -102,6 +103,25 @@ describe("scan knowledge bases", () => {
           0o600,
         );
       }
+    }
+  });
+
+  test("expands ~ in requested paths and leaves absolute paths alone", async () => {
+    const home = await temporaryDirectory();
+    const documents = join(home, "docs");
+    await mkdir(documents, { recursive: true });
+    await writeFile(join(documents, "scope.md"), "Review the payment service.");
+    mock.module("node:os", () => ({ ...os, homedir: () => home }));
+    try {
+      const expanded = await prepareKnowledgeBase(["~/docs"]);
+      temporaryDirectories.push(expanded.path);
+      expect(expanded.sources).toEqual([documents]);
+
+      const absolute = await prepareKnowledgeBase([documents]);
+      temporaryDirectories.push(absolute.path);
+      expect(absolute.sources).toEqual([documents]);
+    } finally {
+      mock.module("node:os", () => os);
     }
   });
 
