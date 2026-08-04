@@ -792,10 +792,10 @@ describe("canonical scan contract", () => {
     return await realpath(scanDir);
   }
 
-  function runBundledValidator(scanDir: string): {
-    exitCode: number;
-    stderr: string;
-  } {
+  function runBundledScript(
+    script: string,
+    args: readonly string[],
+  ): { exitCode: number; stderr: string } {
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     if (python === null) {
@@ -804,20 +804,37 @@ describe("canonical scan contract", () => {
       );
     }
     const result = Bun.spawnSync(
-      [
-        python,
-        "-I",
-        "-B",
-        join(PLUGIN_ROOT, "scripts", "validate_scan_contract.py"),
-        "--scan-dir",
-        scanDir,
-      ],
+      [python, "-I", "-B", join(PLUGIN_ROOT, "scripts", script), ...args],
       { stdout: "pipe", stderr: "pipe" },
     );
     return {
       exitCode: result.exitCode,
       stderr: new TextDecoder().decode(result.stderr),
     };
+  }
+
+  function runBundledValidator(scanDir: string): {
+    exitCode: number;
+    stderr: string;
+  } {
+    return runBundledScript("validate_scan_contract.py", [
+      "--scan-dir",
+      scanDir,
+    ]);
+  }
+
+  // `validate_scan_contract.py` and the export CLI reach the seal through
+  // different functions, so the gate has to be exercised on both.
+  function runBundledExport(
+    scanDir: string,
+    exportFormat: string,
+  ): { exitCode: number; stderr: string } {
+    return runBundledScript("finalize_scan_contract.py", [
+      "--scan-dir",
+      scanDir,
+      "--export-format",
+      exportFormat,
+    ]);
   }
 
   test("accepts sealed derived documents in the bundled validator", async () => {
@@ -857,6 +874,35 @@ describe("canonical scan contract", () => {
       runBundledValidator(await bundledValidatorScanDir(scanDir)),
     ).toMatchObject({ exitCode: 0, stderr: "" });
   });
+
+  test.each(["json", "csv", "sarif"])(
+    "rejects a partially sealed manifest in a bundled %s export",
+    async (exportFormat) => {
+      const scanDir = await copyExample();
+      await sealDerivedDocuments(scanDir, { sealWriteup: false });
+
+      expect(
+        runBundledExport(await bundledValidatorScanDir(scanDir), exportFormat),
+      ).toMatchObject({
+        exitCode: 2,
+        stderr: expect.stringContaining(
+          "derived document is missing from sealed artifacts: findings/report/report.md",
+        ),
+      });
+    },
+  );
+
+  test.each(["json", "csv", "sarif"])(
+    "accepts sealed derived documents in a bundled %s export",
+    async (exportFormat) => {
+      const scanDir = await copyExample();
+      await sealDerivedDocuments(scanDir);
+
+      expect(
+        runBundledExport(await bundledValidatorScanDir(scanDir), exportFormat),
+      ).toMatchObject({ exitCode: 0, stderr: "" });
+    },
+  );
 
   test("keeps the existence check for a manifest that seals no derived document", async () => {
     const scanDir = await copyExample();
