@@ -91,9 +91,12 @@ from workbench_scan_start import (
 )
 from workbench_schema import (
     MIGRATIONS,
-    normalize_pre_release_migrations,
-    repair_deep_scan_migration,
-    sql_statements,
+)
+from workbench_schema import (
+    apply_migrations as apply_schema_migrations,
+)
+from workbench_schema import (
+    sql_statements as sql_statements,
 )
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_target import (
@@ -277,39 +280,7 @@ def disable_setup_ui(connection: sqlite3.Connection, args: argparse.Namespace) -
 
 
 def apply_migrations(connection: sqlite3.Connection) -> None:
-    connection.commit()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            )
-            """
-        )
-        normalize_pre_release_migrations(connection, now())
-        applied = {
-            row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
-        }
-        for version, name, sql in MIGRATIONS:
-            if version in applied:
-                if version == 11:
-                    repair_deep_scan_migration(connection)
-                continue
-            for statement in sql_statements(sql):
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
-                (version, name, now()),
-            )
-        if 16 not in applied:
-            backfill_security_targets(connection)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
+    apply_schema_migrations(connection, MIGRATIONS, now, backfill_security_targets)
 
 
 def require_target(value: str) -> Path:
