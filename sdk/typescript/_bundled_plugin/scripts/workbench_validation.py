@@ -19,8 +19,6 @@ from workbench_constants import (
     MAX_CAPABILITY_PREFLIGHT_PERSISTED_JSON_BYTES,
 )
 
-URL_LIKE_USER_CONTEXT = re.compile(r"(?:[a-z][a-z0-9+.-]*://|www\.)", re.IGNORECASE)
-
 
 def require_uuid(value: str, label: str) -> str:
     try:
@@ -60,13 +58,7 @@ def require_close_note(close_reason: str | None, note: str | None) -> None:
 
 
 def user_text(value: str | None) -> str | None:
-    normalized = optional_text(value)
-    if normalized is not None and URL_LIKE_USER_CONTEXT.search(normalized):
-        raise SystemExit(
-            "user-context must contain derived facts only; "
-            "remove URLs after using them to derive those facts."
-        )
-    return normalized
+    return optional_text(value)
 
 
 def reject_nonstandard_json_number(value: str) -> None:
