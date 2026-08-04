@@ -57,12 +57,34 @@ const digestProbe = [
   "}))",
 ].join("\n");
 
+// The streaming helper reports Git failure as `False` rather than the `None` the
+// buffered helper returned, so the caller's guard has to reject a falsy value. A guard
+// that still tests `is None` accepts `False` and records a digest over an empty patch,
+// which is a wrong snapshot rather than a visible error.
+const failureProbe = [
+  "import json, sys",
+  "from pathlib import Path",
+  "sys.path.insert(0, sys.argv[1])",
+  "import workbench_target as target",
+  "repository = Path(sys.argv[2])",
+  "try:",
+  "    result = {'digest': target.worktree_content_digest(repository)}",
+  "except SystemExit as exc:",
+  "    result = {'exit': str(exc)}",
+  "print(json.dumps(result))",
+].join("\n");
+
 interface DigestProbeResult {
   streamed: string;
   buffered: string;
   sentinel: string;
   patchBytes: number;
   peakRssIncreaseBytes: number | null;
+}
+
+interface FailureProbeResult {
+  digest?: string;
+  exit?: string;
 }
 
 afterEach(async () => {
@@ -112,7 +134,7 @@ function incompressible(size: number, seed: number): Uint8Array {
   return bytes;
 }
 
-async function runDigestProbe(target: string): Promise<DigestProbeResult> {
+async function runProbe(source: string, target: string): Promise<string> {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(python).not.toBeNull();
   if (python === null) {
@@ -124,15 +146,7 @@ async function runDigestProbe(target: string): Promise<DigestProbeResult> {
   // A private temporary directory proves the spool file does not outlive the digest.
   const spoolDirectory = await temporaryDirectory();
   const result = Bun.spawnSync(
-    [
-      python,
-      "-I",
-      "-B",
-      "-c",
-      digestProbe,
-      join(PLUGIN_ROOT, "scripts"),
-      target,
-    ],
+    [python, "-I", "-B", "-c", source, join(PLUGIN_ROOT, "scripts"), target],
     {
       stdout: "pipe",
       stderr: "pipe",
@@ -147,9 +161,11 @@ async function runDigestProbe(target: string): Promise<DigestProbeResult> {
   expect(new TextDecoder().decode(result.stderr)).toBe("");
   expect(result.exitCode).toBe(0);
   expect(await readdir(spoolDirectory)).toEqual([]);
-  return JSON.parse(
-    new TextDecoder().decode(result.stdout),
-  ) as DigestProbeResult;
+  return new TextDecoder().decode(result.stdout);
+}
+
+async function runDigestProbe(target: string): Promise<DigestProbeResult> {
+  return JSON.parse(await runProbe(digestProbe, target)) as DigestProbeResult;
 }
 
 describe("bundled workbench content digests", () => {
@@ -189,6 +205,28 @@ describe("bundled workbench content digests", () => {
     const untrackedResult = await runDigestProbe(untracked);
 
     expect(untrackedResult.streamed).toBe(untrackedResult.buffered);
+  });
+
+  test("refuses to record a digest when Git cannot emit the tracked patch", async () => {
+    // An unborn branch has no HEAD, so `git diff HEAD` exits non-zero and writes no
+    // patch. Streaming has to reject that as firmly as buffering did: the spool would
+    // otherwise be hashed as an empty value and pass for a clean worktree.
+    const root = await temporaryDirectory();
+    const unborn = join(root, "repo");
+    await mkdir(unborn, { recursive: true });
+    git(unborn, "init", "-b", "main");
+    git(unborn, "config", "user.email", "test@example.com");
+    git(unborn, "config", "user.name", "Test");
+    await writeFile(join(unborn, "README.md"), "unborn\n");
+
+    const result = JSON.parse(
+      await runProbe(failureProbe, unborn),
+    ) as FailureProbeResult;
+
+    expect(result.digest).toBeUndefined();
+    expect(result.exit).toBe(
+      "Could not snapshot the selected working-tree changes.",
+    );
   });
 
   // Roughly 4 MiB of incompressible content, which Git expands into a binary patch
