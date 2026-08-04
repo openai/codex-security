@@ -17,10 +17,7 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
-import {
-  requirePrivateOutputDirectory,
-  requireSecureOutputAncestry,
-} from "./runtime.js";
+import { requirePrivateScanOutput } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 
 const DOCUMENTS = {
@@ -325,7 +322,12 @@ async function requireCheckedScanFile(
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
 ): Promise<CheckedScanFile> {
-  const checkedRoot = await requireScanRoot(scanDirectory, signal);
+  // Harden once at prepare; during contract load re-verify the pinned root
+  // instead of re-entering requireScanRoot (and Windows ACL work) per artifact.
+  const checkedRoot =
+    expectedRoot === undefined
+      ? await requireScanRoot(scanDirectory, signal)
+      : (await verifyScanRoot(expectedRoot, signal), expectedRoot);
   const scanDir = checkedRoot.path;
   throwIfAborted(signal);
   const safePath = safeRelativePath(relativePath, context);
@@ -586,8 +588,8 @@ async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(returned, canonical);
-      await requireSecureOutputAncestry(canonical);
+      const secured = await requirePrivateScanOutput(returned, canonical);
+      return { path: secured.path, metadata: secured.metadata };
     } catch (error) {
       throw new ContractValidationError(
         error instanceof Error
@@ -596,7 +598,6 @@ async function requireScanRoot(
         { cause: error },
       );
     }
-    return { path: canonical, metadata: returned };
   } catch (error) {
     throwIfAborted(signal);
     if (error instanceof ContractValidationError) throw error;
@@ -622,8 +623,13 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(current, root.path);
-    await requireSecureOutputAncestry(root.path);
+    const secured = await requirePrivateScanOutput(current, root.path);
+    if (
+      secured.metadata.dev !== root.metadata.dev ||
+      secured.metadata.ino !== root.metadata.ino
+    ) {
+      throw new Error("scan directory changed while reading");
+    }
   } catch (error) {
     throwIfAborted(signal);
     throw new ContractValidationError(
