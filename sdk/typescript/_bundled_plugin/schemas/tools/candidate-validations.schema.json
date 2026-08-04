@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/candidate-validations.schema.json",
+  "title": "Record compact Codex Security candidate validations",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scanId", "validations"],
+  "properties": {
+    "scanId": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+    },
+    "validations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/validationUpdate"
+      }
+    }
+  },
+  "$defs": {
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId", "validations"],
+      "properties": {
+        "scanId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+        },
+        "validations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/validationUpdate"
+          }
+        }
+      }
+    },
+    "updatesPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["validations"],
+      "properties": {
+        "validations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/validationUpdate"
+          }
+        }
+      }
+    },
+    "validationUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateId", "validation"],
+      "properties": {
+        "candidateId": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+        },
+        "validation": {
+          "$ref": "#/$defs/validationRecord"
+        }
+      }
+    },
+    "validationRecord": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "disposition",
+        "method",
+        "confidence",
+        "confidence_rationale",
+        "rubric",
+        "evidence",
+        "counterevidence_or_proof_gap",
+        "remaining_uncertainty"
+      ],
+      "properties": {
+        "disposition": {
+          "type": "string",
+          "enum": ["reportable", "suppressed", "not_applicable", "deferred"]
+        },
+        "method": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["high", "medium", "low"]
+        },
+        "confidence_rationale": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "rubric": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            {
+              "type": "object"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+                  },
+                  {
+                    "type": "object"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              }
+            }
+          ]
+        },
+        "counterevidence_or_proof_gap": {
+          "type": "string"
+        },
+        "remaining_uncertainty": {
+          "type": "string"
+        },
+        "artifact_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+          }
+        },
+        "source": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "control": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "sink": {
+          "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+        },
+        "preconditions": {
+          "anyOf": [
+            {
+              "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

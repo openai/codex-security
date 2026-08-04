@@ -8,6 +8,8 @@ import {
   CodexSecurityError,
   IncompleteScanError,
   ScanInterruptedError,
+  type ScanActivity,
+  type ScanProgress,
   type ScanReconnectDetails,
   type ScanWorkerStatus,
 } from "../src/index.js";
@@ -126,9 +128,9 @@ describe("one-shot scan events", () => {
       yield* completedEvents();
     }
 
-    await runEvents(scanDir, events(), undefined, undefined, undefined, () =>
-      milestones.push("scan started"),
-    );
+    await runEvents(scanDir, events(), {
+      onScanStarted: () => milestones.push("scan started"),
+    });
 
     expect(milestones).toEqual([
       "stream opened",
@@ -146,16 +148,11 @@ describe("one-shot scan events", () => {
     }
 
     await expect(
-      runEvents(
-        scanDir,
-        failedEvents(),
-        undefined,
-        undefined,
-        undefined,
-        () => {
+      runEvents(scanDir, failedEvents(), {
+        onScanStarted: () => {
           scanStarted = true;
         },
-      ),
+      }),
     ).rejects.toThrow("stream failed to start");
     expect(scanStarted).toBe(false);
   });
@@ -170,20 +167,15 @@ describe("one-shot scan events", () => {
       yield* completedEvents();
     }
 
-    await runEvents(
-      scanDir,
-      replayedEvents(),
-      undefined,
-      undefined,
-      undefined,
-      () => {
+    await runEvents(scanDir, replayedEvents(), {
+      onScanStarted: () => {
         starts += 1;
         throw new Error("start observer exploded");
       },
-      (observer, error) => {
+      onObserverError: (observer, error) => {
         observerErrors.push([observer, (error as Error).message]);
       },
-    );
+    });
 
     expect(starts).toBe(1);
     expect(observerErrors).toEqual([
@@ -211,15 +203,13 @@ describe("one-shot scan events", () => {
       });
       throw new DOMException("aborted", "AbortError");
     }
-    const result = runEvents(
-      scanDir,
-      interruptedEvents(),
+    const result = runEvents(scanDir, interruptedEvents(), {
       abortController,
-      (attempt, maxAttempts) => {
+      onReconnect: (attempt, maxAttempts) => {
         reconnects.push([attempt, maxAttempts]);
         notifyReconnect();
       },
-    );
+    });
 
     await reconnectSeen;
     abortController.abort();
@@ -250,22 +240,17 @@ describe("one-shot scan events", () => {
       }
 
       await expect(
-        runEvents(
-          scanDir,
-          reconnectingEvents(),
-          new AbortController(),
-          () => {
+        runEvents(scanDir, reconnectingEvents(), {
+          onReconnect: () => {
             const error = new Error("observer exploded");
             if (asynchronous) return Promise.reject(error);
             throw error;
           },
-          undefined,
-          undefined,
-          (observer, error) => {
+          onObserverError: (observer, error) => {
             observerErrors.push([observer, (error as Error).message]);
             if (asynchronous) return Promise.reject(new Error("report failed"));
           },
-        ),
+        }),
       ).resolves.toBeDefined();
       expect(observerErrors).toEqual([["onReconnect", "observer exploded"]]);
     }
@@ -316,12 +301,10 @@ describe("one-shot scan events", () => {
         closed = true;
       }
     }
-    const result = runEvents(
-      scanDir,
-      reconnectingEvents(),
-      new AbortController(),
-      (attempt, maxAttempts) => reconnects.push([attempt, maxAttempts]),
-    );
+    const result = runEvents(scanDir, reconnectingEvents(), {
+      onReconnect: (attempt, maxAttempts) =>
+        reconnects.push([attempt, maxAttempts]),
+    });
 
     await reconnectSeen;
     expect(closed).toBe(false);
@@ -457,18 +440,15 @@ describe("one-shot scan events", () => {
       yield* completedEvents();
     }
 
-    await runEvents(
-      scanDir,
-      events(),
-      new AbortController(),
-      (attempt, maxAttempts, details) => {
+    await runEvents(scanDir, events(), {
+      onReconnect: (attempt, maxAttempts, details) => {
         reconnects.push({
           attempt,
           maxAttempts,
           ...(details ? { details } : {}),
         });
       },
-    );
+    });
 
     expect(reconnects).toEqual([
       {
@@ -498,14 +478,11 @@ describe("one-shot scan events", () => {
       yield* completedEvents();
     }
 
-    await runEvents(
-      scanDir,
-      events(),
-      new AbortController(),
-      (_a, _m, detail) => {
+    await runEvents(scanDir, events(), {
+      onReconnect: (_a, _m, detail) => {
         if (detail !== undefined) reconnects.push(detail);
       },
-    );
+    });
 
     expect(reconnects).toEqual([
       { reason: "network" },
@@ -532,14 +509,11 @@ describe("one-shot scan events", () => {
       }
 
       await expect(
-        runEvents(
-          scanDir,
-          events(),
-          new AbortController(),
-          (attempt, maxAttempts) => {
+        runEvents(scanDir, events(), {
+          onReconnect: (attempt, maxAttempts) => {
             reconnects.push([attempt, maxAttempts]);
           },
-        ),
+        }),
       ).rejects.toMatchObject({ name: CodexSecurityError.name, message });
       expect(reconnects).toEqual([]);
       expect(advancedPastFailure).toBe(false);
@@ -643,17 +617,207 @@ describe("one-shot scan events", () => {
     }
 
     await expect(
-      runEvents(
-        scanDir,
-        workerEvents(),
-        new AbortController(),
-        undefined,
-        (status) => statuses.push(status),
-      ),
+      runEvents(scanDir, workerEvents(), {
+        onWorkerStatus: (status) => statuses.push(status),
+      }),
     ).resolves.toBeDefined();
     expect(statuses).toEqual([
       { kind: "preflight", delegation: "available", configuredSlots: 8 },
       { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
+    ]);
+  });
+
+  test("forwards real file activity as commands start and complete", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const activities: ScanActivity[] = [];
+
+    async function* activityEvents(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      yield { type: "turn.started" };
+      for (const [type, status] of [
+        ["item.started", "in_progress"],
+        ["item.completed", "completed"],
+      ] as const) {
+        yield {
+          type,
+          item: {
+            id: "file-review-1",
+            type: "command_execution",
+            command: 'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+            aggregated_output: "",
+            status,
+          },
+        };
+      }
+      yield {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 10,
+          cached_input_tokens: 2,
+          output_tokens: 3,
+          reasoning_output_tokens: 1,
+        },
+      };
+    }
+
+    await expect(
+      runEvents(scanDir, activityEvents(), {
+        onActivity: (activity) => activities.push(activity),
+      }),
+    ).resolves.toBeDefined();
+    expect(activities).toEqual([
+      {
+        id: "file-review-1",
+        kind: "command",
+        status: "running",
+        description: 'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+        paths: ["routes/login.ts"],
+      },
+      {
+        id: "file-review-1",
+        kind: "command",
+        status: "completed",
+        description: 'nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+        paths: ["routes/login.ts"],
+      },
+    ]);
+  });
+
+  test("forwards separate main-agent reasoning summaries", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const activities: ScanActivity[] = [];
+
+    async function* reasoningEvents(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      yield { type: "turn.started" };
+      yield {
+        type: "item.completed",
+        item: {
+          id: "reasoning-1",
+          type: "reasoning",
+          text:
+            "**Implementing safe fallback file generation**\n\n" +
+            "**Planning batch file size verification and progress output**",
+        },
+      };
+      yield {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 10,
+          cached_input_tokens: 2,
+          output_tokens: 3,
+          reasoning_output_tokens: 1,
+        },
+      };
+    }
+
+    await runEvents(scanDir, reasoningEvents(), {
+      onActivity: (activity) => activities.push(activity),
+    });
+
+    expect(activities).toEqual([
+      expect.objectContaining({
+        id: "reasoning-1",
+        kind: "reasoning",
+        description: "Implementing safe fallback file generation",
+      }),
+      expect.objectContaining({
+        id: "reasoning-1:1",
+        kind: "reasoning",
+        description:
+          "Planning batch file size verification and progress output",
+      }),
+    ]);
+  });
+
+  test("forwards real phase and reviewed-file progress while the scan runs", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const updates: ScanProgress[] = [];
+
+    async function* progressEvents(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      yield { type: "turn.started" };
+      for (const text of [
+        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
+        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"validation","filesCompleted":8,"filesTotal":8}',
+      ]) {
+        yield {
+          type: "item.completed",
+          item: {
+            id: `progress-${updates.length}`,
+            type: "agent_message",
+            text,
+          },
+        };
+      }
+      yield {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 10,
+          cached_input_tokens: 2,
+          output_tokens: 3,
+          reasoning_output_tokens: 1,
+        },
+      };
+    }
+
+    await expect(
+      runEvents(scanDir, progressEvents(), {
+        onProgress: (progress) => updates.push(progress),
+      }),
+    ).resolves.toBeDefined();
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
+      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+      { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+    ]);
+  });
+
+  test("forwards every file count printed by a completed review command", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const updates: ScanProgress[] = [];
+
+    async function* progressEvents(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      yield { type: "turn.started" };
+      yield {
+        type: "item.completed",
+        item: {
+          id: "file-review-1",
+          type: "command_execution",
+          command: "review the two files in the inventory",
+          aggregated_output: [
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":2}',
+            "--- commands.py ---",
+            "--- server.py ---",
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":2,"filesTotal":2}',
+          ].join("\n"),
+          exit_code: 0,
+          status: "completed",
+        },
+      };
+      yield {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 10,
+          cached_input_tokens: 2,
+          output_tokens: 3,
+          reasoning_output_tokens: 1,
+        },
+      };
+    }
+
+    await expect(
+      runEvents(scanDir, progressEvents(), {
+        expectedFilesTotal: 2,
+        onProgress: (progress) => updates.push(progress),
+      }),
+    ).resolves.toBeDefined();
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
+      { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
     ]);
   });
 });

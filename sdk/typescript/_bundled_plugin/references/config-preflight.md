@@ -60,7 +60,7 @@ When the profile includes remediation patches, present the concrete config delta
 
 Some remediation patches have `kind = "host_setting"`. Present those as host-level setup guidance, not as edits to persistent Codex config.
 
-Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight requires native V2 but does not derive outer worker concurrency from the parent session cap or require parent delegation depth. When migrating a legacy V1 configuration for Deep Security Scan, remediation removes `agents.max_threads`, sets `features.multi_agent_v2.enabled = true`, and sets `features.multi_agent_v2.max_concurrent_threads_per_session = 4`. The coordinator overrides each child session's cap from the per-user deep-scan configuration. Codex rejects the legacy V1 thread setting and explicit V2 mode together.
+Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight does not require a particular parent delegation runtime, ownership, capacity, or depth. Discovery workers inherit the scan's model and run under the verified read-only worker sandbox.
 
 Do not warn merely because a user's value differs from the profile's suggested patch. Warn or block only when the evaluated capability requirement is unmet.
 
