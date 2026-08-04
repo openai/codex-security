@@ -3,16 +3,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { runScanEvents } from "../../src/api.js";
-import type {
-  ScanOptions,
-  ScanReconnectDetails,
-  ScanWorkerStatus,
-} from "../../src/index.js";
+import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
 
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
 >[0];
+
+type ScanEventOptions = Pick<
+  Parameters<typeof runScanEvents>[0],
+  | "expectedFilesTotal"
+  | "onActivity"
+  | "onObserverError"
+  | "onProgress"
+  | "onReconnect"
+  | "onScanStarted"
+  | "onWorkerStatus"
+> & { abortController?: AbortController };
 
 export function createApiTestFixtures() {
   const temporaryDirectories: string[] = [];
@@ -67,16 +74,9 @@ export async function* completedEvents(): AsyncGenerator<ThreadEvent> {
 export function runEvents(
   scanDir: string,
   events: AsyncGenerator<ThreadEvent>,
-  abortController = new AbortController(),
-  onReconnect?: (
-    attempt: number,
-    maxAttempts: number,
-    details?: ScanReconnectDetails,
-  ) => void,
-  onWorkerStatus?: (status: ScanWorkerStatus) => void,
-  onScanStarted?: () => void,
-  onObserverError?: (observer: ScanObserverName, error: unknown) => void,
+  options: ScanEventOptions = {},
 ): ReturnType<typeof runScanEvents> {
+  const { abortController = new AbortController(), ...observers } = options;
   return runScanEvents({
     thread: {
       id: null,
@@ -89,10 +89,7 @@ export function runEvents(
     scanDir,
     pluginRoot: PLUGIN_ROOT,
     model: "gpt-5.6-sol",
-    onScanStarted,
-    onReconnect,
-    onWorkerStatus,
-    onObserverError,
+    ...observers,
     expectation: {
       repository: "/repository",
       repositoryRevision: "deadbeef",

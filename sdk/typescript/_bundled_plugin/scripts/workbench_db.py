@@ -1643,6 +1643,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         "contract": scan_contract(scan),
         "scanDir": str(scan_dir),
         "scanId": scan_id,
+        "scopeFileCount": scope_file_count,
         "targetId": target_id,
         "targetRevision": scan["target_revision"],
     }

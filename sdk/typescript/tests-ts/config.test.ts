@@ -154,6 +154,8 @@ describe("Codex configuration", () => {
       codexOverrides: {
         features: { multi_agent_v2: { max_concurrent_threads_per_session: 4 } },
         model_reasoning_effort: "high",
+        model_reasoning_summary: "concise",
+        show_raw_agent_reasoning: false,
         windows: { sandbox: "elevated" },
       },
     });
@@ -168,6 +170,8 @@ describe("Codex configuration", () => {
     expect(merged["agents"]).toBeUndefined();
     expect(merged["model"]).toBe("gpt-5.6-sol");
     expect(merged["model_reasoning_effort"]).toBe("high");
+    expect(merged["model_reasoning_summary"]).toBe("concise");
+    expect(merged["show_raw_agent_reasoning"]).toBe(false);
     expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
@@ -394,6 +398,8 @@ describe("Codex configuration", () => {
     expect(await mergedCodexConfig({})).toMatchObject({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "xhigh",
+      model_reasoning_summary: "detailed",
+      show_raw_agent_reasoning: true,
       windows: {
         sandbox: "unelevated",
       },

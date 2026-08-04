@@ -1,6 +1,7 @@
 export { CodexSecurity } from "./api.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost } from "./cost.js";
+export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
@@ -10,7 +11,12 @@ export type {
   ScanPreflight,
   ScanReconnectDetails,
 } from "./api.js";
-export type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
+export type {
+  ScanPhase,
+  ScanProgress,
+  ScanWorkerPhase,
+  ScanWorkerStatus,
+} from "./worker-progress.js";
 export { CodexLoginHandle } from "./auth.js";
 export type { AccountStatus, LoginResult } from "./auth.js";
 

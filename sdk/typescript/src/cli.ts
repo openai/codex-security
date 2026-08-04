@@ -56,7 +56,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./config.js";
-import { formatUsd } from "./cost.js";
+import { formatUsd, type ScanCost } from "./cost.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -91,7 +91,13 @@ import {
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
-import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
+import { ScanDashboard } from "./scan-dashboard.js";
+import type {
+  ScanPhase,
+  ScanProgress,
+  ScanWorkerPhase,
+  ScanWorkerStatus,
+} from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -262,6 +268,7 @@ interface ScanArguments extends DeepScanOptions {
   codexOverrides?: JsonObject;
   failOnSeverity?: FailureSeverity;
   maxCostUsd?: number;
+  headless?: boolean;
   dryRun: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
@@ -1087,6 +1094,12 @@ export async function main(
             .positive()
             .optional()
             .describe("Stop the scan if estimated USD cost exceeds AMOUNT."),
+          headless: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Use plain text progress instead of the interactive dashboard.",
+            ),
           dryRun: z
             .boolean()
             .default(false)
@@ -1180,6 +1193,7 @@ export async function main(
             codex: options.codex,
             failOnSeverity: options.failOnSeverity,
             maxCostUsd: options.maxCost,
+            headless: options.headless,
             dryRun: options.dryRun,
           },
           errorOutput,
@@ -2612,7 +2626,12 @@ async function runScan(
   let requestedSignal: SignalName | null = null;
   let firstSignalAt = 0;
   let progress: Progress | null = null;
+  let dashboard: ScanDashboard | null = null;
   let lastWorkerUpdate = "";
+  let lastProgressUpdate = "";
+  let workerCapacity: { planned: number; started: number } | null = null;
+  let fileProgress: ScanProgress | null = null;
+  let runningCost: Readonly<ScanCost> | null = null;
   let phase: string | null = null;
   const configuredLogLevel =
     dependencies.environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
@@ -2657,6 +2676,7 @@ async function runScan(
         return;
       }
       requestedSignal = signal;
+      dashboard?.stop();
       progress?.stopTimer();
       if (progress?.interactive === true) {
         try {
@@ -2781,17 +2801,65 @@ async function runScan(
       model: effectiveModel,
       reasoning_effort: effectiveReasoningEffort,
     });
-    progress = new Progress(errorOutput, dependencies, interactive);
-    const scope = scanScope(arguments_);
-    const runningMessage = (): string =>
-      phase === null
-        ? scope === null
-          ? "Running scan"
-          : `Running scan: ${scope}`
-        : `Running scan: ${phase}${scope === null ? "" : ` (${scope})`}`;
-    progress.startTimer(
-      arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
+    progress = new Progress(
+      errorOutput,
+      dependencies,
+      interactive &&
+        !arguments_.headless &&
+        dependencies.environment["CI"] === undefined &&
+        dependencies.environment["TERM"] !== "dumb",
     );
+    if (progress.interactive && !arguments_.dryRun && !verbose) {
+      dashboard = new ScanDashboard(errorOutput, {
+        repository,
+        model: scanModelConfiguration(await mergedCodexConfig(config)),
+        ...(arguments_.maxCostUsd === undefined
+          ? {}
+          : { maxCostUsd: arguments_.maxCostUsd }),
+        clock: dependencies,
+        color: dependencies.environment["NO_COLOR"] === undefined,
+        sanitize: redactedErrorMessage,
+        input: process.stdin,
+        onInterrupt,
+      });
+    }
+    const scope = scanScope(arguments_);
+    const runningMessage = (): string => {
+      const stage =
+        phase === null
+          ? scope === null
+            ? "Running scan"
+            : `Running scan: ${scope}`
+          : `Running scan: ${phase}${scope === null ? "" : ` (${scope})`}`;
+      const details: string[] = [];
+      if (workerCapacity !== null) {
+        details.push(
+          `Workers: ${workerCapacity.started}/${workerCapacity.planned}`,
+        );
+      }
+      if (fileProgress !== null && fileProgress.filesTotal > 0) {
+        details.push(
+          `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
+        );
+      }
+      if (runningCost !== null) {
+        const tokens = formatTokenUsage({
+          input_tokens: runningCost.inputTokens,
+          cached_input_tokens: runningCost.cachedInputTokens,
+          output_tokens: runningCost.outputTokens,
+        });
+        if (tokens !== null) details.push(`Tokens: ${tokens}`);
+        details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
+      }
+      return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
+    };
+    if (dashboard === null) {
+      progress.startTimer(
+        arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
+      );
+    } else {
+      dashboard.start();
+    }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
       auth,
@@ -2818,17 +2886,41 @@ async function runScan(
           output_tokens: cost.outputTokens,
           max_cost_usd: arguments_.maxCostUsd,
         });
-        if (arguments_.maxCostUsd === undefined) return;
+        runningCost = cost;
+        if (dashboard !== null) {
+          dashboard.setCost(cost);
+          return;
+        }
         progress?.stopTimer();
-        progress?.stage(
-          `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
-        );
-        if (cost.estimatedUsd <= arguments_.maxCostUsd) {
+        if (arguments_.maxCostUsd === undefined) {
+          const tokens = formatTokenUsage({
+            input_tokens: cost.inputTokens,
+            cached_input_tokens: cost.cachedInputTokens,
+            output_tokens: cost.outputTokens,
+          });
+          progress?.stage(
+            `${tokens === null ? "" : `Tokens: ${tokens}. `}Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+          );
+        } else {
+          progress?.stage(
+            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
+          );
+        }
+        if (
+          arguments_.maxCostUsd === undefined ||
+          cost.estimatedUsd <= arguments_.maxCostUsd
+        ) {
           progress?.startTimer(runningMessage());
         }
       },
       onOutputArchived: (archiveDir) => {
         diagnostic("scan.output_archived", { archive_dir: archiveDir });
+        if (dashboard !== null) {
+          dashboard.note(
+            `Moved existing results to: ${redactedErrorMessage(archiveDir)}`,
+          );
+          return;
+        }
         progress?.stopTimer();
         errorOutput.write(
           `Moved existing results to: ${redactedErrorMessage(archiveDir)}\n`,
@@ -2850,6 +2942,14 @@ async function runScan(
               : undefined,
           verified: authentication.verified,
         });
+        if (dashboard !== null) {
+          dashboard.note(
+            authentication.method === "api_key"
+              ? `Using API key from ${authentication.source}`
+              : "Using stored Codex credentials",
+          );
+          return;
+        }
         progress?.stopTimer();
         if (authentication.method === "api_key") {
           progress?.stage(
@@ -2865,6 +2965,10 @@ async function runScan(
       },
       onScanStarted: () => {
         diagnostic("scan.started");
+        if (dashboard !== null) {
+          dashboard.setStage(phase ?? "Scanning repository");
+          return;
+        }
         progress?.stopTimer();
         progress?.startTimer(runningMessage());
       },
@@ -2890,8 +2994,39 @@ async function runScan(
                 : details?.reason === "authorization"
                   ? `Model access interrupted; retrying (${attempt}/${maxAttempts}).`
                   : `Codex connection interrupted; retrying (${attempt}/${maxAttempts})`;
+        if (dashboard !== null) {
+          dashboard.note(message);
+          return;
+        }
         progress?.stage(message);
         progress?.startTimer(runningMessage());
+      },
+      onActivity: (activity) => {
+        if (dashboard === null) return;
+        dashboard.record(activity);
+        if (activity.paths.length > 0 && phase === "preflight") {
+          dashboard.setStage("inspecting repository files");
+        }
+      },
+      onProgress: (update) => {
+        const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
+        if (key === lastProgressUpdate) return;
+        lastProgressUpdate = key;
+        fileProgress = update;
+        const previousPhase = phase;
+        phase = scanPhase(update.phase);
+        if (dashboard !== null) {
+          dashboard.setFiles(update);
+          dashboard.setStage(phase);
+          if (previousPhase !== phase) dashboard.note(`Started ${phase}`);
+          return;
+        }
+        if (progress === null) return;
+        progress.stopTimer();
+        progress.stage(
+          `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
+        );
+        progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
         const update =
@@ -2911,9 +3046,17 @@ async function runScan(
             planned: status.planned,
             started: status.started,
           });
+          workerCapacity = { planned: status.planned, started: status.started };
           phase = scanPhase(status.phase);
         }
         const message = workerStatusMessage(status);
+        if (dashboard !== null) {
+          if (status.kind === "dispatch") {
+            dashboard.setStage(scanPhase(status.phase));
+          }
+          if (message !== null) dashboard.note(message);
+          return;
+        }
         if (message === null || progress === null) return;
         progress.stopTimer();
         progress.stage(message);
@@ -2927,15 +3070,18 @@ async function runScan(
         });
       },
       onObserverError: (observer, error) => {
-        writeAboveProgress(() => {
-          diagnostic("scan.observer_failed", {
-            observer,
-            classification: classifyConnectionFailure(error),
-          });
-          errorOutput.write(
-            `codex-security: warning: ${observer} observer failed: ${sanitizeDiagnosticValue(error)}\n`,
-          );
+        diagnostic("scan.observer_failed", {
+          observer,
+          classification: classifyConnectionFailure(error),
         });
+        const warning = `${observer} observer failed: ${sanitizeDiagnosticValue(error)}`;
+        if (dashboard === null) {
+          writeAboveProgress(() => {
+            errorOutput.write(`codex-security: warning: ${warning}\n`);
+          });
+        } else {
+          dashboard.note(`Warning: ${warning}`);
+        }
       },
     };
     if (arguments_.dryRun) {
@@ -2944,11 +3090,11 @@ async function runScan(
       result = await security.run(repository, options);
       scanDir = result.scanDir;
     }
-    progress.stopTimer();
   } catch (error) {
     failed = true;
     failure = error;
   } finally {
+    dashboard?.stop();
     progress?.stopTimer();
     if (security !== null) {
       diagnostic("runtime.cleanup.started");
@@ -3050,7 +3196,7 @@ async function runScan(
     blockingSeverities.has(severity.level),
   ).length;
   const incomplete = result.coverage.completeness !== "complete";
-  progress?.stage("Scan complete");
+  progress?.stage(`Scan complete · ${result.manifest.scan.id.slice(0, 8)}`);
   printScanSummary(
     result,
     progress,
@@ -3176,12 +3322,16 @@ function scanScope(arguments_: ScanArguments): string | null {
   return null;
 }
 
-function scanPhase(value: ScanWorkerPhase): string {
+function scanPhase(value: ScanWorkerPhase | ScanPhase): string {
   return {
+    preflight: "preflight",
+    threat_model: "building threat model",
+    discovery: "reviewing files",
     ranking: "ranking scan targets",
     file_review: "reviewing files",
     validation: "validating findings",
     attack_path: "analyzing attack paths",
+    reporting: "writing report",
   }[value];
 }
 
