@@ -1861,19 +1861,21 @@ describe("runtime directories and plugin Python boundary", () => {
     const currentUser = "S-1-5-21-111-222-333-1001";
     const joinedDomainAdmins = "S-1-5-21-444-555-666-512";
     const forestRootAdmins = "S-1-5-21-777-888-999-519";
+    const domainRasServers = "S-1-5-21-444-555-666-553";
 
     expect(
       inspectWindowsCredentialAcl(
-        `O:${currentUser}G:SYD:P(A;OICI;FA;;;${currentUser})(A;OICI;FR;;;DA)(A;OICI;FR;;;EA)`,
+        `O:${currentUser}G:SYD:P(A;OICI;FA;;;${currentUser})(A;OICI;FR;;;DA)(A;OICI;FR;;;EA)(A;OICI;FR;;;RS)`,
         currentUser,
         {
           resolvedAliases: {
             DA: joinedDomainAdmins,
             EA: forestRootAdmins,
+            RS: domainRasServers,
           },
         },
       ).untrustedPrincipals,
-    ).toEqual([joinedDomainAdmins, forestRootAdmins]);
+    ).toEqual([joinedDomainAdmins, forestRootAdmins, domainRasServers]);
   });
 
   test("classifies conditional Windows access rules without trusting callbacks", () => {
@@ -1897,7 +1899,52 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
     expect(
       inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(A;OICI;FA;;;${user})(ZA;OICI;FR;;;WD;${condition})`,
+        user,
+      ),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      untrustedPrincipals: ["S-1-1-0"],
+    });
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(ZA;OICI;FA;;;${user};${condition})`,
+        user,
+      ).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(
         `O:${user}G:SYD:P(A;OICI;FA;;;${user})(XD;OICI;FR;;;WD;${condition})`,
+        user,
+      ),
+    ).toMatchObject({
+      grantsCurrentUserAccess: false,
+      deniedPrincipals: ["S-1-1-0"],
+    });
+  });
+
+  test("classifies object-specific Windows ACLs without treating them as unrestricted", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const guid = "bf967aba-0de6-11d0-a285-00aa003049e2";
+
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(A;OICI;FA;;;${user})(OA;OICI;FR;${guid};;WD)`,
+        user,
+      ),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      untrustedPrincipals: ["S-1-1-0"],
+    });
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(OA;OICI;FA;${guid};;${user})`,
+        user,
+      ).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(A;OICI;FA;;;${user})(OD;OICI;FR;;${guid};WD)`,
         user,
       ),
     ).toMatchObject({
@@ -1918,7 +1965,8 @@ describe("runtime directories and plugin Python boundary", () => {
       `O:${user}G:${user}D:P(XA;OICI;FA;;;${user})`,
       `O:${user}G:${user}D:P(A;OIN;FA;;;${user})`,
       `O:${user}G:${user}D:P(A;ZZ;FA;;;${user})`,
-      `O:${user}G:${user}D:P(OA;OICI;FA;bf967aba-0de6-11d0-a285-00aa003049e2;;${user})`,
+      `O:${user}G:${user}D:P(OA;OICI;FA;not-a-guid;;${user})`,
+      `O:${user}G:${user}D:P(A;OICI;FA;bf967aba-0de6-11d0-a285-00aa003049e2;;${user})`,
       `O:${user}G:${user}D:P(A;OICI;FA;;;${user};(@User.Department == \"QA\"))`,
     ]) {
       expect(() => inspectWindowsCredentialAcl(descriptor, user)).toThrow();

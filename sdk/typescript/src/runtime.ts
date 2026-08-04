@@ -324,7 +324,6 @@ const WINDOWS_PRINCIPAL_ALIASES: Readonly<Record<string, string>> = {
   PO: "S-1-5-32-550",
   BO: "S-1-5-32-551",
   RE: "S-1-5-32-552",
-  RS: "S-1-5-32-553",
   RU: "S-1-5-32-554",
   RD: "S-1-5-32-555",
   NO: "S-1-5-32-556",
@@ -340,6 +339,8 @@ const WINDOWS_PRINCIPAL_ALIASES: Readonly<Record<string, string>> = {
   AA: "S-1-5-32-579",
 };
 const WINDOWS_SID = /^S-1-(?:\d+-)*\d+$/u;
+const WINDOWS_GUID =
+  /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu;
 const WINDOWS_SDDL_SID = "(?:S-1-(?:\\d+-)*\\d+|[A-Z]{2})";
 const WINDOWS_SECURITY_DESCRIPTOR = new RegExp(
   `^O:(${WINDOWS_SDDL_SID})(?:G:${WINDOWS_SDDL_SID})?D:([A-Z_]*)(.*)$`,
@@ -411,7 +412,7 @@ export function inspectWindowsCredentialAcl(
   while (remaining.startsWith("(")) {
     const { rule, rest } = windowsSecurityDescriptorRule(remaining);
     const fields = rule.split(";");
-    const callback = fields[0] === "XA" || fields[0] === "XD";
+    const callback = ["XA", "XD", "ZA"].includes(fields[0]!);
     if ((callback && fields.length < 7) || (!callback && fields.length !== 6)) {
       throw new Error("Windows credential ACL has a malformed access rule");
     }
@@ -423,26 +424,28 @@ export function inspectWindowsCredentialAcl(
       inheritObjectGuid,
       rawPrincipal,
     ] = fields;
-    if (!["A", "OA", "D", "OD", "XA", "XD"].includes(type!)) {
+    if (!["A", "OA", "D", "OD", "XA", "XD", "ZA"].includes(type!)) {
       throw new Error("Windows credential ACL has an unsupported access rule");
     }
     if (rawPrincipal === "" || rights === "") {
       throw new Error("Windows credential ACL has an incomplete access rule");
     }
-    if (
-      (type === "OA" || type === "OD") &&
-      (objectGuid !== "" || inheritObjectGuid !== "")
-    ) {
-      throw new Error("Windows credential ACL has an unsupported object rule");
+    const objectRule = type === "OA" || type === "OD" || type === "ZA";
+    for (const guid of [objectGuid!, inheritObjectGuid!]) {
+      if (guid !== "" && (!objectRule || !WINDOWS_GUID.test(guid))) {
+        throw new Error("Windows credential ACL has a malformed object rule");
+      }
     }
     const inheritanceFlags = windowsAceFlags(inheritance!);
     hasAccessRules = true;
     const principal = normalizePrincipal(rawPrincipal!);
-    if (type === "A" || type === "OA" || type === "XA") {
+    if (type === "A" || type === "OA" || type === "XA" || type === "ZA") {
       if (!trustedPrincipals.has(principal)) {
         untrustedPrincipals.add(principal);
       } else if (
         !callback &&
+        objectGuid === "" &&
+        inheritObjectGuid === "" &&
         principal === currentUserSid &&
         windowsAceGrantsFullControl(rights!)
       ) {
