@@ -679,36 +679,23 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
 
   const ancestorScript = [
     "$ErrorActionPreference = 'Stop'",
-    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
+    "$parent = Microsoft.PowerShell.Management\\Split-Path -Path $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Parent",
+    "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
   ].join("; ");
-  const ancestors = await execFile(
+  const parentDescriptor = await execFile(
     powershell,
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ancestorScript],
     processOptions,
   );
-  const ancestorDescriptors = ancestors.stdout
-    .split(/\r?\n/u)
-    .filter((descriptor) => descriptor !== "");
-  let expectedAncestors = 0;
-  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-    expectedAncestors += 1;
-    if (ancestor === dirname(ancestor)) break;
-  }
-  if (ancestorDescriptors.length !== expectedAncestors) {
-    throw new Error("Windows credential-home ancestry could not be verified");
-  }
-  for (const descriptor of ancestorDescriptors) {
-    await resolveDescriptorAliases(descriptor);
-    const ancestor = inspectWindowsCredentialAcl(descriptor, sid, {
-      resolvedAliases,
-      scope: "ancestor",
-    });
-    if (ancestor.untrustedPrincipals.length !== 0) {
-      throw new Error(
-        "Windows credential-home ancestor allows another identity to replace the directory",
-      );
-    }
+  await resolveDescriptorAliases(parentDescriptor.stdout);
+  const parent = inspectWindowsCredentialAcl(parentDescriptor.stdout, sid, {
+    resolvedAliases,
+    scope: "ancestor",
+  });
+  if (parent.untrustedPrincipals.length !== 0) {
+    throw new Error(
+      "Windows credential-home ancestor allows another identity to replace the directory",
+    );
   }
 
   const descendantsArePrivate = async (): Promise<boolean> => {
