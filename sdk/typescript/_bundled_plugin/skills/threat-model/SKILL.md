@@ -41,7 +41,7 @@ Use the shared scan artifact path conventions in `../../references/scan-artifact
    - the threat model is repository-scoped rather than being centered around any specific scan target
    - it describes repository-wide primary product or runtime surfaces and trust boundaries before covering any narrower examples
    - any vulnerability-class discussion is about repository-context classes, not findings about any current diff
-7. Append the exact `Repository` and `Version` lines from `../../references/scan-artifacts.md`, then write the threat model to the repository-scoped path.
+7. Append the exact `Repository` and `Version` lines from `../../references/scan-artifacts.md`. If the bound Deep discovery worker tool `record_codex_security_worker_threat_model` is available, persist the complete Markdown and unchanged footer only by calling `record_codex_security_worker_threat_model({ content })`; otherwise write the threat model to the repository-scoped path.
 
 ## Threat Model Generation Guidance
 
@@ -56,4 +56,4 @@ Generate and structure the threat model using `references/threat-model-guidance.
 - In large monorepos, avoid centering `personal/`, `test/`, `tests/`, `docs/`, `examples/`, or one-off developer tooling unless repository evidence shows those are real deployed or privileged workflow surfaces.
 - Call out trust boundaries and assumptions explicitly.
 - Keep references to vulnerability types at the level of repository-context classes, rather than any diff findings.
-- Persist the threat model output to the repository-scoped threat model path from `../../references/scan-artifacts.md`.
+- When `record_codex_security_worker_threat_model` is available in a bound Deep discovery worker, persist the complete threat model and footer only through that tool. Otherwise persist the threat model output to the repository-scoped threat model path from `../../references/scan-artifacts.md`.

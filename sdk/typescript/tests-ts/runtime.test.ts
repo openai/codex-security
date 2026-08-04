@@ -28,6 +28,7 @@ import {
   relative,
   sep,
 } from "node:path";
+import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
@@ -117,6 +118,141 @@ describe("plugin runtime preparation", () => {
         );
       }),
     ).toBe(true);
+  });
+
+  test("rejects control characters in bundled artifact paths and candidate IDs", async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(
+          PLUGIN_ROOT,
+          "schemas",
+          "definitions",
+          "artifact-common.schema.json",
+        ),
+        "utf8",
+      ),
+    ) as { $defs: Record<string, { pattern: string }> };
+
+    for (const name of ["repositoryPath", "candidateId"]) {
+      const pattern = new RegExp(schema.$defs[name]!.pattern, "u");
+      expect(pattern.test("safe-path")).toBe(true);
+      for (const control of ["\u0000", "\u0001", "\u001f", "\u007f"]) {
+        expect(pattern.test(`safe${control}path`)).toBe(false);
+      }
+    }
+  });
+
+  test("derives distinct finding identities from canonical candidate IDs", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
+      runtime,
+    )?.[0];
+    expect(source).toBeDefined();
+    const buildFindings = new Function(
+      "semanticIdentifier",
+      `${source}\nreturn buildFindings;`,
+    )((value: string, fallback: string) => value || fallback) as (
+      findings: Array<{
+        title: string;
+        extensions: { candidateId: string };
+      }>,
+    ) => Array<{ identity: { anchor: string } }>;
+
+    const findings = buildFindings([
+      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
+      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
+    ]);
+
+    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
+      "candidate-a",
+      "candidate-b",
+    ]);
+  });
+
+  test("includes ignored tracked files in the scoped security inventory", async () => {
+    if (Bun.which("rg") === null) {
+      const generator = await readFile(
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "utf8",
+      );
+      expect(generator).toContain('"--no-ignore"');
+      return;
+    }
+
+    const root = await temporaryDirectory("codex-security-scan-inventory-");
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await writeFile(join(repository, ".gitignore"), "tracked-secret.py\n");
+    await writeFile(join(repository, "tracked-secret.py"), "secret = True\n");
+    for (const args of [
+      ["init", "--quiet", repository],
+      ["-C", repository, "add", "--force", "--", "tracked-secret.py"],
+    ]) {
+      const initialized = spawnSync("git", args, { encoding: "utf8" });
+      expect(initialized.status, initialized.stderr).toBe(0);
+    }
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const output = join(root, "inventory.txt");
+    const inventory = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(inventory.status, inventory.stderr).toBe(0);
+    expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
+  });
+
+  test("allows the workbench to derive missing deferred scan identifiers", async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(PLUGIN_ROOT, "schemas", "tools", "scan-draft.schema.json"),
+        "utf8",
+      ),
+    ) as {
+      $defs: {
+        coverage: {
+          properties: { deferred: { items: { required: string[] } } };
+        };
+      };
+    };
+
+    expect(schema.$defs.coverage.properties.deferred.items.required).toEqual([
+      "reason",
+    ]);
+  });
+
+  test("bounds preserved context before starting a headless scan", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const schema =
+      /var startHeadlessStandardScanSchema = \{[\s\S]*?\n\};/u.exec(
+        runtime,
+      )?.[0];
+
+    expect(schema).toContain(
+      "userContext: editableUserContextSchema.max(2400).optional()",
+    );
   });
 
   test("projects only the unchanged external payload from the source checkout", async () => {
@@ -1839,6 +1975,8 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert sys.argv[1] == 'test-command'",
         "assert os.environ.get('OPENAI_API_KEY') is None",
         "assert os.environ.get('CODEX_API_KEY') is None",
+        "assert os.environ.get('OPENROUTER_API_KEY') is None",
+        "assert os.environ.get('FIREWORKS_API_KEY') is None",
         "print(json.dumps({'ok': True}))",
       ].join("\n"),
     );
@@ -1852,6 +1990,8 @@ describe("runtime directories and plugin Python boundary", () => {
           PATH: process.env["PATH"],
           OPENAI_API_KEY: "must-not-reach-python",
           CODEX_API_KEY: "also-must-not-reach-python",
+          OPENROUTER_API_KEY: "openrouter-must-not-reach-python",
+          FIREWORKS_API_KEY: "fireworks-must-not-reach-python",
         },
       },
       ["test-command"],

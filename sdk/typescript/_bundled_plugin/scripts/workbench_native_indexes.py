@@ -4,7 +4,7 @@ import argparse
 import sqlite3
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -19,14 +19,12 @@ from workbench_validation import bounded_output_text
 def list_global_findings(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
-    *,
-    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
     findings = (
         row
-        for row in _active_findings(connection, read_coverage)
+        for row in _indexed_findings(connection)
         if (args.target_id is None or row["target_id"] == args.target_id)
         and (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
@@ -72,23 +70,8 @@ def list_global_findings(
     }
 
 
-def _active_findings(
-    connection: sqlite3.Connection,
-    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
-) -> Iterator[sqlite3.Row]:
-    completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
-    for scan in connection.execute(
-        """
-        SELECT *
-        FROM scans
-        WHERE status = 'complete' AND seal_manifest_digest IS NOT NULL
-        ORDER BY started_at DESC, id DESC
-        """
-    ):
-        completed_scans_by_target.setdefault(scan["target_id"], []).append(scan)
-
-    coverage_by_scan_id: dict[str, dict[str, Any]] = {}
-    rows = connection.execute(
+def _indexed_findings(connection: sqlite3.Connection) -> Iterator[sqlite3.Row]:
+    yield from connection.execute(
         """
         WITH ranked_findings AS (
             SELECT
@@ -97,7 +80,6 @@ def _active_findings(
                 occurrences.severity,
                 occurrences.created_at,
                 scans.id AS scan_id,
-                scans.started_at AS scan_started_at,
                 scans.target_id,
                 targets.current_path AS target_path,
                 scans.scope,
@@ -146,35 +128,11 @@ def _active_findings(
             selected_findings.occurrence_id
         """,
     )
-    for row in rows:
-        resolved = False
-        for scan in completed_scans_by_target.get(row["target_id"], ()):
-            if (scan["started_at"], scan["id"]) <= (
-                row["scan_started_at"],
-                row["scan_id"],
-            ):
-                break
-            coverage = coverage_by_scan_id.get(scan["id"])
-            if coverage is None:
-                coverage = read_coverage(scan)
-                coverage_by_scan_id[scan["id"]] = coverage
-            if scan_history.scan_covers_path(
-                scan,
-                target_id=row["target_id"],
-                path=row["location_path"],
-                coverage=coverage,
-            ):
-                resolved = True
-                break
-        if not resolved:
-            yield row
 
 
 def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
-    *,
-    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     scans = scan_history.list_scans(connection)["scans"]
     scans_by_id = {scan["scanId"]: scan for scan in scans}
@@ -190,9 +148,7 @@ def list_repositories(
         latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
 
     open_findings_by_target = Counter(
-        row["target_id"]
-        for row in _active_findings(connection, read_coverage)
-        if row["status"] == "open"
+        row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
     repositories = [
