@@ -1894,10 +1894,8 @@ function selectedScanEnvironment(
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
   if (auth !== "chatgpt" && selectedProviderKey === null) return environment;
-  const externalProviderKeys = new Set(
-    Object.values(EXTERNAL_CODEX_PROVIDERS).map(
-      (provider) => provider.env_key,
-    ),
+  const externalProviderKeys = new Set<string>(
+    Object.values(EXTERNAL_CODEX_PROVIDERS).map((provider) => provider.env_key),
   );
   return Object.fromEntries(
     Object.entries(environment).filter(([name]) => {

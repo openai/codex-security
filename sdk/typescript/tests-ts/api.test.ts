@@ -1092,7 +1092,7 @@ describe("CodexSecurity orchestration", () => {
 
   test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting OpenAI credentials",
-    async (name, provider, apiKey, model, providerConfig) => {
+    async (_name, provider, apiKey, model, providerConfig) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       await mkdir(repository);
@@ -1117,7 +1117,7 @@ describe("CodexSecurity orchestration", () => {
       );
 
       await expect(client.run(repository)).rejects.toThrow(
-        `Set ${apiKey} to run a scan through ${name}.`,
+        `Set ${apiKey} to run a scan through ${providerConfig.name}.`,
       );
       expect(runtimeStarted).toBe(false);
       await client.close();
