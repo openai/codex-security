@@ -15,6 +15,16 @@ Follow `nextCursor` until every repository-relative review item has been returne
 
 For an app scan, keep `reviewItemsTotal` at zero while building the file list. Then publish the file count, review files in batches, and update `reviewItemsCompleted` after each batch.
 
+For an SDK or terminal scan with `CODEX_SECURITY_SCAN_ID`, emit this standalone line in an agent message or completed command output after building the file list, after each completed review batch, and when entering validation, attack-path analysis, or reporting:
+
+```text
+CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}
+```
+
+Use the actual phase (`discovery`, `validation`, `attack_path`, or `reporting`), the number of fully reviewed files, and the total from `in_scope_files.txt`. Start discovery at zero completed files. Never count a searched, assigned, or partially reviewed file as completed. Do not include paths, findings, credentials, or other fields.
+
+When delegating, include this rule in each worker prompt and have workers report their own completed and assigned file counts after each small review batch.
+
 ## Discover And Combine Once
 
 Review every listed file from start to finish. Read nearby code when needed to understand it. Look for unsafe command execution, unsafe parsing, XSS, attacker-controlled network requests, unsafe file access, and missing permission checks. Do not ignore a clear bug because another issue seems more important.

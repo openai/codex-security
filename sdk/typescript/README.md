@@ -183,6 +183,7 @@ without printing its value, including when no stored sign-in exists.
 
 ```bash
 npx @openai/codex-security scan /path/to/repository
+npx @openai/codex-security scan /path/to/repository --headless
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -299,6 +300,8 @@ defaults:
 cli_auth_credentials_store = "file"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+show_raw_agent_reasoning = true
 
 [features]
 plugins = true
@@ -420,6 +423,8 @@ Use `--provider fireworks` to send inference through Fireworks AI. Set
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
+Interactive terminals show a full-screen view; CI, redirected output, and
+`--headless` use plain timestamped progress lines.
 Completion summarizes findings, severity, coverage, elapsed time, available
 token and worker counts, estimated cost, the results directory, and the next
 useful command.
