@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -36,7 +37,9 @@ async function fixture(): Promise<{
   input: string;
   output: string;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-multiscan-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-multiscan-")),
+  );
   temporaryDirectories.push(root);
   return {
     root,

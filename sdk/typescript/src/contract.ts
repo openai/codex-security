@@ -17,10 +17,7 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
-import {
-  requirePrivateScanOutput,
-  requireSecureOutputAncestry,
-} from "./runtime.js";
+import { requirePrivateScanOutput } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 
 const DOCUMENTS = {
@@ -325,7 +322,12 @@ async function requireCheckedScanFile(
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
 ): Promise<CheckedScanFile> {
-  const checkedRoot = await requireScanRoot(scanDirectory, signal);
+  // Harden once at prepare; during contract load re-verify the pinned root
+  // instead of re-entering requireScanRoot (and Windows ACL work) per artifact.
+  const checkedRoot =
+    expectedRoot === undefined
+      ? await requireScanRoot(scanDirectory, signal)
+      : (await verifyScanRoot(expectedRoot, signal), expectedRoot);
   const scanDir = checkedRoot.path;
   throwIfAborted(signal);
   const safePath = safeRelativePath(relativePath, context);
@@ -587,7 +589,6 @@ async function requireScanRoot(
     }
     try {
       const secured = await requirePrivateScanOutput(returned, canonical);
-      await requireSecureOutputAncestry(secured.path);
       return { path: secured.path, metadata: secured.metadata };
     } catch (error) {
       throw new ContractValidationError(
@@ -629,7 +630,6 @@ async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    await requireSecureOutputAncestry(secured.path);
   } catch (error) {
     throwIfAborted(signal);
     throw new ContractValidationError(

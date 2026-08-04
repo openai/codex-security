@@ -1,7 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  chmod,
   lstat,
   mkdir,
   open,
@@ -19,7 +18,7 @@ import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { redactedErrorMessage } from "./errors.js";
-import { requirePrivateScanOutput } from "./runtime.js";
+import { hardenScanOutputDirectory } from "./runtime.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -91,8 +90,7 @@ export async function runMultiscan(
     dirname(resolve(options.inputPath)),
     options.mode,
   );
-  const output = resolve(options.outputDir);
-  await ensureOutputDirectory(output);
+  const output = await ensureOutputDirectory(resolve(options.outputDir));
   const unlock = await acquireLock(output);
   try {
     return await runCampaign(options, tasks, output);
@@ -250,7 +248,7 @@ async function runCampaign(
   };
 }
 
-async function ensureOutputDirectory(path: string): Promise<void> {
+async function ensureOutputDirectory(path: string): Promise<string> {
   const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
     return undefined;
@@ -259,15 +257,14 @@ async function ensureOutputDirectory(path: string): Promise<void> {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
   await mkdir(path, { recursive: true, mode: 0o700 });
-  let prepared = await lstat(path);
+  const prepared = await lstat(path);
   if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
     throw new Error("Multiscan output must be a non-symlink directory.");
   }
-  if (process.platform !== "win32" && (prepared.mode & 0o777) !== 0o700) {
-    await chmod(path, 0o700);
-    prepared = await lstat(path);
-  }
-  await requirePrivateScanOutput(prepared, path);
+  // Ownership, mode normalization, Windows ACL, and path rebinding live in
+  // hardenScanOutputDirectory — callers must continue with the returned path.
+  const secured = await hardenScanOutputDirectory(path);
+  return secured.path;
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {

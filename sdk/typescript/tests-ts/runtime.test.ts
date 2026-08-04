@@ -61,6 +61,7 @@ import {
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
+  hardenScanOutputDirectory,
   requirePrivateScanOutput,
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
@@ -1742,25 +1743,36 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test("requires a real private-ACL operation for Windows scan output", async () => {
+  test("hardens Windows scan output once and only verifies afterward", async () => {
     const root = await temporaryDirectory();
     const output = join(root, "results");
     await mkdir(output);
     const metadata = await lstat(output);
-    const secured: string[] = [];
+    const applied: string[] = [];
+    const verified: string[] = [];
+
+    await expect(
+      hardenScanOutputDirectory(output, {
+        platform: "win32",
+        secureWindowsOutput: async (path) => {
+          applied.push(path);
+        },
+      }),
+    ).resolves.toMatchObject({ path: await realpath(output) });
+    expect(applied).toEqual([output]);
 
     await expect(
       requirePrivateScanOutput(metadata, output, {
         platform: "win32",
         secureWindowsOutput: async (path) => {
-          secured.push(path);
+          verified.push(path);
         },
       }),
     ).resolves.toMatchObject({ path: await realpath(output) });
-    expect(secured).toEqual([output]);
+    expect(verified).toEqual([output]);
 
     await expect(
-      requirePrivateScanOutput(metadata, output, {
+      hardenScanOutputDirectory(output, {
         platform: "win32",
         secureWindowsOutput: async () => {
           throw new Error("ACL could not be secured");
@@ -1772,11 +1784,11 @@ describe("runtime directories and plugin Python boundary", () => {
       validatePreparedOutputDir(output, undefined, {
         platform: "win32",
         secureWindowsOutput: async (path) => {
-          secured.push(`prepared:${path}`);
+          applied.push(`prepared:${path}`);
         },
       }),
     ).resolves.toBe(await realpath(output));
-    expect(secured).toContain(`prepared:${output}`);
+    expect(applied).toContain(`prepared:${output}`);
   });
 
   test("rejects a scan output directory replaced during Windows ACL hardening", async () => {
@@ -1784,10 +1796,9 @@ describe("runtime directories and plugin Python boundary", () => {
     const output = join(root, "results");
     await mkdir(output, { mode: 0o700 });
     if (process.platform !== "win32") await chmod(output, 0o700);
-    const metadata = await lstat(output);
 
     await expect(
-      requirePrivateScanOutput(metadata, output, {
+      hardenScanOutputDirectory(output, {
         platform: "win32",
         secureWindowsOutput: async () => {
           await rename(output, join(root, "stolen"));
@@ -1796,6 +1807,15 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       }),
     ).rejects.toThrow("Scan output directory was replaced");
+  });
+
+  testPosix("normalizes owned scan output to mode 0700 during harden", async () => {
+    const root = await temporaryDirectory();
+    const output = join(root, "results");
+    await mkdir(output, { mode: 0o755 });
+    await chmod(output, 0o755);
+    await hardenScanOutputDirectory(output);
+    expect((await lstat(output)).mode & 0o777).toBe(0o700);
   });
 
   test.skipIf(process.platform !== "win32")(

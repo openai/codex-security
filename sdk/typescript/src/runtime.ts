@@ -269,17 +269,25 @@ export async function requirePrivateCredentialHome(
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
-  await secureWindowsPrivateDirectory(path, "Credential");
+  await runWindowsPrivateDirectoryAcl(path, "Credential", "apply");
 }
 
-async function secureWindowsScanOutput(path: string): Promise<void> {
-  await secureWindowsPrivateDirectory(path, "Scan output");
+async function applyWindowsScanOutputAcl(path: string): Promise<void> {
+  await runWindowsPrivateDirectoryAcl(path, "Scan output", "apply");
 }
 
-/** Restrict a Windows directory ACL to the current user, then verify. */
-async function secureWindowsPrivateDirectory(
+async function verifyWindowsScanOutputAcl(path: string): Promise<void> {
+  await runWindowsPrivateDirectoryAcl(path, "Scan output", "verify");
+}
+
+/**
+ * Apply or verify a current-user-only Windows directory ACL.
+ * `apply` mutates; `verify` only reads GetAccessControl.
+ */
+async function runWindowsPrivateDirectoryAcl(
   path: string,
   label: "Credential" | "Scan output",
+  mode: "apply" | "verify",
 ): Promise<void> {
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const powershell = join(
@@ -289,19 +297,25 @@ async function secureWindowsPrivateDirectory(
     "v1.0",
     "powershell.exe",
   );
+  const mutate =
+    mode === "apply"
+      ? [
+          "$acl = New-Object System.Security.AccessControl.DirectorySecurity",
+          "$acl.SetAccessRuleProtection($true, $false)",
+          "$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit",
+          "$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity.User, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)",
+          "$acl.SetOwner($identity.User)",
+          "$acl.SetAccessRule($rule)",
+          "[System.IO.Directory]::SetAccessControl($path, $acl)",
+        ]
+      : [];
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "$path = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_PRIVATE_ACL_PATH', 'Process')",
     "$label = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_PRIVATE_ACL_LABEL', 'Process')",
     "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
     "if ($null -eq $identity.User) { throw 'Unable to identify the current Windows user' }",
-    "$acl = New-Object System.Security.AccessControl.DirectorySecurity",
-    "$acl.SetAccessRuleProtection($true, $false)",
-    "$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit",
-    "$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity.User, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)",
-    "$acl.SetOwner($identity.User)",
-    "$acl.SetAccessRule($rule)",
-    "[System.IO.Directory]::SetAccessControl($path, $acl)",
+    ...mutate,
     "$verified = [System.IO.Directory]::GetAccessControl($path)",
     'if (-not $verified.AreAccessRulesProtected) { throw "$label ACL still inherits access rules" }',
     "$unexpected = @($verified.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.User.Value })",
@@ -720,9 +734,13 @@ export async function validateOutputDir(
           `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
         );
       }
-      const secured = await requirePrivateScanOutput(metadata, path);
-      await requireSecureOutputAncestry(secured.path);
-      return secured.path;
+      // Inspection only: never mutate ACLs/modes before location checks succeed.
+      const resolved = await bindPrivateScanOutputPath(path, metadata);
+      if (process.platform !== "win32") {
+        requirePrivateOutputDirectory(metadata, path);
+      }
+      await requireSecureOutputAncestry(resolved.path);
+      return resolved.path;
     }
 
     let parent = dirname(path);
@@ -854,6 +872,7 @@ export async function validatePreparedOutputDir(
   }
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
+  // Location checks must win before any ACL/mode mutation.
   validateLocation?.(canonical);
   const entries = await readdir(canonical);
   if (entries.length !== 0) {
@@ -861,16 +880,59 @@ export async function validatePreparedOutputDir(
       `Scan output directory must be empty: ${path}`,
     );
   }
-  const secured = await requirePrivateScanOutput(metadata, path, options);
-  await requireSecureOutputAncestry(secured.path);
+  const secured = await hardenScanOutputDirectory(path, options);
   return secured.path;
 }
 
 /**
- * Enforce that scan output stays private to the current user.
- * On Windows this applies and verifies a current-user-only ACL (same boundary
- * as credential homes), then re-binds the path to the same directory identity.
- * On POSIX this checks mode/owner and re-binds the canonical path.
+ * Make a scan output directory private to the current user and return its
+ * rebound canonical path. This is the only mutating privacy entrypoint:
+ * POSIX ownership is checked before chmod 0700, and Windows ACLs are applied
+ * once. Call after location validation succeeds.
+ */
+export async function hardenScanOutputDirectory(
+  path: string,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsOutput?: (path: string) => Promise<void>;
+  } = {},
+): Promise<{ path: string; metadata: Stats }> {
+  let metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new OutputDirectoryError(`Scan output is not a directory: ${path}`);
+  }
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") {
+    const effectiveUid = process.geteuid?.();
+    if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
+      throw new OutputDirectoryError(
+        `Scan output directory must be owned by the current user: ${path}`,
+      );
+    }
+    if ((metadata.mode & 0o777) !== 0o700) {
+      await chmod(path, 0o700);
+      metadata = await lstat(path);
+    }
+    requirePrivateOutputDirectory(metadata, path);
+  } else {
+    try {
+      await (options.secureWindowsOutput ?? applyWindowsScanOutputAcl)(path);
+    } catch (error) {
+      throw new OutputDirectoryError(
+        `Unable to create a private Windows scan output directory: ${path}`,
+        { cause: error },
+      );
+    }
+  }
+  const secured = await bindPrivateScanOutputPath(path, metadata);
+  await requireSecureOutputAncestry(secured.path);
+  return secured;
+}
+
+/**
+ * Require that scan output is still a private, unreplaced directory.
+ * Never mutates mode or Windows ACLs — use {@link hardenScanOutputDirectory}
+ * at prepare time, then this for contract load and subsequent checks.
  */
 export async function requirePrivateScanOutput(
   metadata: Stats,
@@ -885,18 +947,19 @@ export async function requirePrivateScanOutput(
   }
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
-    return await bindPrivateScanOutputPath(path, metadata);
+  } else {
+    try {
+      await (options.secureWindowsOutput ?? verifyWindowsScanOutputAcl)(path);
+    } catch (error) {
+      throw new OutputDirectoryError(
+        `Unable to verify the private Windows scan output directory: ${path}`,
+        { cause: error },
+      );
+    }
   }
-
-  try {
-    await (options.secureWindowsOutput ?? secureWindowsScanOutput)(path);
-  } catch (error) {
-    throw new OutputDirectoryError(
-      `Unable to create a private Windows scan output directory: ${path}`,
-      { cause: error },
-    );
-  }
-  return await bindPrivateScanOutputPath(path, metadata);
+  const secured = await bindPrivateScanOutputPath(path, metadata);
+  await requireSecureOutputAncestry(secured.path);
+  return secured;
 }
 
 async function bindPrivateScanOutputPath(

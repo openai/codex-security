@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
-import { requirePrivateScanOutput } from "./runtime.js";
+import { hardenScanOutputDirectory } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -179,17 +179,15 @@ export async function runBulkScanWizard(
   signal?.throwIfAborted();
 
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
-  let prepared = await lstat(outputDir);
+  const prepared = await lstat(outputDir);
   if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
     throw new Error("The scan output must be a non-symlink directory.");
   }
-  if (process.platform !== "win32" && (prepared.mode & 0o777) !== 0o700) {
-    await chmod(outputDir, 0o700);
-    prepared = await lstat(outputDir);
-  }
-  await requirePrivateScanOutput(prepared, outputDir);
+  const secured = await hardenScanOutputDirectory(outputDir);
+  const canonicalOutput = secured.path;
+  const canonicalInput = join(canonicalOutput, "repositories.csv");
   await writeFile(
-    inputPath,
+    canonicalInput,
     `${Papa.unparse(
       repositories.map(({ fullName, url, revision }) => ({
         id: repositoryId(fullName),
@@ -199,7 +197,11 @@ export async function runBulkScanWizard(
     )}\n`,
     { flag: "wx", mode: 0o600, ...(signal === undefined ? {} : { signal }) },
   );
-  return { inputPath, outputDir, githubHost };
+  return {
+    inputPath: canonicalInput,
+    outputDir: canonicalOutput,
+    githubHost,
+  };
 }
 
 async function selectGitHubOwner(
