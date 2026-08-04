@@ -295,6 +295,10 @@ const WINDOWS_NETWORK_SERVICE_SID = "S-1-5-20";
 const WINDOWS_EVERYONE_SID = "S-1-1-0";
 const WINDOWS_AUTHENTICATED_USERS_SID = "S-1-5-11";
 const WINDOWS_USERS_SID = "S-1-5-32-545";
+const WINDOWS_CREATOR_OWNER_SID = "S-1-3-0";
+const WINDOWS_CREATOR_GROUP_SID = "S-1-3-1";
+const WINDOWS_OWNER_RIGHTS_SID = "S-1-3-4";
+const WINDOWS_ALL_APPLICATION_PACKAGES_SID = "S-1-15-2-1";
 const WINDOWS_SID = /^S-1-(?:\d+-)*\d+$/u;
 const WINDOWS_SDDL_SID = "(?:S-1-(?:\\d+-)*\\d+|[A-Z]{2})";
 const WINDOWS_SECURITY_DESCRIPTOR = new RegExp(
@@ -310,10 +314,17 @@ export interface WindowsCredentialAcl {
   deniedPrincipals: string[];
 }
 
+class UntrustedWindowsCredentialOwnerError extends Error {
+  public constructor() {
+    super("Windows credential ACL owner is not a trusted principal");
+  }
+}
+
 /** Inspect a Windows DACL without translating locale-specific account names. */
 export function inspectWindowsCredentialAcl(
   descriptor: string,
   currentUserSid: string,
+  options: { localAccount?: boolean } = {},
 ): WindowsCredentialAcl {
   if (!WINDOWS_SID.test(currentUserSid)) {
     throw new Error("Unable to identify the current Windows user SID");
@@ -327,7 +338,11 @@ export function inspectWindowsCredentialAcl(
     currentUserSid,
     WINDOWS_SYSTEM_SID,
     WINDOWS_ADMINISTRATORS_SID,
+    "LA",
   ]);
+  const currentDomainSid = /^(S-1-5-21-\d+-\d+-\d+)-\d+$/u.exec(
+    currentUserSid,
+  )?.[1];
   const principalAliases: Readonly<Record<string, string>> = {
     SY: WINDOWS_SYSTEM_SID,
     BA: WINDOWS_ADMINISTRATORS_SID,
@@ -336,14 +351,53 @@ export function inspectWindowsCredentialAcl(
     WD: WINDOWS_EVERYONE_SID,
     AU: WINDOWS_AUTHENTICATED_USERS_SID,
     BU: WINDOWS_USERS_SID,
-    ...(currentUserSid.endsWith("-500") ? { LA: currentUserSid } : {}),
-    ...(currentUserSid.endsWith("-501") ? { LG: currentUserSid } : {}),
+    CO: WINDOWS_CREATOR_OWNER_SID,
+    CG: WINDOWS_CREATOR_GROUP_SID,
+    OW: WINDOWS_OWNER_RIGHTS_SID,
+    AC: WINDOWS_ALL_APPLICATION_PACKAGES_SID,
+    AN: "S-1-5-7",
+    IU: "S-1-5-4",
+    NU: "S-1-5-2",
+    SU: "S-1-5-6",
+    RC: "S-1-5-12",
+    BG: "S-1-5-32-546",
+    PU: "S-1-5-32-547",
+    AO: "S-1-5-32-548",
+    SO: "S-1-5-32-549",
+    PO: "S-1-5-32-550",
+    BO: "S-1-5-32-551",
+    RE: "S-1-5-32-552",
+    RU: "S-1-5-32-554",
+    RD: "S-1-5-32-555",
+    NO: "S-1-5-32-556",
+    MU: "S-1-5-32-558",
+    LU: "S-1-5-32-559",
+    ...(currentDomainSid === undefined
+      ? {}
+      : {
+          DA: `${currentDomainSid}-512`,
+          DU: `${currentDomainSid}-513`,
+          DG: `${currentDomainSid}-514`,
+          DC: `${currentDomainSid}-515`,
+          DD: `${currentDomainSid}-516`,
+          CA: `${currentDomainSid}-517`,
+          SA: `${currentDomainSid}-518`,
+          EA: `${currentDomainSid}-519`,
+          PA: `${currentDomainSid}-520`,
+          RS: `${currentDomainSid}-553`,
+        }),
+    ...(options.localAccount && currentUserSid.endsWith("-500")
+      ? { LA: currentUserSid }
+      : {}),
+    ...(options.localAccount && currentUserSid.endsWith("-501")
+      ? { LG: currentUserSid }
+      : {}),
   };
   const normalizePrincipal = (principal: string): string =>
     principalAliases[principal] ?? principal;
   const owner = normalizePrincipal(match[1]!);
   if (!trustedPrincipals.has(owner)) {
-    throw new Error("Windows credential ACL owner is not a trusted principal");
+    throw new UntrustedWindowsCredentialOwnerError();
   }
   const flags = match[2]!;
   if (flags.includes("NO_ACCESS_CONTROL")) {
@@ -370,13 +424,27 @@ export function inspectWindowsCredentialAcl(
     if (fields.length !== 6) {
       throw new Error("Windows credential ACL has a malformed access rule");
     }
-    const [type, inheritance, rights, , , rawPrincipal] = fields;
+    const [
+      type,
+      inheritance,
+      rights,
+      objectGuid,
+      inheritObjectGuid,
+      rawPrincipal,
+    ] = fields;
     if (!["A", "OA", "D", "OD"].includes(type!)) {
       throw new Error("Windows credential ACL has an unsupported access rule");
     }
     if (rawPrincipal === "" || rights === "") {
       throw new Error("Windows credential ACL has an incomplete access rule");
     }
+    if (
+      (type === "OA" || type === "OD") &&
+      (objectGuid !== "" || inheritObjectGuid !== "")
+    ) {
+      throw new Error("Windows credential ACL has an unsupported object rule");
+    }
+    const inheritanceFlags = windowsAceFlags(inheritance!);
     hasAccessRules = true;
     const principal = normalizePrincipal(rawPrincipal!);
     if (type === "A" || type === "OA") {
@@ -386,11 +454,15 @@ export function inspectWindowsCredentialAcl(
         principal === currentUserSid &&
         windowsAceGrantsFullControl(rights!)
       ) {
-        if (!inheritance!.includes("IO")) {
+        if (!inheritanceFlags.has("IO")) {
           grantsCurrentDirectoryAccess = true;
         }
-        if (inheritance!.includes("OI")) grantsCurrentFileAccess = true;
-        if (inheritance!.includes("CI")) grantsCurrentContainerAccess = true;
+        if (inheritanceFlags.has("OI") && !inheritanceFlags.has("NP")) {
+          grantsCurrentFileAccess = true;
+        }
+        if (inheritanceFlags.has("CI") && !inheritanceFlags.has("NP")) {
+          grantsCurrentContainerAccess = true;
+        }
       }
     } else {
       deniedPrincipals.add(principal);
@@ -414,6 +486,23 @@ export function inspectWindowsCredentialAcl(
   };
 }
 
+function windowsAceFlags(value: string): ReadonlySet<string> {
+  if (value.length % 2 !== 0) {
+    throw new Error("Windows credential ACL has malformed inheritance flags");
+  }
+  const flags = new Set<string>();
+  for (let offset = 0; offset < value.length; offset += 2) {
+    const flag = value.slice(offset, offset + 2);
+    if (!["OI", "CI", "NP", "IO", "ID"].includes(flag)) {
+      throw new Error(
+        "Windows credential ACL has unsupported inheritance flags",
+      );
+    }
+    flags.add(flag);
+  }
+  return flags;
+}
+
 function windowsAceGrantsFullControl(rights: string): boolean {
   if (rights === "FA" || rights === "GA") return true;
   if (!/^0x[\da-f]+$/iu.test(rights)) return false;
@@ -430,9 +519,14 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "v1.0",
     "powershell.exe",
   );
+  const inheritedEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+    ),
+  );
   const processOptions = {
     env: {
-      ...process.env,
+      ...inheritedEnvironment,
       CODEX_SECURITY_CREDENTIAL_ACL_PATH: path,
       PSModulePath: join(
         systemDirectory,
@@ -450,11 +544,29 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     ["/user", "/fo", "csv", "/nh"],
     processOptions,
   );
-  const sid = /^"(?:[^"]|"")*","(S-1-(?:\d+-)*\d+)"$/u.exec(
+  const identityFields = /^"((?:[^"]|"")*)","(S-1-(?:\d+-)*\d+)"$/u.exec(
     identity.stdout.trim(),
-  )?.[1];
-  if (sid === undefined) {
+  );
+  const sid = identityFields?.[2];
+  if (
+    identityFields === null ||
+    sid === undefined ||
+    identityFields[1] === undefined
+  ) {
     throw new Error("Unable to identify the current Windows user SID");
+  }
+  let localAccount = false;
+  if (sid.endsWith("-500") || sid.endsWith("-501")) {
+    const hostname = await execFile(
+      join(systemDirectory, "hostname.exe"),
+      [],
+      processOptions,
+    );
+    const accountName = identityFields[1].replaceAll('""', '"');
+    const accountDomain = accountName.split("\\", 1)[0];
+    localAccount =
+      accountDomain !== undefined &&
+      accountDomain.toLowerCase() === hostname.stdout.trim().toLowerCase();
   }
 
   // Signed built-in cmdlets remain available under ConstrainedLanguage;
@@ -469,11 +581,20 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
       processOptions,
     );
-    return inspectWindowsCredentialAcl(descriptor.stdout, sid);
+    return inspectWindowsCredentialAcl(descriptor.stdout, sid, {
+      localAccount,
+    });
   };
 
   const icacls = join(systemDirectory, "icacls.exe");
-  let existing = await readAcl();
+  let existing: WindowsCredentialAcl;
+  try {
+    existing = await readAcl();
+  } catch (error) {
+    if (!(error instanceof UntrustedWindowsCredentialOwnerError)) throw error;
+    await execFile(icacls, [path, "/setowner", `*${sid}`], processOptions);
+    existing = await readAcl();
+  }
   if (
     existing.grantsCurrentUserAccess &&
     existing.untrustedPrincipals.length === 0

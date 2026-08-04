@@ -1710,6 +1710,16 @@ describe("runtime directories and plugin Python boundary", () => {
       ["WD", "S-1-1-0"],
       ["BU", "S-1-5-32-545"],
       ["AU", "S-1-5-11"],
+      ["CO", "S-1-3-0"],
+      ["CG", "S-1-3-1"],
+      ["OW", "S-1-3-4"],
+      ["AC", "S-1-15-2-1"],
+      ["AN", "S-1-5-7"],
+      ["IU", "S-1-5-4"],
+      ["SU", "S-1-5-6"],
+      ["RD", "S-1-5-32-555"],
+      ["DA", "S-1-5-21-111-222-333-512"],
+      ["DU", "S-1-5-21-111-222-333-513"],
       [stranger, stranger],
     ] as const) {
       expect(
@@ -1740,6 +1750,9 @@ describe("runtime directories and plugin Python boundary", () => {
       ["OI", "FA"],
       ["CI", "FA"],
       ["OICIIO", "FA"],
+      ["OICINP", "FA"],
+      ["OICINPID", "FA"],
+      ["CIIOID", "FA"],
     ] as const) {
       expect(
         inspectWindowsCredentialAcl(
@@ -1764,6 +1777,18 @@ describe("runtime directories and plugin Python boundary", () => {
         user,
       ).grantsCurrentUserAccess,
     ).toBe(true);
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:${user}D:P(A;CIOI;FA;;;${user})`,
+        user,
+      ).grantsCurrentUserAccess,
+    ).toBe(true);
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:${user}D:P(A;;FA;;;${user})(A;OINP;FA;;;${user})(A;CI;FA;;;${user})`,
+        user,
+      ).grantsCurrentUserAccess,
+    ).toBe(false);
   });
 
   test("normalizes built-in Windows user and service SID aliases", () => {
@@ -1778,6 +1803,7 @@ describe("runtime directories and plugin Python boundary", () => {
         inspectWindowsCredentialAcl(
           `O:${alias}G:SYD:P(A;OICI;FA;;;${alias})(A;OICI;FA;;;BA)`,
           user,
+          { localAccount: alias === "LA" || alias === "LG" },
         ),
       ).toMatchObject({
         owner: user,
@@ -1787,6 +1813,33 @@ describe("runtime directories and plugin Python boundary", () => {
         deniedPrincipals: [],
       });
     }
+  });
+
+  test("does not confuse domain accounts with local Administrator or Guest", () => {
+    const administrator = "S-1-5-21-111-222-333-500";
+    const guest = "S-1-5-21-111-222-333-501";
+
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:LAG:SYD:P(A;OICI;FA;;;LA)(A;OICI;FA;;;BA)`,
+        administrator,
+      ),
+    ).toMatchObject({
+      owner: "LA",
+      grantsCurrentUserAccess: false,
+    });
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${guest}G:SYD:P(A;OICI;FA;;;${guest})(A;OICI;FA;;;LG)`,
+        guest,
+      ).untrustedPrincipals,
+    ).toEqual(["LG"]);
+    expect(() =>
+      inspectWindowsCredentialAcl(
+        `O:LGG:SYD:P(A;OICI;FA;;;${guest})(A;OICI;FA;;;LG)`,
+        guest,
+      ),
+    ).toThrow("owner is not a trusted principal");
   });
 
   test("rejects incomplete, unowned, and unsupported Windows ACLs", () => {
@@ -1799,6 +1852,9 @@ describe("runtime directories and plugin Python boundary", () => {
       `O:${user}G:${user}D:P`,
       `O:${stranger}G:${user}D:P(A;OICI;FA;;;${user})`,
       `O:${user}G:${user}D:P(XA;OICI;FA;;;${user})`,
+      `O:${user}G:${user}D:P(A;OIN;FA;;;${user})`,
+      `O:${user}G:${user}D:P(A;ZZ;FA;;;${user})`,
+      `O:${user}G:${user}D:P(OA;OICI;FA;bf967aba-0de6-11d0-a285-00aa003049e2;;${user})`,
       `O:${user}G:${user}D:P(A;OICI;FA;;;${user};(@User.Department == \"QA\"))`,
     ]) {
       expect(() => inspectWindowsCredentialAcl(descriptor, user)).toThrow();
@@ -2084,6 +2140,7 @@ describe("runtime directories and plugin Python boundary", () => {
         __PSLockdownPolicy: "4",
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
         PSModulePath: join(root, "untrusted-or-incompatible-modules"),
+        PSMODULEPATH: join(root, "uppercase-untrusted-modules"),
       };
       const mode = spawnSync(
         powershell,
