@@ -1865,7 +1865,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
     if args.status == "closed" and close_reason is None:
         raise SystemExit("Choose why this finding is being closed.")
     note = optional_text(args.note, maximum=2400)
-    require_close_reason(close_reason, note)
+    require_close_note(close_reason, note)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()

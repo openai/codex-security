@@ -141,6 +141,25 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("allows the workbench to derive missing deferred scan identifiers", async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(PLUGIN_ROOT, "schemas", "tools", "scan-draft.schema.json"),
+        "utf8",
+      ),
+    ) as {
+      $defs: {
+        coverage: {
+          properties: { deferred: { items: { required: string[] } } };
+        };
+      };
+    };
+
+    expect(schema.$defs.coverage.properties.deferred.items.required).toEqual([
+      "reason",
+    ]);
+  });
+
   test("projects only the unchanged external payload from the source checkout", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");
