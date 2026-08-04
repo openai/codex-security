@@ -1763,10 +1763,13 @@ describe("CodexSecurity orchestration", () => {
               falsePositives: [],
             };
           }
+          if (args[0] === "prepare-scan-completion") {
+            return { targetWarnings: [completionWarning] };
+          }
           if (args[0] === "complete-scan") {
             return {
               scan: { warnings: [completionWarning, recoveryWarning] },
-              targetWarnings: [completionWarning],
+              targetWarnings: [],
             };
           }
           return {};

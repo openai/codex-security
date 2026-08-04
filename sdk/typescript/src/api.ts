@@ -356,6 +356,7 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
+    let preparedTargetWarnings: string[] = [];
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -878,11 +879,16 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
-          await workbench(workbenchOptions, [
+          const preparation = await workbench(workbenchOptions, [
             "prepare-scan-completion",
             "--scan-id",
             scanId,
           ]);
+          preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
+            ? preparation["targetWarnings"].filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : [];
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
@@ -902,13 +908,14 @@ export class CodexSecurity {
       activeScan = null;
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
-        const targetWarnings = new Set(
-          Array.isArray(completion["targetWarnings"])
+        const targetWarnings = new Set([
+          ...preparedTargetWarnings,
+          ...(Array.isArray(completion["targetWarnings"])
             ? completion["targetWarnings"].filter(
                 (warning): warning is string => typeof warning === "string",
               )
-            : [],
-        );
+            : []),
+        ]);
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string") {
             notifyObserver(

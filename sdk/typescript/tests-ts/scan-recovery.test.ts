@@ -338,6 +338,31 @@ describe("malformed scan artifact recovery", () => {
     expect((await completeScan(fixture)).progress.status).toBe("complete");
   });
 
+  test("preserves target-drift classification from prepared completion", async () => {
+    const fixture = await startDraftScan();
+    const source = join(fixture.repository, "src", "extract.py");
+    const original = await readFile(source, "utf8");
+    await writeFile(source, "# target changed during scan\n");
+
+    const prepared = await workbench(fixture, [
+      "prepare-scan-completion",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    const warning =
+      "Directory contents changed while the scan was running; results were saved for the original snapshot.";
+    expect(prepared["targetWarnings"]).toEqual([warning]);
+
+    await writeFile(source, original);
+    const completed = await workbench(fixture, [
+      "complete-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((completed["scan"] as ScanSummary).warnings).toContain(warning);
+    expect(completed["targetWarnings"]).toEqual([]);
+  });
+
   test("marks rejected prepared scans as failed without publishing completion", async () => {
     const fixture = await startDraftScan();
     await workbench(fixture, [
