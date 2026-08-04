@@ -64,9 +64,56 @@ describe("ScanResult", () => {
     expect(result.toJSON()).toMatchObject({
       scanDir: "/scan",
       threadId: "thread",
+      rolloutSessionIndexPath: null,
       cost: null,
     });
   });
+
+  test("exposes the rollout session index in machine-readable results", () => {
+    const result = new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/scan",
+      threadId: "thread",
+      turnResult: { status: "completed" },
+      rolloutSessionIndexPath: "/scan/artifacts/rollout-sessions/index.json",
+    });
+
+    expect(result.rolloutSessionIndexPath).toBe(
+      "/scan/artifacts/rollout-sessions/index.json",
+    );
+    expect(result.toJSON()["rolloutSessionIndexPath"]).toBe(
+      result.rolloutSessionIndexPath,
+    );
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "does not discover a symlinked rollout session index",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-result-"));
+      try {
+        const scanDir = join(root, "scan");
+        const indexDirectory = join(scanDir, "artifacts", "rollout-sessions");
+        const outside = join(root, "outside-index.json");
+        await mkdir(indexDirectory, { recursive: true });
+        await writeFile(outside, "{}\n");
+        await symlink(outside, join(indexDirectory, "index.json"));
+
+        const result = new ScanResult({
+          manifest,
+          findings,
+          coverage,
+          scanDir,
+          threadId: "thread",
+          turnResult: { status: "completed" },
+        });
+        expect(result.rolloutSessionIndexPath).toBeNull();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("includes the model and estimated cost in machine-readable results", () => {
     const result = new ScanResult({

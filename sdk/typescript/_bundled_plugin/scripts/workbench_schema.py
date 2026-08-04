@@ -618,6 +618,13 @@ MIGRATIONS = (
         ADD COLUMN completion_warnings_json TEXT NOT NULL DEFAULT '[]';
         """,
     ),
+    (
+        27,
+        "persist rollout session indexes",
+        """
+        ALTER TABLE scans ADD COLUMN rollout_session_index_path TEXT;
+        """,
+    ),
 )
 
 

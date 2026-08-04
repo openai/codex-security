@@ -50,6 +50,7 @@ export interface MultiscanOptions {
   outputDir: string;
   githubHost?: string;
   knowledgeBasePaths?: string[];
+  retainRolloutSessions?: boolean;
   workers: number;
   mode: ScanMode;
   maxAttempts: number;
@@ -184,6 +185,9 @@ async function runCampaign(
             ...(task.scope === undefined ? {} : { target: [task.scope] }),
             ...(options.knowledgeBasePaths?.length
               ? { knowledgeBasePaths: options.knowledgeBasePaths }
+              : {}),
+            ...(options.retainRolloutSessions === true
+              ? { retainRolloutSessions: true }
               : {}),
             mode: task.mode,
             outputDir: scanDir,

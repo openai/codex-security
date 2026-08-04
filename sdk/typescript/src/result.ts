@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { lstatSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
@@ -25,6 +25,7 @@ export interface ScanResultOptions {
   threadId: string;
   turnResult: TurnResultMetadata;
   sarifPath?: string | null;
+  rolloutSessionIndexPath?: string | null;
 }
 
 export class ScanResult {
@@ -36,6 +37,7 @@ export class ScanResult {
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
+  public readonly rolloutSessionIndexPath: string | null;
 
   public constructor(options: ScanResultOptions) {
     this.manifest = options.manifest;
@@ -64,6 +66,25 @@ export class ScanResult {
           : null;
       } catch {
         this.sarifPath = null;
+      }
+    }
+    if (options.rolloutSessionIndexPath !== undefined) {
+      this.rolloutSessionIndexPath = options.rolloutSessionIndexPath;
+    } else {
+      const defaultIndexPath = join(
+        options.scanDir,
+        "artifacts",
+        "rollout-sessions",
+        "index.json",
+      );
+      try {
+        this.rolloutSessionIndexPath = lstatSync(defaultIndexPath, {
+          throwIfNoEntry: false,
+        })?.isFile()
+          ? defaultIndexPath
+          : null;
+      } catch {
+        this.rolloutSessionIndexPath = null;
       }
     }
   }
@@ -102,6 +123,7 @@ export class ScanResult {
       reportPath: this.reportPath,
       artifactsDir: this.artifactsDir,
       sarifPath: this.sarifPath,
+      rolloutSessionIndexPath: this.rolloutSessionIndexPath,
       cost: this.cost,
       turn: this.turnResult,
     };

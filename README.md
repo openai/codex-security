@@ -90,8 +90,15 @@ await security.run(".", {
 });
 
 console.log(result.reportPath);
+console.log(result.rolloutSessionIndexPath);
 await security.close();
 ```
+
+Every started scan indexes its coordinator and descendant worker rollouts in
+the private results directory, including failed scans. Raw rollout JSONL files
+are copied only when `retainRolloutSessions: true` or the CLI flag
+`--retain-rollout-sessions` is set because they can contain source code,
+prompts, and tool output.
 
 ## Containerized bulk scans
 

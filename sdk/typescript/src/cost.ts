@@ -1,5 +1,8 @@
-import { open, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  CodexRolloutReader,
+  normalizeTokenUsage,
+  type ScanTokenUsage,
+} from "./codex-rollouts.js";
 
 export interface ScanCost {
   model: string;
@@ -17,27 +20,9 @@ type ModelPricing = readonly [
   output: number,
 ];
 
-interface ScanTokenUsage {
-  input_tokens: number;
-  cached_input_tokens: number;
-  cache_write_input_tokens: number;
-  output_tokens: number;
-  reasoning_output_tokens: number;
-  total_tokens: number;
-}
-
-interface SessionUsage {
-  offset: number;
-  pendingLine: Buffer[];
-  pendingLineBytes: number;
-  unreadable: boolean;
-  threadId: string | null;
-  parentThreadId: string | null;
-  usage: ScanTokenUsage | null;
-}
-
 interface ScanCostTrackerOptions {
   codexHome: string;
+  rolloutReader?: CodexRolloutReader;
   model: string;
   maxCostUsd?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
@@ -57,12 +42,9 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 };
 
 const COST_POLL_INTERVAL_MS = 100;
-const SESSION_READ_SIZE = 64 * 1_024;
-const MAX_SESSION_EVENT_BYTES = 1 * 1_024 * 1_024;
-
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
-  readonly #sessions = new Map<string, SessionUsage>();
+  readonly #rolloutReader: CodexRolloutReader;
   #threadId: string | null = null;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
@@ -71,6 +53,8 @@ export class ScanCostTracker {
 
   public constructor(options: ScanCostTrackerOptions) {
     this.#options = options;
+    this.#rolloutReader =
+      options.rolloutReader ?? new CodexRolloutReader(options.codexHome);
   }
 
   public start(threadId: string): void {
@@ -126,58 +110,10 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = {
-          offset: 0,
-          pendingLine: [],
-          pendingLineBytes: 0,
-          unreadable: false,
-          threadId: null,
-          parentThreadId: null,
-          usage: null,
-        };
-        this.#sessions.set(path, session);
-      }
-      try {
-        await readSessionUsage(path, session);
-      } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
-      }
-    }
-
-    const included = new Set([this.#threadId]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const session of this.#sessions.values()) {
-        if (
-          session.threadId !== null &&
-          session.parentThreadId !== null &&
-          included.has(session.parentThreadId) &&
-          !included.has(session.threadId)
-        ) {
-          included.add(session.threadId);
-          changed = true;
-        }
-      }
-    }
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
-    }
-
+    const sessions = await this.#rolloutReader.refresh(this.#threadId);
     let usage: ScanTokenUsage | null = null;
-    for (const session of this.#sessions.values()) {
-      if (
-        session.threadId !== null &&
-        included.has(session.threadId) &&
-        session.usage !== null
-      ) {
+    for (const session of sessions) {
+      if (session.usage !== null) {
         usage = addTokenUsage(usage, session.usage);
       }
     }
@@ -192,158 +128,6 @@ export class ScanCostTracker {
     this.#lastCost = cost.estimatedUsd;
     this.#options.onCost?.(cost);
   }
-}
-
-async function* sessionFiles(directory: string): AsyncGenerator<string> {
-  let entries;
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch (error) {
-    if (isMissingFile(error)) return;
-    throw error;
-  }
-  for (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      yield* sessionFiles(path);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      yield path;
-    }
-  }
-}
-
-async function readSessionUsage(
-  path: string,
-  session: SessionUsage,
-): Promise<void> {
-  if (session.unreadable) return;
-  let file;
-  try {
-    file = await open(path, "r");
-  } catch (error) {
-    if (isMissingFile(error)) return;
-    throw error;
-  }
-  try {
-    const buffer = Buffer.alloc(SESSION_READ_SIZE);
-    while (true) {
-      const { bytesRead } = await file.read(
-        buffer,
-        0,
-        buffer.length,
-        session.offset,
-      );
-      if (bytesRead === 0) return;
-      session.offset += bytesRead;
-      try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session);
-      } catch (error) {
-        session.unreadable = true;
-        session.pendingLine = [];
-        session.pendingLineBytes = 0;
-        throw error;
-      }
-    }
-  } finally {
-    await file.close();
-  }
-}
-
-function readSessionChunk(contents: Buffer, session: SessionUsage): void {
-  let lineStart = 0;
-  while (lineStart < contents.length) {
-    const newline = contents.indexOf(0x0a, lineStart);
-    const lineEnd = newline === -1 ? contents.length : newline;
-    const fragment = contents.subarray(lineStart, lineEnd);
-    const lineBytes = session.pendingLineBytes + fragment.length;
-    if (lineBytes > MAX_SESSION_EVENT_BYTES) {
-      throw new Error("Codex session event exceeds the 1 MiB safety limit.");
-    }
-
-    if (newline === -1) {
-      if (fragment.length > 0) {
-        session.pendingLine.push(Buffer.from(fragment));
-        session.pendingLineBytes = lineBytes;
-      }
-      return;
-    }
-
-    if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session);
-    } else {
-      if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
-      readSessionEvent(
-        Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
-        session,
-      );
-      session.pendingLine = [];
-      session.pendingLineBytes = 0;
-    }
-    lineStart = newline + 1;
-  }
-}
-
-function readSessionEvent(line: string, session: SessionUsage): void {
-  if (line.length === 0) return;
-  let event: unknown;
-  try {
-    event = JSON.parse(line) as unknown;
-  } catch {
-    return;
-  }
-  if (!isRecord(event) || !isRecord(event["payload"])) return;
-  const payload = event["payload"];
-  if (event["type"] === "session_meta") {
-    if (typeof payload["id"] === "string") {
-      session.threadId = payload["id"];
-    }
-    const source = payload["source"];
-    const subagent = isRecord(source) ? source["subagent"] : undefined;
-    const spawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
-    const parent =
-      payload["parent_thread_id"] ??
-      (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
-    if (typeof parent === "string") session.parentThreadId = parent;
-    return;
-  }
-  if (
-    event["type"] !== "event_msg" ||
-    payload["type"] !== "token_count" ||
-    !isRecord(payload["info"])
-  ) {
-    return;
-  }
-  const usage = tokenUsage(payload["info"]["total_token_usage"]);
-  if (usage !== null) session.usage = usage;
-}
-
-function tokenUsage(value: unknown): ScanTokenUsage | null {
-  if (!isRecord(value)) return null;
-  const input = value["input_tokens"];
-  const cached = value["cached_input_tokens"] ?? 0;
-  const cacheWrite =
-    value["cache_write_input_tokens"] ?? value["cache_write_tokens"] ?? 0;
-  const output = value["output_tokens"];
-  const reasoning = value["reasoning_output_tokens"] ?? 0;
-  if (
-    !isTokenCount(input) ||
-    !isTokenCount(cached) ||
-    !isTokenCount(cacheWrite) ||
-    !isTokenCount(output) ||
-    !isTokenCount(reasoning) ||
-    cached + cacheWrite > input ||
-    reasoning > output
-  ) {
-    return null;
-  }
-  return {
-    input_tokens: input,
-    cached_input_tokens: cached,
-    cache_write_input_tokens: cacheWrite,
-    output_tokens: output,
-    reasoning_output_tokens: reasoning,
-    total_tokens: input + output,
-  };
 }
 
 function addTokenUsage(
@@ -364,21 +148,13 @@ function addTokenUsage(
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isMissingFile(error: unknown): boolean {
-  return isRecord(error) && error["code"] === "ENOENT";
-}
-
 export function estimateScanCost(
   model: string | undefined,
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
   const pricing = MODEL_PRICING_NANODOLLARS[model];
-  const normalized = tokenUsage(usage);
+  const normalized = normalizeTokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
   const {
@@ -412,8 +188,4 @@ export function formatUsd(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 9,
   }).format(value);
-}
-
-function isTokenCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }

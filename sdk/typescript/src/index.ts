@@ -40,6 +40,10 @@ export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
 export { ScanResult } from "./result.js";
 export type { ScanResultOptions, TurnResultMetadata } from "./result.js";
+export type {
+  RolloutSessionIndex,
+  RolloutSessionIndexEntry,
+} from "./rollout-session-index.js";
 export {
   bootstrapPlugin,
   bundledPluginRoot,

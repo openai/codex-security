@@ -1367,9 +1367,17 @@ def complete_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
     cost_json = None if prepare_only else parse_scan_cost(args.cost_json)
+    rollout_session_index_path = (
+        None if prepare_only else getattr(args, "rollout_session_index_path", None)
+    )
     with scan_completion_lock(scan_id):
         return complete_scan_locked(
-            connection, scan_id, args.claim_token, cost_json, prepare_only=prepare_only
+            connection,
+            scan_id,
+            args.claim_token,
+            cost_json,
+            rollout_session_index_path,
+            prepare_only=prepare_only,
         )
 
 
@@ -1378,6 +1386,7 @@ def complete_scan_locked(
     scan_id: str,
     claim_token: str | None,
     cost_json: str | None,
+    rollout_session_index_path: str | None,
     *,
     prepare_only: bool = False,
 ) -> dict[str, Any]:
@@ -1411,6 +1420,9 @@ def complete_scan_locked(
     if warning is not None and warning not in warnings:
         warnings.append(warning)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    stored_rollout_session_index_path = scan_relative_artifact_path(
+        scan_dir, rollout_session_index_path
+    )
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
     if scan["recipe_json"] is not None:
@@ -1512,7 +1524,8 @@ def complete_scan_locked(
             """
             UPDATE scans
             SET status = 'complete', phase = 'reporting', completed_at = ?, updated_at = ?,
-                seal_manifest_digest = ?, cost_json = ?, completion_warnings_json = ?
+                seal_manifest_digest = ?, cost_json = ?, completion_warnings_json = ?,
+                rollout_session_index_path = ?
             WHERE id = ? AND status = 'running'
             """,
             (
@@ -1521,6 +1534,7 @@ def complete_scan_locked(
                 manifest_digest,
                 cost_json,
                 json.dumps(warnings),
+                stored_rollout_session_index_path,
                 scan["id"],
             ),
         )
@@ -1736,6 +1750,10 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
             return scan_context(connection, scan["id"])
         if scan["status"] == "complete":
             raise SystemExit("A completed scan cannot be marked failed.")
+        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        rollout_session_index_path = scan_relative_artifact_path(
+            scan_dir, getattr(args, "rollout_session_index_path", None)
+        )
         handoff.require_current_continuation(
             scan,
             args.claim_token,
@@ -1745,7 +1763,7 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
             """
             UPDATE scans
             SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?,
-                cost_json = ?
+                cost_json = ?, rollout_session_index_path = ?
             WHERE id = ? AND status = 'running'
             """,
             (
@@ -1753,6 +1771,7 @@ def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[
                 timestamp,
                 timestamp,
                 cost_json,
+                rollout_session_index_path,
                 scan["id"],
             ),
         )
@@ -2949,6 +2968,15 @@ def scan_result(
     )
     if sarif_path is not None:
         artifacts["sarifReport"] = str(sarif_path)
+    rollout_session_index_path = None
+    if scan["rollout_session_index_path"] is not None:
+        rollout_session_index_path = available_artifact_path(
+            Path(scan["scan_dir"]),
+            Path(scan["scan_dir"])
+            / PurePosixPath(scan["rollout_session_index_path"]),
+        )
+        if rollout_session_index_path is not None:
+            artifacts["rolloutSessionIndex"] = str(rollout_session_index_path)
     occurrence_rows = scan_history.finding_occurrence_rows(
         connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
     )
@@ -3029,6 +3057,11 @@ def scan_result(
         "remediationAvailable": remediation_available,
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
+        "rolloutSessionIndexPath": (
+            str(rollout_session_index_path)
+            if rollout_session_index_path is not None
+            else None
+        ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
         "scope": scan["scope"],
@@ -3475,6 +3508,24 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
     if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():
         raise SystemExit(f"{file_name}: expected a regular non-symlink file.")
     return resolved
+
+
+def scan_relative_artifact_path(scan_dir: Path, value: str | None) -> str | None:
+    path = optional_text(value, maximum=2048)
+    if path is None:
+        return None
+    parsed = PurePosixPath(path)
+    if (
+        parsed.is_absolute()
+        or "\\" in path
+        or ".." in parsed.parts
+        or parsed.as_posix() != path
+        or not parsed.parts
+    ):
+        raise SystemExit("Rollout session index path must be scan-relative.")
+    resolved = artifact_path(scan_dir, path, required=True)
+    assert resolved is not None
+    return resolved.relative_to(scan_dir).as_posix()
 
 
 def require_canonical_scan_directory(scan_dir: Path) -> Path:
