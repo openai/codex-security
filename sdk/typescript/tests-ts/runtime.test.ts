@@ -1841,6 +1841,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert os.environ.get('CODEX_API_KEY') is None",
         "assert os.environ.get('OPENROUTER_API_KEY') is None",
         "assert os.environ.get('FIREWORKS_API_KEY') is None",
+        "assert os.environ.get('HF_TOKEN') is None",
         "print(json.dumps({'ok': True}))",
       ].join("\n"),
     );
@@ -1856,6 +1857,7 @@ describe("runtime directories and plugin Python boundary", () => {
           CODEX_API_KEY: "also-must-not-reach-python",
           OPENROUTER_API_KEY: "openrouter-must-not-reach-python",
           FIREWORKS_API_KEY: "fireworks-must-not-reach-python",
+          HF_TOKEN: "huggingface-must-not-reach-python",
         },
       },
       ["test-command"],

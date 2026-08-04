@@ -35,12 +35,27 @@ export const FIREWORKS_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const HUGGINGFACE_CODEX_PROVIDER = {
+  name: "Hugging Face",
+  base_url: "https://router.huggingface.co/v1",
+  env_key: "HF_TOKEN",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
+  huggingface: HUGGINGFACE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
+
+export type ExternalProviderEnvKey =
+  (typeof EXTERNAL_CODEX_PROVIDERS)[ExternalModelProvider]["env_key"];
+
+export const EXTERNAL_CODEX_PROVIDER_ENV_KEYS = new Set<string>(
+  Object.values(EXTERNAL_CODEX_PROVIDERS).map((provider) => provider.env_key),
+);
 
 export function isExternalModelProvider(
   provider: unknown,

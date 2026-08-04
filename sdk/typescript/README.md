@@ -128,6 +128,9 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export HF_TOKEN="<your-huggingface-token>"
+npx @openai/codex-security scan . --provider huggingface --model openai/gpt-oss-120b
 ```
 
 On Windows, set the API key in PowerShell:
@@ -417,6 +420,13 @@ Use `--provider openrouter` to send inference through OpenRouter. Set
 
 Use `--provider fireworks` to send inference through Fireworks AI. Set
 `FIREWORKS_API_KEY` and specify a supported model with `--model`.
+
+Use `--provider huggingface` to send inference through
+[Hugging Face Inference Providers](https://huggingface.co/docs/inference-providers/en/index).
+Set `HF_TOKEN` (fine-grained token with Inference Providers permission) and
+specify a supported model with `--model`. Append a provider or policy suffix
+when needed (for example `openai/gpt-oss-120b:groq` or
+`openai/gpt-oss-120b:cheapest`).
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.

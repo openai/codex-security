@@ -39,6 +39,7 @@ import { main, parseCodexOverrides, Progress } from "../src/cli.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
+  HUGGINGFACE_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   scanModelConfiguration,
 } from "../src/config.js";
@@ -121,7 +122,9 @@ describe("CLI", () => {
           model: { type: "string" },
           verbose: { type: "boolean" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
-          provider: { enum: ["openai", "openrouter", "fireworks"] },
+          provider: {
+            enum: ["openai", "openrouter", "fireworks", "huggingface"],
+          },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
@@ -758,6 +761,12 @@ describe("CLI", () => {
       "fireworks",
       "accounts/fireworks/models/qwen3-235b-a22b",
       FIREWORKS_CODEX_PROVIDER,
+    ],
+    [
+      "Hugging Face",
+      "huggingface",
+      "openai/gpt-oss-120b",
+      HUGGINGFACE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes bulk scans through %s",
@@ -1683,7 +1692,9 @@ describe("CLI", () => {
     expect(help.text()).toContain("--stop-after-no-new <number>");
     expect(help.text()).toContain("--max-discovery-runs <number>");
     expect(help.text()).toContain("--model <string>");
-    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
+    expect(help.text()).toContain(
+      "--provider <openai|openrouter|fireworks|huggingface>",
+    );
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
@@ -1749,7 +1760,9 @@ describe("CLI", () => {
     );
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
+    expect(help.text()).toContain(
+      "--provider <openai|openrouter|fireworks|huggingface>",
+    );
     expect(stderr.text()).toBe("");
   });
 
@@ -1809,6 +1822,13 @@ describe("CLI", () => {
       "accounts/fireworks/models/gpt-oss-120b",
       "accounts/fireworks/models/llama-v3p3-70b-instruct",
       FIREWORKS_CODEX_PROVIDER,
+    ],
+    [
+      "Hugging Face",
+      "huggingface",
+      "openai/gpt-oss-120b",
+      "moonshotai/Kimi-K2-Instruct-0905:groq",
+      HUGGINGFACE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes scans through %s",
@@ -1953,7 +1973,11 @@ describe("CLI", () => {
         "high",
       ),
     ).toThrow("--effort conflicts with --codex model_reasoning_effort");
-    for (const provider of ["openrouter", "fireworks"] as const) {
+    for (const provider of [
+      "openrouter",
+      "fireworks",
+      "huggingface",
+    ] as const) {
       expect(() =>
         parseCodexOverrides([], undefined, undefined, provider),
       ).toThrow(`--model is required when using --provider ${provider}`);
@@ -2046,6 +2070,10 @@ describe("CLI", () => {
       [
         ["scan", ".", "--provider", "fireworks"],
         "--model is required when using --provider fireworks",
+      ],
+      [
+        ["scan", ".", "--provider", "huggingface"],
+        "--model is required when using --provider huggingface",
       ],
       [
         ["scan", ".", "--effort", "ultra"],

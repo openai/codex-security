@@ -26,11 +26,13 @@ import {
   type AccountStatus,
 } from "./auth.js";
 import {
+  EXTERNAL_CODEX_PROVIDER_ENV_KEYS,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
   type CodexSecurityConfig,
+  type ExternalProviderEnvKey,
   type JsonObject,
   writeCodexConfig,
 } from "./config.js";
@@ -173,11 +175,7 @@ export type ScanAuthMode = "auto" | "chatgpt" | "api-key";
 export type ScanAuthentication =
   | {
       method: "api_key";
-      source:
-        | "OPENAI_API_KEY"
-        | "CODEX_API_KEY"
-        | "OPENROUTER_API_KEY"
-        | "FIREWORKS_API_KEY";
+      source: "OPENAI_API_KEY" | "CODEX_API_KEY" | ExternalProviderEnvKey;
       verified: false;
     }
   | {
@@ -1903,7 +1901,7 @@ function selectedScanEnvironment(
       const key = name.toUpperCase();
       if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
       if (selectedProviderKey === null) return true;
-      if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
+      if (EXTERNAL_CODEX_PROVIDER_ENV_KEYS.has(key)) {
         return key === selectedProviderKey;
       }
       return true;
@@ -1936,11 +1934,7 @@ function environmentApiKeyEntry(
   environment: ProcessEnvironment,
   modelProvider?: unknown,
 ): {
-  source:
-    | "OPENAI_API_KEY"
-    | "CODEX_API_KEY"
-    | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY";
+  source: "OPENAI_API_KEY" | "CODEX_API_KEY" | ExternalProviderEnvKey;
   value: string;
 } | null {
   const keys = isExternalModelProvider(modelProvider)
