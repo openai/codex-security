@@ -10,8 +10,9 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,12 +41,55 @@ def git_bytes(
     return completed.stdout if completed.returncode == 0 else None
 
 
+def git_digest_field(
+    digest: Any,
+    label: bytes,
+    target: Path,
+    *args: str,
+    git_dir: Path | None = None,
+    work_tree: Path | None = None,
+) -> bool:
+    """Frame Git output into ``digest`` without holding the output in memory.
+
+    ``update_digest_field`` prefixes every value with its total length, so the byte
+    count has to be known before any of the content is hashed. Spooling stdout to a
+    private temporary file records that length from a single Git invocation, and the file
+    is then hashed in chunks. The framing is byte for byte what ``update_digest_field``
+    writes, so digests stay comparable with recorded ones.
+
+    Returns whether Git succeeded; the digest is left untouched when it did not.
+    """
+    # The spool lives in the process temporary directory, never in the scan directory or
+    # the repository, and is owner-only. On POSIX it is unlinked before Git writes to it,
+    # so the patch is never reachable by name and cannot outlive this process.
+    with tempfile.TemporaryFile() as spool:
+        completed = git_command(
+            target,
+            *args,
+            text=False,
+            git_dir=git_dir,
+            work_tree=work_tree,
+            stdout=spool,
+        )
+        if completed.returncode != 0:
+            return False
+        size = os.fstat(spool.fileno()).st_size
+        spool.seek(0)
+        digest.update(len(label).to_bytes(4, "big"))
+        digest.update(label)
+        digest.update(size.to_bytes(8, "big"))
+        for chunk in iter(lambda: spool.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return True
+
+
 def git_command(
     target: Path,
     *args: str,
     text: bool,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    stdout: IO[bytes] | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -62,7 +106,8 @@ def git_command(
         return subprocess.run(
             full_command,
             check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE if stdout is None else stdout,
+            stderr=subprocess.PIPE,
             env=environment,
             text=text,
         )
@@ -109,7 +154,13 @@ def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
     """
 
     repository, pathspec = git_worktree_context(target)
-    tracked = git_bytes(
+    digest = hashlib.sha256()
+    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    # The patch is streamed: `git diff --binary` over a large changed binary produces
+    # a patch several times the file size, which must not be buffered in memory.
+    tracked = git_digest_field(
+        digest,
+        b"tracked-diff",
         repository,
         "diff",
         "--binary",
@@ -122,11 +173,8 @@ def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
         "--",
         pathspec,
     )
-    if tracked is None:
+    if not tracked:
         raise SystemExit("Could not snapshot the selected committed changes.")
-    digest = hashlib.sha256()
-    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
-    update_digest_field(digest, b"tracked-diff", tracked)
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 

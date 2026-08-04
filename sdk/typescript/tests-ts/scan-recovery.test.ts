@@ -1203,6 +1203,75 @@ function requireDiffTarget(
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
 
+type CommittedDigestProbe = {
+  streamed: string;
+  buffered: string;
+  bufferedPatchCalls: string[][];
+};
+
+// Records every git_bytes call committed_diff_content_digest makes, then recomputes
+// the same digest through the buffered helper pair the streaming path replaced.
+function committedDigestProbe(
+  fixture: GitFixture,
+  base: string,
+  head: string,
+): CommittedDigestProbe {
+  const result = spawnSync(
+    fixture.python,
+    [
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import hashlib, json, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_target as target",
+        "repository = Path(sys.argv[2])",
+        "base, head = sys.argv[3], sys.argv[4]",
+        "calls = []",
+        "buffered_git_bytes = target.git_bytes",
+        "def spy(where, *args, **options):",
+        "    calls.append(list(args))",
+        "    return buffered_git_bytes(where, *args, **options)",
+        "target.git_bytes = spy",
+        "streamed = target.committed_diff_content_digest(repository, base, head)",
+        "target.git_bytes = buffered_git_bytes",
+        "root, pathspec = target.git_worktree_context(repository)",
+        "patch = buffered_git_bytes(",
+        "    root,",
+        "    'diff',",
+        "    '--binary',",
+        "    '--full-index',",
+        "    '--no-ext-diff',",
+        "    '--no-textconv',",
+        "    '--ignore-submodules=none',",
+        "    base,",
+        "    head,",
+        "    '--',",
+        "    pathspec,",
+        ")",
+        "digest = hashlib.sha256()",
+        "target.update_digest_field(digest, b'format', b'codex-security-snapshot/v1')",
+        "target.update_digest_field(digest, b'tracked-diff', patch)",
+        "print(json.dumps({",
+        "    'streamed': streamed,",
+        "    'buffered': 'codex-security-snapshot/v1:sha256:' + digest.hexdigest(),",
+        "    'bufferedPatchCalls': [call for call in calls if 'diff' in call],",
+        "}))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      fixture.repository,
+      base,
+      head,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.stderr).toBe("");
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as CommittedDigestProbe;
+}
+
 describe("committed diff target selection", () => {
   test("diffs a root commit against the SHA-1 empty tree", async () => {
     const fixture = await gitFixture("sha1");
@@ -1279,5 +1348,28 @@ describe("committed diff target selection", () => {
     expect(requireDiffTarget(fixture, "range", base, head, "")).toMatchObject({
       accepted: true,
     });
+  });
+
+  test("streams the committed patch instead of buffering it", async () => {
+    const fixture = await gitFixture("sha1");
+    const path = join(fixture.repository, "payload.bin");
+    // A changed binary is what makes `git diff --binary` output outgrow the file:
+    // it base85-encodes a forward and a reverse literal for every blob it rewrites.
+    await writeFile(path, Buffer.alloc(64 * 1024, 0xa5));
+    fixture.git("add", "--", "payload.bin");
+    const base = fixture.commit("base");
+    await writeFile(path, Buffer.alloc(64 * 1024, 0x5c));
+    fixture.git("add", "--", "payload.bin");
+    const head = fixture.commit("head");
+
+    const probe = committedDigestProbe(fixture, base, head);
+    expect(probe.streamed).toMatch(CONTENT_DIGEST);
+    // Nothing may materialize the whole patch as one value; git_bytes is
+    // subprocess.run(capture_output=True), so any diff call through it buffers.
+    expect(probe.bufferedPatchCalls).toEqual([]);
+    // The streamed framing has to stay byte for byte what the buffered pair
+    // produced, or every digest recorded by an earlier build revalidates as a
+    // changed snapshot.
+    expect(probe.streamed).toBe(probe.buffered);
   });
 });
