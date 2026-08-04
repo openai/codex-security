@@ -61,6 +61,7 @@ import {
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentScanRoot,
+  readStableWindowsCredentialDescendantDescriptors,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -1811,6 +1812,44 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       }),
     ).rejects.toThrow("private Windows credential home");
+  });
+
+  test("retries Windows credential descendant verification after concurrent changes", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const temporary = join(home, ".auth-temporary");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    await writeFile(temporary, "temporary credential\n");
+    let attempts = 0;
+
+    const descriptors = await readStableWindowsCredentialDescendantDescriptors(
+      home,
+      async () => {
+        attempts += 1;
+        if (attempts === 1) await rm(temporary);
+        return ["trusted credential descriptor"];
+      },
+    );
+
+    expect(descriptors).toEqual(["trusted credential descriptor"]);
+    expect(attempts).toBe(2);
+  });
+
+  test("rejects Windows credential descendants that never stabilize", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    let attempts = 0;
+
+    await expect(
+      readStableWindowsCredentialDescendantDescriptors(home, async () => {
+        attempts += 1;
+        return [];
+      }),
+    ).rejects.toThrow("Windows credential descendants could not be verified");
+    expect(attempts).toBe(3);
   });
 
   test("accepts managed Windows ACLs with trusted system principals", () => {

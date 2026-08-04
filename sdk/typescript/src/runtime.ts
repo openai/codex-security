@@ -560,6 +560,40 @@ function windowsAceAllowsAncestorReplacement(
   return ["SD", "WD", "WO", "DC", "DT"].some((right) => rights.includes(right));
 }
 
+export async function readStableWindowsCredentialDescendantDescriptors(
+  path: string,
+  readDescriptors: () => Promise<string[]>,
+): Promise<string[]> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let descendants = 0;
+    const pending = [path];
+    while (pending.length !== 0) {
+      const current = pending.pop()!;
+      const directory = await opendir(current);
+      for await (const entry of directory) {
+        const child = join(current, entry.name);
+        const metadata = await lstat(child);
+        if (metadata.isSymbolicLink()) {
+          throw new Error(
+            "Windows credential home contains a symbolic link or junction",
+          );
+        }
+        if (!metadata.isDirectory() && !metadata.isFile()) {
+          throw new Error("Windows credential home contains an unsafe entry");
+        }
+        descendants += 1;
+        if (metadata.isDirectory()) pending.push(child);
+      }
+    }
+    if (descendants === 0) return [];
+
+    const descriptors = await readDescriptors();
+    if (descriptors.length === descendants) return descriptors;
+  }
+
+  throw new Error("Windows credential descendants could not be verified");
+}
+
 async function secureWindowsCredentialHome(path: string): Promise<void> {
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
@@ -764,49 +798,29 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   }
 
   const descendantsArePrivate = async (): Promise<boolean> => {
-    let descendants = 0;
-    const pending = [path];
-    while (pending.length !== 0) {
-      const current = pending.pop()!;
-      const directory = await opendir(current);
-      for await (const entry of directory) {
-        const child = join(current, entry.name);
-        const metadata = await lstat(child);
-        if (metadata.isSymbolicLink()) {
-          throw new Error(
-            "Windows credential home contains a symbolic link or junction",
-          );
-        }
-        if (!metadata.isDirectory() && !metadata.isFile()) {
-          throw new Error("Windows credential home contains an unsafe entry");
-        }
-        descendants += 1;
-        if (metadata.isDirectory()) pending.push(child);
-      }
-    }
-    if (descendants === 0) return true;
-
     const descendantScript = [
       "$ErrorActionPreference = 'Stop'",
       "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Security\\Get-Acl | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
     ].join("; ");
-    const result = await execFile(
-      powershell,
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        descendantScript,
-      ],
-      processOptions,
+    const descriptors = await readStableWindowsCredentialDescendantDescriptors(
+      path,
+      async () => {
+        const result = await execFile(
+          powershell,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            descendantScript,
+          ],
+          processOptions,
+        );
+        return result.stdout
+          .split(/\r?\n/u)
+          .filter((descriptor) => descriptor !== "");
+      },
     );
-    const descriptors = result.stdout
-      .split(/\r?\n/u)
-      .filter((descriptor) => descriptor !== "");
-    if (descriptors.length !== descendants) {
-      throw new Error("Windows credential descendants could not be verified");
-    }
     for (const descriptor of descriptors) {
       await resolveDescriptorAliases(descriptor);
       const descendant = inspectWindowsCredentialAcl(descriptor, sid, {
