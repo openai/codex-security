@@ -339,7 +339,6 @@ const WINDOWS_PRINCIPAL_ALIASES: Readonly<Record<string, string>> = {
   AA: "S-1-5-32-579",
 };
 const WINDOWS_SID = /^S-1-(?:\d+-)*\d+$/u;
-const WINDOWS_SERVICE_SID = /^S-1-5-80(?:-\d+)+$/u;
 const WINDOWS_GUID =
   /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu;
 const WINDOWS_SDDL_SID = "(?:S-1-(?:\\d+-)*\\d+|[A-Z]{2})";
@@ -398,11 +397,7 @@ export function inspectWindowsCredentialAcl(
   const normalizePrincipal = (principal: string): string =>
     principalAliases[principal] ?? principal;
   const trustedPrincipal = (principal: string): boolean =>
-    trustedPrincipals.has(principal) ||
-    (options.scope === "ancestor" &&
-      (principal === WINDOWS_LOCAL_SERVICE_SID ||
-        principal === WINDOWS_NETWORK_SERVICE_SID ||
-        WINDOWS_SERVICE_SID.test(principal)));
+    trustedPrincipals.has(principal);
   const owner = normalizePrincipal(match[1]!);
   if (!trustedPrincipal(owner)) {
     throw new UntrustedWindowsCredentialOwnerError();

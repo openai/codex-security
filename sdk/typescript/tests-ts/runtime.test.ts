@@ -1881,13 +1881,26 @@ describe("runtime directories and plugin Python boundary", () => {
     }
 
     const service = "S-1-5-80-111-222-333-444-555";
-    expect(
+    for (const [principal, expected] of [
+      ["LS", "S-1-5-19"],
+      ["NS", "S-1-5-20"],
+      [service, service],
+    ] as const) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;DC;;;${principal})`,
+          user,
+          { scope: "ancestor" },
+        ).untrustedPrincipals,
+      ).toEqual([expected]);
+    }
+    expect(() =>
       inspectWindowsCredentialAcl(
-        `O:${service}G:SYD:(A;OICI;FA;;;${service})(A;OICI;FA;;;${user})`,
+        `O:${service}G:SYD:(A;OICI;FA;;;${user})`,
         user,
         { scope: "ancestor" },
-      ).untrustedPrincipals,
-    ).toEqual([]);
+      ),
+    ).toThrow("owner is not a trusted principal");
   });
 
   test("accepts private credential-file ACLs without inheritance flags", () => {
