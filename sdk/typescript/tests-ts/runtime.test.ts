@@ -175,6 +175,15 @@ describe("plugin runtime preparation", () => {
   });
 
   test("includes ignored tracked files in the scoped security inventory", async () => {
+    if (Bun.which("rg") === null) {
+      const generator = await readFile(
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "utf8",
+      );
+      expect(generator).toContain('"--no-ignore"');
+      return;
+    }
+
     const root = await temporaryDirectory("codex-security-scan-inventory-");
     const repository = join(root, "repository");
     await mkdir(repository);
