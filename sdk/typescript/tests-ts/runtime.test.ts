@@ -2124,10 +2124,11 @@ describe("runtime directories and plugin Python boundary", () => {
             "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
             "$allowed = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' })",
             "$denied = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' })",
+            "$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
             "$principals = @($allowed | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
             "$deniedPrincipals = @($denied | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
             "$fullControl = @($allowed | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $env:CODEX_SECURITY_TEST_USER_SID -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit) -ne 0 -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit) -ne 0 -and $_.PropagationFlags -eq [System.Security.AccessControl.PropagationFlags]::None })",
-            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; principals = $principals; deniedPrincipals = $deniedPrincipals; grantsCurrentUserAccess = ($fullControl.Count -gt 0 -and $denied.Count -eq 0) } | ConvertTo-Json -Compress",
+            "[pscustomobject]@{ owner = $owner; protected = $acl.AreAccessRulesProtected; principals = $principals; deniedPrincipals = $deniedPrincipals; grantsCurrentUserAccess = ($fullControl.Count -gt 0 -and $denied.Count -eq 0) } | ConvertTo-Json -Compress",
           ].join("; "),
         ],
         {
@@ -2142,6 +2143,7 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       expect(descriptor.status).toBe(0);
       const access = JSON.parse(descriptor.stdout) as {
+        owner: string;
         protected: boolean;
         principals: string[];
         deniedPrincipals: string[];
@@ -2155,6 +2157,7 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(access.principals).toEqual(
         expect.arrayContaining([sid!, "S-1-5-18", "S-1-5-32-544"]),
       );
+      expect([sid!, "S-1-5-18", "S-1-5-32-544"]).toContain(access.owner);
       expect(new Set(access.principals)).toEqual(
         new Set([sid!, "S-1-5-18", "S-1-5-32-544"]),
       );
