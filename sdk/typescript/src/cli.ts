@@ -885,7 +885,7 @@ export async function main(
           .describe("Print scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, format, options }) {
+      async run({ args, error: incurError, options }) {
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
@@ -908,7 +908,6 @@ export async function main(
           { ...scanArguments, verbose: options.verbose },
           errorOutput,
           dependencies,
-          format !== "json" && format !== "jsonl",
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
@@ -2744,10 +2743,6 @@ async function runScan(
       codex_version: CODEX_EXECUTABLE_VERSION,
       codex_sdk_version: CODEX_SDK_VERSION,
       mode: arguments_.mode,
-      workers: arguments_.workers,
-      subagents: arguments_.subagents,
-      stop_after_no_new: arguments_.stopAfterNoNew,
-      max_discovery_runs: arguments_.maxDiscoveryRuns,
       max_cost_usd: arguments_.maxCostUsd,
       target:
         arguments_.paths.length > 0

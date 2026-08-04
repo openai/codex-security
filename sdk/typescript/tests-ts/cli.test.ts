@@ -19,6 +19,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   CodexSecurityConfig,
   JsonObject,
+  ScanOptions,
   ScanPreflight,
 } from "../src/index.js";
 import { redactedErrorMessage } from "../src/errors.js";
@@ -1390,46 +1391,6 @@ describe("CLI", () => {
     }
   });
 
-  test("keeps structured scan reruns noninteractive even when stderr is a terminal", async () => {
-    for (const options of [
-      ["--json"],
-      ["--format", "json"],
-      ["--format", "jsonl"],
-    ]) {
-      const stdout = capture();
-      const stderr = capture(true);
-      let timers = 0;
-      const deps = dependencies({
-        onWorkbench: () => ({
-          recipe: {
-            repository: "/original/repository",
-            target: { kind: "repository", paths: [] },
-            mode: "standard",
-            config: {},
-          },
-        }),
-      });
-      deps.setInterval = () => {
-        timers += 1;
-        return {} as NodeJS.Timeout;
-      };
-
-      expect(
-        await main(
-          ["scans", "rerun", "scan-original", ...options],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(0);
-      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-      expect(stderr.text()).toContain("Preparing scan");
-      expect(stderr.text()).not.toContain("\u001B");
-      expect(stderr.text()).not.toContain("\r");
-      expect(timers).toBe(0);
-    }
-  });
-
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
       ["validate", ["finding"]],
@@ -2229,30 +2190,13 @@ describe("CLI", () => {
     );
   });
 
-  test("includes deep scan controls and the cost limit in verbose configuration", async () => {
+  test("includes the configured cost limit in verbose scan configuration", async () => {
     const stdout = capture();
     const stderr = capture();
 
     expect(
       await main(
-        [
-          "scan",
-          ".",
-          "--mode",
-          "deep",
-          "--workers",
-          "2",
-          "--subagents",
-          "0",
-          "--stop-after-no-new",
-          "3",
-          "--max-discovery-runs",
-          "4",
-          "--max-cost",
-          "0.5",
-          "--verbose",
-          "--json",
-        ],
+        ["scan", ".", "--max-cost", "0.5", "--verbose", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies(),
@@ -2267,11 +2211,6 @@ describe("CLI", () => {
         line.startsWith("codex-security: debug: scan.configuration"),
       );
 
-    expect(configuration).toContain('mode="deep"');
-    expect(configuration).toContain("workers=2");
-    expect(configuration).toContain("subagents=0");
-    expect(configuration).toContain("stop_after_no_new=3");
-    expect(configuration).toContain("max_discovery_runs=4");
     expect(configuration).toContain("max_cost_usd=0.5");
   });
 
@@ -2449,6 +2388,53 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("codex-security: debug: scan.started");
     expect(stderr.text()).toContain("codex-security: debug: scan.completed");
     expect(stderr.text()).toContain('model="gpt-original"');
+  });
+
+  test("preserves authentication selection for verbose structured reruns", async () => {
+    for (const format of [["--json"], ["--format", "jsonl"]]) {
+      const stdout = capture();
+      const stderr = capture(true);
+      let selectedAuthentication: string | undefined;
+      let prompts = 0;
+      const deps = dependencies({
+        environment: { OPENAI_API_KEY: "synthetic-api-key" },
+        onTurn: (_repository, options) => {
+          selectedAuthentication = (options as ScanOptions).auth;
+        },
+        onWorkbench: () => ({
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+          },
+        }),
+      });
+      deps.hasStoredChatGPTSignIn = async () => true;
+      deps.scanAuthenticationPrompt = {
+        isInteractive: () => true,
+        select: async <Value extends string>(
+          _question: string,
+          choices: readonly { label: string; value: Value }[],
+        ): Promise<Value> => {
+          prompts += 1;
+          return choices.find((choice) => choice.value === "chatgpt")!.value;
+        },
+      };
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original", "--verbose", ...format],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(prompts).toBe(1);
+      expect(selectedAuthentication).toBe("chatgpt");
+      expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    }
   });
 
   test("reports selected profile settings for verbose scan reruns", async () => {
