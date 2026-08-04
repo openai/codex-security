@@ -207,10 +207,7 @@ describe("scan history renderer", () => {
         config: {
           model: "gpt-5.6-sol",
           model_reasoning_effort: "high",
-          features: {
-            goals: true,
-            multi_agent_v2: { enabled: true },
-          },
+          features: { goals: true, multi_agent_v2: { enabled: true } },
           trusted_paths: ["src", "packages/core"],
         },
       },

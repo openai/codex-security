@@ -248,9 +248,7 @@ export function renderScanHistory(
         `  ${strong("CONFIGURATION")}  ${Object.entries(config)
           .map(([key, value]) => {
             const rendered =
-              value !== null && typeof value === "object"
-                ? JSON.stringify(value)
-                : value;
+              typeof value === "object" ? JSON.stringify(value) : value;
             return `${clean(key)}=${clean(rendered)}`;
           })
           .join(`  ${accent("·")}  `)}`,
