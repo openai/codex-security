@@ -57,8 +57,11 @@ import {
 } from "./knowledge-base.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
 import type { SeverityLevel } from "./models.js";
+import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
+  scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
+  type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
@@ -162,6 +165,8 @@ export interface ScanOptions extends DeepScanOptions {
     maxAttempts: number,
     details?: ScanReconnectDetails,
   ) => void;
+  onActivity?: (activity: ScanActivity) => void;
+  onProgress?: (progress: ScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -201,6 +206,8 @@ type ScanObserverName =
   | "onOutputDirReady"
   | "onScanStarted"
   | "onReconnect"
+  | "onActivity"
+  | "onProgress"
   | "onWorkerStatus"
   | "onWarning";
 
@@ -608,10 +615,38 @@ export class CodexSecurity {
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model);
+      let scopeFileCount: number | null = null;
+      let reviewedFileCount = 0;
+      const reportProgress = (progress: ScanProgress): void => {
+        if (
+          scopeFileCount === null ||
+          progress.filesTotal > scopeFileCount ||
+          progress.filesCompleted < reviewedFileCount
+        ) {
+          return;
+        }
+        reviewedFileCount = progress.filesCompleted;
+        notifyObserver(
+          "onProgress",
+          options.onProgress,
+          options.onObserverError,
+          { ...progress, filesTotal: scopeFileCount },
+        );
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
+        repository: repo,
         maxCostUsd: options.maxCostUsd,
+        onActivity: (activity) => {
+          notifyObserver(
+            "onActivity",
+            options.onActivity,
+            options.onObserverError,
+            activity,
+          );
+        },
+        onProgress: reportProgress,
         onCost: (cost) => {
           notifyObserver(
             "onCost",
@@ -720,6 +755,26 @@ export class CodexSecurity {
       }
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
+      const registeredFileCount = registration["scopeFileCount"];
+      scopeFileCount =
+        typeof registeredFileCount === "number" &&
+        Number.isSafeInteger(registeredFileCount) &&
+        registeredFileCount >= 0
+          ? registeredFileCount
+          : null;
+      if (scopeFileCount !== null) {
+        tracker.setExpectedFilesTotal(scopeFileCount);
+        notifyObserver(
+          "onProgress",
+          options.onProgress,
+          options.onObserverError,
+          {
+            phase: "preflight",
+            filesCompleted: 0,
+            filesTotal: scopeFileCount,
+          },
+        );
+      }
       activeScan = { id: scanId, options: workbenchOptions };
       checkOpen();
       const feedback = await workbench(
@@ -893,6 +948,19 @@ export class CodexSecurity {
         },
         onScanStarted: options.onScanStarted,
         onReconnect: options.onReconnect,
+        onActivity: options.onActivity,
+        onProgress: (progress) => {
+          if (
+            progress.phase === "discovery" &&
+            progress.filesCompleted === 0 &&
+            reviewedFileCount === 0 &&
+            progress.filesTotal !== scopeFileCount
+          ) {
+            scopeFileCount = progress.filesTotal;
+            tracker.setExpectedFilesTotal(scopeFileCount);
+          }
+          reportProgress(progress);
+        },
         onWorkerStatus: options.onWorkerStatus,
         onObserverError: options.onObserverError,
       });
@@ -1565,6 +1633,7 @@ interface ScanEventRunOptions {
   expectation: ScanExpectation;
   workbenchValidated?: boolean;
   model?: string;
+  expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
   onThreadStarted?: (threadId: string) => void;
   onScanStarted?: () => void;
@@ -1573,6 +1642,8 @@ interface ScanEventRunOptions {
     maxAttempts: number,
     details?: ScanReconnectDetails,
   ) => void;
+  onActivity?: (activity: ScanActivity) => void;
+  onProgress?: (progress: ScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
@@ -1588,6 +1659,31 @@ export async function runScanEvents(
   let lastStreamError: string | null = null;
   try {
     for await (const event of options.events) {
+      for (const activity of scanActivitiesFromEvent(
+        event,
+        options.expectation.repository,
+      )) {
+        notifyObserver(
+          "onActivity",
+          options.onActivity,
+          options.onObserverError,
+          activity,
+        );
+      }
+      for (const progress of scanProgressUpdatesFromEvent(event)) {
+        if (
+          options.expectedFilesTotal !== undefined &&
+          progress.filesTotal !== options.expectedFilesTotal
+        ) {
+          continue;
+        }
+        notifyObserver(
+          "onProgress",
+          options.onProgress,
+          options.onObserverError,
+          progress,
+        );
+      }
       const workerStatus = workerStatusFromEvent(event);
       if (workerStatus !== null) {
         notifyObserver(
@@ -1742,6 +1838,8 @@ async function scanPrompt(
     'When "$CODEX_SECURITY_TARGET_REVISION" is set, use its exact value as scan.target.revision.',
     'When "$CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST" is set, use its exact value as scan.target.snapshotDigest. For git_revision, omit scan.target.snapshotDigest.',
     'Use exactly "codex-security-plugin" as scan.producer.name.',
+    'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
+    'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',
     ...(hasConfigPath
       ? [
           'For normal config-preflight helper calls, append --config "$CODEX_SECURITY_CONFIG_PATH" so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.',

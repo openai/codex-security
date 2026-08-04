@@ -55,6 +55,8 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
   model_reasoning_effort: "xhigh",
+  model_reasoning_summary: "detailed",
+  show_raw_agent_reasoning: true,
   features: {
     plugins: true,
     goals: true,
