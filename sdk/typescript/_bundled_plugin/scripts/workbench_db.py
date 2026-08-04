@@ -90,7 +90,12 @@ from workbench_scan_start import (
     scan_target_identity,
     stored_diff_target,
 )
-from workbench_schema import MIGRATIONS, normalize_pre_release_migrations, sql_statements
+from workbench_schema import (
+    MIGRATIONS,
+    normalize_pre_release_migrations,
+    repair_deep_scan_migration,
+    sql_statements,
+)
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_target import (
     clean_worktree_content_digest,
@@ -293,6 +298,8 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
         }
         for version, name, sql in MIGRATIONS:
             if version in applied:
+                if version == 11:
+                    repair_deep_scan_migration(connection)
                 continue
             for statement in sql_statements(sql):
                 connection.execute(statement)

@@ -856,6 +856,42 @@ def normalize_pre_release_execution_profile_migrations(
         )
 
 
+def repair_deep_scan_migration(connection: sqlite3.Connection) -> None:
+    scan_columns = {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
+    owner_column_missing = "deep_scan_owner_thread_id" not in scan_columns
+    expected_objects = {
+        "scans_one_running_deep_per_owner_target",
+        "deep_scan_runs",
+        "deep_scan_workers",
+        "deep_scan_workers_completion_sequence",
+        "deep_scan_workers_by_scan_status",
+        "deep_scan_dedup_inputs",
+    }
+    existing_objects = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'deep_scan_%' "
+            "OR name = 'scans_one_running_deep_per_owner_target'"
+        )
+    }
+    if not owner_column_missing and expected_objects <= existing_objects:
+        return
+
+    if owner_column_missing:
+        add_column_if_missing(connection, "scans", "deep_scan_owner_thread_id", "TEXT")
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 11)
+    for statement in sql_statements(migration_sql):
+        if statement.startswith("ALTER TABLE scans"):
+            continue
+        if statement.startswith("UPDATE scans") and not owner_column_missing:
+            continue
+        for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TABLE "):
+            if statement.startswith(prefix):
+                statement = statement.replace(prefix, f"{prefix}IF NOT EXISTS ", 1)
+                break
+        connection.execute(statement)
+
+
 def add_column_if_missing(
     connection: sqlite3.Connection, table: str, column: str, definition: str
 ) -> None:
