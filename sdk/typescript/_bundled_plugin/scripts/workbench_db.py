@@ -1412,9 +1412,12 @@ def complete_scan_locked(
     if scan["recipe_json"] is None:
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
+    target_warnings: list[str] = []
     warning = scan_target_warning(scan)
-    if warning is not None and warning not in warnings:
-        warnings.append(warning)
+    if warning is not None:
+        target_warnings.append(warning)
+        if warning not in warnings:
+            warnings.append(warning)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
@@ -1453,8 +1456,11 @@ def complete_scan_locked(
             completion_warnings=warnings,
         )
         warning = scan_target_warning(scan)
-        if warning is not None and warning not in warnings:
-            warnings.append(warning)
+        if warning is not None:
+            if warning not in target_warnings:
+                target_warnings.append(warning)
+            if warning not in warnings:
+                warnings.append(warning)
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
         fail_scan(
@@ -1553,7 +1559,9 @@ def complete_scan_locked(
     except BaseException:
         connection.rollback()
         raise
-    return scan_context(connection, scan["id"])
+    context = scan_context(connection, scan["id"])
+    context["targetWarnings"] = target_warnings
+    return context
 
 
 def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -1837,7 +1845,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
     if args.status == "closed" and close_reason is None:
         raise SystemExit("Choose why this finding is being closed.")
     note = optional_text(args.note, maximum=2400)
-    require_close_reason(close_reason, note)
+    require_close_note(close_reason, note)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()
@@ -3467,7 +3475,7 @@ def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
         resolved.relative_to(resolved_scan_dir)
     except (FileNotFoundError, RuntimeError, SystemExit, ValueError):
         return None
-    if resolved != candidate or not candidate.is_file():
+    if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():
         return None
     return resolved
 

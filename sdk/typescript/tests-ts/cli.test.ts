@@ -3483,28 +3483,65 @@ describe("CLI", () => {
     }
   });
 
-  test("prints scan completion warnings without failing the scan", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onWarning?.(
-          "Repository HEAD changed while the scan was running; results were saved for the original revision.",
-        );
-        return fakeResult();
-      },
-      close: async () => {},
-      preflight: async () => fakePreflight(),
-    });
+  test("fails stale scans and includes target warnings in machine-readable results", async () => {
+    for (const warning of [
+      "Repository HEAD changed while the scan was running; results were saved for the original revision.",
+      "Directory contents changed while the scan was running; results were saved for the original snapshot.",
+      "Working-tree contents changed while the scan was running; results were saved for the original snapshot.",
+      "The scanned Git repository became unavailable while the scan was running; results were saved for the original revision.",
+      "The scan target became unavailable while the scan was running; results were saved for the original revision or snapshot.",
+      "Repository HEAD changed while the scan was running; findings belong to the previous checkout.",
+      "Completed findings no longer describe the selected source tree.",
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onWarning?.(warning, { kind: "target_changed" });
+          return fakeResult();
+        },
+        close: async () => {},
+        preflight: async () => fakePreflight(),
+      });
 
-    expect(
-      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "codex-security: warning: Repository HEAD changed while the scan was running; results were saved for the original revision.",
-    );
+      expect(
+        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        ...fakeResult().toJSON(),
+        warnings: [warning],
+      });
+      expect(stderr.text()).toContain(`codex-security: warning: ${warning}`);
+      expect(stderr.text()).toContain(
+        "Scan target changed during execution; results do not represent the current checkout.",
+      );
+    }
+  });
+
+  test("preserves non-target warnings without failing the scan", async () => {
+    for (const warning of [
+      "Recovered finding: normalized its semantic anchor.",
+      "Repository HEAD changed while the scan was running; informational retry recovered.",
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onWarning?.(warning);
+          return fakeResult();
+        },
+        close: async () => {},
+        preflight: async () => fakePreflight(),
+      });
+
+      expect(
+        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain(`codex-security: warning: ${warning}`);
+    }
   });
 
   test("emits redacted scan warnings in verbose diagnostics", async () => {

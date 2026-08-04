@@ -2599,6 +2599,7 @@ async function runScan(
   let progress: Progress | null = null;
   let lastWorkerUpdate = "";
   let phase: string | null = null;
+  const targetWarnings: string[] = [];
   const configuredLogLevel =
     dependencies.environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
     dependencies.environment["LOG_LEVEL"]?.trim();
@@ -2896,9 +2897,12 @@ async function runScan(
         progress.stage(message);
         progress.startTimer(runningMessage());
       },
-      onWarning: (warning) => {
+      onWarning: (warning, details) => {
+        const message = sanitizeDiagnosticValue(warning);
+        if (details?.kind === "target_changed") {
+          targetWarnings.push(message);
+        }
         writeAboveProgress(() => {
-          const message = sanitizeDiagnosticValue(warning);
           diagnostic("scan.warning", { message });
           errorOutput.write(`codex-security: warning: ${message}\n`);
         });
@@ -3027,6 +3031,10 @@ async function runScan(
     blockingSeverities.has(severity.level),
   ).length;
   const incomplete = result.coverage.completeness !== "complete";
+  const scanData =
+    targetWarnings.length === 0
+      ? result.toJSON()
+      : { ...result.toJSON(), warnings: targetWarnings };
   progress?.stage("Scan complete");
   printScanSummary(
     result,
@@ -3041,17 +3049,24 @@ async function runScan(
     findings: result.findings.findings.length,
     scan_id: result.manifest.scan.id,
     estimated_usd: result.cost?.estimatedUsd,
-    exit_code: incomplete ? 2 : blockingCount > 0 ? 1 : 0,
+    exit_code:
+      targetWarnings.length > 0 || incomplete ? 2 : blockingCount > 0 ? 1 : 0,
   });
+  if (targetWarnings.length > 0) {
+    errorOutput.write(
+      "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
+    );
+    return { exitCode: 2, data: scanData };
+  }
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
         ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
         : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
     );
-    return { exitCode: 2, data: result.toJSON() };
+    return { exitCode: 2, data: scanData };
   }
-  return { exitCode: blockingCount > 0 ? 1 : 0, data: result.toJSON() };
+  return { exitCode: blockingCount > 0 ? 1 : 0, data: scanData };
 }
 
 // Filesystem and OS syscall failures cannot originate from the model transport,

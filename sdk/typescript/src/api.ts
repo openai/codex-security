@@ -161,7 +161,7 @@ export interface ScanOptions extends DeepScanOptions {
     details?: ScanReconnectDetails,
   ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
-  onWarning?: (warning: string) => void;
+  onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
 }
@@ -182,6 +182,10 @@ export type ScanAuthentication =
 export interface ScanReconnectDetails {
   reason: "rate_limit" | "network" | "authentication" | "authorization";
   retryAfterSeconds?: number;
+}
+
+export interface ScanWarningDetails {
+  kind: "target_changed";
 }
 
 type ScanObserverName =
@@ -864,6 +868,13 @@ export class CodexSecurity {
       activeScan = null;
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
+        const targetWarnings = new Set(
+          Array.isArray(completion["targetWarnings"])
+            ? completion["targetWarnings"].filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : [],
+        );
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string") {
             notifyObserver(
@@ -871,6 +882,9 @@ export class CodexSecurity {
               options.onWarning,
               options.onObserverError,
               warning,
+              targetWarnings.has(warning)
+                ? { kind: "target_changed" }
+                : undefined,
             );
           }
         }

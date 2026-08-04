@@ -413,9 +413,15 @@ describe("malformed scan artifact recovery", () => {
 
     expect((prepared["scan"] as ScanSummary).progress.status).toBe("running");
     expect((prepared["scan"] as ScanSummary).warnings).toEqual([warning]);
-    const completed = await completeScan(fixture);
+    const completion = await workbench(fixture, [
+      "complete-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    const completed = completion["scan"] as ScanSummary;
     expect(completed.progress.status).toBe("complete");
     expect(completed.warnings).toEqual([warning]);
+    expect(completion["targetWarnings"]).toEqual([]);
     const saved = await workbench(fixture, [
       "get-scan",
       "--scan-id",
