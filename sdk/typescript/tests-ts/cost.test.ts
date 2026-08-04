@@ -87,6 +87,41 @@ describe("scan cost", () => {
     expect(estimateScanCost("gpt-5.6-luna", usage)?.estimatedUsd).toBe(7);
   });
 
+  test("uses published MiniMax model rates", () => {
+    const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
+
+    expect(estimateScanCost("MiniMax-M3", usage)?.estimatedUsd).toBe(3);
+    expect(estimateScanCost("MiniMax-M2.7", usage)?.estimatedUsd).toBe(1.5);
+  });
+
+  test("charges MiniMax cached input at its discounted rate", () => {
+    expect(
+      estimateScanCost("MiniMax-M3", {
+        input_tokens: 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      }),
+    ).toEqual({
+      model: "MiniMax-M3",
+      inputTokens: 1_250,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      estimatedUsd: 0.000726,
+    });
+  });
+
+  test("charges MiniMax M2.7 cache writes at their published rate", () => {
+    expect(
+      estimateScanCost("MiniMax-M2.7", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 200,
+        output_tokens: 10,
+      })?.estimatedUsd,
+    ).toBe(0.000303);
+  });
+
   test("charges cached input at its discounted rate", () => {
     expect(
       estimateScanCost("gpt-5.6-sol", {

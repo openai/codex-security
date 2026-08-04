@@ -54,6 +54,8 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-terra": [2_500, 250, 3_125, 15_000],
   "gpt-5.6-luna": [1_000, 100, 1_250, 6_000],
+  "MiniMax-M3": [600, 120, 0, 2_400],
+  "MiniMax-M2.7": [300, 60, 375, 1_200],
 };
 
 const COST_POLL_INTERVAL_MS = 100;
