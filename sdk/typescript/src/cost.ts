@@ -30,6 +30,7 @@ interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
   pendingLineBytes: number;
+  openFailures: number;
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
@@ -56,8 +57,9 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-luna": [1_000, 100, 1_250, 6_000],
 };
 
-// Open failures that keep failing until the file itself changes. Every other
-// code (EMFILE, ENFILE, EIO and friends) is treated as transient and retried.
+// Open failures that cannot succeed again until the file itself changes, so
+// retrying them only wastes a syscall per poll. Every other code (EMFILE,
+// ENFILE, EBUSY, EIO and friends) may clear on its own and is retried.
 const PERMANENT_ACCESS_ERROR_CODES: ReadonlySet<string> = new Set([
   "EACCES",
   "EPERM",
@@ -66,6 +68,10 @@ const PERMANENT_ACCESS_ERROR_CODES: ReadonlySet<string> = new Set([
   "ENAMETOOLONG",
   "ENOTDIR",
 ]);
+
+// A retryable code that never clears must still stop somewhere, otherwise the
+// "reported once, then skipped" guarantee holds only for the codes listed above.
+const MAX_SESSION_OPEN_ATTEMPTS = 5;
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
@@ -161,6 +167,7 @@ export class ScanCostTracker {
           offset: 0,
           pendingLine: [],
           pendingLineBytes: 0,
+          openFailures: 0,
           unreadable: false,
           threadId: null,
           parentThreadId: null,
@@ -248,11 +255,19 @@ async function readSessionUsage(
   } catch (error) {
     if (isMissingFile(error)) return;
     // A process-wide shortage such as EMFILE clears on its own, so quarantining
-    // would stop observing this session's usage for the rest of the scan. Only
-    // a persistent, file-specific access failure earns a permanent quarantine.
-    if (isPermanentAccessError(error)) quarantineSession(session);
+    // on the first failure would stop observing this session's usage for the
+    // rest of the scan. A file-specific access failure cannot clear on its own,
+    // and anything else is retried a few times before it is retired.
+    session.openFailures += 1;
+    if (
+      isPermanentAccessError(error) ||
+      session.openFailures >= MAX_SESSION_OPEN_ATTEMPTS
+    ) {
+      quarantineSession(session);
+    }
     throw error;
   }
+  session.openFailures = 0;
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {

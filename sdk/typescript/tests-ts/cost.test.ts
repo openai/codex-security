@@ -625,6 +625,76 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test("retires a session log that keeps failing to open", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+    const open = failingOpen(path, "EBUSY");
+
+    try {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(tracker.refresh()).rejects.toThrow("EBUSY");
+      }
+      expect((await tracker.refresh()).cost).toBeNull();
+      expect((await tracker.refresh()).cost).toBeNull();
+      expect(open.attempts()).toBe(5);
+    } finally {
+      open.restore();
+    }
+  });
+
+  test("counts open failures per outage rather than for the whole scan", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    for (const code of ["EMFILE", "ENFILE"]) {
+      const open = failingOpen(path, code);
+      try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await expect(tracker.refresh()).rejects.toThrow(code);
+        }
+      } finally {
+        open.restore();
+      }
+      expect((await tracker.refresh()).cost).toMatchObject({
+        inputTokens: 100,
+      });
+    }
+
+    await appendFile(
+      path,
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 250, output_tokens: 20 },
+          },
+        },
+      })}\n`,
+    );
+
+    expect((await tracker.refresh()).cost).toMatchObject({
+      inputTokens: 250,
+      outputTokens: 20,
+    });
+  });
+
   testPosix(
     "falls back to the completed turn when session logs cannot be read",
     async () => {
