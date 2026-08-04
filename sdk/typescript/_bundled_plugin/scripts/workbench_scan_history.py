@@ -83,9 +83,10 @@ def list_workspace_scans(
     ).fetchone()[0]
     rows = connection.execute(
         """
-        SELECT id, mode, status, phase, scope, target_revision,
+        SELECT id, mode, status, phase, scope, target_revision, scan_dir,
             seal_manifest_digest, started_at, completed_at, canceled_at,
-            updated_at, failure_message, completion_warnings_json
+            updated_at, failure_message, completion_warnings_json,
+            rollout_session_index_path
         FROM scans
         WHERE workspace_id = ?
         ORDER BY created_at DESC, id DESC
@@ -106,6 +107,7 @@ def list_workspace_scans(
                 "mode": row["mode"],
                 "phase": row["phase"],
                 "scanId": row["id"],
+                **rollout_session_index_result(row),
                 "scope": row["scope"],
                 "sealed": row["seal_manifest_digest"] is not None,
                 "startedAt": row["started_at"],
@@ -240,6 +242,7 @@ def list_scans(
                 "recipeAvailable": row["recipe_json"] is not None,
                 "scanDir": row["scan_dir"],
                 "scanId": row["id"],
+                **rollout_session_index_result(row),
                 "scope": row["scope"],
                 "startedAt": row["started_at"],
                 "targetId": row["target_id"],
@@ -265,6 +268,17 @@ def list_scans(
             }
         )
     return result
+
+
+def rollout_session_index_result(scan: sqlite3.Row) -> dict[str, str]:
+    path = scan["rollout_session_index_path"]
+    if path is None:
+        return {}
+    return {
+        "rolloutSessionIndexPath": str(
+            Path(scan["scan_dir"]).joinpath(*PurePosixPath(path).parts)
+        )
+    }
 
 
 def list_unmatched_scan_pairs(

@@ -78,6 +78,7 @@ Pass scan configuration to `security.run(repository, options)` or
 | `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.         |
 | `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
 | `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
+| `retainRolloutSessions` | Copy coordinator and worker rollout logs into private scan artifacts.                 |
 | `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
 | `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                            |
 | `parentScanId`          | Link a rerun to an existing parent scan.                                              |
@@ -187,6 +188,7 @@ npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
 npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @openai/codex-security scan /path/to/repository --retain-rollout-sessions
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
@@ -441,6 +443,27 @@ running cost exceeds the limit. Partial results are preserved. Requests
 already in progress can finish above the limit. Cost tracking accepts Codex
 session events up to 1 MiB; an oversized event stops the scan because its
 running cost can no longer be verified safely.
+
+Each started scan writes
+`artifacts/rollout-sessions/index.json` with the coordinator thread, its
+transitive worker sessions, and their original rollout locations. Unrelated
+sessions in the same Codex home are excluded. The SDK exposes the absolute
+location as `result.rolloutSessionIndexPath`, and scan history exposes it for
+both completed and failed scans. `complete: false` in the index means the
+coordinator rollout was not available when discovery settled. Index creation
+has a 4,096-session safety limit so a malformed or unexpectedly shared Codex
+home cannot produce an unbounded scan artifact.
+
+When `scan --json` fails after creating an index, its failure object includes
+`scanDir` and `rolloutSessionIndexPath` so automation can inspect partial
+execution without a separate history query.
+
+Raw rollouts can contain source code, prompts, and tool output, so they are not
+copied by default. Pass `--retain-rollout-sessions` or set
+`retainRolloutSessions: true` to copy only the indexed coordinator and worker
+JSONL files beneath `artifacts/rollout-sessions/sessions/`. The index and
+retained files are written with private permissions. Saved scan recipes retain
+this choice for `scans rerun`, and bulk scans accept the same CLI flag.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.

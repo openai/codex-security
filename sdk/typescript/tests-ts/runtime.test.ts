@@ -2228,9 +2228,9 @@ describe("runtime directories and plugin Python boundary", () => {
           "connection = sqlite3.connect(sys.argv[1])",
           "connection.row_factory = sqlite3.Row",
           "columns = {row['name'] for row in connection.execute('PRAGMA table_info(scans)')}",
-          "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (25, 26)')}",
+          "migrations = {row['version']: row['name'] for row in connection.execute('SELECT version, name FROM schema_migrations WHERE version IN (25, 26, 27)')}",
           "warnings = connection.execute('SELECT completion_warnings_json FROM scans WHERE id = ?', ('legacy-scan',)).fetchone()[0]",
-          "print(json.dumps({'columns': sorted(columns & {'model', 'reasoning_effort', 'completion_warnings_json'}), 'migrations': migrations, 'warnings': json.loads(warnings)}))",
+          "print(json.dumps({'columns': sorted(columns & {'model', 'reasoning_effort', 'completion_warnings_json', 'rollout_session_index_path'}), 'migrations': migrations, 'warnings': json.loads(warnings)}))",
         ].join("\n"),
         join(stateDirectory, "workbench.sqlite3"),
       ],
@@ -2239,10 +2239,16 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(upgraded.status).toBe(0);
     expect(upgraded.stderr).toBe("");
     expect(JSON.parse(upgraded.stdout)).toEqual({
-      columns: ["completion_warnings_json", "model", "reasoning_effort"],
+      columns: [
+        "completion_warnings_json",
+        "model",
+        "reasoning_effort",
+        "rollout_session_index_path",
+      ],
       migrations: {
         "25": "persist scan model settings",
         "26": "persist scan completion warnings",
+        "27": "persist rollout session indexes",
       },
       warnings: ["existing warning"],
     });

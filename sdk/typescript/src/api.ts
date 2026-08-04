@@ -35,6 +35,7 @@ import {
   writeCodexConfig,
 } from "./config.js";
 import { estimateScanCost, ScanCostTracker, type ScanCost } from "./cost.js";
+import { CodexRolloutReader } from "./codex-rollouts.js";
 import {
   loadContract,
   requireScanFile,
@@ -56,6 +57,10 @@ import {
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
 import { ScanResult, type TurnResultMetadata } from "./result.js";
+import {
+  ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
+  writeRolloutSessionIndex,
+} from "./rollout-session-index.js";
 import type { SeverityLevel } from "./models.js";
 import {
   workerStatusFromEvent,
@@ -152,6 +157,7 @@ export interface ScanOptions extends DeepScanOptions {
   expectedPluginVersion?: string;
   failureSeverity?: SeverityLevel;
   maxCostUsd?: number;
+  retainRolloutSessions?: boolean;
   onCost?: (cost: Readonly<ScanCost>) => void;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
@@ -238,6 +244,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  writeRolloutSessionIndex?: typeof writeRolloutSessionIndex;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -349,6 +356,11 @@ export class CodexSecurity {
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
+    let rolloutReader: CodexRolloutReader | null = null;
+    let rolloutCodexHome: string | null = null;
+    let rolloutRootThreadId: string | null = null;
+    let rolloutSessionIndexPath: string | null = null;
+    let rolloutSessionIndexAttempted = false;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
@@ -357,6 +369,61 @@ export class CodexSecurity {
       options: WorkbenchCommandOptions;
     } | null = null;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
+    const rolloutSessionIndexWriter =
+      this.#dependencies.writeRolloutSessionIndex ?? writeRolloutSessionIndex;
+    const persistRolloutSessionIndex = async (
+      retain = options.retainRolloutSessions === true,
+    ): Promise<string | null> => {
+      if (rolloutSessionIndexPath !== null) return rolloutSessionIndexPath;
+      if (
+        rolloutSessionIndexAttempted ||
+        rolloutReader === null ||
+        rolloutCodexHome === null ||
+        rolloutRootThreadId === null ||
+        scanDir === ""
+      ) {
+        return null;
+      }
+      rolloutSessionIndexAttempted = true;
+      rolloutSessionIndexPath = await rolloutSessionIndexWriter({
+        codexHome: rolloutCodexHome,
+        scanDir,
+        snapshot: rolloutReader.snapshot(rolloutRootThreadId),
+        retain,
+      });
+      return rolloutSessionIndexPath;
+    };
+    const persistRolloutSessionIndexSafely = async (): Promise<
+      string | null
+    > => {
+      try {
+        return await persistRolloutSessionIndex();
+      } catch (indexError) {
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not ${options.retainRolloutSessions === true ? "retain rollout sessions" : "save the rollout session index"}: ${redactedErrorMessage(indexError)}`,
+        );
+        if (
+          options.retainRolloutSessions === true &&
+          rolloutSessionIndexPath === null
+        ) {
+          rolloutSessionIndexAttempted = false;
+          try {
+            return await persistRolloutSessionIndex(false);
+          } catch (fallbackError) {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not save the fallback rollout session index: ${redactedErrorMessage(fallbackError)}`,
+            );
+          }
+        }
+        return null;
+      }
+    };
     try {
       const checkOpen = (): void => {
         this.#requireOpen();
@@ -603,8 +670,12 @@ export class CodexSecurity {
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model);
+      const rollouts = new CodexRolloutReader(runtime.codexHome);
+      rolloutReader = rollouts;
+      rolloutCodexHome = runtime.codexHome;
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
+        rolloutReader: rollouts,
         model,
         maxCostUsd: options.maxCostUsd,
         onCost: (cost) => {
@@ -637,6 +708,7 @@ export class CodexSecurity {
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
+        options.retainRolloutSessions,
         deepScanOptions(options),
       );
       const workbenchOptions: WorkbenchCommandOptions = {
@@ -861,7 +933,11 @@ export class CodexSecurity {
         expectation,
         workbenchValidated: true,
         model,
-        onThreadStarted: (threadId) => tracker.start(threadId),
+        onThreadStarted: (threadId) => {
+          if (rolloutRootThreadId !== null) return;
+          rolloutRootThreadId = threadId;
+          tracker.start(threadId);
+        },
         onFinalize: async (usage) => {
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
@@ -879,6 +955,7 @@ export class CodexSecurity {
             "--scan-id",
             scanId,
           ]);
+          await persistRolloutSessionIndexSafely();
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
@@ -894,6 +971,12 @@ export class CodexSecurity {
         ...(completionCost === null
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
+        ...(rolloutSessionIndexPath === null
+          ? []
+          : [
+              "--rollout-session-index-path",
+              ROLLOUT_SESSION_INDEX_RELATIVE_PATH.join("/"),
+            ]),
       ]);
       activeScan = null;
       const completedScan = completion["scan"];
@@ -919,6 +1002,7 @@ export class CodexSecurity {
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
           : error;
+      await persistRolloutSessionIndexSafely();
       if (activeScan !== null) {
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
@@ -932,6 +1016,12 @@ export class CodexSecurity {
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
+            ...(rolloutSessionIndexPath === null
+              ? []
+              : [
+                  "--rollout-session-index-path",
+                  ROLLOUT_SESSION_INDEX_RELATIVE_PATH.join("/"),
+                ]),
           ]);
         } catch {}
       }
@@ -1771,6 +1861,7 @@ function scanRecipe(
   failOnSeverity?: SeverityLevel,
   knowledgeBasePaths?: string[],
   maxCostUsd?: number,
+  retainRolloutSessions?: boolean,
   deepScan?: DeepScanOptions,
 ): JsonObject {
   return {
@@ -1790,6 +1881,7 @@ function scanRecipe(
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
+    ...(retainRolloutSessions === true ? { retainRolloutSessions: true } : {}),
     ...(deepScan === undefined || Object.keys(deepScan).length === 0
       ? {}
       : { deepScan: { ...deepScan } }),

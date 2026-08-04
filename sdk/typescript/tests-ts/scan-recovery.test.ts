@@ -56,6 +56,7 @@ type CoverageDocument = Record<string, unknown> & {
 };
 
 type ScanSummary = {
+  artifacts?: Record<string, string>;
   findingCount: number;
   progress: { status: string };
   warnings: string[];
@@ -362,6 +363,92 @@ describe("malformed scan artifact recovery", () => {
       fixture.scanId,
     ]);
     expect((stored["scan"] as ScanSummary).progress.status).toBe("failed");
+  });
+
+  test("persists the rollout session index for completed and failed scan records", async () => {
+    const relativeIndexPath = "artifacts/rollout-sessions/index.json";
+    for (const status of ["complete", "failed"] as const) {
+      const fixture = await startDraftScan();
+      const indexPath = join(fixture.scanDir, ...relativeIndexPath.split("/"));
+      await mkdir(join(fixture.scanDir, "artifacts", "rollout-sessions"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeJson(indexPath, {
+        schemaVersion: 1,
+        rootThreadId: `${status}-thread`,
+        sessions: [],
+      });
+      const terminal = await workbench(fixture, [
+        status === "complete" ? "complete-scan" : "fail-scan",
+        "--scan-id",
+        fixture.scanId,
+        ...(status === "failed" ? ["--message", "Synthetic failure."] : []),
+        "--rollout-session-index-path",
+        relativeIndexPath,
+      ]);
+
+      expect((terminal["scan"] as ScanSummary).artifacts).toMatchObject({
+        rolloutSessionIndex: indexPath,
+      });
+      const stored = await workbench(fixture, [
+        "get-scan",
+        "--scan-id",
+        fixture.scanId,
+      ]);
+      expect((stored["scan"] as ScanSummary).artifacts).toMatchObject({
+        rolloutSessionIndex: indexPath,
+      });
+      const listed = await workbench(fixture, [
+        "list-scans",
+        "--repository",
+        fixture.repository,
+      ]);
+      expect(listed["scans"]).toContainEqual(
+        expect.objectContaining({
+          scanId: fixture.scanId,
+          rolloutSessionIndexPath: indexPath,
+        }),
+      );
+      const workspace = stored["workspace"] as { id: string };
+      const workspaceScans = await workbench(fixture, [
+        "list-workspace-scans",
+        "--workspace-id",
+        workspace.id,
+      ]);
+      expect(workspaceScans["scans"]).toContainEqual(
+        expect.objectContaining({
+          scanId: fixture.scanId,
+          rolloutSessionIndexPath: indexPath,
+        }),
+      );
+    }
+  });
+
+  test("rejects rollout session indexes outside the scan directory", async () => {
+    const fixture = await startDraftScan();
+    await writeJson(join(fixture.scanDir, "..", "outside-index.json"), {
+      schemaVersion: 1,
+      sessions: [],
+    });
+
+    await expect(
+      workbench(fixture, [
+        "fail-scan",
+        "--scan-id",
+        fixture.scanId,
+        "--message",
+        "Synthetic failure.",
+        "--rollout-session-index-path",
+        "../outside-index.json",
+      ]),
+    ).rejects.toThrow("must be scan-relative");
+    const stored = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect((stored["scan"] as ScanSummary).progress.status).toBe("running");
   });
 
   test("normalizes finding identities and persists recovery warnings", async () => {

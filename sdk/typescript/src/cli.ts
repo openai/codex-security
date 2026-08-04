@@ -91,6 +91,7 @@ import {
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
+import { ROLLOUT_SESSION_INDEX_RELATIVE_PATH } from "./rollout-session-index.js";
 import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
@@ -119,6 +120,7 @@ const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
 const SCAN_HISTORY_OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
+const FULL_OUTPUT_OPTION = /^--full-output(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
@@ -256,6 +258,7 @@ interface ScanArguments extends DeepScanOptions {
   provider?: "openai" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
+  retainRolloutSessions: boolean;
   pluginPath?: string;
   pythonPath?: string;
   codex: string[];
@@ -271,6 +274,7 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
+  failureData?: Record<string, unknown>;
 }
 
 interface ExportArguments {
@@ -894,7 +898,7 @@ export async function main(
           .describe("Print scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
@@ -917,6 +921,13 @@ export async function main(
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          if (
+            (format === "json" || format === "jsonl") &&
+            outcome.failureData !== undefined &&
+            !argv.some((argument) => FULL_OUTPUT_OPTION.test(argument))
+          ) {
+            return outcome.failureData;
+          }
           return incurError({
             code: "SCAN_FAILED",
             message: outcome.error,
@@ -1068,6 +1079,12 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Archive existing results; requires --output-dir."),
+          retainRolloutSessions: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Copy coordinator and worker rollout logs into private scan artifacts.",
+            ),
           pluginPath: optionValue("--plugin-path")
             .optional()
             .describe(PLUGIN_PATH_DESCRIPTION),
@@ -1175,6 +1192,7 @@ export async function main(
             provider: options.provider,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
+            retainRolloutSessions: options.retainRolloutSessions,
             pluginPath: options.pluginPath,
             pythonPath: options.python,
             codex: options.codex,
@@ -1188,6 +1206,13 @@ export async function main(
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          if (
+            (format === "json" || format === "jsonl") &&
+            outcome.failureData !== undefined &&
+            !argv.some((argument) => FULL_OUTPUT_OPTION.test(argument))
+          ) {
+            return outcome.failureData;
+          }
           return incurError({
             code: "SCAN_FAILED",
             message: outcome.error,
@@ -1301,6 +1326,12 @@ export async function main(
           .array(optionValue("--knowledge-base"))
           .default([])
           .describe("Read shared security docs for every repository."),
+        retainRolloutSessions: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Copy coordinator and worker rollout logs into private scan artifacts.",
+          ),
         workers: z
           .number()
           .int()
@@ -1386,13 +1417,18 @@ export async function main(
                 argument.startsWith("--knowledge-base=")
               ) {
                 optionIndex += 1;
+              } else if (
+                argument === "--retain-rollout-sessions" ||
+                argument.startsWith("--retain-rollout-sessions=")
+              ) {
+                optionIndex += 1;
               } else {
                 break;
               }
             }
             if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH] [--retain-rollout-sessions]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1425,6 +1461,7 @@ export async function main(
             mode: options.mode,
             maxAttempts: options.maxAttempts,
             knowledgeBasePaths: options.knowledgeBase,
+            retainRolloutSessions: options.retainRolloutSessions,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -1916,6 +1953,12 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains an invalid cost limit.",
     );
   }
+  const retainRolloutSessions = recipe["retainRolloutSessions"] ?? false;
+  if (typeof retainRolloutSessions !== "boolean") {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid rollout retention setting.",
+    );
+  }
   const deepScan = z
     .object(DEEP_SCAN_OPTION_SCHEMAS)
     .optional()
@@ -1945,6 +1988,7 @@ function scanArgumentsFromRecipe(
     mode,
     ...deepScan.data,
     archiveExisting: false,
+    retainRolloutSessions,
     codex: [],
     codexOverrides: config,
     failOnSeverity: threshold as FailureSeverity | undefined,
@@ -2804,6 +2848,7 @@ async function runScan(
       maxDiscoveryRuns: arguments_.maxDiscoveryRuns,
       outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,
+      retainRolloutSessions: arguments_.retainRolloutSessions,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
       failureSeverity: arguments_.failOnSeverity,
@@ -2973,12 +3018,15 @@ async function runScan(
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
+    const message =
+      requestedSignal === "SIGINT"
+        ? "Scan canceled by Ctrl-C."
+        : "Scan terminated by SIGTERM.";
     return {
-      exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
-      error:
-        requestedSignal === "SIGINT"
-          ? "Scan canceled by Ctrl-C."
-          : "Scan terminated by SIGTERM.",
+      exitCode,
+      error: message,
+      failureData: scanFailureData(scanDir, exitCode, message),
     };
   }
   if (failed) {
@@ -3001,14 +3049,22 @@ async function runScan(
     });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
-      return { exitCode: 2, error: message };
+      return {
+        exitCode: 2,
+        error: message,
+        failureData: scanFailureData(scanDir, 2, message),
+      };
     }
     if (scanDir !== null) {
       errorOutput.write(
         `Partial output was kept at ${redactedErrorMessage(scanDir)}.\n`,
       );
     }
-    return { exitCode: 2, error: message };
+    return {
+      exitCode: 2,
+      error: message,
+      failureData: scanFailureData(scanDir, 2, message),
+    };
   }
   if (preflight !== null) {
     const effectivePreflight: ScanPreflight = {
@@ -3035,7 +3091,12 @@ async function runScan(
       message: "Scan completed without a result.",
     });
     errorOutput.write("scan completed without a result\n");
-    return { exitCode: 2, error: "Scan completed without a result." };
+    const message = "Scan completed without a result.";
+    return {
+      exitCode: 2,
+      error: message,
+      failureData: scanFailureData(scanDir, 2, message),
+    };
   }
   const threshold = arguments_.failOnSeverity;
   const blockingSeverities = new Set<SeverityLevel>(
@@ -3075,6 +3136,36 @@ async function runScan(
     return { exitCode: 2, data: result.toJSON() };
   }
   return { exitCode: blockingCount > 0 ? 1 : 0, data: result.toJSON() };
+}
+
+function scanFailureData(
+  scanDir: string | null,
+  exitCode: number,
+  message: string,
+): Record<string, unknown> | undefined {
+  if (scanDir === null) return undefined;
+  const rolloutSessionIndexPath = join(
+    scanDir,
+    ...ROLLOUT_SESSION_INDEX_RELATIVE_PATH,
+  );
+  try {
+    if (
+      lstatSync(rolloutSessionIndexPath, {
+        throwIfNoEntry: false,
+      })?.isFile() !== true
+    ) {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return {
+    ok: false,
+    error: { code: "SCAN_FAILED", message },
+    exitCode,
+    scanDir,
+    rolloutSessionIndexPath,
+  };
 }
 
 // Filesystem and OS syscall failures cannot originate from the model transport,

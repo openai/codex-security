@@ -705,6 +705,7 @@ describe("CLI", () => {
             "--knowledge-base",
             "/shared/architecture.pdf",
             "--knowledge-base=/shared/threat-models",
+            "--retain-rollout-sessions",
             "--codex",
             "features.goals=true",
             "--json",
@@ -738,6 +739,7 @@ describe("CLI", () => {
           "/shared/architecture.pdf",
           "/shared/threat-models",
         ],
+        retainRolloutSessions: true,
       });
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
@@ -1678,6 +1680,7 @@ describe("CLI", () => {
     expect(help.text()).toContain("--verbose");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
+    expect(help.text()).toContain("--retain-rollout-sessions");
     expect(help.text()).toContain("--workers <number>");
     expect(help.text()).toContain("--subagents <number>");
     expect(help.text()).toContain("--stop-after-no-new <number>");
@@ -1750,6 +1753,7 @@ describe("CLI", () => {
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
     expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
+    expect(help.text()).toContain("--retain-rollout-sessions");
     expect(stderr.text()).toBe("");
   });
 
@@ -1871,6 +1875,7 @@ describe("CLI", () => {
           "--output-dir",
           "/tmp/results",
           "--archive-existing",
+          "--retain-rollout-sessions",
         ],
         pathOutput.stream,
         capture().stream,
@@ -1887,6 +1892,7 @@ describe("CLI", () => {
       subagents: 0,
       stopAfterNoNew: 3,
       maxDiscoveryRuns: 10,
+      retainRolloutSessions: true,
     });
     expect(pathConfig).toMatchObject({
       pluginPath: "plugin.zip",
@@ -2458,6 +2464,7 @@ describe("CLI", () => {
   test("reports saved model and reasoning effort for verbose scan reruns", async () => {
     const stdout = capture();
     const stderr = capture();
+    let replayedOptions: ScanOptions | undefined;
 
     expect(
       await main(
@@ -2470,12 +2477,16 @@ describe("CLI", () => {
               repository: "/original/repository",
               target: { kind: "repository", paths: [] },
               mode: "standard",
+              retainRolloutSessions: true,
               config: {
                 model: "gpt-original",
                 model_reasoning_effort: "high",
               },
             },
           }),
+          onTurn: (_repository, options) => {
+            replayedOptions = options as ScanOptions;
+          },
         }),
       ),
     ).toBe(0);
@@ -2487,6 +2498,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("codex-security: debug: scan.completed");
     expect(stderr.text()).toContain('model="gpt-original"');
     expect(stderr.text()).toContain('reasoning_effort="high"');
+    expect(replayedOptions?.retainRolloutSessions).toBe(true);
   });
 
   test("reports selected profile settings for verbose scan reruns", async () => {
@@ -4308,6 +4320,58 @@ describe("CLI", () => {
     ).toBe(2);
     expect(cwdOutput.text()).toBe("");
     expect(cwdError.text()).toContain("working directory is unavailable");
+  });
+
+  test("returns a failed scan rollout index in machine-readable JSON", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-failed-rollout-")),
+    );
+    try {
+      const scanDir = join(root, "scan");
+      const rolloutSessionIndexPath = join(
+        scanDir,
+        "artifacts",
+        "rollout-sessions",
+        "index.json",
+      );
+      await mkdir(join(scanDir, "artifacts", "rollout-sessions"), {
+        recursive: true,
+      });
+      await writeFile(rolloutSessionIndexPath, "{}\n");
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["scan", ".", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onTurn: (_repository, options) => {
+              (
+                options as { onOutputDirReady?: (path: string) => void }
+              ).onOutputDirReady?.(scanDir);
+            },
+            onRun: () => {
+              throw new CodexSecurityError("synthetic scan failure");
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        ok: false,
+        error: {
+          code: "SCAN_FAILED",
+          message: "synthetic scan failure",
+        },
+        exitCode: 2,
+        scanDir,
+        rolloutSessionIndexPath,
+      });
+      expect(stderr.text()).toContain("synthetic scan failure");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("explains protected-root output failures without contaminating JSON stdout", async () => {

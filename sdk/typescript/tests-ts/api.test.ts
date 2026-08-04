@@ -50,6 +50,7 @@ import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
+import { writeRolloutSessionIndex } from "../src/rollout-session-index.js";
 import { normalizeTarget } from "../src/targets.js";
 import { REDACTED_CREDENTIALS, SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -1887,6 +1888,8 @@ describe("CodexSecurity orchestration", () => {
       "complete-scan",
       "--scan-id",
       "scan_example_001",
+      "--rollout-session-index-path",
+      "artifacts/rollout-sessions/index.json",
     ]);
     await client.close();
   });
@@ -2476,6 +2479,366 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("indexes coordinator and worker rollouts without retaining raw sessions by default", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              await Promise.all([
+                writeUsageSession(codexHome, "thread-1", {
+                  input_tokens: 10,
+                  output_tokens: 3,
+                }),
+                writeUsageSession(
+                  codexHome,
+                  "worker-thread",
+                  { input_tokens: 5, output_tokens: 2 },
+                  "thread-1",
+                ),
+                writeUsageSession(codexHome, "unrelated-thread", {
+                  input_tokens: 100,
+                  output_tokens: 100,
+                }),
+              ]);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    const result = await client.run(repository);
+    const indexPath = join(
+      scanDir,
+      "artifacts",
+      "rollout-sessions",
+      "index.json",
+    );
+    expect(result.rolloutSessionIndexPath).toBe(indexPath);
+    expect(JSON.parse(await readFile(indexPath, "utf8"))).toMatchObject({
+      rootThreadId: "thread-1",
+      complete: true,
+      retained: false,
+      sessions: [
+        { threadId: "thread-1", role: "coordinator" },
+        {
+          threadId: "worker-thread",
+          parentThreadId: "thread-1",
+          role: "worker",
+        },
+      ],
+    });
+    await expect(
+      stat(join(scanDir, "artifacts", "rollout-sessions", "sessions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(commands.find(([command]) => command === "complete-scan")).toContain(
+      "artifacts/rollout-sessions/index.json",
+    );
+    await client.close();
+  });
+
+  test("completes with an index when retaining successful scan rollouts fails", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const warnings: string[] = [];
+    let retainedWriteAttempts = 0;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        writeRolloutSessionIndex: async (
+          options: Parameters<typeof writeRolloutSessionIndex>[0],
+        ) => {
+          if (options.retain) {
+            retainedWriteAttempts += 1;
+            throw new Error("synthetic retention failure");
+          }
+          return writeRolloutSessionIndex(options);
+        },
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              await writeUsageSession(codexHome, "thread-1", {
+                input_tokens: 10,
+                output_tokens: 3,
+              });
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    const result = await client.run(repository, {
+      retainRolloutSessions: true,
+      onWarning: (warning) => warnings.push(warning),
+    });
+    expect(retainedWriteAttempts).toBe(1);
+    expect(warnings).toContainEqual(
+      expect.stringContaining(
+        "Could not retain rollout sessions: synthetic retention failure",
+      ),
+    );
+    expect(result.rolloutSessionIndexPath).toBe(
+      join(scanDir, "artifacts", "rollout-sessions", "index.json"),
+    );
+    expect(commands.find(([command]) => command === "complete-scan")).toContain(
+      "artifacts/rollout-sessions/index.json",
+    );
+    expect(commands.some(([command]) => command === "fail-scan")).toBe(false);
+    await client.close();
+  });
+
+  test("retains indexed rollouts and records their index when a scan fails", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await Promise.all([
+                  writeUsageSession(codexHome, "scan-thread", {
+                    input_tokens: 10,
+                    output_tokens: 3,
+                  }),
+                  writeUsageSession(
+                    codexHome,
+                    "worker-thread",
+                    { input_tokens: 5, output_tokens: 2 },
+                    "scan-thread",
+                  ),
+                ]);
+                yield {
+                  type: "turn.failed",
+                  error: { message: "synthetic scan failure" },
+                };
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, { retainRolloutSessions: true }),
+    ).rejects.toThrow("synthetic scan failure");
+    const indexPath = join(
+      scanDir,
+      "artifacts",
+      "rollout-sessions",
+      "index.json",
+    );
+    const index = JSON.parse(await readFile(indexPath, "utf8")) as {
+      retained: boolean;
+      sessions: Array<{ threadId: string; retainedPath: string }>;
+    };
+    expect(index.retained).toBe(true);
+    expect(index.sessions.map(({ threadId }) => threadId)).toEqual([
+      "scan-thread",
+      "worker-thread",
+    ]);
+    for (const session of index.sessions) {
+      await expect(
+        stat(join(scanDir, ...session.retainedPath.split("/"))),
+      ).resolves.toBeDefined();
+    }
+    expect(commands.find(([command]) => command === "fail-scan")).toContain(
+      "artifacts/rollout-sessions/index.json",
+    );
+    const registration = commands.find(
+      ([command]) => command === "register-cli-scan",
+    );
+    expect(
+      JSON.parse(
+        registration?.[registration.indexOf("--recipe-json") + 1] ?? "{}",
+      ),
+    ).toMatchObject({ retainRolloutSessions: true });
+    await client.close();
+  });
+
+  test("falls back to an index when retaining failed scan rollouts fails", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const warnings: string[] = [];
+    let retainedWriteAttempts = 0;
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        writeRolloutSessionIndex: async (
+          options: Parameters<typeof writeRolloutSessionIndex>[0],
+        ) => {
+          if (options.retain) {
+            retainedWriteAttempts += 1;
+            throw new Error("synthetic retention failure");
+          }
+          return writeRolloutSessionIndex(options);
+        },
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await writeUsageSession(codexHome, "scan-thread", {
+                  input_tokens: 10,
+                  output_tokens: 3,
+                });
+                yield {
+                  type: "turn.failed",
+                  error: { message: "synthetic scan failure" },
+                };
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        retainRolloutSessions: true,
+        onWarning: (warning) => warnings.push(warning),
+      }),
+    ).rejects.toThrow("synthetic scan failure");
+    expect(retainedWriteAttempts).toBe(1);
+    expect(warnings).toContainEqual(
+      expect.stringContaining(
+        "Could not retain rollout sessions: synthetic retention failure",
+      ),
+    );
+    const indexPath = join(
+      scanDir,
+      "artifacts",
+      "rollout-sessions",
+      "index.json",
+    );
+    expect(JSON.parse(await readFile(indexPath, "utf8"))).toMatchObject({
+      retained: false,
+      sessions: [{ threadId: "scan-thread" }],
+    });
+    await expect(
+      stat(join(scanDir, "artifacts", "rollout-sessions", "sessions")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(commands.find(([command]) => command === "fail-scan")).toContain(
+      "artifacts/rollout-sessions/index.json",
+    );
+    await client.close();
+  });
+
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -2592,6 +2955,8 @@ describe("CodexSecurity orchestration", () => {
       `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
       "--cost-json",
       JSON.stringify(cost),
+      "--rollout-session-index-path",
+      "artifacts/rollout-sessions/index.json",
     ]);
     expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
     await expect(stat(scanDir)).resolves.toBeDefined();
