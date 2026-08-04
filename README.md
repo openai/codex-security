@@ -36,11 +36,17 @@ npx @openai/codex-security scan . --auth chatgpt
 npx @openai/codex-security scan . --auth api-key
 ```
 
-To make your ChatGPT sign-in the automatic default, unset any configured API
-keys:
+To make your ChatGPT sign-in the automatic default, remove any configured API
+keys from the environment:
 
 ```bash
 unset OPENAI_API_KEY CODEX_API_KEY
+```
+
+On Windows, remove the API-key variables in PowerShell:
+
+```powershell
+Remove-Item Env:OPENAI_API_KEY, Env:CODEX_API_KEY -ErrorAction SilentlyContinue
 ```
 
 Scan history is stored in the Codex Security workbench state directory. If that
