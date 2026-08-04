@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -80,7 +79,8 @@ async function writeSession(
 }
 
 describe("scan cost", () => {
-  test("retains cached and alternate cache-write usage in workbench totals", () => {
+  test("retains cached and alternate cache-write usage in workbench totals", async () => {
+    const { PLUGIN_ROOT } = await import("./plugin-root.js");
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const usage = {
