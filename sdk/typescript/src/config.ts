@@ -21,6 +21,36 @@ export interface ScanModelConfiguration {
   reasoningEffort: string;
 }
 
+export const OPENROUTER_CODEX_PROVIDER = {
+  name: "OpenRouter",
+  base_url: "https://openrouter.ai/api/v1",
+  env_key: "OPENROUTER_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const FIREWORKS_CODEX_PROVIDER = {
+  name: "Fireworks AI",
+  base_url: "https://api.fireworks.ai/inference/v1",
+  env_key: "FIREWORKS_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const EXTERNAL_CODEX_PROVIDERS = {
+  openrouter: OPENROUTER_CODEX_PROVIDER,
+  fireworks: FIREWORKS_CODEX_PROVIDER,
+} as const;
+
+export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
+
+export function isExternalModelProvider(
+  provider: unknown,
+): provider is ExternalModelProvider {
+  return (
+    typeof provider === "string" &&
+    Object.hasOwn(EXTERNAL_CODEX_PROVIDERS, provider)
+  );
+}
+
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
@@ -44,13 +74,31 @@ deepFreezeJson(DEFAULT_CODEX_CONFIG);
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
-  const model = config["model"];
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const configuredProfile =
+    typeof profileName === "string" &&
+    isObject(profiles) &&
+    Object.hasOwn(profiles, profileName)
+      ? profiles[profileName]
+      : undefined;
+  const selectedProfile = isObject(configuredProfile)
+    ? configuredProfile
+    : undefined;
+  const model =
+    selectedProfile !== undefined && Object.hasOwn(selectedProfile, "model")
+      ? selectedProfile["model"]
+      : config["model"];
   if (typeof model !== "string" || model.trim().length === 0) {
     throw new ConfigurationError(
       "The configured Codex model must be a nonempty string.",
     );
   }
-  const reasoningEffort = config["model_reasoning_effort"];
+  const reasoningEffort =
+    selectedProfile !== undefined &&
+    Object.hasOwn(selectedProfile, "model_reasoning_effort")
+      ? selectedProfile["model_reasoning_effort"]
+      : config["model_reasoning_effort"];
   if (
     typeof reasoningEffort !== "string" ||
     reasoningEffort.trim().length === 0
