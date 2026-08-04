@@ -76,6 +76,7 @@ jobs:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' && 'true' || 'false' }}
         run: pnpm --dir sdk/typescript run test
 
       - name: Check formatting

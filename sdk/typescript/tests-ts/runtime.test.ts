@@ -2122,13 +2122,21 @@ describe("runtime directories and plugin Python boundary", () => {
           "-Command",
           [
             "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
-            "$principals = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
-            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; principals = $principals } | ConvertTo-Json -Compress",
+            "$allowed = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' })",
+            "$denied = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' })",
+            "$principals = @($allowed | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
+            "$deniedPrincipals = @($denied | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
+            "$fullControl = @($allowed | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $env:CODEX_SECURITY_TEST_USER_SID -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq [System.Security.AccessControl.FileSystemRights]::FullControl -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit) -ne 0 -and ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit) -ne 0 -and $_.PropagationFlags -eq [System.Security.AccessControl.PropagationFlags]::None })",
+            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; principals = $principals; deniedPrincipals = $deniedPrincipals; grantsCurrentUserAccess = ($fullControl.Count -gt 0 -and $denied.Count -eq 0) } | ConvertTo-Json -Compress",
           ].join("; "),
         ],
         {
           encoding: "utf8",
-          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
+          env: {
+            ...process.env,
+            CODEX_SECURITY_TEST_ACL_PATH: home,
+            CODEX_SECURITY_TEST_USER_SID: sid!,
+          },
           windowsHide: true,
         },
       );
@@ -2136,8 +2144,14 @@ describe("runtime directories and plugin Python boundary", () => {
       const access = JSON.parse(descriptor.stdout) as {
         protected: boolean;
         principals: string[];
+        deniedPrincipals: string[];
+        grantsCurrentUserAccess: boolean;
       };
-      expect(access.protected).toBe(true);
+      expect(access).toMatchObject({
+        protected: true,
+        deniedPrincipals: [],
+        grantsCurrentUserAccess: true,
+      });
       expect(access.principals).toEqual(
         expect.arrayContaining([sid!, "S-1-5-18", "S-1-5-32-544"]),
       );
@@ -2245,7 +2259,10 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(
-    process.platform !== "win32" || process.env["GITHUB_ACTIONS"] !== "true",
+    process.platform !== "win32" ||
+      process.env["GITHUB_ACTIONS"] !== "true" ||
+      process.env["RUNNER_ENVIRONMENT"] !== "github-hosted" ||
+      process.env["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"] !== "true",
   )(
     "prepares managed credential homes under constrained PowerShell",
     async () => {
@@ -2268,22 +2285,22 @@ describe("runtime directories and plugin Python boundary", () => {
         "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
       const policyName = "__PSLockdownPolicy";
       const original = spawnSync(
-        powershell,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "[pscustomobject]@{ value = [Environment]::GetEnvironmentVariable('__PSLockdownPolicy', 'Machine') } | ConvertTo-Json -Compress",
-        ],
+        registry,
+        ["query", policyKey, "/v", policyName],
         { encoding: "utf8", timeout: 15_000, windowsHide: true },
       );
-      expect(original.status).toBe(0);
-      const originalPolicy = (
-        JSON.parse(original.stdout) as {
-          value: string | null;
-        }
-      ).value;
+      expect(original.status === 0 || original.status === 1).toBe(true);
+      const originalEntry =
+        original.status === 0
+          ? /^\s*__PSLockdownPolicy\s+(REG_[A-Z_]+)\s*(.*?)\s*$/mu.exec(
+              original.stdout,
+            )
+          : null;
+      if (original.status === 0) expect(originalEntry).not.toBeNull();
+      const originalPolicy =
+        originalEntry === null
+          ? null
+          : { type: originalEntry[1]!, value: originalEntry[2]! };
       const enabled = spawnSync(
         registry,
         ["add", policyKey, "/v", policyName, "/t", "REG_SZ", "/d", "4", "/f"],
@@ -2416,9 +2433,9 @@ describe("runtime directories and plugin Python boundary", () => {
                 "/v",
                 policyName,
                 "/t",
-                "REG_SZ",
+                originalPolicy.type,
                 "/d",
-                originalPolicy,
+                originalPolicy.value,
                 "/f",
               ],
           { encoding: "utf8", timeout: 15_000, windowsHide: true },
