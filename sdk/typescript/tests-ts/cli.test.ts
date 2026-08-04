@@ -533,6 +533,12 @@ describe("CLI", () => {
       const hook = join(root, ".custom hooks", "pre-commit");
       const deps = dependencies({
         currentDirectory: root,
+        environment: {
+          ...process.env,
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "core.hooksPath",
+          GIT_CONFIG_VALUE_0: join(root, "injected-hooks"),
+        },
         onRun: () => (started = true),
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -555,6 +561,9 @@ describe("CLI", () => {
       expect(await readFile(hook, "utf8")).toContain(
         "--working-tree --fail-on-severity medium",
       );
+      await expect(stat(join(root, "injected-hooks"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       expect(started).toBe(false);
 
       const trustedHook = await readFile(hook, "utf8");

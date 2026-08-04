@@ -219,6 +219,33 @@ describe("trusted executable resolution", () => {
     });
   });
 
+  test("removes PATH entries inside any protected root", async () => {
+    const root = await temporaryDirectory();
+    const invocation = join(root, "invocation");
+    const repository = join(root, "repository");
+    const invocationBin = join(invocation, "node_modules", ".bin");
+    const repositoryBin = join(repository, "node_modules", ".bin");
+    const trusted = await realpath(dirname(process.execPath));
+    await Promise.all([
+      mkdir(invocationBin, { recursive: true }),
+      mkdir(repositoryBin, { recursive: true }),
+    ]);
+
+    const result = await resolveTrustedExecutable(
+      basename(process.execPath),
+      {
+        PATH: [invocationBin, repositoryBin, trusted].join(delimiter),
+        KEEP: "ok",
+      },
+      [invocation, repository],
+    );
+
+    expect(result).toEqual({
+      executable: await realpath(process.execPath),
+      environment: { KEEP: "ok", PATH: trusted },
+    });
+  });
+
   test.skipIf(process.platform !== "win32")(
     "resolves a real Windows executable without trusting PATHEXT, repository junctions, or PATH casing",
     async () => {

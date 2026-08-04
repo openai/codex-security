@@ -91,6 +91,7 @@ import {
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
@@ -1228,18 +1229,39 @@ export async function main(
         .optional(),
       async run({ args, options }) {
         try {
-          const hook = execFileSync(
+          const invocationDirectory = await realpath(
+            dependencies.currentDirectory(),
+          );
+          const repository = await realpath(
+            resolve(invocationDirectory, args.repository ?? "."),
+          );
+          const git = await resolveTrustedExecutable(
             "git",
+            isolatedGitEnvironment(dependencies.environment),
+            [invocationDirectory, repository],
+          );
+          if (git === null) {
+            throw new Error("Git is not available on a trusted PATH.");
+          }
+          const hook = execFileSync(
+            git.executable,
             [
               "-C",
-              resolve(dependencies.currentDirectory(), args.repository ?? "."),
+              repository,
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
               "hooks/pre-commit",
             ],
-            { encoding: "utf8" },
+            { encoding: "utf8", env: git.environment },
           ).trim();
+          if (
+            hook.length === 0 ||
+            !isAbsolute(hook) ||
+            /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(hook)
+          ) {
+            throw new Error("Git returned an invalid pre-commit hook path.");
+          }
           const command = [
             realpathSync(process.execPath),
             realpathSync(fileURLToPath(import.meta.url)),
@@ -3340,6 +3362,16 @@ function quoteCliPath(path: string): string {
   return process.platform === "win32"
     ? `"${path}"`
     : `'${path.replaceAll("'", `'"'"'`)}'`;
+}
+
+function isolatedGitEnvironment(
+  environment: Readonly<NodeJS.ProcessEnv>,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) => !name.toUpperCase().startsWith("GIT_"),
+    ),
+  );
 }
 
 function targetFromArguments(arguments_: ScanArguments): ScanTarget {

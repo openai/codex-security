@@ -10,10 +10,12 @@ export interface TrustedExecutable {
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
 ): Promise<TrustedExecutable | null> {
-  const root = await realpath(protectedRoot).catch(() =>
-    resolve(protectedRoot),
+  const protectedRoots = await Promise.all(
+    (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
+      async (root) => await realpath(root).catch(() => resolve(root)),
+    ),
   );
   const path = Object.entries(environment).find(
     ([name]) => name.toUpperCase() === "PATH",
@@ -22,7 +24,12 @@ export async function resolveTrustedExecutable(
   for (const entry of path?.split(delimiter) ?? []) {
     if (entry.length === 0 || !isAbsolute(entry)) continue;
     const canonical = await realpath(entry).catch(() => null);
-    if (canonical === null || isWithin(root, canonical)) continue;
+    if (
+      canonical === null ||
+      protectedRoots.some((root) => isWithin(root, canonical))
+    ) {
+      continue;
+    }
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
@@ -54,7 +61,7 @@ export async function resolveTrustedExecutable(
   for (const current of candidates) {
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    if (isWithin(root, canonical)) {
+    if (protectedRoots.some((root) => isWithin(root, canonical))) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
