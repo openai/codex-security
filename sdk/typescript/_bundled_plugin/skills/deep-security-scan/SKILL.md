@@ -72,7 +72,7 @@ Confirm these plugin skills are available in the active runtime:
 - `$codex-security:validation`
 - `$codex-security:attack-path-analysis`
 
-The discovery tool launches Codex workers that may use Subagents v2. The active configuration must satisfy the deep profile's native-v2 requirement. The worker count is configured separately from this thread's subagent allowance.
+The discovery tool manages its own workers independently of this thread's delegation runtime and subagent allowance.
 
 Continue after a `ready` result, explaining material warn or suggest limitations. For `blocked` or `incomplete` results with actionable remediation, first classify the session using `../../references/config-preflight.md`. In an interactive session, present the exact reasons, helper-reported config file path, and config changes, then use that reference's native `request_user_input` → `request_codex_security_user_input` → plain-chat fallback sequence before editing persistent configuration. Stop for the answer without creating a goal or starting discovery. In `codex exec`, headless, automation, or another non-interactive session, do not ask or wait; apply only helper-provided ordinary config patches to the helper's `user_config_path`, rerun preflight once, and continue only if it becomes `ready`. Never guess which Codex home is active or hide a higher-precedence conflict with a lower-precedence edit. If an interactive user declines required remediation, ask whether to cancel the durable desktop scan with `cancel_codex_security_scan` or leave it running for a later retry.
 
