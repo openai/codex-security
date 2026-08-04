@@ -43,6 +43,11 @@ interface MultiscanReceipt extends MultiscanTask {
   outputDir: string;
   cost?: ScanCost;
   error?: string;
+  // Optional in exactly the way `error` is, because the ledger is append-only JSONL that
+  // readReceipts parses without a schema: receipts written before this field existed have
+  // to keep resuming, so the key is omitted when the attempt warned about nothing rather
+  // than written as an empty array.
+  warnings?: string[];
 }
 
 export interface MultiscanOptions {
@@ -70,6 +75,11 @@ export interface MultiscanResult {
   total: number;
   completed: number;
   failed: number;
+  // Repositories that reported at least one warning: from the attempts this run made, and
+  // from the receipt of a repository it resumed and skipped, the same way `completed`
+  // counts skipped repositories. A warning is not a failure, so a drifted or partially
+  // cleaned repository is only visible here and on its receipt.
+  warned: number;
   skipped: number;
   resultsPath: string;
 }
@@ -111,6 +121,7 @@ async function runCampaign(
   const receipts = await readReceipts(ledger);
   const pending: MultiscanTask[] = [];
   let completed = 0;
+  let warned = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
     if (
@@ -120,6 +131,11 @@ async function runCampaign(
       (await hasArtifacts(receipt.outputDir))
     ) {
       completed += 1;
+      // This repository is not scanned again, so its receipt is the only place its
+      // warnings still exist. Array.isArray because the ledger is parsed unvalidated.
+      if (Array.isArray(receipt.warnings) && receipt.warnings.length > 0) {
+        warned += 1;
+      }
     } else {
       pending.push(task);
     }
@@ -130,6 +146,7 @@ async function runCampaign(
       total: tasks.length,
       completed,
       failed: 0,
+      warned,
       skipped,
       resultsPath: ledger,
     };
@@ -145,6 +162,7 @@ async function runCampaign(
       const task = pending[next++];
       if (task === undefined) return;
       let attempt = receipts.get(task.id.toLowerCase())?.attempt ?? 0;
+      let repositoryWarned = false;
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
         attempt += 1;
@@ -159,6 +177,13 @@ async function runCampaign(
         options.onProgress?.({ ...progress, status: "started" });
         let failure: string | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        // Warnings are collected through the observer rather than read off the returned
+        // ScanResult, which does not carry them, and the observer is also the only channel
+        // that reports the warnings run() emits from its finally block: cleanup failures,
+        // which happen whether the attempt returned a result or threw. run() dispatches
+        // observers on a microtask, and the checkout removal this loop awaits below runs
+        // after run() settles, so every warning has landed before the receipt is written.
+        const warnings: string[] = [];
         try {
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
           await rm(checkout, { recursive: true, force: true });
@@ -187,6 +212,11 @@ async function runCampaign(
               : {}),
             mode: task.mode,
             outputDir: scanDir,
+            onWarning: (warning) => {
+              // Redacted like `error` is: unlike the observer the CLI installs, this text
+              // is about to be persisted in the ledger and read back on resume.
+              warnings.push(redactedErrorMessage(warning));
+            },
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
@@ -200,6 +230,7 @@ async function runCampaign(
           await rm(checkout, { recursive: true, force: true });
         }
         const status = failure === undefined ? "completed" : "failed";
+        if (warnings.length > 0) repositoryWarned = true;
         await appendReceipt(
           ledger,
           `${JSON.stringify({
@@ -209,6 +240,7 @@ async function runCampaign(
             outputDir: scanDir,
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
+            ...(warnings.length === 0 ? {} : { warnings }),
           })}\n`,
         );
         options.onProgress?.({
@@ -222,6 +254,7 @@ async function runCampaign(
         }
         if (retry === options.maxAttempts - 1) failed += 1;
       }
+      if (repositoryWarned) warned += 1;
     }
   };
   const results = await Promise.allSettled(
@@ -243,6 +276,7 @@ async function runCampaign(
     total: tasks.length,
     completed,
     failed,
+    warned,
     skipped,
     resultsPath: ledger,
   };
