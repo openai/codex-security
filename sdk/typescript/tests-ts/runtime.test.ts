@@ -2652,6 +2652,63 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "treats a missing output parent as the output parent, not the root",
+    async () => {
+      // prepareOutputDirectory calls this before the output tree exists, so the
+      // resolution loop climbs past every missing component. The ancestor it
+      // lands on is not the directory that will hold the output, and treating it
+      // as one made the same path fail before creation and pass afterwards.
+      const entry = (uid: number, mode: number) =>
+        ({
+          uid,
+          mode,
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        }) as unknown as Awaited<ReturnType<typeof fsPromises.lstat>>;
+      const tree = new Map([["/", entry(0, 0o40777)]]);
+      const missing = (path: string) => {
+        const error = new Error(`ENOENT: ${path}`) as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        return error;
+      };
+      const originalLstat = fsPromises.lstat;
+      const originalRealpath = fsPromises.realpath;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        realpath: async (path: string) => {
+          if (!tree.has(path)) throw missing(path);
+          return path;
+        },
+        lstat: async (path: string) => {
+          const metadata = tree.get(path);
+          if (metadata === undefined) throw missing(path);
+          return metadata;
+        },
+      }));
+      try {
+        // /workspace does not exist yet and will be created by this run, so the
+        // directory that holds the output is /workspace, not /. The root keeps
+        // its exemption exactly as it would once /workspace exists.
+        await expect(
+          requireSecureOutputAncestry("/workspace/scans/scan-1", 4242),
+        ).resolves.toBeUndefined();
+
+        // Output placed directly in the root is still refused, whether or not
+        // the output directory itself has been created.
+        await expect(
+          requireSecureOutputAncestry("/scan-1", 4242),
+        ).rejects.toThrow("sticky bit");
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+          realpath: originalRealpath,
+        }));
+      }
+    },
+  );
+
   testPosix("rejects sticky shared parents controlled by another user", () => {
     expect(() =>
       requireTrustedOutputAncestor(

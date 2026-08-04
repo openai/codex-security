@@ -873,6 +873,11 @@ export async function requireSecureOutputAncestry(
 ): Promise<void> {
   if (process.platform === "win32") return;
   let current = dirname(resolve(path));
+  // Callers reach here before the output tree exists, so the loop below climbs
+  // past every missing component. Once it has climbed, `current` is an ancestor
+  // of the directory that will hold the output rather than that directory, and
+  // the exemption below must not treat it as one.
+  let isOutputParent = true;
   while (true) {
     try {
       current = await realpath(current);
@@ -892,9 +897,9 @@ export async function requireSecureOutputAncestry(
         );
       }
       current = parent;
+      isOutputParent = false;
     }
   }
-  let isOutputParent = true;
   while (true) {
     let metadata: Stats;
     try {
