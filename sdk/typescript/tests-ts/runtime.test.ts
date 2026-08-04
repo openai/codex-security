@@ -1901,6 +1901,22 @@ describe("runtime directories and plugin Python boundary", () => {
         { scope: "ancestor" },
       ),
     ).toThrow("owner is not a trusted principal");
+
+    const installer =
+      "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${installer}G:SYD:(A;OICI;FA;;;${installer})(A;OICI;FA;;;${user})`,
+        user,
+        { scope: "ancestor" },
+      ).untrustedPrincipals,
+    ).toEqual([]);
+    expect(() =>
+      inspectWindowsCredentialAcl(
+        `O:${installer}G:SYD:(A;OICI;FA;;;${user})`,
+        user,
+      ),
+    ).toThrow("owner is not a trusted principal");
   });
 
   test("accepts private credential-file ACLs without inheritance flags", () => {

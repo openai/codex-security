@@ -290,6 +290,8 @@ function windowsCredentialAclFailure(error: unknown): string {
 
 const WINDOWS_SYSTEM_SID = "S-1-5-18";
 const WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544";
+const WINDOWS_TRUSTED_INSTALLER_SID =
+  "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 const WINDOWS_LOCAL_SERVICE_SID = "S-1-5-19";
 const WINDOWS_NETWORK_SERVICE_SID = "S-1-5-20";
 const WINDOWS_EVERYONE_SID = "S-1-1-0";
@@ -356,8 +358,8 @@ export interface WindowsCredentialAcl {
 }
 
 class UntrustedWindowsCredentialOwnerError extends Error {
-  public constructor() {
-    super("Windows credential ACL owner is not a trusted principal");
+  public constructor(owner: string) {
+    super(`Windows credential ACL owner is not a trusted principal: ${owner}`);
   }
 }
 
@@ -394,13 +396,16 @@ export function inspectWindowsCredentialAcl(
     WINDOWS_ADMINISTRATORS_SID,
     principalAliases["LA"] ?? "LA",
   ]);
+  if (options.scope === "ancestor") {
+    trustedPrincipals.add(WINDOWS_TRUSTED_INSTALLER_SID);
+  }
   const normalizePrincipal = (principal: string): string =>
     principalAliases[principal] ?? principal;
   const trustedPrincipal = (principal: string): boolean =>
     trustedPrincipals.has(principal);
   const owner = normalizePrincipal(match[1]!);
   if (!trustedPrincipal(owner)) {
-    throw new UntrustedWindowsCredentialOwnerError();
+    throw new UntrustedWindowsCredentialOwnerError(owner);
   }
   const flags = match[2]!;
   if (flags.includes("NO_ACCESS_CONTROL")) {
