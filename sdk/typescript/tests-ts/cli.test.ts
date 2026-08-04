@@ -36,7 +36,12 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
-import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
+import {
+  DEFAULT_CODEX_CONFIG,
+  MINIMAX_CN_CODEX_PROVIDER,
+  MINIMAX_CODEX_PROVIDER,
+  scanModelConfiguration,
+} from "../src/config.js";
 import {
   FakeSignals,
   REDACTED_CREDENTIALS,
@@ -116,6 +121,7 @@ describe("CLI", () => {
           model: { type: "string" },
           verbose: { type: "boolean" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
+          provider: { enum: ["openai", "minimax", "minimax-cn"] },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
@@ -1611,7 +1617,7 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra --effort high",
     );
-    expect(help.text()).not.toContain("--provider");
+    expect(help.text()).toContain("--provider <openai|minimax|minimax-cn>");
     expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).not.toContain("codex-security scan . --path src,tests");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
@@ -1659,7 +1665,7 @@ describe("CLI", () => {
     );
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).not.toContain("--provider");
+    expect(help.text()).toContain("--provider <openai|minimax|minimax-cn>");
     expect(stderr.text()).toBe("");
   });
 
@@ -1702,6 +1708,79 @@ describe("CLI", () => {
         ),
       ).toBe(0);
       expect(config?.codexOverrides).toEqual(expected);
+    }
+  });
+
+  test.each([
+    [
+      "MiniMax",
+      "minimax",
+      "MiniMax-M3",
+      "MiniMax-M2.7",
+      MINIMAX_CODEX_PROVIDER,
+    ],
+    [
+      "MiniMax China",
+      "minimax-cn",
+      "MiniMax-M2.7",
+      "MiniMax-M3",
+      MINIMAX_CN_CODEX_PROVIDER,
+    ],
+  ] as const)(
+    "routes scans through %s",
+    async (_name, provider, selectedModel, codexModel, providerConfig) => {
+      for (const [options, expectedModel] of [
+        [[`--provider=${provider}`, "--model", selectedModel], selectedModel],
+        [
+          ["--provider", provider, "--codex", `model="${codexModel}"`],
+          codexModel,
+        ],
+      ] as const) {
+        let config: CodexSecurityConfig | undefined;
+        expect(
+          await main(
+            ["scan", ".", ...options],
+            capture().stream,
+            capture().stream,
+            dependencies({ onConfig: (value) => (config = value) }),
+          ),
+        ).toBe(0);
+        expect(config?.codexOverrides).toEqual({
+          model: expectedModel,
+          model_provider: provider,
+          model_providers: { [provider]: providerConfig },
+        });
+      }
+    },
+  );
+
+  test("registers MiniMax providers and rejects conflicting overrides", () => {
+    expect(parseCodexOverrides([], "MiniMax-M3", undefined, "minimax")).toEqual(
+      {
+        model: "MiniMax-M3",
+        model_provider: "minimax",
+        model_providers: { minimax: MINIMAX_CODEX_PROVIDER },
+      },
+    );
+    expect(
+      parseCodexOverrides([], "MiniMax-M2.7", undefined, "minimax-cn"),
+    ).toEqual({
+      model: "MiniMax-M2.7",
+      model_provider: "minimax-cn",
+      model_providers: { "minimax-cn": MINIMAX_CN_CODEX_PROVIDER },
+    });
+    for (const provider of ["minimax", "minimax-cn"] as const) {
+      expect(() =>
+        parseCodexOverrides([], undefined, undefined, provider),
+      ).toThrow(`--model is required when using --provider ${provider}`);
+      expect(() =>
+        parseCodexOverrides(
+          ['model_provider="other"'],
+          "MiniMax-M3",
+          undefined,
+          provider,
+        ),
+      ).toThrow("--provider conflicts with --codex model_provider");
     }
   });
 
@@ -1893,6 +1972,14 @@ describe("CLI", () => {
         "--knowledge-base must not be empty",
       ],
       [["scan", ".", "--model="], "--model must not be empty"],
+      [
+        ["scan", ".", "--provider", "minimax"],
+        "--model is required when using --provider minimax",
+      ],
+      [
+        ["scan", ".", "--provider", "minimax-cn"],
+        "--model is required when using --provider minimax-cn",
+      ],
       [
         ["scan", ".", "--effort", "ultra"],
         "--effort must be minimal, low, medium, high, or xhigh",

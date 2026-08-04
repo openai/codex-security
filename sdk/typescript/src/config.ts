@@ -21,6 +21,36 @@ export interface ScanModelConfiguration {
   reasoningEffort: string;
 }
 
+export const MINIMAX_CODEX_PROVIDER = {
+  name: "MiniMax",
+  base_url: "https://api.minimax.io/v1",
+  env_key: "MINIMAX_API_KEY",
+  wire_api: "chat",
+} as const satisfies JsonObject;
+
+export const MINIMAX_CN_CODEX_PROVIDER = {
+  name: "MiniMax",
+  base_url: "https://api.minimaxi.com/v1",
+  env_key: "MINIMAX_API_KEY",
+  wire_api: "chat",
+} as const satisfies JsonObject;
+
+export const EXTERNAL_CODEX_PROVIDERS = {
+  minimax: MINIMAX_CODEX_PROVIDER,
+  "minimax-cn": MINIMAX_CN_CODEX_PROVIDER,
+} as const;
+
+export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
+
+export function isExternalModelProvider(
+  provider: unknown,
+): provider is ExternalModelProvider {
+  return (
+    typeof provider === "string" &&
+    Object.hasOwn(EXTERNAL_CODEX_PROVIDERS, provider)
+  );
+}
+
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
