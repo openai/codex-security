@@ -29,6 +29,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
@@ -119,6 +120,141 @@ describe("plugin runtime preparation", () => {
         );
       }),
     ).toBe(true);
+  });
+
+  test("rejects control characters in bundled artifact paths and candidate IDs", async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(
+          PLUGIN_ROOT,
+          "schemas",
+          "definitions",
+          "artifact-common.schema.json",
+        ),
+        "utf8",
+      ),
+    ) as { $defs: Record<string, { pattern: string }> };
+
+    for (const name of ["repositoryPath", "candidateId"]) {
+      const pattern = new RegExp(schema.$defs[name]!.pattern, "u");
+      expect(pattern.test("safe-path")).toBe(true);
+      for (const control of ["\u0000", "\u0001", "\u001f", "\u007f"]) {
+        expect(pattern.test(`safe${control}path`)).toBe(false);
+      }
+    }
+  });
+
+  test("derives distinct finding identities from canonical candidate IDs", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
+      runtime,
+    )?.[0];
+    expect(source).toBeDefined();
+    const buildFindings = new Function(
+      "semanticIdentifier",
+      `${source}\nreturn buildFindings;`,
+    )((value: string, fallback: string) => value || fallback) as (
+      findings: Array<{
+        title: string;
+        extensions: { candidateId: string };
+      }>,
+    ) => Array<{ identity: { anchor: string } }>;
+
+    const findings = buildFindings([
+      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
+      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
+    ]);
+
+    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
+      "candidate-a",
+      "candidate-b",
+    ]);
+  });
+
+  test("includes ignored tracked files in the scoped security inventory", async () => {
+    if (Bun.which("rg") === null) {
+      const generator = await readFile(
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "utf8",
+      );
+      expect(generator).toContain('"--no-ignore"');
+      return;
+    }
+
+    const root = await temporaryDirectory("codex-security-scan-inventory-");
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await writeFile(join(repository, ".gitignore"), "tracked-secret.py\n");
+    await writeFile(join(repository, "tracked-secret.py"), "secret = True\n");
+    for (const args of [
+      ["init", "--quiet", repository],
+      ["-C", repository, "add", "--force", "--", "tracked-secret.py"],
+    ]) {
+      const initialized = spawnSync("git", args, { encoding: "utf8" });
+      expect(initialized.status, initialized.stderr).toBe(0);
+    }
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const output = join(root, "inventory.txt");
+    const inventory = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(inventory.status, inventory.stderr).toBe(0);
+    expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
+  });
+
+  test("allows the workbench to derive missing deferred scan identifiers", async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(PLUGIN_ROOT, "schemas", "tools", "scan-draft.schema.json"),
+        "utf8",
+      ),
+    ) as {
+      $defs: {
+        coverage: {
+          properties: { deferred: { items: { required: string[] } } };
+        };
+      };
+    };
+
+    expect(schema.$defs.coverage.properties.deferred.items.required).toEqual([
+      "reason",
+    ]);
+  });
+
+  test("bounds preserved context before starting a headless scan", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const schema =
+      /var startHeadlessStandardScanSchema = \{[\s\S]*?\n\};/u.exec(
+        runtime,
+      )?.[0];
+
+    expect(schema).toContain(
+      "userContext: editableUserContextSchema.max(2400).optional()",
+    );
   });
 
   test("projects only the unchanged external payload from the source checkout", async () => {
@@ -1704,6 +1840,71 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("identifies Windows ancestor grants that can replace credential homes", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    for (const rights of [
+      "FA",
+      "GA",
+      "FW",
+      "GW",
+      "SD",
+      "WD",
+      "WO",
+      "DC",
+      "0x40",
+      "0x10000",
+      "0x40000",
+      "0x80000",
+      "0x1301bf",
+    ]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;${rights};;;WD)`,
+          user,
+          { scope: "ancestor" },
+        ).untrustedPrincipals,
+      ).toEqual(["S-1-1-0"]);
+    }
+
+    for (const [flags, rights] of [
+      ["", "FR"],
+      ["", "0x1200a9"],
+      ["IO", "FA"],
+    ] as const) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;${flags};${rights};;;WD)`,
+          user,
+          { scope: "ancestor" },
+        ).untrustedPrincipals,
+      ).toEqual([]);
+    }
+
+    const service = "S-1-5-80-111-222-333-444-555";
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${service}G:SYD:(A;OICI;FA;;;${service})(A;OICI;FA;;;${user})`,
+        user,
+        { scope: "ancestor" },
+      ).untrustedPrincipals,
+    ).toEqual([]);
+  });
+
+  test("accepts private credential-file ACLs without inheritance flags", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const descriptor = `O:${user}G:SYD:P(A;;FA;;;${user})(A;;FA;;;SY)`;
+
+    expect(inspectWindowsCredentialAcl(descriptor, user)).toMatchObject({
+      grantsCurrentUserAccess: false,
+    });
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user, { scope: "file" }),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      untrustedPrincipals: [],
+    });
+  });
+
   test("identifies broad, foreign, and inherited Windows ACL grants", () => {
     const user = "S-1-5-21-111-222-333-1001";
     const stranger = "S-1-5-21-111-222-333-1002";
@@ -2258,6 +2459,102 @@ describe("runtime directories and plugin Python boundary", () => {
         protected: true,
         everyone: 0,
       });
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects Windows credential homes beneath attacker-writable ancestry",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      await mkdir(state);
+      const systemDirectory = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+      );
+      const writable = spawnSync(
+        join(systemDirectory, "icacls.exe"),
+        [state, "/grant", "*S-1-1-0:(OI)(CI)M"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(writable.status).toBe(0);
+
+      await expect(
+        prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).rejects.toThrow("ancestor allows another identity");
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "repairs unsafe ACLs on existing nested Windows credential files",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      const home = join(state, "codex-home");
+      const nested = join(home, "sessions");
+      await mkdir(nested, { recursive: true });
+      const auth = join(home, "auth.json");
+      const nestedAuth = join(nested, "credentials.json");
+      await writeFile(auth, '{"token":"synthetic-root"}\n');
+      await writeFile(nestedAuth, '{"token":"synthetic-nested"}\n');
+
+      const systemDirectory = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+      );
+      const identity = spawnSync(
+        join(systemDirectory, "whoami.exe"),
+        ["/user", "/fo", "csv", "/nh"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(identity.status).toBe(0);
+      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
+      expect(sid).toBeDefined();
+
+      for (const credential of [auth, nestedAuth]) {
+        const unsafe = spawnSync(
+          join(systemDirectory, "icacls.exe"),
+          [credential, "/inheritance:r", "/grant:r", `*${sid}:F`, "*S-1-1-0:R"],
+          { encoding: "utf8", windowsHide: true },
+        );
+        expect(unsafe.status).toBe(0);
+      }
+
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).toBe(await realpath(home));
+
+      const inspection = spawnSync(
+        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          [
+            "$paths = @($env:CODEX_SECURITY_TEST_AUTH_PATH, $env:CODEX_SECURITY_TEST_NESTED_AUTH_PATH)",
+            "$unexpected = @($paths | ForEach-Object { $acl = Get-Acl -LiteralPath $_; $acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' } })",
+            "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
+          ].join("; "),
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_TEST_AUTH_PATH: auth,
+            CODEX_SECURITY_TEST_NESTED_AUTH_PATH: nestedAuth,
+          },
+          windowsHide: true,
+        },
+      );
+      expect(inspection.status).toBe(0);
+      expect(JSON.parse(inspection.stdout)).toEqual({ unexpected: 0 });
+      expect(await readFile(auth, "utf8")).toContain("synthetic-root");
+      expect(await readFile(nestedAuth, "utf8")).toContain("synthetic-nested");
     },
   );
 

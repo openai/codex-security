@@ -163,7 +163,7 @@ export interface ScanOptions extends DeepScanOptions {
     details?: ScanReconnectDetails,
   ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
-  onWarning?: (warning: string) => void;
+  onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
 }
@@ -188,6 +188,10 @@ export type ScanAuthentication =
 export interface ScanReconnectDetails {
   reason: "rate_limit" | "network" | "authentication" | "authorization";
   retryAfterSeconds?: number;
+}
+
+export interface ScanWarningDetails {
+  kind: "target_changed";
 }
 
 type ScanObserverName =
@@ -352,6 +356,7 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
+    let preparedTargetWarnings: string[] = [];
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -874,11 +879,16 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
-          await workbench(workbenchOptions, [
+          const preparation = await workbench(workbenchOptions, [
             "prepare-scan-completion",
             "--scan-id",
             scanId,
           ]);
+          preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
+            ? preparation["targetWarnings"].filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : [];
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
@@ -898,6 +908,14 @@ export class CodexSecurity {
       activeScan = null;
       const completedScan = completion["scan"];
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
+        const targetWarnings = new Set([
+          ...preparedTargetWarnings,
+          ...(Array.isArray(completion["targetWarnings"])
+            ? completion["targetWarnings"].filter(
+                (warning): warning is string => typeof warning === "string",
+              )
+            : []),
+        ]);
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string") {
             notifyObserver(
@@ -905,6 +923,9 @@ export class CodexSecurity {
               options.onWarning,
               options.onObserverError,
               warning,
+              targetWarnings.has(warning)
+                ? { kind: "target_changed" }
+                : undefined,
             );
           }
         }

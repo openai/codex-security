@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   appendFile,
   mkdir,
@@ -78,6 +79,48 @@ async function writeSession(
 }
 
 describe("scan cost", () => {
+  test("retains cached and alternate cache-write usage in workbench totals", async () => {
+    const { PLUGIN_ROOT } = await import("./plugin-root.js");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const usage = {
+      input_tokens: 100,
+      cached_input_tokens: 40,
+      cache_write_tokens: 15,
+      output_tokens: 20,
+      reasoning_output_tokens: 5,
+      total_tokens: 120,
+    };
+    const probe = [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_scan_usage",
+      "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
+      "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
+    ].join("\n");
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        probe,
+        join(PLUGIN_ROOT, "scripts"),
+        JSON.stringify(usage),
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      cacheWriteInputTokens: 15,
+      outputTokens: 20,
+      totalTokens: 120,
+    });
+  });
+
   test("uses published GPT-5.6 model rates", () => {
     const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
 

@@ -1717,10 +1717,13 @@ describe("CodexSecurity orchestration", () => {
     let prompt = "";
     let scanStarted = false;
     const warnings: string[] = [];
+    const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
     const reconnects: Array<[number, number]> = [];
     const commands: Array<readonly string[]> = [];
     const completionWarning =
       "Repository HEAD changed while the scan was running; results were saved for the original revision.";
+    const recoveryWarning =
+      "Recovered finding: normalized its semantic anchor.";
 
     const client = new TestClient(
       { codexOverrides: { model: "replay-model" } },
@@ -1760,8 +1763,14 @@ describe("CodexSecurity orchestration", () => {
               falsePositives: [],
             };
           }
+          if (args[0] === "prepare-scan-completion") {
+            return { targetWarnings: [completionWarning] };
+          }
           if (args[0] === "complete-scan") {
-            return { scan: { warnings: [completionWarning] } };
+            return {
+              scan: { warnings: [completionWarning, recoveryWarning] },
+              targetWarnings: [],
+            };
           }
           return {};
         },
@@ -1794,8 +1803,9 @@ describe("CodexSecurity orchestration", () => {
       onScanStarted: () => {
         scanStarted = true;
       },
-      onWarning: (warning) => {
+      onWarning: (warning, details) => {
         warnings.push(warning);
+        warningDetails.push(details);
       },
       onReconnect: (attempt, maxAttempts) => {
         reconnects.push([attempt, maxAttempts]);
@@ -1803,7 +1813,8 @@ describe("CodexSecurity orchestration", () => {
     });
     expect(result.threadId).toBe("thread-1");
     expect(scanStarted).toBe(true);
-    expect(warnings).toEqual([completionWarning]);
+    expect(warnings).toEqual([completionWarning, recoveryWarning]);
+    expect(warningDetails).toEqual([{ kind: "target_changed" }, undefined]);
     expect(reconnects).toEqual([[2, 5]]);
     const startedAt = (codexOptions as CodexOptions | null)?.env?.[
       "CODEX_SECURITY_STARTED_AT"
