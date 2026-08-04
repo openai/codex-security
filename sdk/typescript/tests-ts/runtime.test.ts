@@ -142,6 +142,74 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("derives distinct finding identities from canonical candidate IDs", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
+      runtime,
+    )?.[0];
+    expect(source).toBeDefined();
+    const buildFindings = new Function(
+      "semanticIdentifier",
+      `${source}\nreturn buildFindings;`,
+    )((value: string, fallback: string) => value || fallback) as (
+      findings: Array<{
+        title: string;
+        extensions: { candidateId: string };
+      }>,
+    ) => Array<{ identity: { anchor: string } }>;
+
+    const findings = buildFindings([
+      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
+      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
+    ]);
+
+    expect(findings.map((finding) => finding.identity.anchor)).toEqual([
+      "candidate-a",
+      "candidate-b",
+    ]);
+  });
+
+  test("includes ignored tracked files in the scoped security inventory", async () => {
+    const root = await temporaryDirectory("codex-security-scan-inventory-");
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await writeFile(join(repository, ".gitignore"), "tracked-secret.py\n");
+    await writeFile(join(repository, "tracked-secret.py"), "secret = True\n");
+    for (const args of [
+      ["init", "--quiet", repository],
+      ["-C", repository, "add", "--force", "--", "tracked-secret.py"],
+    ]) {
+      const initialized = spawnSync("git", args, { encoding: "utf8" });
+      expect(initialized.status, initialized.stderr).toBe(0);
+    }
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const output = join(root, "inventory.txt");
+    const inventory = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(inventory.status, inventory.stderr).toBe(0);
+    expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
+  });
+
   test("allows the workbench to derive missing deferred scan identifiers", async () => {
     const schema = JSON.parse(
       await readFile(
