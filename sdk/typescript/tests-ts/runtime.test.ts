@@ -1689,6 +1689,7 @@ describe("runtime directories and plugin Python boundary", () => {
       protected: false,
       grantsCurrentUserAccess: true,
       untrustedPrincipals: [],
+      deniedPrincipals: [],
     });
     expect(
       inspectWindowsCredentialAcl(
@@ -1705,20 +1706,87 @@ describe("runtime directories and plugin Python boundary", () => {
   test("identifies broad, foreign, and inherited Windows ACL grants", () => {
     const user = "S-1-5-21-111-222-333-1001";
     const stranger = "S-1-5-21-111-222-333-1002";
-    for (const principal of ["WD", "BU", "AU", stranger]) {
+    for (const [principal, expected] of [
+      ["WD", "S-1-1-0"],
+      ["BU", "S-1-5-32-545"],
+      ["AU", "S-1-5-11"],
+      [stranger, stranger],
+    ] as const) {
       expect(
         inspectWindowsCredentialAcl(
           `O:${user}G:${user}D:AI(A;OICIID;FA;;;${user})(A;OICIID;FR;;;${principal})`,
           user,
         ).untrustedPrincipals,
-      ).toEqual([principal]);
+      ).toEqual([expected]);
     }
     expect(
       inspectWindowsCredentialAcl(
         `O:${user}G:${user}D:P(D;OICI;FR;;;WD)(A;OICI;FA;;;${user})`,
         user,
-      ).untrustedPrincipals,
-    ).toEqual([]);
+      ),
+    ).toMatchObject({
+      grantsCurrentUserAccess: false,
+      untrustedPrincipals: [],
+      deniedPrincipals: ["S-1-1-0"],
+    });
+  });
+
+  test("requires effective, inheritable Windows credential access", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    for (const [flags, rights] of [
+      ["OICI", "FR"],
+      ["OICI", "FW"],
+      ["", "FA"],
+      ["OI", "FA"],
+      ["CI", "FA"],
+      ["OICIIO", "FA"],
+    ] as const) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:${user}D:P(A;${flags};${rights};;;${user})`,
+          user,
+        ).grantsCurrentUserAccess,
+      ).toBe(false);
+    }
+
+    for (const rights of ["FA", "GA", "0x1f01ff", "0x10000000"]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:${user}D:P(A;OICI;${rights};;;${user})`,
+          user,
+        ).grantsCurrentUserAccess,
+      ).toBe(true);
+    }
+
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:${user}D:P(A;;FA;;;${user})(A;OICIIO;FA;;;${user})`,
+        user,
+      ).grantsCurrentUserAccess,
+    ).toBe(true);
+  });
+
+  test("normalizes built-in Windows user and service SID aliases", () => {
+    for (const [alias, user] of [
+      ["SY", "S-1-5-18"],
+      ["LS", "S-1-5-19"],
+      ["NS", "S-1-5-20"],
+      ["LA", "S-1-5-21-111-222-333-500"],
+      ["LG", "S-1-5-21-111-222-333-501"],
+    ] as const) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${alias}G:SYD:P(A;OICI;FA;;;${alias})(A;OICI;FA;;;BA)`,
+          user,
+        ),
+      ).toMatchObject({
+        owner: user,
+        protected: true,
+        grantsCurrentUserAccess: true,
+        untrustedPrincipals: [],
+        deniedPrincipals: [],
+      });
+    }
   });
 
   test("rejects incomplete, unowned, and unsupported Windows ACLs", () => {
@@ -1843,7 +1911,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "preserves safe inherited SYSTEM and Administrators access",
+    "preserves SYSTEM and Administrators when protecting inherited access",
     async () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
@@ -1884,7 +1952,7 @@ describe("runtime directories and plugin Python boundary", () => {
           "-NoProfile",
           "-NonInteractive",
           "-Command",
-          "Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Select-Object -ExpandProperty Sddl",
+          "[System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH).GetSecurityDescriptorSddlForm('All')",
         ],
         {
           encoding: "utf8",
@@ -1895,9 +1963,10 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(descriptor.status).toBe(0);
       expect(inspectWindowsCredentialAcl(descriptor.stdout, sid!)).toEqual({
         owner: expect.any(String),
-        protected: false,
+        protected: true,
         grantsCurrentUserAccess: true,
         untrustedPrincipals: [],
+        deniedPrincipals: [],
       });
     },
   );
@@ -1930,8 +1999,58 @@ describe("runtime directories and plugin Python boundary", () => {
           "-NonInteractive",
           "-Command",
           [
-            "$acl = Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
+            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
             "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
+          ].join("; "),
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
+          windowsHide: true,
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        protected: true,
+        everyone: 0,
+      });
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "removes explicit foreign Windows credential-home grants",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      const home = join(state, "codex-home");
+      await mkdir(home, { recursive: true });
+      const systemDirectory = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+      );
+      const configured = spawnSync(
+        join(systemDirectory, "icacls.exe"),
+        [home, "/grant", "*S-1-1-0:(OI)(CI)R"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(configured.status).toBe(0);
+
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).toBe(await realpath(home));
+      const result = spawnSync(
+        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          [
+            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
+            "$everyone = @($acl.Access | Where-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
             "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
           ].join("; "),
         ],
@@ -1964,6 +2083,7 @@ describe("runtime directories and plugin Python boundary", () => {
         ...process.env,
         __PSLockdownPolicy: "4",
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        PSModulePath: join(root, "untrusted-or-incompatible-modules"),
       };
       const mode = spawnSync(
         powershell,
