@@ -2823,7 +2823,9 @@ def workspace_state(
         result["capabilityPreflight"] = json.loads(workspace["capability_preflight_json"])
     selected_scan_id = result_scan_id or workspace["active_scan_id"]
     if selected_scan_id:
-        result["results"] = scan_result(connection, require_scan(connection, selected_scan_id))
+        selected_scan = require_scan(connection, selected_scan_id)
+        result["userContext"] = selected_scan["user_context"]
+        result["results"] = scan_result(connection, selected_scan)
         return result
 
     target_metadata = None
