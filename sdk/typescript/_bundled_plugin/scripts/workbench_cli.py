@@ -75,7 +75,7 @@ def parse_args(description: str) -> argparse.Namespace:
     begin_diff_resolution.add_argument("--workspace-id", required=True)
     begin_diff_resolution.add_argument("--request-id", required=True)
     begin_diff_resolution.add_argument("--target-path", required=True)
-    begin_diff_resolution.add_argument("--user-context", required=True)
+    begin_diff_resolution.add_argument("--user-context")
 
     cancel_diff_resolution = subparsers.add_parser("cancel-diff-resolution")
     cancel_diff_resolution.add_argument("--workspace-id", required=True)
@@ -159,6 +159,15 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_scan_feedback = subparsers.add_parser("get-scan-feedback")
     get_scan_feedback.add_argument("--scan-id", required=True)
+
+    update_scan_context = subparsers.add_parser("update-scan-context")
+    update_scan_context.add_argument("--scan-id", required=True)
+    update_scan_context.add_argument("--user-context", required=True)
+    update_scan_context_owner = update_scan_context.add_mutually_exclusive_group(required=True)
+    update_scan_context_owner.add_argument("--workspace-id")
+    update_scan_context_owner.add_argument("--thread-id")
+    update_scan_context.add_argument("--claim-token")
+
     list_scans = subparsers.add_parser("list-scans")
     list_scans.add_argument("--query")
     list_scans.add_argument("--target-id")

@@ -22,7 +22,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text
+from workbench_validation import optional_text, user_text
 
 
 def safe_segment(value: str) -> str:
@@ -168,6 +168,7 @@ def insert_running_scan(
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
+    user_context = user_text(workspace["user_context"])
     if scan_dir is None:
         scan_dir = Path(
             tempfile.mkdtemp(
@@ -194,7 +195,7 @@ def insert_running_scan(
             *target_identity,
             scope,
             workspace["default_mode"],
-            workspace["user_context"],
+            user_context,
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,
             diff_target["kind"] if diff_target else None,
             diff_target["baseRevision"] if diff_target else None,

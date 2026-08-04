@@ -127,6 +127,7 @@ from workbench_validation import (
     require_occurrence,
     require_uuid,
     sqlite_busy,
+    user_text,
 )
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
@@ -787,7 +788,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 optional_text(args.target_summary, maximum=2400),
                 default_scope,
                 args.mode,
-                optional_text(args.user_context),
+                user_text(args.user_context),
                 diff_target_kind,
                 diff_base_revision,
                 diff_head_revision,
@@ -896,7 +897,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 target_summary,
                 scope,
                 args.mode,
-                optional_text(args.user_context),
+                user_text(args.user_context),
                 diff_target["kind"] if diff_target else None,
                 diff_target["baseRevision"] if diff_target else None,
                 diff_target["headRevision"] if diff_target else None,
@@ -970,7 +971,7 @@ def begin_diff_resolution(
                 target_id,
                 str(target),
                 target_title,
-                optional_text(args.user_context),
+                user_text(args.user_context),
                 request_id,
                 timestamp,
                 workspace["id"],
@@ -1191,7 +1192,7 @@ def _start_prompt_driven_scan(
     target_path = str(target)
     scope = inspected["scope"]
     diff_target = inspected["diffTarget"]
-    user_context = optional_text(args.user_context)
+    user_context = user_text(args.user_context)
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
@@ -3694,13 +3695,9 @@ def main() -> None:
             result = native_indexes.list_repositories(connection, args)
         elif args.command == "list-findings":
             result = list_findings(connection, args)
-        elif args.command == "update-progress":
-            result = progress.update_progress(
-                connection,
-                args,
-                now=now,
-                require_scan=require_scan,
-                scan_context=scan_context,
+        elif args.command in {"update-progress", "update-scan-context"}:
+            result = progress.update(
+                connection, args, now, require_scan, require_workspace, scan_context
             )
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(
