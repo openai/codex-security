@@ -117,7 +117,12 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
 }
 
 async function startDraftScan(
-  repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
+  repositoryKind:
+    | "directory"
+    | "clean"
+    | "dirty"
+    | "nested"
+    | "range-diff" = "directory",
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -155,6 +160,27 @@ async function startDraftScan(
     if (repositoryKind === "dirty") {
       await writeFile(join(target, "src", "extract.py"), "# changed fixture\n");
     }
+    if (repositoryKind === "range-diff") {
+      await writeFile(join(target, "src", "extract.py"), "# second fixture\n");
+      for (const args of [
+        ["-C", target, "add", "--", "src/extract.py"],
+        [
+          "-C",
+          target,
+          "-c",
+          "user.name=Codex Security",
+          "-c",
+          "user.email=codex-security@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          "fixture change",
+        ],
+      ]) {
+        const result = spawnSync("git", args, { encoding: "utf8" });
+        expect(result.status, result.stderr).toBe(0);
+      }
+    }
     if (repositoryKind === "nested") {
       const nested = join(target, "nested");
       await mkdir(nested);
@@ -185,7 +211,10 @@ async function startDraftScan(
       config: {},
       mode: "standard",
       repository: target,
-      target: { kind: "repository", paths: [] },
+      target:
+        repositoryKind === "range-diff"
+          ? { kind: "refs", paths: [], base: "HEAD~1", head: "HEAD" }
+          : { kind: "repository", paths: [] },
     }),
   ]);
   fixture.scanId = String(registration["scanId"]);
@@ -209,7 +238,9 @@ async function startDraftScan(
       ? "directory_snapshot"
       : repositoryKind === "clean"
         ? "git_revision"
-        : "git_worktree";
+        : repositoryKind === "range-diff"
+          ? "git_diff"
+          : "git_worktree";
   delete manifest.scan.sealedAt;
   delete manifest.scan.artifacts;
   await writeJson(manifestPath, manifest);
@@ -340,6 +371,90 @@ describe("malformed scan artifact recovery", () => {
     expect(sealed.scan.target.kind).toBe("git_revision");
     expect(sealed.scan.target.revision).toBe(revision.stdout.trim());
     expect(sealed.scan.target).not.toHaveProperty("snapshotDigest");
+  });
+
+  test("seals a dirty worktree draft that inferred the revision target kind", async () => {
+    const fixture = await startDraftScan("dirty");
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const draft = await readJson<{
+      scan: { target: { kind: string; snapshotDigest?: string } };
+    }>(manifestPath);
+    draft.scan.target.kind = "git_revision";
+    draft.scan.target.snapshotDigest = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
+    await writeJson(manifestPath, draft);
+    const registered = (
+      fixture.registration["contract"] as {
+        target: { requiredSnapshotDigest: string };
+      }
+    ).target.requiredSnapshotDigest;
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    const sealed = await readJson<{
+      scan: { target: { kind: string; snapshotDigest: string } };
+    }>(manifestPath);
+    expect(sealed.scan.target.kind).toBe("git_worktree");
+    expect(sealed.scan.target.snapshotDigest).toBe(registered);
+  });
+
+  test("rejects a range diff draft whose inferred kind kept an unbindable digest", async () => {
+    const fixture = await startDraftScan("range-diff");
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const draft = await readJson<{
+      scan: { target: { kind: string; snapshotDigest?: string } };
+    }>(manifestPath);
+    draft.scan.target.kind = "git_worktree";
+    draft.scan.target.snapshotDigest = `codex-security-snapshot/v1:sha256:${"b".repeat(64)}`;
+    await writeJson(manifestPath, draft);
+
+    await expect(completeScan(fixture)).rejects.toThrow(
+      "scan.target.kind: must match the workbench target",
+    );
+    expect(
+      (
+        await readJson<{ scan: { target: { snapshotDigest?: string } } }>(
+          manifestPath,
+        )
+      ).scan.target.snapshotDigest,
+    ).toBe(`codex-security-snapshot/v1:sha256:${"b".repeat(64)}`);
+  });
+
+  test("seals a range diff draft that reported the registered diff kind", async () => {
+    const fixture = await startDraftScan("range-diff");
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const draft = await readJson<{
+      scan: { target: { snapshotDigest: string } };
+    }>(manifestPath);
+    const digest = draft.scan.target.snapshotDigest;
+    const revisions = spawnSync(
+      "git",
+      ["-C", fixture.repository, "rev-parse", "HEAD~1", "HEAD"],
+      { encoding: "utf8" },
+    );
+    expect(revisions.status, revisions.stderr).toBe(0);
+    const revisionList = revisions.stdout.trim().split("\n");
+    const base = revisionList[0]!;
+    const head = revisionList[1]!;
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    const sealed = await readJson<{
+      scan: {
+        target: {
+          kind: string;
+          baseRevision: string;
+          headRevision: string;
+          snapshotDigest: string;
+        };
+      };
+    }>(manifestPath);
+    expect(sealed.scan.target.kind).toBe("git_diff");
+    expect(sealed.scan.target.baseRevision).toBe(base);
+    expect(sealed.scan.target.headRevision).toBe(head);
+    expect(sealed.scan.target.snapshotDigest).toBe(digest);
+    expect(sealed.scan.target).not.toHaveProperty("revision");
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {
