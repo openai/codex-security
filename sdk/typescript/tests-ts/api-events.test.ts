@@ -222,6 +222,32 @@ describe("one-shot scan events", () => {
     }
   });
 
+  test("does not mistake external-provider keys for OpenAI API organizations", async () => {
+    for (const source of ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"] as const) {
+      for (const status of ["not_granted", "unknown"] as const) {
+        const scanDir = await copyCompletedScan(await temporaryDirectory());
+        const warnings: string[] = [];
+
+        const result = await runTacEvents(
+          scanDir,
+          [tacToolCall(status)],
+          (warning) => warnings.push(warning),
+          undefined,
+          undefined,
+          { method: "api_key", source, verified: false },
+        );
+
+        expect(result.turnResult.status).toBe("completed");
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("https://chatgpt.com/cyber");
+        expect(warnings[0]).not.toContain("API organization");
+        expect(warnings[0]).not.toContain(
+          "enterprise-trusted-access-for-cyber",
+        );
+      }
+    }
+  });
+
   test("treats failed trusted cyber access checks as an advisory without exposing provider errors", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const warnings: string[] = [];

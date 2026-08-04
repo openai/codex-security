@@ -1905,7 +1905,9 @@ function trustedAccessWarning(
   authentication?: ScanAuthentication,
 ): string {
   const apiOrganization =
-    authentication?.method === "api_key" ||
+    (authentication?.method === "api_key" &&
+      (authentication.source === "OPENAI_API_KEY" ||
+        authentication.source === "CODEX_API_KEY")) ||
     (authentication?.method === "stored_credentials" &&
       authentication.credentialType === "api_key");
   const applicationUrl = apiOrganization
