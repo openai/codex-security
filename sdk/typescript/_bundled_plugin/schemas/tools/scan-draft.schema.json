@@ -478,7 +478,6 @@
               }
             },
             "required": [
-              "id",
               "reason"
             ],
             "additionalProperties": true

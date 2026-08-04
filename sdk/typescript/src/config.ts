@@ -21,6 +21,36 @@ export interface ScanModelConfiguration {
   reasoningEffort: string;
 }
 
+export const OPENROUTER_CODEX_PROVIDER = {
+  name: "OpenRouter",
+  base_url: "https://openrouter.ai/api/v1",
+  env_key: "OPENROUTER_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const FIREWORKS_CODEX_PROVIDER = {
+  name: "Fireworks AI",
+  base_url: "https://api.fireworks.ai/inference/v1",
+  env_key: "FIREWORKS_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const EXTERNAL_CODEX_PROVIDERS = {
+  openrouter: OPENROUTER_CODEX_PROVIDER,
+  fireworks: FIREWORKS_CODEX_PROVIDER,
+} as const;
+
+export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
+
+export function isExternalModelProvider(
+  provider: unknown,
+): provider is ExternalModelProvider {
+  return (
+    typeof provider === "string" &&
+    Object.hasOwn(EXTERNAL_CODEX_PROVIDERS, provider)
+  );
+}
+
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
