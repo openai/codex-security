@@ -19,6 +19,10 @@ import { prepareKnowledgeBase } from "../src/knowledge-base.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
+// `mock.module` mutates the live `node:os` namespace, so the original exports
+// have to be snapshotted before the first mock to be restorable afterwards.
+const nodeOs = { ...os };
+const realHomeDirectory = os.homedir();
 
 afterEach(async () => {
   await Promise.all(
@@ -106,23 +110,34 @@ describe("scan knowledge bases", () => {
     }
   });
 
-  test("expands ~ in requested paths and leaves absolute paths alone", async () => {
+  test("expands ~ in requested paths and leaves absolute and ~user paths alone", async () => {
     const home = await temporaryDirectory();
     const documents = join(home, "docs");
     await mkdir(documents, { recursive: true });
     await writeFile(join(documents, "scope.md"), "Review the payment service.");
-    mock.module("node:os", () => ({ ...os, homedir: () => home }));
+    mock.module("node:os", () => ({ ...nodeOs, homedir: () => home }));
     try {
       const expanded = await prepareKnowledgeBase(["~/docs"]);
       temporaryDirectories.push(expanded.path);
       expect(expanded.sources).toEqual([documents]);
 
+      const bare = await prepareKnowledgeBase(["~"]);
+      temporaryDirectories.push(bare.path);
+      expect(bare.sources).toEqual([home]);
+
       const absolute = await prepareKnowledgeBase([documents]);
       temporaryDirectories.push(absolute.path);
       expect(absolute.sources).toEqual([documents]);
+
+      // Another account's home cannot be resolved portably, so `~other` stays a
+      // literal path segment under the working directory.
+      await expect(prepareKnowledgeBase(["~other/docs"])).rejects.toThrow(
+        /~other/u,
+      );
     } finally {
-      mock.module("node:os", () => os);
+      mock.module("node:os", () => nodeOs);
     }
+    expect(os.homedir()).toBe(realHomeDirectory);
   });
 
   test("extracts searchable text from PDFs and DOCX documents", async () => {
