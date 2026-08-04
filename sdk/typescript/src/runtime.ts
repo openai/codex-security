@@ -672,25 +672,60 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     }
   };
 
+  const icacls = join(systemDirectory, "icacls.exe");
+  const installTrustedAcl = async (target = path): Promise<void> => {
+    await execFile(
+      icacls,
+      [
+        target,
+        "/inheritance:r",
+        "/grant:r",
+        `*${sid}:(OI)(CI)F`,
+        `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
+        `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
+      ],
+      processOptions,
+    );
+  };
   const ancestorScript = [
     "$ErrorActionPreference = 'Stop'",
     "$parent = Microsoft.PowerShell.Management\\Split-Path -Path $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Parent",
     "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
   ].join("; ");
-  const parentDescriptor = await execFile(
-    powershell,
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ancestorScript],
-    processOptions,
-  );
-  await resolveDescriptorAliases(parentDescriptor.stdout);
-  const parent = inspectWindowsCredentialAcl(parentDescriptor.stdout, sid, {
-    resolvedAliases,
-    scope: "ancestor",
-  });
-  if (parent.untrustedPrincipals.length !== 0) {
-    throw new Error(
-      "Windows credential-home ancestor allows another identity to replace the directory",
+  const readParentAcl = async (): Promise<WindowsCredentialAcl> => {
+    const descriptor = await execFile(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ancestorScript],
+      processOptions,
     );
+    await resolveDescriptorAliases(descriptor.stdout);
+    return inspectWindowsCredentialAcl(descriptor.stdout, sid, {
+      resolvedAliases,
+      scope: "ancestor",
+    });
+  };
+  let parent = await readParentAcl();
+  if (parent.untrustedPrincipals.length !== 0) {
+    const parentPath = dirname(path);
+    await installTrustedAcl(parentPath);
+    for (const principal of parent.untrustedPrincipals) {
+      if (!WINDOWS_SID.test(principal)) {
+        throw new Error(
+          "Windows credential ACL contains an unresolvable identity",
+        );
+      }
+      await execFile(
+        icacls,
+        [parentPath, "/remove:g", `*${principal}`],
+        processOptions,
+      );
+    }
+    parent = await readParentAcl();
+    if (parent.untrustedPrincipals.length !== 0) {
+      throw new Error(
+        "Windows credential-home ancestor allows another identity to replace the directory",
+      );
+    }
   }
 
   const descendantsArePrivate = async (): Promise<boolean> => {
@@ -753,21 +788,6 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     return true;
   };
 
-  const icacls = join(systemDirectory, "icacls.exe");
-  const installTrustedAcl = async (): Promise<void> => {
-    await execFile(
-      icacls,
-      [
-        path,
-        "/inheritance:r",
-        "/grant:r",
-        `*${sid}:(OI)(CI)F`,
-        `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
-        `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
-      ],
-      processOptions,
-    );
-  };
   let existing: WindowsCredentialAcl | undefined;
   for (let attempt = 0; existing === undefined && attempt < 3; attempt += 1) {
     try {

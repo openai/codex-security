@@ -2476,7 +2476,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "rejects Windows credential homes beneath attacker-writable ancestry",
+    "repairs attacker-writable Windows credential-home parents",
     async () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
@@ -2492,11 +2492,36 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       expect(writable.status).toBe(0);
 
-      await expect(
-        prepareCodexSecurityCredentialHome({
+      expect(
+        await prepareCodexSecurityCredentialHome({
           CODEX_SECURITY_STATE_DIR: state,
         }),
-      ).rejects.toThrow("ancestor allows another identity");
+      ).toBe(await realpath(join(state, "codex-home")));
+
+      const inspection = spawnSync(
+        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          [
+            "$acl = Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
+            "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
+          ].join("; "),
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: state },
+          windowsHide: true,
+        },
+      );
+      expect(inspection.status).toBe(0);
+      expect(JSON.parse(inspection.stdout)).toEqual({
+        protected: true,
+        everyone: 0,
+      });
     },
   );
 
