@@ -499,7 +499,11 @@ def _token_snapshot(payload: Mapping[str, Any]) -> dict[str, int] | None:
         return None
     result: dict[str, int] = {}
     for source_key, result_key in TOKEN_FIELDS.items():
-        value = usage.get(source_key, 0)
+        value = (
+            usage.get(source_key, usage.get("cache_write_tokens", 0))
+            if source_key == "cache_write_input_tokens"
+            else usage.get(source_key, 0)
+        )
         if type(value) is not int or value < 0:
             return None
         if source_key in {"input_tokens", "output_tokens", "total_tokens"} and (
@@ -509,9 +513,7 @@ def _token_snapshot(payload: Mapping[str, Any]) -> dict[str, int] | None:
         result[result_key] = value
     if result["cachedInputTokens"] + result["cacheWriteInputTokens"] > result["inputTokens"]:
         return None
-    result["totalTokens"] = (
-        result["inputTokens"] - result["cachedInputTokens"] + result["outputTokens"]
-    )
+    result["totalTokens"] = result["inputTokens"] + result["outputTokens"]
     return result
 
 
