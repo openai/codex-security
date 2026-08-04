@@ -2501,7 +2501,21 @@ describe("runtime directories and plugin Python boundary", () => {
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
       );
+      const identity = spawnSync(
+        join(systemDirectory, "whoami.exe"),
+        ["/user", "/fo", "csv", "/nh"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(identity.status).toBe(0);
+      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
+      expect(sid).toBeDefined();
       for (const ancestor of [root, state]) {
+        const owned = spawnSync(
+          join(systemDirectory, "icacls.exe"),
+          [ancestor, "/setowner", `*${sid}`],
+          { encoding: "utf8", windowsHide: true },
+        );
+        expect(owned.status).toBe(0);
         const writable = spawnSync(
           join(systemDirectory, "icacls.exe"),
           [ancestor, "/grant", "*S-1-1-0:(OI)(CI)M"],
