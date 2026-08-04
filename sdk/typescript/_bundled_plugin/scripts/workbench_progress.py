@@ -10,7 +10,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
-from workbench_validation import require_uuid
+from workbench_validation import optional_text, require_uuid
 
 MAX_PREFLIGHT_ISSUES_JSON_BYTES = 64 * 1024
 MAX_PREFLIGHT_ISSUES = 32
@@ -86,6 +86,8 @@ def update_progress(
     scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    model = optional_text(args.model, maximum=200)
+    reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
     serialized_preflight_issues = preflight_issues_json(args.preflight_issues_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -189,10 +191,11 @@ def update_progress(
         updated = connection.execute(
             """
             UPDATE scans
-            SET phase = COALESCE(?, phase), updated_at = ?
+            SET phase = COALESCE(?, phase), model = COALESCE(?, model),
+                reasoning_effort = COALESCE(?, reasoning_effort), updated_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (args.phase, timestamp, scan["id"]),
+            (args.phase, model, reasoning_effort, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can update progress.")

@@ -225,6 +225,7 @@ def list_scans(
                 "findingCount": row["finding_count"],
                 "handoffStatus": row["handoff_status"],
                 "mode": row["mode"],
+                "model": row["model"],
                 "parentScanId": row["parent_scan_id"],
                 "progress": {
                     "candidates": {"reportable": row["reportable_findings_count"]},
@@ -238,6 +239,7 @@ def list_scans(
                     "updatedAt": row["progress_updated_at"],
                 },
                 "recipeAvailable": row["recipe_json"] is not None,
+                "reasoningEffort": row["reasoning_effort"],
                 "scanDir": row["scan_dir"],
                 "scanId": row["id"],
                 "scope": row["scope"],

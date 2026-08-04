@@ -40,6 +40,8 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     begin_deep_scan.add_argument("--user-context")
     begin_deep_scan.add_argument("--scan-root")
     begin_deep_scan.add_argument("--claim-token")
+    begin_deep_scan.add_argument("--model")
+    begin_deep_scan.add_argument("--reasoning-effort")
     begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
     begin_deep_scan.add_argument("--workflow-version", default=DEEP_SCAN_WORKFLOW_VERSION)
 
@@ -324,7 +326,7 @@ def independent_review_progress(
     connection: sqlite3.Connection, scan_id: str
 ) -> dict[str, int | str] | None:
     run = connection.execute(
-        "SELECT completion_sequence, updated_at FROM deep_scan_runs WHERE scan_id = ?",
+        "SELECT completion_sequence, phase, updated_at FROM deep_scan_runs WHERE scan_id = ?",
         (scan_id,),
     ).fetchone()
     if run is None:
@@ -342,6 +344,7 @@ def independent_review_progress(
     return {
         "active": int(active),
         "completed": int(run["completion_sequence"]),
+        "consolidating": run["phase"] == "reducing",
         "updatedAt": str(run["updated_at"]),
     }
 
@@ -569,6 +572,18 @@ def begin_deep_scan_for_scan(
     )
     if scan["mode"] != "deep":
         raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
+    model = optional_text(args.model, maximum=200)
+    reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
+    if model is not None or reasoning_effort is not None:
+        connection.execute(
+            """
+            UPDATE scans
+            SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort)
+            WHERE id = ?
+            """,
+            (model, reasoning_effort, scan_id),
+        )
+        connection.commit()
     existing = connection.execute(
         "SELECT scan_id FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
@@ -681,6 +696,8 @@ def begin_deep_scan_for_target(
             raise SystemExit("The scan artifact directory must be outside the selected target.")
         target_root.mkdir(parents=True, exist_ok=True)
         user_context = optional_text(args.user_context)
+        model = optional_text(args.model, maximum=200)
+        reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
@@ -715,10 +732,10 @@ def begin_deep_scan_for_target(
             INSERT INTO scans (
                 id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
                 target_device, target_inode, scope, mode, user_context,
-                deep_scan_owner_thread_id, scan_dir, status, phase, handoff_status,
-                started_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, 'running', 'preflight',
-                'delivered', ?, ?, ?)
+                deep_scan_owner_thread_id, scan_dir, model, reasoning_effort, status, phase,
+                handoff_status, started_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'deep', ?, ?, ?, ?, ?,
+                'running', 'preflight', 'delivered', ?, ?, ?)
             """,
             (
                 scan_id,
@@ -733,6 +750,8 @@ def begin_deep_scan_for_target(
                 user_context,
                 thread_id,
                 str(scan_dir),
+                model,
+                reasoning_effort,
                 timestamp,
                 timestamp,
                 timestamp,
@@ -1112,6 +1131,14 @@ def claim_deep_scan_dedup(
         )
         connection.execute(
             "UPDATE deep_scan_runs SET phase = 'reducing', updated_at = ? WHERE scan_id = ?",
+            (timestamp, scan_id),
+        )
+        connection.execute(
+            """
+            UPDATE scan_progress
+            SET deep_review_pass = COALESCE(deep_review_pass, 0) + 1, updated_at = ?
+            WHERE scan_id = ?
+            """,
             (timestamp, scan_id),
         )
         connection.commit()

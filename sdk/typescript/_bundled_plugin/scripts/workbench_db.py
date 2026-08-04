@@ -79,6 +79,7 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
+from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
     compact_timestamp,
@@ -135,23 +136,6 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
     return (
         (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
     )
-
-
-def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
-    if remediation["pending_action_claim_token"] is None:
-        return False
-    delivered_at = remediation["pending_action_delivered_at"]
-    claimed_at = delivered_at or remediation["pending_action_claimed_at"]
-    if not isinstance(claimed_at, str):
-        return True
-    try:
-        parsed = datetime.fromisoformat(claimed_at)
-        if parsed.tzinfo is None:
-            return True
-    except ValueError:
-        return True
-    lease_seconds = DELIVERED_ACTION_LEASE_SECONDS if delivered_at else CLAIM_LEASE_SECONDS
-    return parsed > datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)
 
 
 def state_dir() -> Path:
@@ -1172,6 +1156,8 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             target_summary=target_summary,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
         )
         if manages_transaction:
             connection.commit()
@@ -1309,6 +1295,8 @@ def start_prompt_only_scan(
             scope_file_count=scope_file_count,
             timestamp=timestamp,
             handoff_status="delivered",
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
         )
         connection.commit()
     except BaseException:
@@ -1452,6 +1440,15 @@ def complete_scan_locked(
             warnings.append(warning)
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
+        fail_scan(
+            connection,
+            argparse.Namespace(
+                claim_token=claim_token,
+                cost_json=cost_json,
+                message=str(exc),
+                scan_id=scan_id,
+            ),
+        )
         raise SystemExit(str(exc)) from exc
     artifacts = {
         kind: artifact_path(scan_dir, filename, required=True)
@@ -3004,6 +3001,7 @@ def scan_result(
         progress_result["independentReviews"] = {
             "active": independent_reviews["active"],
             "completed": independent_reviews["completed"],
+            "consolidating": independent_reviews["consolidating"],
         }
     return {
         "artifacts": artifacts,
@@ -3024,8 +3022,10 @@ def scan_result(
         "handoffClaimToken": scan["handoff_claim_token"],
         "handoffStatus": scan["handoff_status"],
         "mode": scan["mode"],
+        "model": scan["model"],
         "diffTarget": stored_diff_target(scan),
         "progress": progress_result,
+        "reasoningEffort": scan["reasoning_effort"],
         "remediationAvailable": remediation_available,
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
@@ -3647,13 +3647,9 @@ def main() -> None:
                 read_coverage=coverage_for_comparison,
             )
         elif args.command == "list-global-findings":
-            result = native_indexes.list_global_findings(
-                connection, args, read_coverage=coverage_for_comparison
-            )
+            result = native_indexes.list_global_findings(connection, args)
         elif args.command == "list-repositories":
-            result = native_indexes.list_repositories(
-                connection, args, read_coverage=coverage_for_comparison
-            )
+            result = native_indexes.list_repositories(connection, args)
         elif args.command == "list-findings":
             result = list_findings(connection, args)
         elif args.command == "update-progress":

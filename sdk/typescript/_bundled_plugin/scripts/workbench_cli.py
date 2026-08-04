@@ -113,6 +113,8 @@ def parse_args(description: str) -> argparse.Namespace:
     start_scan = subparsers.add_parser("start-scan")
     start_scan.add_argument("--workspace-id", required=True)
     start_scan.add_argument("--scan-root")
+    start_scan.add_argument("--model")
+    start_scan.add_argument("--reasoning-effort")
 
     disable_setup_ui = subparsers.add_parser("disable-setup-ui")
     disable_setup_ui.add_argument("--workspace-id", required=True)
@@ -129,6 +131,8 @@ def parse_args(description: str) -> argparse.Namespace:
     start_prompt_only_scan.add_argument("--diff-head-revision")
     start_prompt_only_scan.add_argument("--diff-content-digest")
     start_prompt_only_scan.add_argument("--scan-root")
+    start_prompt_only_scan.add_argument("--model")
+    start_prompt_only_scan.add_argument("--reasoning-effort")
 
     deep_scan.register_subcommands(subparsers, positive_int)
 
@@ -209,6 +213,8 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
+    update_progress.add_argument("--model")
+    update_progress.add_argument("--reasoning-effort")
 
     prepare_scan_completion = subparsers.add_parser("prepare-scan-completion")
     prepare_scan_completion.add_argument("--scan-id", required=True)
