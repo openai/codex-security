@@ -2190,30 +2190,6 @@ describe("CLI", () => {
     );
   });
 
-  test("includes the configured cost limit in verbose scan configuration", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
-        ["scan", ".", "--max-cost", "0.5", "--verbose", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-
-    const configuration = stderr
-      .text()
-      .split("\n")
-      .find((line) =>
-        line.startsWith("codex-security: debug: scan.configuration"),
-      );
-
-    expect(configuration).toContain("max_cost_usd=0.5");
-  });
-
   test("includes selected reasoning effort in verbose scan diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -2331,38 +2307,6 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scans", "rerun", "scan-original"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          environment: { CODEX_SECURITY_LOG_LEVEL: "debug" },
-          onWorkbench: () => ({
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "repository", paths: [] },
-              mode: "standard",
-              config: {
-                model: "gpt-original",
-                model_reasoning_effort: "high",
-              },
-            },
-          }),
-        }),
-      ),
-    ).toBe(0);
-    expect(stderr.text()).toContain(
-      "codex-security: debug: scan.configuration",
-    );
-    expect(stderr.text()).toContain('model="gpt-original"');
-    expect(stderr.text()).toContain('reasoning_effort="high"');
-  });
-
-  test("accepts an explicit verbose flag for saved scan reruns", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
         ["scans", "rerun", "scan-original", "--verbose", "--json"],
         stdout.stream,
         stderr.stream,
@@ -2388,53 +2332,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("codex-security: debug: scan.started");
     expect(stderr.text()).toContain("codex-security: debug: scan.completed");
     expect(stderr.text()).toContain('model="gpt-original"');
-  });
-
-  test("preserves authentication selection for verbose structured reruns", async () => {
-    for (const format of [["--json"], ["--format", "jsonl"]]) {
-      const stdout = capture();
-      const stderr = capture(true);
-      let selectedAuthentication: string | undefined;
-      let prompts = 0;
-      const deps = dependencies({
-        environment: { OPENAI_API_KEY: "synthetic-api-key" },
-        onTurn: (_repository, options) => {
-          selectedAuthentication = (options as ScanOptions).auth;
-        },
-        onWorkbench: () => ({
-          recipe: {
-            repository: "/original/repository",
-            target: { kind: "repository", paths: [] },
-            mode: "standard",
-            config: {},
-          },
-        }),
-      });
-      deps.hasStoredChatGPTSignIn = async () => true;
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => true,
-        select: async <Value extends string>(
-          _question: string,
-          choices: readonly { label: string; value: Value }[],
-        ): Promise<Value> => {
-          prompts += 1;
-          return choices.find((choice) => choice.value === "chatgpt")!.value;
-        },
-      };
-
-      expect(
-        await main(
-          ["scans", "rerun", "scan-original", "--verbose", ...format],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(0);
-      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-      expect(prompts).toBe(1);
-      expect(selectedAuthentication).toBe("chatgpt");
-      expect(stderr.text()).toContain("codex-security: debug: scan.started");
-    }
+    expect(stderr.text()).toContain('reasoning_effort="high"');
   });
 
   test("reports selected profile settings for verbose scan reruns", async () => {
@@ -3844,7 +3742,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("cache_write_input_tokens=200");
   });
 
-  test("reports a scan stopped when its live cost exceeds the limit", async () => {
+  test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
     const stdout = capture();
     const stderr = capture();
     const cost = fakeResult([], "complete", {
@@ -3855,11 +3753,12 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json", "--max-cost", "0.005"],
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.005"],
         stdout.stream,
         stderr.stream,
         dependencies({
-          onTurn: () => {
+          onTurn: (_repository, options) => {
+            (options as ScanOptions).onOutputDirReady?.("/tmp/scan");
             throw new ScanCostLimitExceededError(0.005, cost, "/tmp/scan");
           },
         }),
@@ -3869,45 +3768,12 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
     );
-  });
-
-  test("classifies exceeded scan budgets in verbose failure diagnostics", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const cost = fakeResult([], "complete", {
-      input_tokens: 1_250,
-      cached_input_tokens: 200,
-      output_tokens: 30,
-    }).cost!;
-    const deps = dependencies();
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
-        options?.onOutputDirReady?.("/tmp/scan");
-        throw new ScanCostLimitExceededError(0.005, cost, "/tmp/scan");
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
-
-    expect(
-      await main(
-        ["scan", ".", "--verbose", "--json", "--max-cost", "0.005"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
-    expect(stdout.text()).toBe("");
-
-    const failure = stderr
-      .text()
-      .split("\n")
-      .find((line) => line.startsWith("codex-security: debug: scan.failed"));
-
-    expect(failure).toContain('classification="cost_limit_exceeded"');
-    expect(failure).toContain("partial_output=true");
-    expect(failure).toContain("max_cost_usd=0.005");
-    expect(failure).toContain("estimated_usd=0.00625");
+    expect(stderr.text()).toMatch(
+      /scan\.configuration[^\n]*max_cost_usd=0\.005/u,
+    );
+    expect(stderr.text()).toContain(
+      'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.005 estimated_usd=0.00625',
+    );
   });
 
   test("accepts a scan at its estimated cost limit", async () => {

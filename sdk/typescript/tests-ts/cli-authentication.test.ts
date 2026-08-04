@@ -338,7 +338,15 @@ describe("CLI authentication", () => {
   });
 
   test("offers the existing interactive prompt when both sign-ins are available", async () => {
-    for (const selection of ["chatgpt", "api-key"] as const) {
+    for (const [argv, selection] of [
+      [["scan"], "chatgpt"],
+      [["scan"], "api-key"],
+      [["scans", "rerun", "scan-original", "--verbose", "--json"], "chatgpt"],
+      [
+        ["scans", "rerun", "scan-original", "--verbose", "--format", "jsonl"],
+        "chatgpt",
+      ],
+    ] as const) {
       const stderr = capture(true);
       let selected: ScanOptions["auth"];
       let question = "";
@@ -348,6 +356,14 @@ describe("CLI authentication", () => {
         onTurn: (_repository, options) => {
           selected = (options as ScanOptions).auth;
         },
+        onWorkbench: () => ({
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+          },
+        }),
       });
       deps.hasStoredChatGPTSignIn = async () => true;
       deps.scanAuthenticationPrompt = {
@@ -362,9 +378,7 @@ describe("CLI authentication", () => {
         },
       };
 
-      expect(await main(["scan"], capture().stream, stderr.stream, deps)).toBe(
-        0,
-      );
+      expect(await main(argv, capture().stream, stderr.stream, deps)).toBe(0);
       expect(selected).toBe(selection);
       expect(question).toBe("How would you like to authenticate this scan?");
       expect(choices).toEqual([

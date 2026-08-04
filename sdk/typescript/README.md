@@ -192,7 +192,6 @@ npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
-npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans rerun SCAN_ID --verbose
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all

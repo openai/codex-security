@@ -894,6 +894,7 @@ export async function main(
             args.scanId,
           ]);
           scanArguments = scanArgumentsFromRecipe(recipe, args.scanId);
+          scanArguments.verbose = options.verbose;
         } catch (error) {
           const message = redactedErrorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
@@ -904,11 +905,7 @@ export async function main(
             exitCode,
           });
         }
-        const outcome = await runScan(
-          { ...scanArguments, verbose: options.verbose },
-          errorOutput,
-          dependencies,
-        );
+        const outcome = await runScan(scanArguments, errorOutput, dependencies);
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           return incurError({
