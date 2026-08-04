@@ -689,26 +689,40 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   };
   const ancestorScript = [
     "$ErrorActionPreference = 'Stop'",
-    "$parent = Microsoft.PowerShell.Management\\Split-Path -Path $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Parent",
-    "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
   ].join("; ");
-  const readParentAcl = async (): Promise<WindowsCredentialAcl> => {
-    const descriptor = await execFile(
-      powershell,
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ancestorScript],
-      processOptions,
-    );
-    await resolveDescriptorAliases(descriptor.stdout);
-    return inspectWindowsCredentialAcl(descriptor.stdout, sid, {
+  const ancestorPaths: string[] = [];
+  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+    ancestorPaths.push(ancestor);
+    if (ancestor === dirname(ancestor)) break;
+  }
+  const ancestry = await execFile(
+    powershell,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ancestorScript],
+    processOptions,
+  );
+  const ancestorDescriptors = ancestry.stdout
+    .split(/\r?\n/u)
+    .filter((descriptor) => descriptor !== "");
+  if (ancestorDescriptors.length !== ancestorPaths.length) {
+    throw new Error("Windows credential-home ancestry could not be verified");
+  }
+  for (const [index, descriptor] of ancestorDescriptors.entries()) {
+    await resolveDescriptorAliases(descriptor);
+    const ancestor = inspectWindowsCredentialAcl(descriptor, sid, {
       resolvedAliases,
       scope: "ancestor",
     });
-  };
-  let parent = await readParentAcl();
-  if (parent.untrustedPrincipals.length !== 0) {
-    const parentPath = dirname(path);
-    await installTrustedAcl(parentPath);
-    for (const principal of parent.untrustedPrincipals) {
+    if (ancestor.untrustedPrincipals.length === 0) continue;
+    const ancestorPath = ancestorPaths[index]!;
+    if (ancestor.owner !== sid || ancestorPath === dirname(ancestorPath)) {
+      throw new Error(
+        "Windows credential-home ancestor allows another identity to replace the directory",
+      );
+    }
+    await installTrustedAcl(ancestorPath);
+    for (const principal of ancestor.untrustedPrincipals) {
       if (!WINDOWS_SID.test(principal)) {
         throw new Error(
           "Windows credential ACL contains an unresolvable identity",
@@ -716,12 +730,28 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       }
       await execFile(
         icacls,
-        [parentPath, "/remove:g", `*${principal}`],
+        [ancestorPath, "/remove:g", `*${principal}`],
         processOptions,
       );
     }
-    parent = await readParentAcl();
-    if (parent.untrustedPrincipals.length !== 0) {
+    const repairedDescriptor = await execFile(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      {
+        ...processOptions,
+        env: {
+          ...processOptions.env,
+          CODEX_SECURITY_CREDENTIAL_ACL_PATH: ancestorPath,
+        },
+      },
+    );
+    await resolveDescriptorAliases(repairedDescriptor.stdout);
+    const repaired = inspectWindowsCredentialAcl(
+      repairedDescriptor.stdout,
+      sid,
+      { resolvedAliases, scope: "ancestor" },
+    );
+    if (repaired.untrustedPrincipals.length !== 0) {
       throw new Error(
         "Windows credential-home ancestor allows another identity to replace the directory",
       );

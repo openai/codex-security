@@ -2476,7 +2476,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "repairs attacker-writable Windows credential-home parents",
+    "repairs attacker-writable Windows credential-home ancestry",
     async () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
@@ -2485,12 +2485,14 @@ describe("runtime directories and plugin Python boundary", () => {
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
       );
-      const writable = spawnSync(
-        join(systemDirectory, "icacls.exe"),
-        [state, "/grant", "*S-1-1-0:(OI)(CI)M"],
-        { encoding: "utf8", windowsHide: true },
-      );
-      expect(writable.status).toBe(0);
+      for (const ancestor of [root, state]) {
+        const writable = spawnSync(
+          join(systemDirectory, "icacls.exe"),
+          [ancestor, "/grant", "*S-1-1-0:(OI)(CI)M"],
+          { encoding: "utf8", windowsHide: true },
+        );
+        expect(writable.status).toBe(0);
+      }
 
       expect(
         await prepareCodexSecurityCredentialHome({
@@ -2498,30 +2500,32 @@ describe("runtime directories and plugin Python boundary", () => {
         }),
       ).toBe(await realpath(join(state, "codex-home")));
 
-      const inspection = spawnSync(
-        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
+      for (const ancestor of [root, state]) {
+        const inspection = spawnSync(
+          join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
           [
-            "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
-            "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
-            "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
-          ].join("; "),
-        ],
-        {
-          encoding: "utf8",
-          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: state },
-          windowsHide: true,
-        },
-      );
-      expect(inspection.status).toBe(0);
-      expect(JSON.parse(inspection.stdout)).toEqual({
-        protected: true,
-        everyone: 0,
-      });
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            [
+              "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
+              "$everyone = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0' })",
+              "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; everyone = $everyone.Count } | ConvertTo-Json -Compress",
+            ].join("; "),
+          ],
+          {
+            encoding: "utf8",
+            env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: ancestor },
+            windowsHide: true,
+          },
+        );
+        expect(inspection.status).toBe(0);
+        expect(JSON.parse(inspection.stdout)).toEqual({
+          protected: true,
+          everyone: 0,
+        });
+      }
     },
   );
 
