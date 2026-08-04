@@ -234,6 +234,54 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
+  test("rejoins a headless scan after its running context changes", async () => {
+    const fixture = await startDraftScan();
+    const threadId = "context-rejoin-regression";
+    const startArguments = [
+      "start-headless-standard-scan",
+      "--thread-id",
+      threadId,
+      "--target-path",
+      fixture.repository,
+      "--scope",
+      ".",
+      "--user-context",
+      "original security focus",
+    ];
+    const created = await workbench(fixture, startArguments);
+    const scan = created["scan"] as {
+      scanId: string;
+      handoffClaimToken: string;
+      userContext: string;
+    };
+
+    const updated = await workbench(fixture, [
+      "update-scan-context",
+      "--scan-id",
+      scan.scanId,
+      "--user-context",
+      "updated security focus",
+      "--thread-id",
+      threadId,
+      "--claim-token",
+      scan.handoffClaimToken,
+    ]);
+    expect(updated["scan"]).toMatchObject({
+      scanId: scan.scanId,
+      userContext: "updated security focus",
+    });
+    expect(updated["workspace"]).toMatchObject({
+      userContext: "updated security focus",
+    });
+
+    const retried = await workbench(fixture, startArguments);
+    expect(retried["startDisposition"]).toBe("joined");
+    expect(retried["scan"]).toMatchObject({
+      scanId: scan.scanId,
+      userContext: "updated security focus",
+    });
+  });
+
   test("returns the authoritative directory snapshot contract at registration", async () => {
     const fixture = await startDraftScan();
     const registration = fixture.registration;

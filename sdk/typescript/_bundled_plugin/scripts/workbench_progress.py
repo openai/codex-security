@@ -114,10 +114,16 @@ def update_context(
             "UPDATE scans SET user_context = ?, updated_at = ? WHERE id = ?",
             (context, timestamp, scan["id"]),
         )
-        connection.execute(
-            "UPDATE workspaces SET user_context = ?, updated_at = ? WHERE id = ?",
-            (context, timestamp, workspace["id"]),
-        )
+        if args.workspace_id is not None:
+            connection.execute(
+                "UPDATE workspaces SET user_context = ?, updated_at = ? WHERE id = ?",
+                (context, timestamp, workspace["id"]),
+            )
+        else:
+            connection.execute(
+                "UPDATE workspaces SET updated_at = ? WHERE id = ?",
+                (timestamp, workspace["id"]),
+            )
         connection.commit()
     except BaseException:
         connection.rollback()
