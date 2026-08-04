@@ -28,6 +28,7 @@ import {
   relative,
   sep,
 } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
@@ -1726,6 +1727,12 @@ describe("runtime directories and plugin Python boundary", () => {
         inspectWindowsCredentialAcl(
           `O:${user}G:${user}D:AI(A;OICIID;FA;;;${user})(A;OICIID;FR;;;${principal})`,
           user,
+          {
+            resolvedAliases: {
+              DA: "S-1-5-21-111-222-333-512",
+              DU: "S-1-5-21-111-222-333-513",
+            },
+          },
         ).untrustedPrincipals,
       ).toEqual([expected]);
     }
@@ -1803,7 +1810,10 @@ describe("runtime directories and plugin Python boundary", () => {
         inspectWindowsCredentialAcl(
           `O:${alias}G:SYD:P(A;OICI;FA;;;${alias})(A;OICI;FA;;;BA)`,
           user,
-          { localAccount: alias === "LA" || alias === "LG" },
+          {
+            resolvedAliases:
+              alias === "LA" || alias === "LG" ? { [alias]: user } : {},
+          },
         ),
       ).toMatchObject({
         owner: user,
@@ -1818,28 +1828,82 @@ describe("runtime directories and plugin Python boundary", () => {
   test("does not confuse domain accounts with local Administrator or Guest", () => {
     const administrator = "S-1-5-21-111-222-333-500";
     const guest = "S-1-5-21-111-222-333-501";
+    const localAdministrator = "S-1-5-21-444-555-666-500";
+    const localGuest = "S-1-5-21-444-555-666-501";
 
     expect(
       inspectWindowsCredentialAcl(
         `O:LAG:SYD:P(A;OICI;FA;;;LA)(A;OICI;FA;;;BA)`,
         administrator,
+        { resolvedAliases: { LA: localAdministrator } },
       ),
     ).toMatchObject({
-      owner: "LA",
+      owner: localAdministrator,
       grantsCurrentUserAccess: false,
     });
     expect(
       inspectWindowsCredentialAcl(
         `O:${guest}G:SYD:P(A;OICI;FA;;;${guest})(A;OICI;FA;;;LG)`,
         guest,
+        { resolvedAliases: { LG: localGuest } },
       ).untrustedPrincipals,
-    ).toEqual(["LG"]);
+    ).toEqual([localGuest]);
     expect(() =>
       inspectWindowsCredentialAcl(
         `O:LGG:SYD:P(A;OICI;FA;;;${guest})(A;OICI;FA;;;LG)`,
         guest,
+        { resolvedAliases: { LG: localGuest } },
       ),
     ).toThrow("owner is not a trusted principal");
+  });
+
+  test("resolves domain and forest aliases against their actual SID domain", () => {
+    const currentUser = "S-1-5-21-111-222-333-1001";
+    const joinedDomainAdmins = "S-1-5-21-444-555-666-512";
+    const forestRootAdmins = "S-1-5-21-777-888-999-519";
+
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${currentUser}G:SYD:P(A;OICI;FA;;;${currentUser})(A;OICI;FR;;;DA)(A;OICI;FR;;;EA)`,
+        currentUser,
+        {
+          resolvedAliases: {
+            DA: joinedDomainAdmins,
+            EA: forestRootAdmins,
+          },
+        },
+      ).untrustedPrincipals,
+    ).toEqual([joinedDomainAdmins, forestRootAdmins]);
+  });
+
+  test("classifies conditional Windows access rules without trusting callbacks", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const condition = '(@User.department == "(Managed;QA)")';
+
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(A;OICI;FA;;;${user})(XA;OICI;FR;;;WD;${condition})`,
+        user,
+      ),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      untrustedPrincipals: ["S-1-1-0"],
+    });
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(XA;OICI;FA;;;${user};${condition})`,
+        user,
+      ).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(
+        `O:${user}G:SYD:P(A;OICI;FA;;;${user})(XD;OICI;FR;;;WD;${condition})`,
+        user,
+      ),
+    ).toMatchObject({
+      grantsCurrentUserAccess: false,
+      deniedPrincipals: ["S-1-1-0"],
+    });
   });
 
   test("rejects incomplete, unowned, and unsupported Windows ACLs", () => {
@@ -2179,11 +2243,71 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       expect(oldImplementation.status).not.toBe(0);
 
-      const fixture = spawnSync(
+      const trustedPowerShellEnvironment = {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+          ),
+        ),
+        PSModulePath: join(dirname(powershell), "Modules"),
+      };
+      const guest = spawnSync(
+        powershell,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          [
+            "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LGG:SYD:(A;;GA;;;SY)'",
+            "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor",
+            "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner",
+            "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+          ].join(" | "),
+        ],
+        {
+          encoding: "utf8",
+          env: trustedPowerShellEnvironment,
+          timeout: 15_000,
+          windowsHide: true,
+        },
+      );
+      expect(guest.status).toBe(0);
+      expect(guest.stdout.trim()).toMatch(/^S-1-(?:\d+-)*501$/u);
+      const home = join(root, "state", "codex-home");
+      await mkdir(home, { recursive: true });
+      const foreignGrant = spawnSync(
+        join(dirname(dirname(dirname(powershell))), "icacls.exe"),
+        [home, "/grant", `*${guest.stdout.trim()}:(OI)(CI)R`],
+        { encoding: "utf8", timeout: 15_000, windowsHide: true },
+      );
+      expect(foreignGrant.status).toBe(0);
+
+      const fixtureModule = join(root, "runtime-node-fixture.mjs");
+      const build = spawnSync(
         process.execPath,
         [
+          "build",
+          fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
+          "--target=node",
+          "--format=esm",
+          `--outfile=${fixtureModule}`,
+        ],
+        { encoding: "utf8", timeout: 30_000, windowsHide: true },
+      );
+      expect(build.status).toBe(0);
+      const selectedNode = spawnSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+        timeout: 15_000,
+        windowsHide: true,
+      });
+      expect(selectedNode.status).toBe(0);
+      const fixture = spawnSync(
+        selectedNode.stdout.trim(),
+        [
+          "--input-type=module",
           "--eval",
-          `import { prepareCodexSecurityCredentialHome } from ${JSON.stringify(new URL("../src/runtime.ts", import.meta.url).href)}; await prepareCodexSecurityCredentialHome();`,
+          `import { prepareCodexSecurityCredentialHome } from ${JSON.stringify(pathToFileURL(fixtureModule).href)}; await prepareCodexSecurityCredentialHome();`,
         ],
         {
           encoding: "utf8",
@@ -2194,7 +2318,7 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       expect(fixture.stderr).toBe("");
       expect(fixture.status).toBe(0);
-      expect(existsSync(join(root, "state", "codex-home"))).toBe(true);
+      expect(existsSync(home)).toBe(true);
     },
   );
 
