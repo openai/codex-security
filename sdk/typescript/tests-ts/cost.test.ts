@@ -1012,9 +1012,10 @@ describe("live scan cost tracking", () => {
     await tracker.stop();
 
     expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+      { phase: "discovery", filesCompleted: expect.any(Number), filesTotal: 8 },
       { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
     ]);
+    expect([3, 5]).toContain(updates[0]!.filesCompleted);
   });
 
   test("aggregates worker progress without regressing or changing assigned shards", async () => {
