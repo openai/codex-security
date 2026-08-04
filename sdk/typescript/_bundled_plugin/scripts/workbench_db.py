@@ -3501,7 +3501,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         effective_uid = geteuid() if geteuid is not None else None
         if effective_uid is not None and metadata.st_uid != effective_uid:
             raise SystemExit("Scan directory must be owned by the current user.")
-        for parent in scan_dir.parents:
+        for index, parent in enumerate(scan_dir.parents):
             try:
                 parent_metadata = parent.lstat()
             except OSError as exc:
@@ -3515,21 +3515,33 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
                 effective_uid,
             }:
                 raise SystemExit("Scan output parent must have a trusted owner.")
+            # The filesystem root is the one ancestor that every absolute path
+            # must pass through and that an unprivileged user can neither avoid
+            # nor repair. A host that leaves it group- or world-writable without
+            # the sticky bit has already handed every local user the ability to
+            # rename /etc, /usr and every other top-level entry, so refusing to
+            # run cannot make that host safer, while it does make every output
+            # path unusable. Exempt only the root, and only from the writability
+            # rule: every other ancestor is still checked, including a root-owned
+            # one, because a writable root-owned directory higher up is a
+            # substitution point an administrator can repair and a caller can
+            # route around. Output placed directly in a writable root is still
+            # refused, because that placement is the caller's choice. Root keeps
+            # the full walk, since root can repair the mode.
+            unrepairable_filesystem_root = (
+                parent.parent == parent
+                and index > 0
+                and parent_metadata.st_uid == 0
+                and effective_uid != 0
+            )
             if (
-                stat.S_IMODE(parent_metadata.st_mode) & 0o022
+                not unrepairable_filesystem_root
+                and stat.S_IMODE(parent_metadata.st_mode) & 0o022
                 and not parent_metadata.st_mode & stat.S_ISVTX
             ):
                 raise SystemExit(
                     "Scan output parent must not be group- or world-writable without the sticky bit."
                 )
-            # Stop once the walk reaches system-administered territory. Replacing
-            # scan output through a shared parent requires a parent the attacker
-            # can write to, and a root-owned directory is not one an unprivileged
-            # user can create entries in or repair, so refusing to run cannot make
-            # the host safer. Hosts that leave / group- or world-writable would
-            # otherwise fail every possible output path.
-            if parent_metadata.st_uid == 0 and effective_uid != 0:
-                break
     return scan_dir
 
 

@@ -2572,7 +2572,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   testPosix(
-    "stops the ancestry walk at a root-owned parent on a world-writable root",
+    "exempts only the filesystem root from the writable parent rule",
     async () => {
       // A shared Linux host can leave / at mode 0777 without the sticky bit,
       // which an unprivileged user cannot repair. The chain is simulated so the
@@ -2592,6 +2592,9 @@ describe("runtime directories and plugin Python boundary", () => {
         ["/tmp/shared", entry(4242, 0o40777)],
         ["/rootstate", entry(0, 0o40700)],
         ["/rootstate/scans", entry(0, 0o40700)],
+        ["/shared-root", entry(0, 0o40777)],
+        ["/shared-root/lib", entry(0, 0o40755)],
+        ["/shared-root/lib/state", entry(4242, 0o40700)],
       ]);
       const originalLstat = fsPromises.lstat;
       const originalRealpath = fsPromises.realpath;
@@ -2611,13 +2614,14 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       }));
       try {
-        // The walk reaches /tmp, which is root-owned and sticky, and stops there
-        // instead of blaming the user for the mode of /.
+        // The walk accepts the whole chain instead of blaming the user for the
+        // mode of /, which no output path can avoid and no user can repair.
         await expect(
           requireSecureOutputAncestry("/tmp/state/scans/scan-1", 4242),
         ).resolves.toBeUndefined();
 
-        // A world-writable root is still rejected when it is the actual parent.
+        // A world-writable root is still rejected when it is the actual parent,
+        // because placing output directly in it is the caller's choice.
         await expect(
           requireSecureOutputAncestry("/results", 4242),
         ).rejects.toThrow("sticky bit");
@@ -2625,6 +2629,13 @@ describe("runtime directories and plugin Python boundary", () => {
         // A world-writable parent the user does own is still rejected.
         await expect(
           requireSecureOutputAncestry("/tmp/shared/results", 4242),
+        ).rejects.toThrow("sticky bit");
+
+        // A world-writable root-owned parent above a root-owned ancestor is
+        // still rejected: root ownership is not a boundary, because anyone with
+        // write permission on /shared-root can rename /shared-root/lib.
+        await expect(
+          requireSecureOutputAncestry("/shared-root/lib/state/scan-1", 4242),
         ).rejects.toThrow("sticky bit");
 
         // Running as root keeps the full walk, because root can repair /.
