@@ -1463,15 +1463,6 @@ def complete_scan_locked(
                 warnings.append(warning)
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
-        fail_scan(
-            connection,
-            argparse.Namespace(
-                claim_token=claim_token,
-                cost_json=cost_json,
-                message=str(exc),
-                scan_id=scan_id,
-            ),
-        )
         raise SystemExit(str(exc)) from exc
     artifacts = {
         kind: artifact_path(scan_dir, filename, required=True)
