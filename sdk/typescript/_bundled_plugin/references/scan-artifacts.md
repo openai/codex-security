@@ -112,5 +112,5 @@ Compact standard scans use the nested `attack_path` record above. Other scan mod
 
 - Put scan phase outputs and supporting evidence under the numbered artifact subdirectories above.
 - Keep fix-finding outputs outside the numbered scan phases because fix-finding can run standalone or against an existing scan.
-- Do not author the final `report.md` directly. Put complete scan-level report semantics in the canonical JSON files. Detailed per-finding prose in `findings/<slug>/<slug>.md` and derived design guidance under `hardening/` are optional for a standard scan. Finalization deterministically writes the unsealed `report.md` projection and links any recorded write-ups and hardening portfolio. Do not add these derived documents to the sealed artifact list.
+- Do not author the final `report.md` directly. Put complete scan-level report semantics in the canonical JSON files. Detailed per-finding prose in `findings/<slug>/<slug>.md` and derived design guidance under `hardening/` are optional for a standard scan. Finalization deterministically writes the unsealed `report.md` projection and links any recorded write-ups and hardening portfolio. Finalization also seals every recorded write-up and hardening portfolio, so do not author the artifact list yourself and do not edit those documents after completion.
 - Keep the full scan bundle together under `scan_dir`.

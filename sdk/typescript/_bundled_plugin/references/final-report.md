@@ -16,7 +16,7 @@ Use `report.md` as the primary readable entry point. Explain report-relevant art
 
 In the final response, link the generated markdown report path as the primary readable artifact.
 
-Every scan mode uses the same final report pipeline. The model authors canonical JSON only; it must not author, repair, or treat an existing `report.md` as input. For an app-backed running scan, author `scan-manifest.json` as an unsealed draft and omit `scan.sealedAt` and `scan.artifacts`; finalization owns the exact workbench timestamps, seal, artifact digests, and derived finding identities. `complete-scan` invokes finalization, which validates and enriches the canonical JSON, seals the canonical JSON and evidence artifacts, then deterministically generates and validates `report.md` as an unsealed downstream projection. Missing report prose must be added to the structured canonical fields rather than recovered from a separately authored report.
+Every scan mode uses the same final report pipeline. The model authors canonical JSON only; it must not author, repair, or treat an existing `report.md` as input. For an app-backed running scan, author `scan-manifest.json` as an unsealed draft and omit `scan.sealedAt` and `scan.artifacts`; finalization owns the exact workbench timestamps, seal, artifact digests, and derived finding identities. `complete-scan` invokes finalization, which validates and enriches the canonical JSON, seals the canonical JSON, evidence artifacts, and any referenced write-ups and hardening portfolio, then deterministically generates and validates `report.md` as an unsealed downstream projection. Missing report prose must be added to the structured canonical fields rather than recovered from a separately authored report.
 
 When `complete_codex_security_scan` is available, use it to complete the scan. In Codex CLI or another terminal/chat host without that tool, run `python <plugin_dir>/scripts/finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>` after writing the completed canonical JSON. Do not mark the scan goal complete until this command succeeds and the generated markdown report exists.
 
@@ -30,8 +30,8 @@ Canonical report semantics live in these fields:
 
 - `scan-manifest.json`: `scan.scope` and `scan.threatModel`
 - `findings.json`: each finding's `summary`, `codeEvidence`, `rootCause`, `validation`, `attackPath.dataflow`, `attackPath.reachability`, `severity.rationale`, `severity.changeConditions`, `remediation`, `remediationTests`, and `preventiveControls`
-- `findings.json`: optional `writeup.reportPath` for a derived, unsealed detailed vulnerability report written under `findings/<slug>/<slug>.md`
-- `scan-manifest.json`: optional `scan.hardening.portfolioPath` for the derived, unsealed design portfolio at `hardening/hardening.md`
+- `findings.json`: optional `writeup.reportPath` for a derived detailed vulnerability report written under `findings/<slug>/<slug>.md`; finalization seals it
+- `scan-manifest.json`: optional `scan.hardening.portfolioPath` for the derived design portfolio at `hardening/hardening.md`; finalization seals it
 - `coverage.json`: `surfaces` including `riskArea` and `notes`, plus `openQuestions`
 
 For a whole-repository Deep scan, keep `coverage.inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
@@ -87,7 +87,7 @@ After the summary table, include a compact `### Confidence Scale` table with col
 - `medium`: source evidence supports a plausible issue, but runtime behavior, deployment configuration, role reachability, type constraints, or exploit reliability still need proof.
 - `low`: weak or incomplete evidence; include only when the user explicitly wants follow-up candidates in the final report.
 
-When a finding records `writeup.reportPath`, link the detailed report from the findings summary and do not duplicate the complete finding inline. The linked write-up is a derived, unsealed readable output; the canonical finding remains the source of truth for adapters and regeneration. Findings without a write-up continue to use the inline format below for compatibility.
+When a finding records `writeup.reportPath`, link the detailed report from the findings summary and do not duplicate the complete finding inline. The linked write-up is a derived readable output that finalization seals; the canonical finding remains the source of truth for adapters and regeneration. Findings without a write-up continue to use the inline format below for compatibility.
 
 Render each inline finding as:
 

@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   truncate,
@@ -700,7 +701,10 @@ describe("canonical scan contract", () => {
 
   async function sealDerivedDocuments(
     scanDir: string,
-    { sealWriteup = true }: { sealWriteup?: boolean } = {},
+    {
+      sealWriteup = true,
+      sealPortfolio = true,
+    }: { sealWriteup?: boolean; sealPortfolio?: boolean } = {},
   ): Promise<void> {
     const manifestPath = join(scanDir, "scan-manifest.json");
     const findingsPath = join(scanDir, "findings.json");
@@ -718,11 +722,13 @@ describe("canonical scan contract", () => {
       "report\n",
     );
     // List them the way the bundled producer now does.
-    manifest["scan"]["artifacts"].push({
-      path: "hardening/hardening.md",
-      sha256: "",
-      mediaType: "text/markdown",
-    });
+    if (sealPortfolio) {
+      manifest["scan"]["artifacts"].push({
+        path: "hardening/hardening.md",
+        sha256: "",
+        mediaType: "text/markdown",
+      });
+    }
     if (sealWriteup) {
       manifest["scan"]["artifacts"].push({
         path: "findings/report/report.md",
@@ -776,6 +782,95 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow(
       "Derived document is missing from sealed artifacts: findings/report/report.md",
     );
+  });
+
+  // The bundled Python validator has to apply the same gate the SDK applies, or
+  // direct CLI exports and workbench comparisons would keep accepting a
+  // partially unsealed contract that loadContract rejects.
+  async function bundledValidatorScanDir(scanDir: string): Promise<string> {
+    await writeFile(join(scanDir, "report.md"), "# Security Review: example\n");
+    return await realpath(scanDir);
+  }
+
+  function runBundledValidator(scanDir: string): {
+    exitCode: number;
+    stderr: string;
+  } {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) {
+      throw new Error(
+        "A Python interpreter is required for bundled contract validator tests.",
+      );
+    }
+    const result = Bun.spawnSync(
+      [
+        python,
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "validate_scan_contract.py"),
+        "--scan-dir",
+        scanDir,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    return {
+      exitCode: result.exitCode,
+      stderr: new TextDecoder().decode(result.stderr),
+    };
+  }
+
+  test("accepts sealed derived documents in the bundled validator", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir);
+
+    expect(
+      runBundledValidator(await bundledValidatorScanDir(scanDir)),
+    ).toMatchObject({ exitCode: 0, stderr: "" });
+  });
+
+  test("rejects a partially sealed manifest in the bundled validator", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, { sealWriteup: false });
+
+    expect(
+      runBundledValidator(await bundledValidatorScanDir(scanDir)),
+    ).toMatchObject({
+      exitCode: 2,
+      stderr: expect.stringContaining(
+        "derived document is missing from sealed artifacts: findings/report/report.md",
+      ),
+    });
+  });
+
+  test("accepts a manifest that seals no derived document on both sides", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, {
+      sealWriteup: false,
+      sealPortfolio: false,
+    });
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+    expect(
+      runBundledValidator(await bundledValidatorScanDir(scanDir)),
+    ).toMatchObject({ exitCode: 0, stderr: "" });
+  });
+
+  test("keeps the existence check for a manifest that seals no derived document", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, {
+      sealWriteup: false,
+      sealPortfolio: false,
+    });
+    const validatorScanDir = await bundledValidatorScanDir(scanDir);
+    await rm(join(scanDir, "findings", "report", "report.md"));
+
+    expect(runBundledValidator(validatorScanDir)).toMatchObject({
+      exitCode: 2,
+      stderr: expect.stringContaining("findings[0].writeup.reportPath"),
+    });
   });
 
   test.each([

@@ -366,6 +366,11 @@ describe("malformed scan artifact recovery", () => {
       sha256: digest(portfolioBody),
       mediaType: "text/markdown",
     });
+
+    // The generated report must not keep calling the portfolio unsealed.
+    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
+    expect(report).toContain("covered by the scan seal");
+    expect(report).not.toContain("unsealed design guidance");
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {

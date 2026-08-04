@@ -2034,6 +2034,39 @@ def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str,
             raise ContractError(f"coverage receipt is missing from sealed artifacts: {ref}")
 
 
+def _validate_sealed_derived_documents(
+    scan_dir: Path, scan: dict[str, Any], findings: dict[str, Any]
+) -> None:
+    """Require referenced derived documents to be sealed artifacts.
+
+    A producer that seals derived documents lists them in ``scan.artifacts``,
+    where their digests are already verified. Requiring every referenced
+    document to be one of those artifacts stops a write-up from being replaced
+    after sealing while the scan still validates as intact. A manifest sealed
+    before derived documents joined the seal lists none of them, so it keeps the
+    existence check it was sealed with rather than becoming unreadable.
+
+    This is the Python side of the gate ``validateSeal`` applies in the
+    TypeScript SDK; keep the two conditions identical.
+    """
+
+    artifact_paths = {
+        _require_safe_relative_path(artifact["path"], "sealed artifact path")
+        for artifact in scan["artifacts"]
+    }
+    refs = {
+        ref: _require_safe_relative_path(ref, "derived document path")
+        for ref in _derived_document_refs(scan, findings)
+    }
+    if not any(normalized in artifact_paths for normalized in refs.values()):
+        _require_derived_writeup_files(scan_dir, findings)
+        _require_hardening_portfolio_file(scan_dir, scan)
+        return
+    for ref, normalized in refs.items():
+        if normalized not in artifact_paths:
+            raise ContractError(f"derived document is missing from sealed artifacts: {ref}")
+
+
 def _validate_existing_seal(
     scan_dir: Path,
     scan: dict[str, Any],
@@ -2098,6 +2131,7 @@ def _read_sealed_scan(
     _validate_findings(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_sealed_coverage_receipts(scan, coverage)
+    _validate_sealed_derived_documents(scan_dir, scan, findings)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
@@ -2417,6 +2451,7 @@ def _prepare_scan_finalization(
     _require_hardening_portfolio_file(scan_dir, scan)
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
+        _validate_sealed_derived_documents(scan_dir, scan, findings)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         validate_against_schema(findings, schema_dir / "findings.schema.json")
@@ -2456,6 +2491,7 @@ def _prepare_scan_finalization(
         sealed_artifacts.append(_artifact_record(scan_dir, ref, "text/markdown"))
     scan["artifacts"] = sealed_artifacts
     _validate_sealed_coverage_receipts(scan, coverage)
+    _validate_sealed_derived_documents(scan_dir, scan, findings)
     _validate_manifest(manifest)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
