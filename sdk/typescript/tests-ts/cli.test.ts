@@ -697,10 +697,13 @@ describe("CLI", () => {
           }),
         ),
       ).toBe(0);
+      // `warned` has to survive the command's z.record output schema to be worth
+      // recording: a campaign script reads it off stdout, not out of the ledger.
       expect(JSON.parse(stdout.text())).toMatchObject({
         total: 1,
         completed: 1,
         failed: 0,
+        warned: 0,
         skipped: 0,
         resultsPath: join(root, "results", "results.jsonl"),
       });

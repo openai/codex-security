@@ -75,10 +75,12 @@ export interface MultiscanResult {
   total: number;
   completed: number;
   failed: number;
-  // Repositories that reported at least one warning: from the attempts this run made, and
-  // from the receipt of a repository it resumed and skipped, the same way `completed`
-  // counts skipped repositories. A warning is not a failure, so a drifted or partially
-  // cleaned repository is only visible here and on its receipt.
+  // Repositories with at least one warned attempt in the ledger: from the attempts this
+  // run made and from the attempts a resumed ledger already records, the same way
+  // `completed` counts repositories this run skipped. Warnings belong to an attempt and
+  // the ledger is append-only, so this cannot go down when a campaign is resumed. A
+  // warning is not a failure, so a drifted or partially cleaned repository is only
+  // visible here and on its receipt.
   warned: number;
   skipped: number;
   resultsPath: string;
@@ -118,7 +120,7 @@ async function runCampaign(
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   await ensureManifest(join(output, "manifest.json"), tasks);
-  const receipts = await readReceipts(ledger);
+  const { receipts, warnedIds } = await readReceipts(ledger);
   const pending: MultiscanTask[] = [];
   let completed = 0;
   let warned = 0;
@@ -131,11 +133,12 @@ async function runCampaign(
       (await hasArtifacts(receipt.outputDir))
     ) {
       completed += 1;
-      // This repository is not scanned again, so its receipt is the only place its
-      // warnings still exist. Array.isArray because the ledger is parsed unvalidated.
-      if (Array.isArray(receipt.warnings) && receipt.warnings.length > 0) {
-        warned += 1;
-      }
+      // This repository is not scanned again, so the ledger is the only place its warnings
+      // still exist. Every attempt counts, not just the receipt that won: a retry that
+      // succeeded quietly leaves a final receipt with no warnings at all, and reading only
+      // that one would report warned: 0 for a campaign the run that wrote the ledger
+      // reported as warned: 1, even though resuming did no new work.
+      if (warnedIds.has(task.id.toLowerCase())) warned += 1;
     } else {
       pending.push(task);
     }
@@ -162,7 +165,11 @@ async function runCampaign(
       const task = pending[next++];
       if (task === undefined) return;
       let attempt = receipts.get(task.id.toLowerCase())?.attempt ?? 0;
-      let repositoryWarned = false;
+      // Seeded from the ledger for the same reason the skip branch above reads it: a
+      // repository this campaign already warned about keeps its count when a later run
+      // retries it, so `warned` reports the ledger rather than whichever run last touched
+      // it. Retrying does not erase the attempt that warned; the receipt stays on disk.
+      let repositoryWarned = warnedIds.has(task.id.toLowerCase());
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
         attempt += 1;
@@ -348,14 +355,17 @@ async function ensureManifest(
   }
 }
 
-async function readReceipts(
-  path: string,
-): Promise<Map<string, MultiscanReceipt>> {
+async function readReceipts(path: string): Promise<{
+  receipts: Map<string, MultiscanReceipt>;
+  warnedIds: Set<string>;
+}> {
   let contents: string;
   try {
     contents = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { receipts: new Map(), warnedIds: new Set() };
+    }
     throw error;
   }
   const lines = contents.split("\n");
@@ -366,12 +376,22 @@ async function readReceipts(
       Buffer.byteLength(contents) - Buffer.byteLength(partial),
     );
   }
-  return new Map(
-    lines.filter(Boolean).map((line): [string, MultiscanReceipt] => {
-      const receipt = JSON.parse(line) as MultiscanReceipt;
-      return [receipt.id.toLowerCase(), receipt];
-    }),
-  );
+  const receipts = new Map<string, MultiscanReceipt>();
+  // Warnings belong to the attempt that produced them, so a later attempt's receipt
+  // supersedes an earlier warned one in `receipts`. Which attempt warned is recorded
+  // separately so it survives that replacement. Array.isArray because the ledger is
+  // parsed unvalidated: a hand-edited line holding a non-array there is not a warning.
+  const warnedIds = new Set<string>();
+  for (const line of lines) {
+    if (!line) continue;
+    const receipt = JSON.parse(line) as MultiscanReceipt;
+    const id = receipt.id.toLowerCase();
+    receipts.set(id, receipt);
+    if (Array.isArray(receipt.warnings) && receipt.warnings.length > 0) {
+      warnedIds.add(id);
+    }
+  }
+  return { receipts, warnedIds };
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {

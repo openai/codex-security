@@ -881,4 +881,94 @@ describe("multiscan", () => {
     });
     expect(calls).toBe(1);
   });
+
+  test("keeps a retried repository's warnings in a resumed summary", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "retried");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nretried,${source.path},${source.revision}\n`,
+    );
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls += 1;
+      if (calls === 1) {
+        scanOptions.onWarning!("Scan target drifted mid-run.");
+        throw new Error("temporary failure");
+      }
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    // The warning belongs to attempt 1, which failed; attempt 2 succeeded quietly, so the
+    // last receipt for this repository carries no warnings at all.
+    const initial = await runMultiscan(options(paths, security));
+    expect(initial).toMatchObject({ completed: 1, failed: 0, warned: 1 });
+    expect(await results(initial.resultsPath)).toMatchObject([
+      {
+        attempt: 1,
+        status: "failed",
+        warnings: ["Scan target drifted mid-run."],
+      },
+      { attempt: 2, status: "completed" },
+    ]);
+
+    // Resuming does no new work, so it must report the campaign the ledger already
+    // records rather than silently dropping the attempt that warned.
+    const resumed = await runMultiscan(options(paths, security));
+    expect(calls).toBe(2);
+    expect(resumed).toMatchObject({
+      total: 1,
+      completed: 1,
+      failed: 0,
+      warned: 1,
+      skipped: 1,
+    });
+  });
+
+  test("keeps a rescanned repository's earlier warnings in the summary", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "rescanned");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrescanned,${source.path},${source.revision}\n`,
+    );
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls += 1;
+      if (calls === 1) {
+        scanOptions.onWarning!("Scan target drifted mid-run.");
+        throw new Error("temporary failure");
+      }
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    // One attempt per run, so the first run leaves the repository failed with a warning
+    // and the second has to scan it again rather than skip it.
+    const first = await runMultiscan(
+      options(paths, security, { maxAttempts: 1 }),
+    );
+    expect(first).toMatchObject({ completed: 0, failed: 1, warned: 1 });
+
+    // The retry is quiet, but the ledger still holds the attempt that warned, so the
+    // summary must not drop back to zero for a campaign whose ledger only ever grows.
+    const second = await runMultiscan(
+      options(paths, security, { maxAttempts: 1 }),
+    );
+    expect(calls).toBe(2);
+    expect(second).toMatchObject({
+      total: 1,
+      completed: 1,
+      failed: 0,
+      warned: 1,
+      skipped: 0,
+    });
+
+    // And a third run, which skips the repository outright, agrees with the second.
+    expect(await runMultiscan(options(paths, security))).toMatchObject({
+      completed: 1,
+      warned: 1,
+      skipped: 1,
+    });
+    expect(calls).toBe(2);
+  });
 });
