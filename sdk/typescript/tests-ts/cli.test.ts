@@ -19,6 +19,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   CodexSecurityConfig,
   JsonObject,
+  ScanOptions,
   ScanPreflight,
 } from "../src/index.js";
 import { redactedErrorMessage } from "../src/errors.js";
@@ -35,7 +36,12 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
-import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
+import {
+  DEFAULT_CODEX_CONFIG,
+  FIREWORKS_CODEX_PROVIDER,
+  OPENROUTER_CODEX_PROVIDER,
+  scanModelConfiguration,
+} from "../src/config.js";
 import {
   FakeSignals,
   REDACTED_CREDENTIALS,
@@ -113,10 +119,26 @@ describe("CLI", () => {
           stopAfterNoNew: { type: "integer" },
           maxDiscoveryRuns: { type: "integer" },
           model: { type: "string" },
+          verbose: { type: "boolean" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
+          provider: { enum: ["openai", "openrouter", "fireworks"] },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
         },
       },
+    });
+
+    const rerunSchema = capture();
+    expect(
+      await main(
+        ["scans", "rerun", "--schema", "--format", "json"],
+        rerunSchema.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(rerunSchema.text())).toMatchObject({
+      args: { properties: { scanId: { type: "string" } } },
+      options: { properties: { verbose: { type: "boolean" } } },
     });
 
     const matchSchema = capture();
@@ -269,6 +291,8 @@ describe("CLI", () => {
     for (const setting of [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
+      "CODEX_SECURITY_LOG_LEVEL",
+      "LOG_LEVEL",
       "CODEX_SECURITY_STATE_DIR",
       "CODEX_HOME",
       "PYTHON",
@@ -299,6 +323,10 @@ describe("CLI", () => {
     ]) {
       expect(readme).toContain(setting);
     }
+    expect(readme).toMatch(
+      /\|\s*`CODEX_SECURITY_LOG_LEVEL`\s*\|\s*CLI-only\b/u,
+    );
+    expect(readme).toMatch(/\|\s*`LOG_LEVEL`\s*\|\s*CLI-only\b/u);
   });
 
   test("keeps documented runtime and deep-scan defaults accurate", async () => {
@@ -718,6 +746,81 @@ describe("CLI", () => {
     }
   });
 
+  test.each([
+    [
+      "OpenRouter",
+      "openrouter",
+      "anthropic/claude-sonnet-4.5",
+      OPENROUTER_CODEX_PROVIDER,
+    ],
+    [
+      "Fireworks AI",
+      "fireworks",
+      "accounts/fireworks/models/qwen3-235b-a22b",
+      FIREWORKS_CODEX_PROVIDER,
+    ],
+  ] as const)(
+    "routes bulk scans through %s",
+    async (_name, provider, model, providerConfig) => {
+      const root = await mkdtemp(join(tmpdir(), `codex-security-${provider}-`));
+      try {
+        await multiscanInventory(root);
+        let config: CodexSecurityConfig | undefined;
+        const missingModelError = capture();
+        expect(
+          await main(
+            [
+              "bulk-scan",
+              "repositories.csv",
+              "--output-dir",
+              "results",
+              "--provider",
+              provider,
+            ],
+            capture().stream,
+            missingModelError.stream,
+            dependencies({
+              currentDirectory: root,
+              onConfig: (value) => (config = value),
+            }),
+          ),
+        ).toBe(2);
+        expect(missingModelError.text()).toContain(
+          `--model is required when using --provider ${provider}`,
+        );
+        expect(config).toBeUndefined();
+        expect(
+          await main(
+            [
+              "bulk-scan",
+              "repositories.csv",
+              "--output-dir",
+              "results",
+              "--provider",
+              provider,
+              "--model",
+              model,
+              "--json",
+            ],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              currentDirectory: root,
+              onConfig: (value) => (config = value),
+            }),
+          ),
+        ).toBe(0);
+        expect(config?.codexOverrides).toMatchObject({
+          model,
+          model_provider: provider,
+          model_providers: { [provider]: providerConfig },
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("preserves the bulk-scan failure summary and redacts progress errors", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
@@ -780,6 +883,15 @@ describe("CLI", () => {
         "features.goals=true",
         "--knowledge-base",
         "/shared/threat-models",
+      ],
+      ["bulk-scan", "--provider", "openrouter"],
+      ["bulk-scan", "--provider=openrouter", "--model", "openai/gpt-5.4"],
+      ["bulk-scan", "--provider", "fireworks"],
+      [
+        "bulk-scan",
+        "--provider=fireworks",
+        "--model",
+        "accounts/fireworks/models/qwen3-235b-a22b",
       ],
     ] as const) {
       const stdout = capture();
@@ -1259,6 +1371,84 @@ describe("CLI", () => {
     expect(timers).toBe(0);
   });
 
+  test("keeps verbose diagnostics separate from interactive progress", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const result = fakeResult([], "complete", {
+      input_tokens: 200,
+      cache_write_input_tokens: 100,
+      output_tokens: 0,
+    });
+    const activeTimers = new Set<NodeJS.Timeout>();
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_TTY_SECRET_123" },
+    });
+    deps.setInterval = () => {
+      const timer = {} as NodeJS.Timeout;
+      activeTimers.add(timer);
+      return timer;
+    };
+    deps.clearInterval = (timer) => {
+      activeTimers.delete(timer);
+    };
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        expect(activeTimers.size).toBe(1);
+        options?.onAuthentication?.({
+          method: "api_key",
+          source: "OPENAI_API_KEY",
+          verified: false,
+        });
+        expect(activeTimers.size).toBe(1);
+        options?.onOutputDirReady?.("/tmp/scan");
+        expect(activeTimers.size).toBe(1);
+        options?.onCost?.(result.cost!);
+        expect(activeTimers.size).toBe(1);
+        options?.onWarning?.("Recoverable scanner warning");
+        expect(activeTimers.size).toBe(1);
+        options?.onObserverError?.(
+          "onWorkerStatus",
+          new Error("Observer temporarily unavailable"),
+        );
+        expect(activeTimers.size).toBe(1);
+        options?.onScanStarted?.();
+        expect(activeTimers.size).toBe(1);
+        return result;
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    const output = stripVTControlCharacters(stderr.text());
+    const diagnosticLines = output
+      .split(/[\r\n]+/u)
+      .filter(
+        (line) =>
+          line.includes("codex-security: debug:") ||
+          line.includes("codex-security: warning:"),
+      );
+    expect(diagnosticLines.length).toBeGreaterThan(3);
+    for (const line of diagnosticLines) {
+      expect(
+        line.startsWith("codex-security: debug:") ||
+          line.startsWith("codex-security: warning:"),
+      ).toBe(true);
+    }
+    expect(output).not.toMatch(
+      /\[[0-9:]+\][^\r\n]*codex-security: (?:debug|warning):/u,
+    );
+    expect(output).not.toContain("SYNTHETIC_TTY_SECRET");
+    expect(activeTimers.size).toBe(0);
+  });
+
   test("keeps structured scans noninteractive even when stderr is a terminal", async () => {
     for (const options of [
       ["--json"],
@@ -1485,6 +1675,7 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(help.text()).toContain("Usage: codex-security scan [repository]");
+    expect(help.text()).toContain("--verbose");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
     expect(help.text()).toContain("--workers <number>");
@@ -1492,6 +1683,7 @@ describe("CLI", () => {
     expect(help.text()).toContain("--stop-after-no-new <number>");
     expect(help.text()).toContain("--max-discovery-runs <number>");
     expect(help.text()).toContain("--model <string>");
+    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
@@ -1510,7 +1702,6 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       "codex-security scan . --model gpt-5.6-terra --effort high",
     );
-    expect(help.text()).not.toContain("--provider");
     expect(help.text()).not.toContain("openai:gpt");
     expect(help.text()).not.toContain("codex-security scan . --path src,tests");
     expect(help.text()).toContain("--format <toon|json|yaml|md|jsonl>");
@@ -1558,7 +1749,7 @@ describe("CLI", () => {
     );
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).not.toContain("--provider");
+    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
     expect(stderr.text()).toBe("");
   });
 
@@ -1603,6 +1794,49 @@ describe("CLI", () => {
       expect(config?.codexOverrides).toEqual(expected);
     }
   });
+
+  test.each([
+    [
+      "OpenRouter",
+      "openrouter",
+      "anthropic/claude-sonnet-4.5",
+      "google/gemini-2.5-pro",
+      OPENROUTER_CODEX_PROVIDER,
+    ],
+    [
+      "Fireworks AI",
+      "fireworks",
+      "accounts/fireworks/models/gpt-oss-120b",
+      "accounts/fireworks/models/llama-v3p3-70b-instruct",
+      FIREWORKS_CODEX_PROVIDER,
+    ],
+  ] as const)(
+    "routes scans through %s",
+    async (_name, provider, selectedModel, codexModel, providerConfig) => {
+      for (const [options, expectedModel] of [
+        [[`--provider=${provider}`, "--model", selectedModel], selectedModel],
+        [
+          ["--provider", provider, "--codex", `model="${codexModel}"`],
+          codexModel,
+        ],
+      ] as const) {
+        let config: CodexSecurityConfig | undefined;
+        expect(
+          await main(
+            ["scan", ".", ...options],
+            capture().stream,
+            capture().stream,
+            dependencies({ onConfig: (value) => (config = value) }),
+          ),
+        ).toBe(0);
+        expect(config?.codexOverrides).toEqual({
+          model: expectedModel,
+          model_provider: provider,
+          model_providers: { [provider]: providerConfig },
+        });
+      }
+    },
+  );
 
   test("parses repeatable options and every scan target through Incur", async () => {
     const pathOutput = capture();
@@ -1719,6 +1953,19 @@ describe("CLI", () => {
         "high",
       ),
     ).toThrow("--effort conflicts with --codex model_reasoning_effort");
+    for (const provider of ["openrouter", "fireworks"] as const) {
+      expect(() =>
+        parseCodexOverrides([], undefined, undefined, provider),
+      ).toThrow(`--model is required when using --provider ${provider}`);
+      expect(() =>
+        parseCodexOverrides(
+          ['model_provider="other"'],
+          undefined,
+          undefined,
+          provider,
+        ),
+      ).toThrow("--provider conflicts with --codex model_provider");
+    }
   });
 
   test("redacts malformed and bounded --codex overrides", () => {
@@ -1792,6 +2039,14 @@ describe("CLI", () => {
         "--knowledge-base must not be empty",
       ],
       [["scan", ".", "--model="], "--model must not be empty"],
+      [
+        ["scan", ".", "--provider", "openrouter"],
+        "--model is required when using --provider openrouter",
+      ],
+      [
+        ["scan", ".", "--provider", "fireworks"],
+        "--model is required when using --provider fireworks",
+      ],
       [
         ["scan", ".", "--effort", "ultra"],
         "--effort must be minimal, low, medium, high, or xhigh",
@@ -1973,6 +2228,918 @@ describe("CLI", () => {
     expect(repository).toBe("repo");
   });
 
+  test("emits verbose scan lifecycle diagnostics without changing JSON output", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult(["high"], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_SECRET_123" },
+    });
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "api_key",
+          source: "OPENAI_API_KEY",
+          verified: false,
+        });
+        options?.onOutputDirReady?.("/tmp/scan");
+        options?.onScanStarted?.();
+        options?.onWorkerStatus?.({
+          kind: "preflight",
+          delegation: "available",
+          configuredSlots: 8,
+        });
+        options?.onWorkerStatus?.({
+          kind: "dispatch",
+          phase: "validation",
+          planned: 6,
+          started: 3,
+        });
+        options?.onReconnect?.(2, 5, {
+          reason: "rate_limit",
+          retryAfterSeconds: 1.2,
+        });
+        options?.onCost?.(result.cost!);
+        return result;
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain(
+      `codex-security: debug: scan.configuration cli_version=${JSON.stringify(VERSION)}`,
+    );
+    expect(stderr.text()).toContain(
+      `bundled_plugin_version=${JSON.stringify(BUNDLED_PLUGIN_VERSION)}`,
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: authentication.selected requested="auto" method="api_key" source="OPENAI_API_KEY" verified=false',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.output_ready scan_dir="/tmp/scan"',
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).toContain(
+      'codex-security: debug: worker.preflight delegation="available" configured_slots=8',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: worker.phase phase="validation" planned=6 started=3',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: connection.retry reason="rate_limit" attempt=2 max_attempts=5 retry_after_seconds=1.2',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: cost.updated model="gpt-5.6-sol"',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.completed coverage="complete" findings=1',
+    );
+    expect(stderr.text()).toContain(
+      "codex-security: debug: runtime.cleanup.started",
+    );
+    expect(stderr.text()).toContain(
+      "codex-security: debug: runtime.cleanup.completed",
+    );
+    expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_SECRET");
+  });
+
+  test("reports the effective default model and reasoning effort in verbose scan diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    const configuration = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.configuration"),
+      );
+    expect(configuration).toBeDefined();
+    expect(configuration).toContain(
+      `model=${JSON.stringify(DEFAULT_SCAN_MODEL_CONFIGURATION.model)}`,
+    );
+    expect(configuration).toContain(
+      `reasoning_effort=${JSON.stringify(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort)}`,
+    );
+  });
+
+  test("includes selected reasoning effort in verbose scan diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--effort", "high", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("reports reasoning effort supplied through legacy --codex overrides", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--codex",
+          'model_reasoning_effort="high"',
+          "--verbose",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("reports effective model and reasoning settings from the selected Codex profile", async () => {
+    const scenarios = [
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-sol"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="high"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "high",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "low",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="medium"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "medium",
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            ...scenario.overrides.flatMap((override) => ["--codex", override]),
+            "--verbose",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      const configuration = stderr
+        .text()
+        .split("\n")
+        .find((line) =>
+          line.startsWith("codex-security: debug: scan.configuration"),
+        );
+      expect(configuration).toBeDefined();
+      expect(configuration).toContain('profile="review"');
+      expect(configuration).toContain(
+        `model=${JSON.stringify(scenario.model)}`,
+      );
+      expect(configuration).toContain(
+        `reasoning_effort=${JSON.stringify(scenario.reasoningEffort)}`,
+      );
+    }
+  });
+
+  test("reports saved model and reasoning effort for verbose scan reruns", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {
+                model: "gpt-original",
+                model_reasoning_effort: "high",
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+    expect(stderr.text()).toContain('model="gpt-original"');
+    expect(stderr.text()).toContain('reasoning_effort="high"');
+  });
+
+  test("reports selected profile settings for verbose scan reruns", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { CODEX_SECURITY_LOG_LEVEL: "debug" },
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {
+                profile: "review",
+                model: "gpt-5.6-sol",
+                model_reasoning_effort: "low",
+                profiles: {
+                  review: {
+                    model: "gpt-5.6-terra",
+                    model_reasoning_effort: "high",
+                  },
+                },
+              },
+            },
+          }),
+        }),
+      ),
+    ).toBe(0);
+    const configuration = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.configuration"),
+      );
+    expect(configuration).toBeDefined();
+    expect(configuration).toContain('profile="review"');
+    expect(configuration).toContain('model="gpt-5.6-terra"');
+    expect(configuration).toContain('reasoning_effort="high"');
+  });
+
+  test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+  });
+
+  test("accepts Promptfoo-compatible LOG_LEVEL as a verbose fallback", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LOG_LEVEL: "  ",
+            LOG_LEVEL: "  DEBUG  ",
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+  });
+
+  test("prefers CODEX_SECURITY_LOG_LEVEL over a shared LOG_LEVEL", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LOG_LEVEL: "info",
+            LOG_LEVEL: "debug",
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).not.toContain("codex-security: debug:");
+  });
+
+  test("lets --verbose override non-debug environment log levels", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LOG_LEVEL: "error",
+            LOG_LEVEL: "warn",
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: debug: scan.configuration",
+    );
+    expect(stderr.text()).toContain("codex-security: debug: scan.completed");
+  });
+
+  test("does not emit verbose diagnostics unless explicitly requested", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).not.toContain("codex-security: debug:");
+  });
+
+  test("keeps verbose dry-run authentication unverified without starting a scan", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    let scanStarted = false;
+    const preflight = {
+      ...fakePreflight("."),
+      authentication: {
+        method: "api_key" as const,
+        source: "OPENAI_API_KEY" as const,
+        verified: false as const,
+      },
+    };
+
+    expect(
+      await main(
+        ["scan", ".", "--dry-run", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: {
+            OPENAI_API_KEY: "sk-proj-SYNTHETIC_DRY_RUN_SECRET_123",
+          },
+          preflight,
+          onRun: () => {
+            scanStarted = true;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({ dryRun: true, ...preflight });
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.preflight.completed model="gpt-5.6-sol" reasoning_effort="xhigh" method="api_key" source="OPENAI_API_KEY" verified=false',
+    );
+    expect(stderr.text()).not.toContain("codex-security: debug: scan.started");
+    expect(stderr.text()).not.toContain("SYNTHETIC_DRY_RUN_SECRET");
+    expect(scanStarted).toBe(false);
+  });
+
+  test("reports selected profile configuration consistently in verbose dry runs", async () => {
+    const scenarios = [
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-sol"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="high"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "high",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model_reasoning_effort="low"',
+          'profiles.review.model="gpt-5.6-terra"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "low",
+      },
+      {
+        overrides: [
+          'profile="review"',
+          'model="gpt-5.6-terra"',
+          'profiles.review.model_reasoning_effort="medium"',
+        ],
+        model: "gpt-5.6-terra",
+        reasoningEffort: "medium",
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            "--dry-run",
+            "--verbose",
+            "--json",
+            ...scenario.overrides.flatMap((override) => ["--codex", override]),
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({
+        dryRun: true,
+        ...fakePreflight("."),
+        model: scenario.model,
+        reasoningEffort: scenario.reasoningEffort,
+      });
+
+      for (const event of ["scan.configuration", "scan.preflight.completed"]) {
+        const diagnostic = stderr
+          .text()
+          .split("\n")
+          .find((line) => line.startsWith(`codex-security: debug: ${event}`));
+
+        expect(diagnostic).toBeDefined();
+        expect(diagnostic).toContain(`model=${JSON.stringify(scenario.model)}`);
+        expect(diagnostic).toContain(
+          `reasoning_effort=${JSON.stringify(scenario.reasoningEffort)}`,
+        );
+      }
+    }
+  });
+
+  test("redacts verbose provider failures and excludes private provider context", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_KEY_123" },
+    });
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError(
+          "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.failed classification="unauthorized"',
+    );
+    expect(stderr.text()).toContain("OPENAI_API_KEY");
+    expect(stderr.text()).not.toContain("org-private");
+    expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_KEY");
+    expect(stderr.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
+  });
+
+  test("excludes unclassified provider context from verbose failure diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async () => {
+        throw new CodexSecurityError(
+          "Provider failed for tenant=tenant-private request_id=req-internal",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+
+    const failureDiagnostic = stderr
+      .text()
+      .split("\n")
+      .find((line) => line.startsWith("codex-security: debug: scan.failed"));
+
+    expect(failureDiagnostic).toBeDefined();
+    expect(failureDiagnostic).toContain('classification="unknown"');
+    expect(failureDiagnostic).toContain("partial_output=false");
+    expect(failureDiagnostic).not.toContain("tenant-private");
+    expect(failureDiagnostic).not.toContain("req-internal");
+    expect(stderr.text()).toContain("Provider failed for");
+    expect(stderr.text()).not.toContain("tenant-private");
+    expect(stderr.text()).not.toContain("req-internal");
+    expect(stdout.text()).toBe("");
+  });
+
+  test("redacts provider identifier variants in scan failures", async () => {
+    const cases = [
+      {
+        message:
+          "Provider failed for TENANT_ID=tenant-private ORGANIZATION_ID=organization-private ORG_ID=org-private PROJECT_ID=project-private project-id=project-hyphen-private",
+        identifiers: [
+          "tenant-private",
+          "organization-private",
+          "org-private",
+          "project-private",
+          "project-hyphen-private",
+        ],
+      },
+      {
+        message:
+          "Provider failed for x-request-id:req-private Trace-ID=trace-private correlationId=correlation-private",
+        identifiers: ["req-private", "trace-private", "correlation-private"],
+      },
+      {
+        message:
+          'Provider failed for {"tenant":"tenant private","organizationId":"organization private","projectId":"project private","requestId":"request private","traceId":"trace private"}',
+        identifiers: [
+          "tenant private",
+          "organization private",
+          "project private",
+          "request private",
+          "trace private",
+        ],
+      },
+      {
+        message: `Provider failed for ${JSON.stringify({
+          payload: JSON.stringify({
+            tenant: 'tenant-"private" suffix',
+            organizationId: "org-private",
+            projectId: "project-private",
+            requestId: "req-private",
+            traceId: "trace-private",
+            correlationId: "correlation-private",
+          }),
+        })}`,
+        identifiers: [
+          "tenant-",
+          "private",
+          "suffix",
+          "org-private",
+          "project-private",
+          "req-private",
+          "trace-private",
+          "correlation-private",
+        ],
+      },
+      {
+        message: `Provider failed for ${JSON.stringify({
+          payload: JSON.stringify({
+            nested: JSON.stringify({
+              tenant: "tenant-private",
+              requestId: "req-private",
+            }),
+          }),
+        })}`,
+        identifiers: ["tenant-private", "req-private"],
+      },
+      {
+        message:
+          "Provider failed for https://api.example.test?tenant=tenant-private&project=project-private&request_id=req-private",
+        identifiers: ["tenant-private", "project-private", "req-private"],
+      },
+    ];
+
+    for (const { message, identifiers } of cases) {
+      for (const verbose of [false, true]) {
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies();
+        deps.createSecurity = () => ({
+          run: async () => {
+            throw new CodexSecurityError(message);
+          },
+          preflight: async () => fakePreflight(),
+          close: async () => {},
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--json", ...(verbose ? ["--verbose"] : [])],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain("Provider failed for");
+        expect(stderr.text()).toContain("[redacted]");
+        for (const identifier of identifiers) {
+          expect(stderr.text()).not.toContain(identifier);
+        }
+      }
+    }
+  });
+
+  test("redacts provider identifiers from scanner warnings", async () => {
+    for (const verbose of [false, true]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onWarning?.(
+            'Provider warning {"organizationId":"organization private","requestId":"request private"} tenant=tenant-private',
+          );
+          options?.onWarning?.(
+            `Provider warning ${JSON.stringify({
+              payload: JSON.stringify({
+                organizationId: "organization private",
+                requestId: "request private",
+              }),
+            })}`,
+          );
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          ["scan", ".", "--json", ...(verbose ? ["--verbose"] : [])],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain(
+        "codex-security: warning: Provider warning",
+      );
+      expect(stderr.text()).toContain("[redacted]");
+      expect(stderr.text()).not.toContain("organization private");
+      expect(stderr.text()).not.toContain("request private");
+      expect(stderr.text()).not.toContain("tenant-private");
+    }
+  });
+
+  test("prevents Unicode line separators from forging verbose diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const separators = "\u0085\u2028\u2029";
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onOutputDirReady?.(
+          `/tmp/scan${separators}codex-security: debug: forged`,
+        );
+        options?.onWarning?.(
+          `Scanner warning${separators}codex-security: debug: forged`,
+        );
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).not.toMatch(/[\u0085\u2028\u2029]/u);
+
+    const diagnostics = stderr
+      .text()
+      .split("\n")
+      .filter((line) => line.startsWith("codex-security: debug:"));
+
+    expect(diagnostics.some((line) => line.includes("scan.output_ready"))).toBe(
+      true,
+    );
+    expect(diagnostics.some((line) => line.includes("scan.warning"))).toBe(
+      true,
+    );
+    for (const diagnostic of diagnostics) {
+      expect(diagnostic).not.toMatch(/[\u0085\u2028\u2029]/u);
+      expect(diagnostic).not.toMatch(/^codex-security: debug: forged$/u);
+    }
+  });
+
+  test("redacts verbose output paths and observer diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onOutputArchived?.(
+          "/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123",
+        );
+        options?.onOutputDirReady?.(
+          "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_SECRET_123",
+        );
+        options?.onObserverError?.(
+          "onWorkerStatus",
+          new Error(`observer failed ${SYNTHETIC_CREDENTIALS}`),
+        );
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.output_archived archive_dir="/tmp/archive_[redacted]"',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.output_ready scan_dir="/tmp/scan_[redacted]"',
+    );
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.observer_failed observer="onWorkerStatus"',
+    );
+    expect(stderr.text()).toContain("[redacted]");
+    expect(stderr.text()).not.toContain("SYNTHETIC");
+  });
+
+  test("excludes observer failure context from verbose diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onObserverError?.(
+          "onWorkerStatus",
+          new Error(
+            "Observer failed for tenant=tenant-private request_id=req-internal",
+          ),
+        );
+        return fakeResult();
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+
+    const observerDiagnostic = stderr
+      .text()
+      .split("\n")
+      .find((line) =>
+        line.startsWith("codex-security: debug: scan.observer_failed"),
+      );
+
+    expect(observerDiagnostic).toBeDefined();
+    expect(observerDiagnostic).toContain('observer="onWorkerStatus"');
+    expect(observerDiagnostic).toContain('classification="unknown"');
+    expect(observerDiagnostic).not.toContain("tenant-private");
+    expect(observerDiagnostic).not.toContain("req-internal");
+    expect(stderr.text()).toContain("Observer failed for");
+    expect(stderr.text()).not.toContain("tenant-private");
+    expect(stderr.text()).not.toContain("req-internal");
+  });
+
+  test("excludes cleanup failure context from verbose diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onClose: () => {
+            throw new Error(
+              "Cleanup failed for tenant=tenant-private request_id=req-internal",
+            );
+          },
+        }),
+      ),
+    ).toBe(2);
+
+    for (const event of ["runtime.cleanup.failed", "scan.failed"]) {
+      const diagnostic = stderr
+        .text()
+        .split("\n")
+        .find((line) => line.startsWith(`codex-security: debug: ${event}`));
+
+      expect(diagnostic).toBeDefined();
+      expect(diagnostic).toContain('classification="unknown"');
+      expect(diagnostic).not.toContain("tenant-private");
+      expect(diagnostic).not.toContain("req-internal");
+    }
+
+    expect(stderr.text()).toContain("Cleanup failed for");
+    expect(stderr.text()).not.toContain("tenant-private");
+    expect(stderr.text()).not.toContain("req-internal");
+    expect(stdout.text()).toBe("");
+  });
+
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -2082,6 +3249,7 @@ describe("CLI", () => {
       "sandbox-exec: sandbox_apply: Operation not permitted during network setup.",
       "network failure ECONNRESET while connecting to the model.",
       "request timed out while reading the scanner response.",
+      "Local scan failed: project_directory=/tmp/project tenant_count=2 request_index=3.",
     ]) {
       const stdout = capture();
       const stderr = capture();
@@ -2161,9 +3329,15 @@ describe("CLI", () => {
       });
 
       expect(
-        await main(["scan", "."], stdout.stream, stderr.stream, deps),
+        await main(
+          ["scan", ".", "--verbose"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
       ).toBe(2);
       expect(stderr.text()).toContain((failure as Error).message);
+      expect(stderr.text()).toContain('scan.failed classification="local"');
       expect(stderr.text()).not.toContain("cannot access the configured model");
       expect(stderr.text()).not.toContain("Authentication failed");
       expect(stderr.text()).not.toContain("reached its rate limit");
@@ -2487,6 +3661,39 @@ describe("CLI", () => {
     );
   });
 
+  test("emits redacted scan warnings in verbose diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      'codex-security: debug: scan.warning message="Repository HEAD changed during the scan: [redacted]"',
+    );
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Repository HEAD changed during the scan: [redacted]",
+    );
+    expect(stderr.text()).not.toContain("SYNTHETIC_WARNING_SECRET");
+  });
+
   test("reports isolated observer failures without failing the scan", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -2665,7 +3872,31 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Estimated cost: $0.00625 of $0.01 limit");
   });
 
-  test("reports a scan stopped when its live cost exceeds the limit", async () => {
+  test("includes cache-write tokens in verbose cost diagnostics", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = fakeResult([], "complete", {
+      input_tokens: 200,
+      cache_write_input_tokens: 200,
+      output_tokens: 0,
+    });
+
+    expect(result.cost?.cacheWriteInputTokens).toBe(200);
+    expect(result.cost?.estimatedUsd).toBeGreaterThan(0);
+    expect(
+      await main(
+        ["scan", ".", "--verbose", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result, costUpdates: [result.cost!] }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain("codex-security: debug: cost.updated");
+    expect(stderr.text()).toContain("cache_write_input_tokens=200");
+  });
+
+  test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
     const stdout = capture();
     const stderr = capture();
     const cost = fakeResult([], "complete", {
@@ -2676,11 +3907,12 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json", "--max-cost", "0.005"],
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.005"],
         stdout.stream,
         stderr.stream,
         dependencies({
-          onTurn: () => {
+          onTurn: (_repository, options) => {
+            (options as ScanOptions).onOutputDirReady?.("/tmp/scan");
             throw new ScanCostLimitExceededError(0.005, cost, "/tmp/scan");
           },
         }),
@@ -2689,6 +3921,12 @@ describe("CLI", () => {
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
       "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
+    );
+    expect(stderr.text()).toMatch(
+      /scan\.configuration[^\n]*max_cost_usd=0\.005/u,
+    );
+    expect(stderr.text()).toContain(
+      'scan.failed classification="cost_limit_exceeded" partial_output=true max_cost_usd=0.005 estimated_usd=0.00625',
     );
   });
 
