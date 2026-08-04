@@ -2938,7 +2938,7 @@ async function runScan(
           requested: auth ?? "auto",
           method: authentication.method,
           source:
-            authentication.method === "api_key"
+            authentication.method !== "stored_credentials"
               ? authentication.source
               : undefined,
           verified: authentication.verified,
@@ -2947,7 +2947,9 @@ async function runScan(
           dashboard.note(
             authentication.method === "api_key"
               ? `Using API key from ${authentication.source}`
-              : "Using stored Codex credentials",
+              : authentication.method === "aws_credentials"
+                ? `Using AWS credentials from ${authentication.source}`
+                : "Using stored Codex credentials",
           );
           return;
         }
@@ -2958,6 +2960,10 @@ async function runScan(
           );
           progress?.stage(
             "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+          );
+        } else if (authentication.method === "aws_credentials") {
+          progress?.stage(
+            `Authentication: AWS credentials from ${authentication.source}.`,
           );
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
@@ -3172,7 +3178,7 @@ async function runScan(
       reasoning_effort: effectivePreflight.reasoningEffort,
       method: effectivePreflight.authentication.method,
       source:
-        effectivePreflight.authentication.method === "api_key"
+        effectivePreflight.authentication.method !== "stored_credentials"
           ? effectivePreflight.authentication.source
           : undefined,
       verified: effectivePreflight.authentication.verified,
@@ -3295,6 +3301,12 @@ function scanFailureMessage(
   if (isLocalScanFailure(error)) return sanitizeDiagnosticValue(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `Authentication failed using AWS credentials from ${authentication.source}. ` +
+          "Check your Amazon Bedrock bearer token or AWS credential chain."
+        );
+      }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
             "Your ChatGPT sign-in was not used. " +
@@ -3302,6 +3314,12 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions."
+        );
+      }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."

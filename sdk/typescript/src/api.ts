@@ -188,6 +188,18 @@ export type ScanAuthentication =
   | {
       method: "stored_credentials";
       verified: false;
+    }
+  | {
+      method: "aws_credentials";
+      source:
+        | "AWS_BEARER_TOKEN_BEDROCK"
+        | "AWS_ACCESS_KEY_ID"
+        | "AWS_PROFILE"
+        | "AWS_WEB_IDENTITY_TOKEN_FILE"
+        | "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"
+        | "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+        | "default_credential_chain";
+      verified: false;
     };
 
 export interface ScanReconnectDetails {
@@ -524,7 +536,11 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      if (!runtime.credentialsAvailable && apiKey === null) {
+      if (
+        !runtime.credentialsAvailable &&
+        apiKey === null &&
+        authentication.method !== "aws_credentials"
+      ) {
         throw new AuthenticationRequiredError(
           "No credentials were found. Run 'codex-security login', use " +
             "'codex-security login --device-auth' on a remote or headless machine, or set " +
@@ -1459,13 +1475,15 @@ export class CodexSecurity {
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
-      const credentialsAvailable = isExternalModelProvider(modelProvider)
-        ? false
-        : await initialCredentialsAvailable(
-            processEnvironment,
-            ambientHome,
-            codexHome,
-          );
+      const credentialsAvailable =
+        isExternalModelProvider(modelProvider) ||
+        modelProvider === "amazon-bedrock"
+          ? false
+          : await initialCredentialsAvailable(
+              processEnvironment,
+              ambientHome,
+              codexHome,
+            );
       return {
         codexHome,
         persistentCredentialHome,
@@ -1989,6 +2007,22 @@ export function scanAuthentication(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
 ): ScanAuthentication {
+  if (modelProvider === "amazon-bedrock") {
+    const sources = [
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_PROFILE",
+      "AWS_WEB_IDENTITY_TOKEN_FILE",
+      "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+      "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    ] as const;
+    const source = sources.find((name) => environmentValue(environment, name));
+    return {
+      method: "aws_credentials",
+      source: source ?? "default_credential_chain",
+      verified: false,
+    };
+  }
   if (auth === "chatgpt" && !isExternalModelProvider(modelProvider)) {
     return { method: "stored_credentials", verified: false };
   }
@@ -2016,14 +2050,19 @@ function selectedScanEnvironment(
   const selectedProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
-  if (auth !== "chatgpt" && selectedProviderKey === null) return environment;
+  const bedrockProvider = modelProvider === "amazon-bedrock";
+  if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
+    return environment;
+  }
   return Object.fromEntries(
     Object.entries(environment).filter(([name]) => {
       const key = name.toUpperCase();
       if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
-      if (selectedProviderKey === null) return true;
       if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
-        return key === selectedProviderKey;
+        return (
+          !bedrockProvider &&
+          (selectedProviderKey === null || key === selectedProviderKey)
+        );
       }
       return true;
     }),

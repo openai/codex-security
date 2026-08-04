@@ -80,6 +80,50 @@ const EXTERNAL_PROVIDER_CASES = [
     FIREWORKS_CODEX_PROVIDER,
   ],
 ] as const;
+const BEDROCK_AUTHENTICATION_CASES = [
+  [
+    "Bedrock bearer token",
+    {
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-west-2",
+    },
+    "AWS_BEARER_TOKEN_BEDROCK",
+  ],
+  [
+    "AWS environment credentials",
+    {
+      AWS_ACCESS_KEY_ID: "synthetic-aws-access-key",
+      AWS_SECRET_ACCESS_KEY: "synthetic-aws-secret-key",
+      AWS_SESSION_TOKEN: "synthetic-aws-session-token",
+    },
+    "AWS_ACCESS_KEY_ID",
+  ],
+  [
+    "AWS profile",
+    {
+      AWS_PROFILE: "synthetic-bedrock-profile",
+      AWS_DEFAULT_REGION: "us-east-1",
+    },
+    "AWS_PROFILE",
+  ],
+  [
+    "AWS web identity",
+    {
+      AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/synthetic-bedrock",
+      AWS_WEB_IDENTITY_TOKEN_FILE: "/synthetic/web-identity-token",
+    },
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+  ],
+  [
+    "AWS container credentials",
+    {
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:
+        "/synthetic/container-credentials",
+    },
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  ],
+  ["default AWS credential chain", {}, "default_credential_chain"],
+] as const;
 const TestClientBase = CodexSecurity as unknown as new (
   config: Record<string, unknown>,
   dependencies: Record<string, unknown>,
@@ -1221,6 +1265,118 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     },
   );
+
+  test.each(BEDROCK_AUTHENTICATION_CASES)(
+    "runs Amazon Bedrock scans through %s without signing in to OpenAI",
+    async (_name, credentials, source) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      let codexOptions: CodexOptions | null = null;
+      let authentication: ScanAuthentication | undefined;
+      const environment = {
+        OPENAI_API_KEY: "synthetic-openai-key",
+        CODEX_API_KEY: "synthetic-codex-key",
+        OPENROUTER_API_KEY: "synthetic-openrouter-key",
+        FIREWORKS_API_KEY: "synthetic-fireworks-key",
+        ...credentials,
+      };
+      const client = new TestClient(
+        {
+          codexOverrides: {
+            model: "openai.gpt-oss-120b-1:0",
+            model_provider: "amazon-bedrock",
+          },
+        },
+        {
+          environment,
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment,
+            credentialsAvailable: false,
+          }),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          resolveCodexCommand: () => {
+            throw new Error("Amazon Bedrock must not sign in to OpenAI");
+          },
+          createCodex: (options: CodexOptions) => {
+            codexOptions = options;
+            return {
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  await copyCompletedScan(root);
+                  return { events: completedEvents() };
+                },
+              }),
+            };
+          },
+        },
+      );
+
+      const preflight = await client.preflight(repository);
+      expect(preflight).toMatchObject({
+        model: "openai.gpt-oss-120b-1:0",
+        modelProvider: "amazon-bedrock",
+        authentication: { method: "aws_credentials", source, verified: false },
+      });
+      expect(JSON.stringify(preflight)).not.toContain("synthetic-");
+      const result = await client.run(repository, {
+        onAuthentication: (selected) => {
+          authentication = selected;
+        },
+      });
+      expect(result).toMatchObject({ threadId: "thread-1" });
+      expect(authentication).toEqual({
+        method: "aws_credentials",
+        source,
+        verified: false,
+      });
+      expect((codexOptions as CodexOptions | null)?.env).toMatchObject(
+        credentials,
+      );
+      for (const key of [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "OPENROUTER_API_KEY",
+        "FIREWORKS_API_KEY",
+      ]) {
+        expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+          key,
+        );
+      }
+      expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
+      await client.close();
+    },
+  );
+
+  test("does not accept Bedrock credentials for an OpenAI scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+          AWS_ACCESS_KEY_ID: "synthetic-aws-access-key",
+          AWS_SECRET_ACCESS_KEY: "synthetic-aws-secret-key",
+        },
+      },
+    );
+
+    expect((await client.preflight(repository)).authentication).toEqual({
+      method: "stored_credentials",
+      verified: false,
+    });
+    await client.close();
+  });
 
   test("isolates authentication observer failures from scan startup", async () => {
     const root = await temporaryDirectory();
