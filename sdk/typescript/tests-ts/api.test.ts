@@ -39,7 +39,12 @@ import {
   scanPreflightCodexConfig,
   scanRuntimeCodexConfig,
 } from "../src/api.js";
-import { writeCodexConfig, type JsonObject } from "../src/config.js";
+import {
+  FIREWORKS_CODEX_PROVIDER,
+  OPENROUTER_CODEX_PROVIDER,
+  writeCodexConfig,
+  type JsonObject,
+} from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
   runWorkbench,
@@ -57,6 +62,22 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
 const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
+const EXTERNAL_PROVIDER_CASES = [
+  [
+    "OpenRouter",
+    "openrouter",
+    "OPENROUTER_API_KEY",
+    "anthropic/claude-sonnet-4.5",
+    OPENROUTER_CODEX_PROVIDER,
+  ],
+  [
+    "Fireworks AI",
+    "fireworks",
+    "FIREWORKS_API_KEY",
+    "accounts/fireworks/models/qwen3-235b-a22b",
+    FIREWORKS_CODEX_PROVIDER,
+  ],
+] as const;
 const TestClientBase = CodexSecurity as unknown as new (
   config: Record<string, unknown>,
   dependencies: Record<string, unknown>,
@@ -1048,6 +1069,155 @@ describe("CodexSecurity orchestration", () => {
     }
     await client.close();
   });
+
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "keeps the %s provider in sanitized scan configuration",
+    (_name, provider, _apiKey, model, providerConfig) => {
+      expect(
+        scanPreflightCodexConfig({
+          model,
+          model_provider: provider,
+          model_providers: {
+            [provider]: providerConfig,
+            private: { api_key: "synthetic-secret" },
+          },
+        }),
+      ).toEqual({
+        model,
+        model_provider: provider,
+        model_providers: { [provider]: providerConfig },
+      });
+    },
+  );
+
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "requires the %s API key instead of accepting another provider's credentials",
+    async (name, provider, apiKey, model, providerConfig) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      let runtimeStarted = false;
+      const client = new TestClient(
+        {
+          codexOverrides: {
+            model,
+            model_provider: provider,
+            model_providers: { [provider]: providerConfig },
+          },
+        },
+        {
+          environment: {
+            OPENAI_API_KEY: "synthetic-openai-key",
+            [provider === "openrouter"
+              ? "FIREWORKS_API_KEY"
+              : "OPENROUTER_API_KEY"]: "synthetic-competing-provider-key",
+          },
+          prepareRuntime: async () => {
+            runtimeStarted = true;
+            throw new Error("runtime must not start");
+          },
+        },
+      );
+
+      await expect(client.run(repository)).rejects.toThrow(
+        `Set ${apiKey} to run a scan through ${name}.`,
+      );
+      expect(runtimeStarted).toBe(false);
+      await client.close();
+    },
+  );
+
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "runs %s scans without signing in to OpenAI",
+    async (_name, provider, apiKey, model, providerConfig) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      let codexOptions: CodexOptions | null = null;
+      let authentication: ScanAuthentication | undefined;
+      const competingApiKey =
+        provider === "openrouter" ? "FIREWORKS_API_KEY" : "OPENROUTER_API_KEY";
+      const environment = {
+        OPENAI_API_KEY: "synthetic-openai-key",
+        [competingApiKey]: "synthetic-competing-provider-key",
+        [apiKey]: `synthetic-${provider}-key`,
+      };
+      const client = new TestClient(
+        {
+          codexOverrides: {
+            model,
+            model_provider: provider,
+            model_providers: { [provider]: providerConfig },
+          },
+        },
+        {
+          environment,
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment,
+            credentialsAvailable: false,
+          }),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          resolveCodexCommand: () => {
+            throw new Error(`${provider} must not sign in to OpenAI`);
+          },
+          createCodex: (options: CodexOptions) => {
+            codexOptions = options;
+            return {
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  await copyCompletedScan(root);
+                  return { events: completedEvents() };
+                },
+              }),
+            };
+          },
+        },
+      );
+
+      const preflight = await client.preflight(repository);
+      expect(preflight).toMatchObject({
+        model,
+        modelProvider: provider,
+        authentication: {
+          method: "api_key",
+          source: apiKey,
+          verified: false,
+        },
+      });
+      expect(JSON.stringify(preflight)).not.toContain("synthetic-");
+      await expect(
+        client.run(repository, {
+          onAuthentication: (selected) => {
+            authentication = selected;
+          },
+        }),
+      ).resolves.toMatchObject({ threadId: "thread-1" });
+      expect(authentication).toEqual({
+        method: "api_key",
+        source: apiKey,
+        verified: false,
+      });
+      expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+        [apiKey]: `synthetic-${provider}-key`,
+      });
+      expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+        "OPENAI_API_KEY",
+      );
+      expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+        competingApiKey,
+      );
+      expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
+      await client.close();
+    },
+  );
 
   test("isolates authentication observer failures from scan startup", async () => {
     const root = await temporaryDirectory();

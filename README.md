@@ -23,6 +23,16 @@ For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
 Environment API keys are passed directly to the current scan and are never
 stored in Codex's credential home or system keyring.
 
+To use another inference provider, set its API key and select a model:
+
+```bash
+export OPENROUTER_API_KEY="<your-openrouter-api-key>"
+npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
+
+export FIREWORKS_API_KEY="<your-fireworks-api-key>"
+npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+```
+
 Local sign-in honors Codex's configured credential backend, including a system
 keyring required by a managed device. Codex Security keeps login and scan
 credentials in the same private, persistent state directory.
