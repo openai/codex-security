@@ -1,0 +1,96 @@
+Claude Security (claude-security)
+=================================
+
+This product is an unofficial port of Codex Security to Claude Code.
+
+It is not affiliated with, endorsed by, or supported by OpenAI or Anthropic.
+"Codex" is a product name of OpenAI. "Claude" and "Claude Code" are product
+names of Anthropic. Both are used here only to identify the software this port
+derives from and the runtime it targets.
+
+
+Original work
+-------------
+
+Codex Security
+Copyright 2025 OpenAI
+https://github.com/openai/codex-security
+Licensed under the Apache License, Version 2.0.
+
+This port is distributed under the same license. A copy is in LICENSE, and at
+http://www.apache.org/licenses/LICENSE-2.0
+
+
+Statement of modifications (Apache-2.0 section 4(b))
+----------------------------------------------------
+
+The following files are derived from Codex Security and carry modifications:
+
+  plugin/skills/**/SKILL.md
+      Rebranded to Claude Code skill invocation syntax and environment variable
+      names. The three top-level scan workflows (security-scan,
+      security-diff-scan, deep-security-scan) additionally had their setup,
+      completion, and orchestration sections rewritten: the Codex desktop MCP
+      app surface they described has no Claude Code equivalent, and scan
+      registration, sealing, and reporting moved into the CLI.
+
+  plugin/references/config-preflight.md
+  plugin/preflight/capability-profiles.toml
+  plugin/scripts/config_preflight.py
+      Rewritten. The originals discovered and layered Codex `config.toml` files
+      to evaluate sandbox mode, approval policy, and native multi-agent v2.
+      Claude Code exposes none of those as user configuration, so these now
+      evaluate capabilities a session can actually observe about its own tool
+      surface.
+
+  plugin/references/final-report.md
+      The "Codex Review Directives" section, which emitted `::code-comment{...}`
+      directives for Codex app rendering, was replaced with a plain final-response
+      contract. Completion guidance was updated: the CLI owns sealing.
+
+  plugin/references/*.md, plugin/skills/**/*.md
+      Product naming, skill invocation syntax, and environment variable names
+      rebranded. Analytical content (validation guidance, severity policy,
+      attack-path rules, repository-wide scan procedure) is unmodified.
+
+  plugin/scripts/workbench_db.py
+      Plugin manifest path changed from `.codex-plugin/plugin.json` to
+      `.claude-plugin/plugin.json`. Error text rebranded.
+
+  plugin/scripts/finalize_scan_contract.py
+      PRODUCER_NAME changed to "claude-security-plugin"; SARIF tool driver name
+      changed to "Claude Security". Contract logic unmodified.
+
+  plugin/scripts/*.py
+      Docstrings and error messages rebranded. Logic otherwise unmodified.
+
+  plugin/.claude-plugin/plugin.json
+      Replaces the upstream `.codex-plugin/plugin.json`.
+
+The on-disk scan contract identifiers are deliberately UNCHANGED, so scan
+bundles remain interchangeable with upstream tooling:
+
+  documentType: "codex-security.scan-manifest"
+  documentType: "codex-security.findings"
+  documentType: "codex-security.coverage"
+  fingerprints.algorithm: "codex-security/v1"
+
+
+Removed
+-------
+
+  mcp/                    The Codex MCP app server, which embedded the Codex SDK
+                          and spawned `codex exec` workers.
+  .app.json               Codex app connector registration.
+  skills/*/agents/openai.yaml
+                          Codex-only skill interface metadata.
+
+The following upstream capabilities are not ported: containerized bulk scans,
+the `bulk-scan` and `install-hook` subcommands, and deep-scan resume.
+
+
+New work
+--------
+
+  bin/, src/, tests/, tools/, README.md
+      Written for this port. Not derived from Codex Security.

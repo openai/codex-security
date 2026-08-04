@@ -1,5 +1,10 @@
 # `@openai/codex-security`
 
+> **This is the original OpenAI package**, which runs on the Codex CLI and requires a
+> ChatGPT sign-in or `OPENAI_API_KEY`. For the Claude Code port that runs the same
+> scanner on a Claude subscription, see [`claude-security/`](../../claude-security/)
+> at the repository root.
+
 Open-source TypeScript SDK and CLI for running Codex Security scans. The
 ESM-only package includes TypeScript declarations, the `codex-security`
 executable, and the matching Codex runtime.

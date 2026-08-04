@@ -10,3 +10,5 @@ dist/
 /codex-security.json
 /findings.json
 /*.sarif
+__pycache__/
+*.pyc

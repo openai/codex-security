@@ -1,0 +1,26 @@
+{
+  "name": "claude-security",
+  "version": "0.1.0",
+  "description": "Unofficial port of OpenAI Codex Security to Claude Code — security scanning on a Claude subscription.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "main": "./src/index.mjs",
+  "bin": {
+    "claude-security": "./bin/claude-security.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "plugin",
+    "README.md",
+    "NOTICE",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {}
+}

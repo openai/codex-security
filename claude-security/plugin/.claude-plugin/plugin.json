@@ -1,0 +1,10 @@
+{
+  "name": "claude-security",
+  "version": "0.1.0",
+  "description": "Security scanning workflows: repository scans, diff scans, deep scans, threat modeling, validation, attack-path analysis, triage, and remediation.",
+  "author": {
+    "name": "Ported from OpenAI Codex Security (Apache-2.0)"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["security", "code-review", "diff-review", "appsec", "threat-modeling"]
+}

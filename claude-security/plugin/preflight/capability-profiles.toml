@@ -1,0 +1,109 @@
+# Capability requirements for Claude Security scan workflows.
+#
+# The upstream Codex profiles evaluated a config.toml (sandbox mode, approval
+# policy, native multi-agent v2). Claude Code exposes none of those as user
+# config; what actually varies between sessions is which tools the session can
+# see. So every capability here is either a runtime fact the caller observes in
+# its own tool surface, or a plugin skill it can name.
+
+version = 1
+
+[capabilities.repository_tools]
+kind = "runtime"
+reason = "Reading, searching, and listing repository files is required to review code at all."
+
+[capabilities.write_scan_artifacts]
+kind = "runtime"
+reason = "Writing files is required to produce the canonical scan JSON and its supporting evidence."
+
+[capabilities.shell_commands]
+kind = "runtime"
+reason = "Plugin helper scripts are invoked through the shell. Without them the inventory, ranking, and preview helpers cannot run."
+
+[capabilities.delegated_workers]
+kind = "runtime"
+reason = "The Task tool lets phase work run in parallel subagents. Without it the scan runs every phase in the parent session, which is slower and consumes more of the parent's context."
+
+[capabilities.deep_scan_phase_skills]
+kind = "plugin_skills"
+plugin = "claude-security"
+required = [
+  "attack-path-analysis",
+  "security-scan",
+  "threat-model",
+  "validation",
+  "vulnerability-writeup",
+]
+
+[profiles.security_scan]
+description = "Standard repository or scoped-path scan."
+
+[[profiles.security_scan.requirements]]
+capability = "repository_tools"
+severity = "block"
+
+[[profiles.security_scan.requirements]]
+capability = "write_scan_artifacts"
+severity = "block"
+
+[[profiles.security_scan.requirements]]
+capability = "shell_commands"
+severity = "warn"
+
+[[profiles.security_scan.requirements]]
+capability = "delegated_workers"
+severity = "suggest"
+
+[profiles.security_diff_scan]
+description = "Git-backed diff scan."
+
+[[profiles.security_diff_scan.requirements]]
+capability = "repository_tools"
+severity = "block"
+
+[[profiles.security_diff_scan.requirements]]
+capability = "write_scan_artifacts"
+severity = "block"
+
+[[profiles.security_diff_scan.requirements]]
+capability = "shell_commands"
+severity = "block"
+
+[[profiles.security_diff_scan.requirements]]
+capability = "delegated_workers"
+severity = "suggest"
+
+[profiles.deep_security_scan]
+description = "Centralized tail of a deep scan; repeated discovery already ran in the CLI coordinator."
+
+[[profiles.deep_security_scan.requirements]]
+capability = "repository_tools"
+severity = "block"
+
+[[profiles.deep_security_scan.requirements]]
+capability = "write_scan_artifacts"
+severity = "block"
+
+[[profiles.deep_security_scan.requirements]]
+capability = "shell_commands"
+severity = "warn"
+
+[[profiles.deep_security_scan.requirements]]
+capability = "deep_scan_phase_skills"
+severity = "block"
+
+[[profiles.deep_security_scan.requirements]]
+capability = "delegated_workers"
+severity = "warn"
+
+[[routes]]
+skill = "security-scan"
+profile = "security_scan"
+
+[[routes]]
+skill = "security-diff-scan"
+profile = "security_diff_scan"
+
+[[routes]]
+skill = "deep-security-scan"
+profile = "deep_security_scan"

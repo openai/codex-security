@@ -1,5 +1,30 @@
 # Codex Security
 
+> ### 🔵 Looking for the Claude Code version?
+>
+> This repository now contains **two** implementations of the same security scanner:
+>
+> | Directory | Tool | Runtime | Billing |
+> | --- | --- | --- | --- |
+> | `sdk/typescript/` | **Codex Security** (upstream, OpenAI) | Codex CLI | ChatGPT sign-in or `OPENAI_API_KEY` |
+> | **[`claude-security/`](claude-security/)** | **Claude Security** (port) | Claude Code (Opus 5) | **Claude Pro/Max subscription** |
+>
+> [`claude-security/`](claude-security/) is an unofficial port that runs the identical
+> security methodology on Claude Code, using the subscription your local `claude` CLI
+> is signed in to. No OpenAI account and no API keys are involved.
+>
+> ```bash
+> cd claude-security
+> node bin/claude-security.mjs auth status
+> node bin/claude-security.mjs scan .
+> ```
+>
+> See [`claude-security/README.md`](claude-security/README.md) for the full guide and
+> [`claude-security/NOTICE`](claude-security/NOTICE) for attribution and the list of
+> modifications. Everything below documents the original OpenAI tool.
+
+---
+
 `@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
 
 **See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for more details.
