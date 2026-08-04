@@ -160,6 +160,7 @@ def insert_running_scan(
     target_summary: str | None,
     scope_file_count: int,
     timestamp: str,
+    scope_exclusions: list[dict[str, str]] | None = None,
     handoff_status: str = "pending",
     scan_dir: Path | None = None,
 ) -> str:
@@ -178,10 +179,12 @@ def insert_running_scan(
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
             target_device, target_inode, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
-            diff_head_revision, diff_content_digest, target_summary, scan_dir, status, phase,
-            handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'preflight',
-            ?, ?, ?, ?)
+            diff_head_revision, diff_content_digest, target_summary, scope_exclusions_json,
+            scan_dir, status, phase, handoff_status, started_at, created_at, updated_at
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'running', 'preflight', ?, ?, ?, ?
+        )
         """,
         (
             scan_id,
@@ -198,6 +201,11 @@ def insert_running_scan(
             diff_target["headRevision"] if diff_target else None,
             diff_target.get("contentDigest") if diff_target else None,
             target_summary,
+            (
+                json.dumps(scope_exclusions, allow_nan=False, separators=(",", ":"))
+                if scope_exclusions is not None
+                else None
+            ),
             str(scan_dir),
             handoff_status,
             timestamp,

@@ -4,6 +4,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   rm,
@@ -77,15 +78,19 @@ import {
   planOutputArchive,
   prepareOutputDir,
   preparePersistentScanRoot,
+  prepareScopeInventory,
   requireModelSafeOutputDir,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  verifyScopeCoverage,
+  verifyScopeInventory,
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
+  type ScopeInventorySnapshot,
   type WorkbenchCommandOptions,
   validateOutputDir,
 } from "./runtime.js";
@@ -238,6 +243,9 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  prepareScopeInventory?: typeof prepareScopeInventory;
+  verifyScopeCoverage?: typeof verifyScopeCoverage;
+  scopeInventoryRoots?: readonly string[];
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -347,6 +355,11 @@ export class CodexSecurity {
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
+    let scopeInventoryDirectory: string | null = null;
+    let scopeInventoryFile: string | null = null;
+    let scopeExclusionsFile: string | null = null;
+    let scopePathsFile: string | null = null;
+    let standardScopeInventory: ScopeInventorySnapshot | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
@@ -533,6 +546,16 @@ export class CodexSecurity {
         protectedRoot,
         signal,
       });
+      if (
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        await requireHostControlledVerifierPython(
+          python,
+          stateDirectory,
+          signal,
+        );
+      }
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
@@ -675,6 +698,53 @@ export class CodexSecurity {
       const contractTarget = isRecord(contract)
         ? contract["target"]
         : undefined;
+      const contractScope = isRecord(contract) ? contract["scope"] : undefined;
+      const registeredScopeExclusions = isRecord(contractScope)
+        ? contractScope["requiredExcludePaths"]
+        : undefined;
+      const registeredExplicitScopeExclusions = isRecord(contractScope)
+        ? contractScope["requiredExplicitExclusions"]
+        : undefined;
+      const registeredScopePaths = isRecord(contractScope)
+        ? contractScope["requiredIncludePaths"]
+        : undefined;
+      const requestedScopePaths =
+        normalized.kind === "paths" ? normalized.paths : ["."];
+      const expectedScopePaths =
+        Array.isArray(registeredScopePaths) &&
+        registeredScopePaths.length === requestedScopePaths.length &&
+        registeredScopePaths.every(
+          (path, index) => path === requestedScopePaths[index],
+        )
+          ? registeredScopePaths
+          : undefined;
+      const expectedScopeExclusions =
+        Array.isArray(registeredScopeExclusions) &&
+        registeredScopeExclusions.every(
+          (pattern): pattern is string =>
+            typeof pattern === "string" && pattern.length > 0,
+        )
+          ? registeredScopeExclusions
+          : undefined;
+      const expectedExplicitScopeExclusions =
+        Array.isArray(registeredExplicitScopeExclusions) &&
+        registeredExplicitScopeExclusions.every(
+          (exclusion): exclusion is { pattern: string; reason: string } =>
+            isRecord(exclusion) &&
+            typeof exclusion["pattern"] === "string" &&
+            exclusion["pattern"].length > 0 &&
+            typeof exclusion["reason"] === "string" &&
+            exclusion["reason"].trim().length > 0,
+        ) &&
+        expectedScopeExclusions !== undefined &&
+        registeredExplicitScopeExclusions.length ===
+          expectedScopeExclusions.length &&
+        registeredExplicitScopeExclusions.every(
+          (exclusion, index) =>
+            exclusion.pattern === expectedScopeExclusions[index],
+        )
+          ? registeredExplicitScopeExclusions
+          : undefined;
       const allowedKinds = isRecord(contractTarget)
         ? contractTarget["allowedKinds"]
         : undefined;
@@ -707,6 +777,12 @@ export class CodexSecurity {
         ((targetKind === "git_worktree" ||
           targetKind === "directory_snapshot") &&
           typeof snapshotDigest !== "string") ||
+        (registeredScopeExclusions !== undefined &&
+          expectedScopeExclusions === undefined) ||
+        (registeredExplicitScopeExclusions !== undefined &&
+          expectedExplicitScopeExclusions === undefined) ||
+        (registeredScopePaths !== undefined &&
+          expectedScopePaths === undefined) ||
         typeof registeredRevision !== "string"
       ) {
         throw new CodexSecurityError(
@@ -771,6 +847,95 @@ export class CodexSecurity {
               `codex-security-target-paths-${randomUUID()}.json`,
             )
           : null;
+      const serializedPaths =
+        normalized.kind === "paths"
+          ? JSON.stringify(normalized.paths)
+              .replaceAll("\u0085", "\\u0085")
+              .replaceAll("\u2028", "\\u2028")
+              .replaceAll("\u2029", "\\u2029")
+          : null;
+      checkOpen();
+      if (serializedPaths !== null && targetPathsFile !== null) {
+        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
+          flag: "wx",
+          mode: 0o400,
+          signal,
+        });
+        await chmod(targetPathsFile, 0o400);
+      }
+      if (
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        standardScopeInventory = await (
+          this.#dependencies.prepareScopeInventory ?? prepareScopeInventory
+        )({
+          python,
+          pluginRoot: runtime.plugin.pluginRoot,
+          repository: repo,
+          scanDir,
+          ...(targetPathsFile === null ? {} : { scopesFile: targetPathsFile }),
+          ...(expectedScopeExclusions === undefined
+            ? {}
+            : { expectedExclusions: expectedScopeExclusions }),
+          environment: selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+          ),
+          signal,
+        });
+        scopeInventoryDirectory = await createProtectedScopeInventoryDirectory(
+          runtime.codexHome,
+          stateDirectory,
+          protectedRoot,
+          scanDir,
+          signal,
+          this.#dependencies.scopeInventoryRoots,
+        );
+        await stageProtectedScopeVerifier(
+          runtime.plugin.installedRoot,
+          scopeInventoryDirectory,
+          signal,
+        );
+        scopeExclusionsFile = join(
+          scopeInventoryDirectory,
+          "scope_exclusions.json",
+        );
+        await writeFile(
+          scopeExclusionsFile,
+          `${JSON.stringify(expectedExplicitScopeExclusions ?? [])}\n`,
+          { flag: "wx", mode: 0o400, signal },
+        );
+        await chmod(scopeExclusionsFile, 0o400);
+        workbenchOptions.environment["CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE"] =
+          scopeExclusionsFile;
+        scopePathsFile = join(scopeInventoryDirectory, "scope_paths.json");
+        await writeFile(
+          scopePathsFile,
+          `${JSON.stringify(expectedScopePaths ?? requestedScopePaths)}\n`,
+          { flag: "wx", mode: 0o400, signal },
+        );
+        await chmod(scopePathsFile, 0o400);
+        workbenchOptions.environment["CODEX_SECURITY_SCOPE_PATHS_FILE"] =
+          scopePathsFile;
+        scopeInventoryFile = join(
+          scopeInventoryDirectory,
+          "scope_inventory.jsonl",
+        );
+        await writeFile(
+          scopeInventoryFile,
+          await readFile(standardScopeInventory.path, { signal }),
+          { flag: "wx", mode: 0o400, signal },
+        );
+        await chmod(scopeInventoryFile, 0o400);
+        workbenchOptions.environment["CODEX_SECURITY_SCOPE_INVENTORY_FILE"] =
+          scopeInventoryFile;
+        await verifyScopeInventory(
+          { ...standardScopeInventory, path: scopeInventoryFile },
+          signal,
+        );
+      }
+      checkOpen();
       const runtimePaths = {
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
@@ -797,6 +962,12 @@ export class CodexSecurity {
         ...(targetPathsFile === null
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
+        ...(scopeInventoryFile === null
+          ? {}
+          : { CODEX_SECURITY_SCOPE_INVENTORY_FILE: scopeInventoryFile }),
+        ...(scopeExclusionsFile === null
+          ? {}
+          : { CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE: scopeExclusionsFile }),
       };
       const environment = {
         ...pluginExecutionEnvironment(
@@ -830,27 +1001,42 @@ export class CodexSecurity {
         skipGitRepoCheck: true,
         approvalPolicy: "never",
       });
-      const serializedPaths =
-        normalized.kind === "paths"
-          ? JSON.stringify(normalized.paths)
-              .replaceAll("\u0085", "\\u0085")
-              .replaceAll("\u2028", "\\u2028")
-              .replaceAll("\u2029", "\\u2029")
-          : null;
-      checkOpen();
-      if (serializedPaths !== null && targetPathsFile !== null) {
-        await writeFile(targetPathsFile, `${serializedPaths}\n`, {
-          flag: "wx",
-          mode: 0o400,
-          signal,
-        });
-        await chmod(targetPathsFile, 0o400);
-      }
       checkOpen();
       const { events } = await thread.runStreamed(prompt, {
         signal,
       });
       checkOpen();
+
+      const verifyAuthoritativeScope = async (): Promise<void> => {
+        if (standardScopeInventory === null) return;
+        await verifyScopeInventory(standardScopeInventory, signal);
+        if (scopeInventoryFile === null || scopeInventoryDirectory === null) {
+          throw new CodexSecurityError(
+            "The standard scan scope inventory is missing its protected snapshot.",
+          );
+        }
+        await verifyScopeInventory(
+          { ...standardScopeInventory, path: scopeInventoryFile },
+          signal,
+        );
+        await (this.#dependencies.verifyScopeCoverage ?? verifyScopeCoverage)({
+          python,
+          pluginRoot: scopeInventoryDirectory,
+          repository: repo,
+          scanDir,
+          inventory: {
+            ...standardScopeInventory,
+            path: scopeInventoryFile,
+          },
+          environment: {
+            ...selectedScanEnvironment(runtime.environment, options.auth),
+            ...(scopeExclusionsFile === null
+              ? {}
+              : { CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE: scopeExclusionsFile }),
+          },
+          signal,
+        });
+      };
 
       const result = await runScanEvents({
         thread,
@@ -863,6 +1049,7 @@ export class CodexSecurity {
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
         onFinalize: async (usage) => {
+          await verifyAuthoritativeScope();
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
@@ -879,6 +1066,7 @@ export class CodexSecurity {
             "--scan-id",
             scanId,
           ]);
+          await verifyAuthoritativeScope();
           return snapshot.usage;
         },
         onScanStarted: options.onScanStarted,
@@ -950,6 +1138,7 @@ export class CodexSecurity {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
+          removeScopeInventory(scopeInventoryFile, scopeInventoryDirectory),
         ])) {
           if (cleanup.status === "rejected") {
             warnCleanupFailed(options, cleanup.reason);
@@ -1535,6 +1724,134 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
   }
 }
 
+async function stageProtectedScopeVerifier(
+  installedPluginRoot: string,
+  protectedDirectory: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const scriptsDirectory = join(protectedDirectory, "scripts");
+  await mkdir(scriptsDirectory, { mode: 0o700 });
+  await chmod(scriptsDirectory, 0o700);
+  await Promise.all(
+    [
+      "generate_rank_input.py",
+      "normalize_candidates.py",
+      "rank_preview.py",
+    ].map(async (name) => {
+      const destination = join(scriptsDirectory, name);
+      await writeFile(
+        destination,
+        await readFile(join(installedPluginRoot, "scripts", name), {
+          signal,
+        }),
+        { flag: "wx", mode: 0o400, signal },
+      );
+      await chmod(destination, 0o400);
+    }),
+  );
+}
+
+async function realpathIfPresent(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    ) {
+      return path;
+    }
+    throw error;
+  }
+}
+
+async function requireHostControlledVerifierPython(
+  python: string,
+  stateDirectory: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!isAbsolute(python)) return;
+  throwIfAborted(signal);
+  const canonicalState = await realpathIfPresent(stateDirectory);
+  requireOutputOutsideRepository(stateDirectory, python, "runtime");
+  requireOutputOutsideRepository(canonicalState, python, "runtime");
+
+  const canonicalPythonParent = await realpathIfPresent(dirname(python));
+  requireOutputOutsideRepository(
+    canonicalState,
+    canonicalPythonParent,
+    "runtime",
+  );
+
+  const canonicalPython = await realpathIfPresent(python);
+  requireOutputOutsideRepository(canonicalState, canonicalPython, "runtime");
+}
+
+async function createProtectedScopeInventoryDirectory(
+  codexHome: string,
+  stateDirectory: string,
+  protectedRoot: string,
+  scanDir: string,
+  signal: AbortSignal,
+  candidateRoots?: readonly string[],
+): Promise<string> {
+  const canonicalState = await realpathIfPresent(stateDirectory);
+  const failures: unknown[] = [];
+  for (const root of new Set(
+    candidateRoots ?? [
+      dirname(codexHome),
+      dirname(stateDirectory),
+      homedir(),
+      tmpdir(),
+    ],
+  )) {
+    throwIfAborted(signal, scanDir);
+    let directory: string | null = null;
+    try {
+      const canonicalRoot = await realpath(root);
+      requireOutputOutsideRepository(canonicalState, canonicalRoot, "runtime");
+      directory = await mkdtemp(
+        join(canonicalRoot, "codex-security-scope-inventory-"),
+      );
+      await chmod(directory, 0o700);
+      directory = await realpath(directory);
+      requireOutputOutsideRepository(canonicalState, directory, "runtime");
+      requireOutputOutsideRepository(protectedRoot, directory, "runtime");
+      requireOutputOutsideRepository(scanDir, directory, "runtime");
+      return directory;
+    } catch (error) {
+      if (directory !== null) {
+        try {
+          await cleanupSdkDirectory(directory);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Could not clean up an unsafe standard scan scope inventory.",
+          );
+        }
+      }
+      throwIfAborted(signal, scanDir);
+      failures.push(error);
+    }
+  }
+
+  throw new CodexSecurityError(
+    "Could not place the standard scan scope inventory outside model-writable roots.",
+    { cause: new AggregateError(failures) },
+  );
+}
+
+async function removeScopeInventory(
+  path: string | null,
+  directory: string | null,
+): Promise<void> {
+  await removeTargetPathsFile(path);
+  if (directory !== null) {
+    await cleanupSdkDirectory(directory);
+  }
+}
+
 interface ScanEventRunOptions {
   thread: CodexThreadLike;
   events: AsyncGenerator<ScanEvent>;
@@ -1738,7 +2055,7 @@ async function scanPrompt(
         ]
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
-    targetInstruction(target),
+    targetInstruction(target, mode),
     "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
   ].join("\n");
 }
@@ -1749,11 +2066,16 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(target: NormalizedTarget): string {
+function targetInstruction(target: NormalizedTarget, mode: ScanMode): string {
   if (target.kind === "repository")
-    return "Scan target: the entire repository.";
-  if (target.kind === "paths")
+    return mode === "standard"
+      ? 'Scan target: the entire repository. The SDK has already written the exhaustive standard inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl". Review every JSONL path from the SDK-protected "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" without regenerating, ranking, filtering, or dropping files. Use "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/normalize_candidates.py" with --in-scope-inventory "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" when normalizing candidate findings; do not replace this inventory with an rg-generated file list.'
+      : "Scan target: the entire repository.";
+  if (target.kind === "paths") {
+    if (mode === "standard")
+      return 'Scan target paths: the SDK has already written the exhaustive combined inventory to "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/scope_inventory.jsonl". Review every JSONL path from the SDK-protected "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" without regenerating, ranking, filtering, or dropping files. Use "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/normalize_candidates.py" with --in-scope-inventory "$CODEX_SECURITY_SCOPE_INVENTORY_FILE" when normalizing candidate findings; do not replace this inventory with an rg-generated file list. Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
     return 'Scan target paths: generate the combined inventory once with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/artifacts/02_discovery/rank_input.jsonl". Before finalization, preserve every requested scope with "$PYTHON" "$CODEX_SECURITY_PLUGIN_ROOT/scripts/generate_rank_input.py" bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json" --coverage "$CODEX_SECURITY_SCAN_DIR/coverage.json". Do not print, evaluate, or modify the target-paths file.';
+  }
   if (target.kind === "refs") {
     return `Scan target: Git diff from ${target.base} to ${target.head}.`;
   }

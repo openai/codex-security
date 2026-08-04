@@ -5,7 +5,7 @@ description: "Use for a standard, single-pass security audit of an entire reposi
 
 # Security Scan
 
-Review every file in scope. Use one file list and one candidate ledger. Standard scans use the existing validation and attack-path reasoning in compact mode, without the ranking, queues, fan-out, or per-candidate reports used by deep scans.
+Review every file in scope. Use one JSONL scope inventory, one exhaustive scope-review receipt, and one candidate ledger. Standard scans use the existing validation and attack-path reasoning in compact mode, without the ranking, queues, fan-out, or per-candidate reports used by deep scans.
 
 ## Setup And Preflight
 
@@ -22,17 +22,23 @@ Resolve the shared paths in `../../references/scan-artifacts.md`, apply relevant
 ## Standard Workflow
 
 1. Run `$threat-model` or use the supplied threat model. Keep a copy under `<context_dir>/threat_model.md`.
-2. Read `references/repository-wide-scan.md` and follow its standard procedure. It builds `<discovery_dir>/in_scope_files.txt`, reviews every file, and combines raw candidates into `<discovery_dir>/candidate_ledger.jsonl`.
+2. Read `references/repository-wide-scan.md` and follow its standard procedure. It uses `<discovery_dir>/scope_inventory.jsonl`, records exactly one review per inventoried file in `<coverage_dir>/scope_review.jsonl`, and combines raw candidates into `<discovery_dir>/candidate_ledger.jsonl`. For SDK scans, use the existing host-attested `$CODEX_SECURITY_SCOPE_INVENTORY_FILE` snapshot.
 3. Run `$validation` once over the combined ledger in compact standard-scan mode. Validate every candidate and add one concise `validation` record to each ledger row. Preserve the candidate id, locations, instance, and discovery evidence.
 4. Run `$attack-path-analysis` once in compact standard-scan mode over candidates whose validation disposition is `reportable` or `deferred`. Use the threat model to establish reachability and severity, and add one concise `attack_path` record to each candidate that enters the phase. Do not create ranking or phase queues, per-candidate subagent fan-out, receipts, or narrative phase reports.
-5. Write `scan-manifest.json`, `findings.json`, and `coverage.json` using `../../references/final-report.md`. Put candidates that survive both compact phases in `findings.json`. Map rejected, not-applicable, and deferred candidates to the corresponding coverage outcomes. Include the relevant code locations.
-6. Complete the scan once. When `complete_codex_security_scan` is available, use it. Otherwise run:
+5. Write `scan-manifest.json`, `findings.json`, and `coverage.json` using `../../references/final-report.md`. Put candidates that survive both compact phases in `findings.json`. Map rejected, not-applicable, and deferred candidates to the corresponding coverage outcomes. Preserve every candidate location across its final findings, including shared sinks and supporting locations outside the initial scan scope. Reference `artifacts/03_coverage/scope_review.jsonl`, `artifacts/02_discovery/scope_inventory.jsonl`, and `artifacts/02_discovery/candidate_ledger.jsonl` from a coverage surface's `receiptRefs` so finalization seals all three authoritative inputs.
+6. Complete the scan once. When `complete_codex_security_scan` is available, use it. Otherwise, set `<scope_inventory_file>` to the host-attested `$CODEX_SECURITY_SCOPE_INVENTORY_FILE` when available or to `<discovery_dir>/scope_inventory.jsonl` for a prompt-only scan. Verify the complete standard-scan coverage first:
 
    ```text
-   <python_command> <plugin_dir>/scripts/finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>
+   <python_command> -I -B <plugin_dir>/scripts/generate_rank_input.py verify-scope-coverage --repo <repo_root> --inventory <scope_inventory_file> --scan-dir <scan_dir>
    ```
 
-   The finalizer generates `report.md` and SARIF. Do not edit either by hand. Detailed write-ups and hardening plans are optional.
+   Only if verification succeeds, finalize the scan:
+
+   ```text
+   <python_command> -I -B <plugin_dir>/scripts/finalize_scan_contract.py --scan-dir <scan_dir> --source-root <repo_root>
+   ```
+
+   Stop and surface any verifier or finalizer failure. The finalizer generates `report.md` and SARIF. Do not edit either by hand. Detailed write-ups and hardening plans are optional.
 
 ## Detection Notes
 

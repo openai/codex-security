@@ -114,6 +114,25 @@ describe("canonical scan contract", () => {
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
+  test.skipIf(process.platform === "win32")(
+    "preserves literal POSIX source filenames in sealed findings",
+    async () => {
+      for (const path of ["a:config", "source\\candidate.py"]) {
+        const scanDir = await copyExample();
+        const findingsPath = join(scanDir, "findings.json");
+        const findings = await readJson(findingsPath);
+        findings["findings"][0]["locations"][0]["path"] = path;
+        await writeJson(findingsPath, findings);
+        await reseal(scanDir);
+
+        const contract = await loadContract(scanDir, {
+          pluginRoot: PLUGIN_ROOT,
+        });
+        expect(contract.findings.findings[0]?.locations[0]?.path).toBe(path);
+      }
+    },
+  );
+
   test("honors cancellation during contract validation", async () => {
     const scanDir = await copyExample();
     const controller = new AbortController();

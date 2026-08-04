@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -58,6 +59,7 @@ import {
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentScanRoot,
+  prepareScopeInventory,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -66,11 +68,18 @@ import {
   requireTrustedOutputAncestor,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  verifyScopeCoverage,
+  verifyScopeInventory,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
+const STANDARD_SCOPE_RECEIPTS = [
+  "artifacts/03_coverage/scope_review.jsonl",
+  "artifacts/02_discovery/scope_inventory.jsonl",
+  "artifacts/02_discovery/candidate_ledger.jsonl",
+];
 
 afterEach(async () => {
   await Promise.all(
@@ -321,10 +330,7 @@ describe("plugin runtime preparation", () => {
         cases.map((item) => ({
           ...item,
           inScope: true,
-          contractValid:
-            item.path.trim().length > 0 &&
-            !item.path.includes("\\") &&
-            !item.path.includes(":"),
+          contractValid: item.path.trim().length > 0,
         })),
       );
     },
@@ -351,6 +357,102 @@ describe("plugin runtime preparation", () => {
         (await stat(join(selected, "scripts", "helper.py"))).mode & 0o777,
       ).toBe(0o750);
     }
+  });
+
+  test("binds a sole authoritative workbench target kind without retaining draft coordinates", async () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    const bundledPlugin = await bundledPluginRoot();
+    const result = Bun.spawnSync([
+      python!,
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, runpy, sys",
+        "module = runpy.run_path(sys.argv[1])",
+        "def bind(draft_kind, allowed, target):",
+        "    manifest = {'scan': {'target': {'kind': draft_kind, 'targetId': 'draft', 'snapshotDigest': 'draft-snapshot', 'revision': 'draft-revision'}, 'scope': {}}}",
+        "    binding = {'scanId': 'scan_123', 'startedAt': '2026-01-01T00:00:00Z', 'completedAt': '2026-01-01T00:01:00Z', 'producer': {'name': 'test'}, 'allowedTargetKinds': allowed, 'target': target, 'scope': {}}",
+        "    module['_populate_unsealed_manifest_envelope'](manifest, manifest['scan'], binding)",
+        "    return manifest['scan']['target']",
+        "print(json.dumps({",
+        "    'singleRevision': bind('git_worktree', ['git_revision'], {'targetId': 'target_123', 'revision': 'deadbeef'}),",
+        "    'singleDiff': bind('git_revision', ['git_diff'], {'targetId': 'target_123', 'snapshotDigest': 'actual-snapshot'}),",
+        "    'multipleAllowed': bind('git_worktree', ['git_revision', 'git_worktree'], {'targetId': 'target_123', 'snapshotDigest': 'actual-snapshot'}),",
+        "}))",
+      ].join("\n"),
+      join(bundledPlugin, "scripts", "finalize_scan_contract.py"),
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      singleRevision: {
+        kind: "git_revision",
+        revision: "deadbeef",
+        targetId: "target_123",
+      },
+      singleDiff: {
+        kind: "git_diff",
+        snapshotDigest: "actual-snapshot",
+        targetId: "target_123",
+      },
+      multipleAllowed: {
+        kind: "git_worktree",
+        snapshotDigest: "actual-snapshot",
+        targetId: "target_123",
+      },
+    });
+  });
+
+  test("binds the authoritative snapshot digest for every committed diff", async () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    const bundledPlugin = await bundledPluginRoot();
+    const snapshotDigest = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
+    const result = Bun.spawnSync([
+      python!,
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, runpy, sys",
+        "module = runpy.run_path(sys.argv[1])",
+        "binding = module['workbench_completion_binding']",
+        "globals = binding.__globals__",
+        "globals['scan_contract'] = lambda scan: {'target': {'targetId': 'target_123', 'displayName': 'repo', 'allowedKinds': ['git_diff']}, 'scope': {'requiredExcludePaths': []}}",
+        "globals['read_json_object'] = lambda path: {'version': '0.1.3'}",
+        "globals['requested_scan_paths'] = lambda scan: ['.']",
+        "globals['expected_coverage_mode'] = lambda scan: 'repository'",
+        "finalizer = sys.modules['finalize_scan_contract']",
+        "def bind(kind):",
+        "    scan = {'id': 'scan_123', 'started_at': '2026-01-01T00:00:00Z', 'mode': 'diff', 'diff_target_kind': kind, 'diff_base_revision': 'base', 'diff_head_revision': 'head', 'diff_content_digest': sys.argv[2]}",
+        "    completion = binding(scan, '2026-01-01T00:01:00Z')",
+        "    manifest = {'scan': {'target': {'kind': 'git_revision', 'targetId': 'draft', 'revision': 'draft-revision'}, 'scope': {}}}",
+        "    finalizer._populate_unsealed_manifest_envelope(manifest, manifest['scan'], completion)",
+        "    return manifest['scan']['target']",
+        "print(json.dumps({kind: bind(kind) for kind in ('commit', 'range', 'working_tree')}))",
+      ].join("\n"),
+      join(bundledPlugin, "scripts", "workbench_db.py"),
+      snapshotDigest,
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    const expected = {
+      kind: "git_diff",
+      targetId: "target_123",
+      displayName: "repo",
+      baseRevision: "base",
+      headRevision: "head",
+      snapshotDigest,
+    };
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      commit: expected,
+      range: expected,
+      working_tree: expected,
+    });
   });
 
   test("honors cancellation while staging a configured plugin directory", async () => {
@@ -1861,6 +1963,1586 @@ describe("runtime directories and plugin Python boundary", () => {
       ["test-command"],
     );
     expect(result).toEqual({ ok: true });
+  });
+
+  test("attests standard inventories without inheriting API keys or trusting umask", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(join(pluginRoot, "scripts"), { recursive: true }),
+      mkdir(repository),
+      mkdir(scanDir),
+    ]);
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export {};\n"),
+      writeFile(
+        join(pluginRoot, "scripts", "generate_rank_input.py"),
+        [
+          "import json, os, pathlib, sys",
+          "assert sys.flags.isolated",
+          "assert sys.dont_write_bytecode",
+          "assert sys.argv[1] == 'make-scope-inventory'",
+          "assert os.environ.get('OPENAI_API_KEY') is None",
+          "assert os.environ.get('CODEX_API_KEY') is None",
+          "output = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])",
+          "output.write_text(json.dumps({'path': 'safe.ts'}) + '\\n', encoding='utf-8')",
+        ].join("\n"),
+      ),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const previousUmask =
+      process.platform === "win32" ? null : process.umask(0o777);
+    let inventory: Awaited<ReturnType<typeof prepareScopeInventory>>;
+    try {
+      inventory = await prepareScopeInventory({
+        python: python!,
+        pluginRoot,
+        repository,
+        scanDir,
+        environment: {
+          PATH: process.env["PATH"],
+          OPENAI_API_KEY: "must-not-reach-python",
+          CODEX_API_KEY: "also-must-not-reach-python",
+        },
+      });
+    } finally {
+      if (previousUmask !== null) process.umask(previousUmask);
+    }
+
+    expect(inventory.path).toBe(
+      join(scanDir, "artifacts", "02_discovery", "scope_inventory.jsonl"),
+    );
+    expect(inventory.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(inventory.fileCount).toBe(1);
+    expect(inventory.byteLength).toBeGreaterThan(0);
+    const serializedInventory = await readFile(inventory.path, "utf8");
+    expect(JSON.parse(serializedInventory)).toEqual({ path: "safe.ts" });
+    expect(Buffer.byteLength(serializedInventory)).toBe(inventory.byteLength);
+    expect(createHash("sha256").update(serializedInventory).digest("hex")).toBe(
+      inventory.sha256,
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(inventory.path)).mode & 0o777).toBe(0o600);
+      expect((await stat(join(scanDir, "artifacts"))).mode & 0o777).toBe(0o700);
+      expect(
+        (await stat(join(scanDir, "artifacts", "02_discovery"))).mode & 0o777,
+      ).toBe(0o700);
+    }
+    await verifyScopeInventory(inventory);
+  });
+
+  test("verifies LF and CRLF inventory snapshots against their exact original bytes", async () => {
+    const root = await temporaryDirectory();
+    for (const [label, newline] of [
+      ["lf", "\n"],
+      ["crlf", "\r\n"],
+    ] as const) {
+      const path = join(root, `scope-inventory-${label}.jsonl`);
+      const contents = `${JSON.stringify({ path: "safe.ts" })}${newline}`;
+      await writeFile(path, contents);
+      const inventory = {
+        path,
+        sha256: createHash("sha256").update(contents).digest("hex"),
+        fileCount: 1,
+        byteLength: Buffer.byteLength(contents),
+      };
+
+      await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
+      expect(await readFile(path, "utf8")).toBe(contents);
+    }
+  });
+
+  test("passes large host exclusion inventories through a private temporary file", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await Promise.all([
+      mkdir(join(pluginRoot, "scripts"), { recursive: true }),
+      mkdir(repository),
+      mkdir(scanDir),
+    ]);
+    await writeFile(
+      join(pluginRoot, "scripts", "generate_rank_input.py"),
+      [
+        "import json, pathlib, sys",
+        "assert '--expected-exclusions-json' not in sys.argv",
+        "source = pathlib.Path(sys.argv[sys.argv.index('--expected-exclusions-file') + 1])",
+        "assert len(json.loads(source.read_text(encoding='utf-8'))) == 5000",
+        "output = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])",
+        "output.write_text(json.dumps({'path': 'safe.ts'}) + '\\n', encoding='utf-8')",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot,
+      repository,
+      scanDir,
+      expectedExclusions: Array.from(
+        { length: 5000 },
+        (_value, index) => `excluded/package-${index}/node_modules/**`,
+      ),
+      environment: {},
+    });
+
+    expect(inventory.fileCount).toBe(1);
+    expect(
+      (await readdir(dirname(inventory.path))).some((name) =>
+        name.startsWith(".scope-exclusions-"),
+      ),
+    ).toBe(false);
+  });
+
+  testPosix(
+    "preserves drive-like colon filenames in authoritative POSIX inventories",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await Promise.all([mkdir(repository), mkdir(scanDir)]);
+      await Promise.all([
+        writeFile(join(repository, "a:config"), "first-party configuration\n"),
+        writeFile(join(repository, "C:candidate.py"), "print('in scope')\n"),
+        writeFile(
+          join(repository, "source\\candidate.py"),
+          "print('literal POSIX backslash')\n",
+        ),
+      ]);
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const inventory = await prepareScopeInventory({
+        python: python!,
+        pluginRoot: PLUGIN_ROOT,
+        repository,
+        scanDir,
+        environment: { PATH: process.env["PATH"] },
+      });
+
+      expect(inventory.fileCount).toBe(3);
+      expect(
+        (await readFile(inventory.path, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line).path),
+      ).toEqual(["C:candidate.py", "a:config", "source\\candidate.py"]);
+      await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
+
+      for (const path of [
+        "C:candidate.py",
+        "a:config",
+        "source\\candidate.py",
+      ]) {
+        const source = join(root, "native-posix-candidate.jsonl");
+        const output = join(root, "native-posix-candidate-ledger.jsonl");
+        await writeFile(
+          source,
+          `${JSON.stringify({
+            cwe_ids: ["CWE-20"],
+            locations: [{ path, start_line: 1, role: "evidence" }],
+            summary: "Native POSIX candidate filename.",
+            evidence:
+              "The authoritative inventory includes the exact filename.",
+          })}\n`,
+        );
+        const normalized = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+            "--input",
+            source,
+            "--out",
+            output,
+            "--repo-root",
+            repository,
+            "--in-scope-inventory",
+            inventory.path,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(normalized.status, normalized.stderr).toBe(0);
+        expect(
+          (
+            JSON.parse(await readFile(output, "utf8")) as {
+              locations: Array<{ path: string }>;
+            }
+          ).locations[0]?.path,
+        ).toBe(path);
+      }
+    },
+  );
+
+  testPosix(
+    "normalizes candidate source lines without loading sparse files",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const source = join(repository, "large.ts");
+      await mkdir(repository);
+      await writeFile(source, "export const reviewed = true;\r\n");
+      await truncate(source, 96 * 1024 * 1024);
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const normalized = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "module = runpy.run_path(sys.argv[1])",
+            "def reject_unbounded_read(self): raise RuntimeError('source files must be streamed')",
+            "Path.read_bytes = reject_unbounded_read",
+            "row = {'locations': [{'path': 'large.ts', 'start_line': 1, 'role': 'evidence'}]}",
+            "print(json.dumps(module['normalize_locations'](row, Path(sys.argv[2]), {})))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+          repository,
+        ],
+        { encoding: "utf8", timeout: 10_000 },
+      );
+
+      expect(normalized.status, normalized.stderr).toBe(0);
+      expect(JSON.parse(normalized.stdout)).toEqual([
+        { path: "large.ts", start_line: 1, end_line: 1, role: "evidence" },
+      ]);
+    },
+  );
+
+  test("bounds exhaustive review receipts separately from inventory bytes", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const discoveryDirectory = join(scanDir, "artifacts", "02_discovery");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(discoveryDirectory, { recursive: true }),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    const inventory = join(discoveryDirectory, "scope_inventory.jsonl");
+    const review = join(coverageDirectory, "scope_review.jsonl");
+    const writeReceipt = async (reason: string) =>
+      writeFile(
+        review,
+        `${JSON.stringify({ path: "safe.ts", disposition: "deferred", reason })}\n`,
+      );
+
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export {};\n"),
+      writeFile(inventory, `${JSON.stringify({ path: "safe.ts" })}\n`),
+      writeFile(join(discoveryDirectory, "candidate_ledger.jsonl"), ""),
+      writeFile(join(scanDir, "findings.json"), '{"findings":[]}\n'),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "partial",
+          surfaces: [
+            {
+              id: "scope-review",
+              label: "Exhaustive standard scope review",
+              disposition: "needs_follow_up",
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
+            },
+          ],
+        })}\n`,
+      ),
+      writeReceipt("bounded review evidence ".repeat(14)),
+    ]);
+    expect((await stat(review)).size).toBeGreaterThan(256);
+    expect((await stat(review)).size).toBeLessThanOrEqual(512);
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const args = [
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import runpy, sys",
+        "from types import SimpleNamespace",
+        "module = runpy.run_path(sys.argv[1])",
+        "verify = module['verify_scope_coverage']",
+        "verify.__globals__['MAX_SCOPE_COVERAGE_BYTES'] = 256",
+        "verify.__globals__['MAX_SCOPE_REVIEW_BYTES'] = 512",
+        "verify(SimpleNamespace(repo=sys.argv[2], scan_dir=sys.argv[3], inventory=sys.argv[4]))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+      repository,
+      scanDir,
+      inventory,
+    ];
+    const accepted = spawnSync(python!, args, { encoding: "utf8" });
+    expect(accepted.status).toBe(0);
+    expect(accepted.stderr).toBe("");
+
+    await writeReceipt("oversized review evidence ".repeat(24));
+    expect((await stat(review)).size).toBeGreaterThan(512);
+    const oversized = spawnSync(python!, args, { encoding: "utf8" });
+    expect(oversized.status).not.toBe(0);
+    expect(oversized.stderr).toContain("bounded regular file");
+  });
+
+  test("preserves deferred review when an inventoried file disappears", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    const disappearingFile = join(repository, "disappears.ts");
+    await writeFile(disappearingFile, "export const transient = true;\n");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    await rm(disappearingFile);
+    const surface = {
+      id: "scope-review",
+      label: "Exhaustive standard scope review",
+      disposition: "needs_follow_up",
+      receiptRefs: STANDARD_SCOPE_RECEIPTS,
+    };
+    await Promise.all([
+      writeFile(
+        join(coverageDirectory, "scope_review.jsonl"),
+        `${JSON.stringify({
+          path: "disappears.ts",
+          disposition: "deferred",
+          reason: "The inventoried file was removed before review.",
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "artifacts", "02_discovery", "candidate_ledger.jsonl"),
+        "",
+      ),
+      writeFile(join(scanDir, "findings.json"), '{"findings":[]}\n'),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({ completeness: "partial", surfaces: [surface] })}\n`,
+      ),
+    ]);
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {},
+    };
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        completeness: "partial",
+        surfaces: [{ ...surface, disposition: "no_issue_found" }],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /deferred.*needs.follow.up|needs.follow.up.*deferred/iu,
+    );
+  });
+
+  test("rejects forged finding payloads and unsealable review surfaces", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const discoveryDirectory = join(scanDir, "artifacts", "02_discovery");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(discoveryDirectory, { recursive: true }),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    await writeFile(
+      join(repository, "safe.ts"),
+      "export const safe = true;\nexport const decoy = true;\n",
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    const candidateLedger = join(discoveryDirectory, "candidate_ledger.jsonl");
+    const rawCandidates = join(root, "raw-candidates.jsonl");
+    await writeFile(
+      rawCandidates,
+      `${JSON.stringify({
+        cwe_ids: ["CWE-20"],
+        locations: [
+          { path: "safe.ts", start_line: 1, role: "evidence" },
+          { path: "safe.ts", start_line: 2, role: "evidence" },
+        ],
+        summary: "The reviewed candidate.",
+        evidence: "The first source line establishes the finding.",
+      })}\n`,
+    );
+    const normalized = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        rawCandidates,
+        "--out",
+        candidateLedger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        inventory.path,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(normalized.status).toBe(0);
+    const candidate = JSON.parse(
+      await readFile(candidateLedger, "utf8"),
+    ) as Record<string, unknown>;
+    const validation = {
+      disposition: "reportable",
+      method: "source trace",
+      confidence: "high",
+      confidence_rationale: "The exact reviewed source is present.",
+      rubric: ["The source reaches the identified behavior."],
+      evidence: "The first source line establishes the finding.",
+      counterevidence_or_proof_gap: "No blocking control was found.",
+      remaining_uncertainty: "None.",
+    };
+    const attackPath = {
+      decision: "reportable",
+      dataflow: "The first source line reaches the reviewed behavior.",
+      reachability: "The reviewed source is directly reachable.",
+      counterevidence: "No blocking control was found.",
+      impact: "high",
+      likelihood: "medium",
+      severity: "high",
+      severity_rationale: "The reviewed source crosses a trust boundary.",
+      change_conditions: "Input validation would block the behavior.",
+    };
+    const candidateId = candidate["candidate_id"] as string;
+    const canonicalFinding = {
+      taxonomy: { category: "input-validation", cwe: ["CWE-20"] },
+      severity: {
+        level: "high",
+        rationale: attackPath.severity_rationale,
+        changeConditions: attackPath.change_conditions,
+      },
+      confidence: {
+        level: validation.confidence,
+        rationale: validation.confidence_rationale,
+      },
+      locations: [
+        { path: "safe.ts", startLine: 1, endLine: 1, role: "evidence" },
+        { path: "safe.ts", startLine: 2, endLine: 2, role: "evidence" },
+      ],
+      validation: {
+        method: validation.method,
+        summary: validation.evidence,
+      },
+      attackPath: {
+        dataflow: { summary: attackPath.dataflow },
+        reachability: { summary: attackPath.reachability },
+        counterevidence: attackPath.counterevidence,
+        impact: attackPath.impact,
+        likelihood: attackPath.likelihood,
+      },
+      extensions: { candidateId },
+    };
+    const scopeSurface = {
+      id: "scope-review",
+      label: "Exhaustive standard scope review",
+      disposition: "no_issue_found",
+      receiptRefs: STANDARD_SCOPE_RECEIPTS,
+    };
+    const candidateSurface = {
+      id: candidateId,
+      label: "Reviewed input-validation candidate",
+      disposition: "reported",
+      receiptRefs: [] as string[],
+    };
+    const restore = async () =>
+      Promise.all([
+        writeFile(
+          join(coverageDirectory, "scope_review.jsonl"),
+          `${JSON.stringify({ path: "safe.ts", disposition: "reviewed" })}\n`,
+        ),
+        writeFile(
+          candidateLedger,
+          `${JSON.stringify({ ...candidate, validation, attack_path: attackPath })}\n`,
+        ),
+        writeFile(
+          join(scanDir, "coverage.json"),
+          `${JSON.stringify({
+            completeness: "complete",
+            surfaces: [scopeSurface, candidateSurface],
+          })}\n`,
+        ),
+        writeFile(
+          join(scanDir, "findings.json"),
+          `${JSON.stringify({ findings: [canonicalFinding] })}\n`,
+        ),
+      ]);
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {},
+    };
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const childFindings = canonicalFinding.locations.map((location, index) => ({
+      ...canonicalFinding,
+      identity: {
+        anchor: "reviewed-candidate",
+        instance: `source-${index + 1}`,
+      },
+      locations: [location],
+    }));
+    await writeFile(
+      join(scanDir, "findings.json"),
+      `${JSON.stringify({ findings: childFindings })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    await restore();
+    await writeFile(
+      join(repository, "shared-sink.ts"),
+      "export const sharedSink = (value: string) => value;\n",
+    );
+    await writeFile(
+      rawCandidates,
+      `${JSON.stringify({
+        cwe_ids: ["CWE-20"],
+        locations: [
+          { path: "safe.ts", start_line: 1, role: "evidence" },
+          { path: "safe.ts", start_line: 2, role: "evidence" },
+          { path: "shared-sink.ts", start_line: 1, role: "sink" },
+        ],
+        summary: "The reviewed candidate reaches a shared sink.",
+        evidence: "Both in-scope source lines reach the shared sink.",
+      })}\n`,
+    );
+    const normalizedCrossScopeCandidate = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        rawCandidates,
+        "--out",
+        candidateLedger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        inventory.path,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(normalizedCrossScopeCandidate.status).toBe(0);
+    const crossScopeCandidate = JSON.parse(
+      await readFile(candidateLedger, "utf8"),
+    ) as Record<string, unknown>;
+    const crossScopeCandidateId = crossScopeCandidate["candidate_id"] as string;
+    const crossScopeFinding = {
+      ...canonicalFinding,
+      extensions: { candidateId: crossScopeCandidateId },
+    };
+    await Promise.all([
+      writeFile(
+        candidateLedger,
+        `${JSON.stringify({
+          ...crossScopeCandidate,
+          validation,
+          attack_path: attackPath,
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            scopeSurface,
+            { ...candidateSurface, id: crossScopeCandidateId },
+          ],
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({ findings: [crossScopeFinding] })}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /unreported source locations/u,
+    );
+    const runManualScopeVerifier = () =>
+      spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "verify-scope-coverage",
+          "--repo",
+          repository,
+          "--inventory",
+          inventory.path,
+          "--scan-dir",
+          scanDir,
+        ],
+        { encoding: "utf8" },
+      );
+    const rejectedManualCompletion = runManualScopeVerifier();
+    expect(rejectedManualCompletion.status).not.toBe(0);
+    expect(rejectedManualCompletion.stderr).toContain(
+      "unreported source locations",
+    );
+
+    const sharedSink = {
+      path: "shared-sink.ts",
+      startLine: 1,
+      endLine: 1,
+      role: "sink",
+    };
+    await writeFile(
+      join(scanDir, "findings.json"),
+      `${JSON.stringify({
+        findings: canonicalFinding.locations.map((location, index) => ({
+          ...crossScopeFinding,
+          identity: {
+            anchor: "reviewed-candidate",
+            instance: `source-${index + 1}`,
+          },
+          locations: [location, sharedSink],
+        })),
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+    const acceptedManualCompletion = runManualScopeVerifier();
+    expect(acceptedManualCompletion.status).toBe(0);
+    expect(acceptedManualCompletion.stderr).toBe("");
+
+    for (const receipt of STANDARD_SCOPE_RECEIPTS.slice(1)) {
+      await restore();
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            {
+              ...scopeSurface,
+              receiptRefs: STANDARD_SCOPE_RECEIPTS.filter(
+                (required) => required !== receipt,
+              ),
+            },
+            candidateSurface,
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /seal.*(?:inventory|candidate)|authoritative.*(?:inventory|candidate)/iu,
+      );
+    }
+
+    await restore();
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        completeness: "complete",
+        surfaces: [
+          {
+            ...scopeSurface,
+            receiptRefs: [STANDARD_SCOPE_RECEIPTS[0]],
+          },
+          {
+            ...candidateSurface,
+            receiptRefs: STANDARD_SCOPE_RECEIPTS.slice(1),
+          },
+        ],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /same coverage surface|single coverage surface|receipts together/iu,
+    );
+
+    await restore();
+    const changeConditions = [
+      "Input validation would block the behavior.",
+      "A guarded source would prevent the transition.",
+    ];
+    await Promise.all([
+      writeFile(
+        candidateLedger,
+        `${JSON.stringify({
+          ...candidate,
+          validation,
+          attack_path: { ...attackPath, change_conditions: changeConditions },
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({
+          findings: [
+            {
+              ...canonicalFinding,
+              severity: {
+                ...canonicalFinding.severity,
+                changeConditions: changeConditions.join("\n"),
+              },
+            },
+          ],
+        })}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    await restore();
+    await writeFile(
+      candidateLedger,
+      `${JSON.stringify({
+        ...candidate,
+        validation,
+        attack_path: {
+          ...attackPath,
+          severity_rationale: { summary: "This must remain canonical text." },
+        },
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /incomplete attack.path closure: severity_rationale/u,
+    );
+
+    const forgedFindings = [
+      {
+        ...canonicalFinding,
+        taxonomy: { category: "forged", cwe: ["CWE-22"] },
+      },
+      {
+        ...canonicalFinding,
+        severity: { ...canonicalFinding.severity, level: "low" },
+      },
+      {
+        ...canonicalFinding,
+        confidence: { ...canonicalFinding.confidence, level: "low" },
+      },
+      {
+        ...canonicalFinding,
+        validation: {
+          ...canonicalFinding.validation,
+          summary: "Forged evidence.",
+        },
+      },
+      {
+        ...canonicalFinding,
+        attackPath: {
+          ...canonicalFinding.attackPath,
+          dataflow: "Forged dataflow.",
+        },
+      },
+      {
+        ...canonicalFinding,
+        locations: [
+          { path: "safe.ts", startLine: 2, endLine: 2, role: "forged" },
+        ],
+      },
+    ];
+    for (const finding of forgedFindings) {
+      await restore();
+      await writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({ findings: [finding] })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /candidate (?:payload|locations)/u,
+      );
+    }
+
+    await restore();
+    const { label: _label, ...unsealableSurface } = scopeSurface;
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        completeness: "complete",
+        surfaces: [unsealableSurface, candidateSurface],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /scope-review surface|coverage surface/u,
+    );
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+  });
+
+  test("binds complete standard coverage to every host-attested inventory path", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    const reviewLedger = join(coverageDirectory, "scope_review.jsonl");
+    const candidateLedger = join(
+      scanDir,
+      "artifacts",
+      "02_discovery",
+      "candidate_ledger.jsonl",
+    );
+    await Promise.all([
+      mkdir(repository),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export const safe = true;\n"),
+      writeFile(join(repository, "hidden.ts"), "export const hidden = true;\n"),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {
+        OPENAI_API_KEY: "must-not-reach-python",
+        CODEX_API_KEY: "also-must-not-reach-python",
+      },
+    };
+
+    const restore = async () => {
+      await Promise.all([
+        writeFile(
+          join(repository, "hidden.ts"),
+          "export const hidden = true;\n",
+        ),
+        writeFile(
+          reviewLedger,
+          ["hidden.ts", "safe.ts"]
+            .map((path) => JSON.stringify({ path, disposition: "reviewed" }))
+            .join("\n") + "\n",
+        ),
+        writeFile(candidateLedger, ""),
+        writeFile(
+          join(scanDir, "coverage.json"),
+          `${JSON.stringify({
+            completeness: "complete",
+            surfaces: [
+              {
+                id: "scope-review",
+                label: "Exhaustive standard scope review",
+                disposition: "no_issue_found",
+                receiptRefs: STANDARD_SCOPE_RECEIPTS,
+              },
+            ],
+          })}\n`,
+        ),
+        writeFile(join(scanDir, "findings.json"), '{"findings":[]}\n'),
+      ]);
+    };
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const rawCandidates = join(root, "raw-candidates.jsonl");
+    await writeFile(
+      rawCandidates,
+      `${JSON.stringify({
+        cwe_ids: ["CWE-20"],
+        locations: [{ path: "safe.ts", start_line: 1, role: "evidence" }],
+        summary: "In-scope candidate",
+        evidence: "The reviewed source is within the authoritative scope.",
+      })}\n`,
+    );
+    const normalized = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+        "--input",
+        rawCandidates,
+        "--out",
+        candidateLedger,
+        "--repo-root",
+        repository,
+        "--in-scope-inventory",
+        inventory.path,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(normalized.status).toBe(0);
+    const candidate = JSON.parse(
+      await readFile(candidateLedger, "utf8"),
+    ) as Record<string, unknown>;
+    const completeValidation = {
+      disposition: "reportable",
+      method: "source trace",
+      confidence: "high",
+      confidence_rationale: "The exact source and sink are present.",
+      rubric: ["The source reaches the sink."],
+      evidence: "The candidate location contains the source.",
+      counterevidence_or_proof_gap: "No counterevidence was found.",
+      remaining_uncertainty: "None.",
+    };
+    const completeAttackPath = {
+      decision: "reportable",
+      dataflow: "The in-scope source reaches the sink.",
+      reachability: "The source is reachable.",
+      counterevidence: "No blocking control is present.",
+      impact: "high",
+      likelihood: "medium",
+      severity: "high",
+      severity_rationale: "The candidate crosses a trust boundary.",
+      change_conditions: "A validated boundary would block the path.",
+    };
+    candidate["validation"] = completeValidation;
+    candidate["attack_path"] = completeAttackPath;
+    const candidateId = candidate["candidate_id"] as string;
+    await Promise.all([
+      writeFile(candidateLedger, `${JSON.stringify(candidate)}\n`),
+      writeFile(
+        join(scanDir, "findings.json"),
+        `${JSON.stringify({
+          findings: [
+            {
+              taxonomy: { category: "input-validation", cwe: ["CWE-20"] },
+              severity: {
+                level: completeAttackPath.severity,
+                rationale: completeAttackPath.severity_rationale,
+                changeConditions: completeAttackPath.change_conditions,
+              },
+              confidence: {
+                level: completeValidation.confidence,
+                rationale: completeValidation.confidence_rationale,
+              },
+              locations: [
+                { path: "safe.ts", startLine: 1, endLine: 1, role: "evidence" },
+              ],
+              validation: {
+                method: completeValidation.method,
+                summary: completeValidation.evidence,
+              },
+              attackPath: {
+                dataflow: { summary: completeAttackPath.dataflow },
+                reachability: { summary: completeAttackPath.reachability },
+                counterevidence: completeAttackPath.counterevidence,
+                impact: completeAttackPath.impact,
+                likelihood: completeAttackPath.likelihood,
+              },
+              extensions: { candidateId },
+            },
+          ],
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            {
+              id: "scope-review",
+              label: "Exhaustive standard scope review",
+              disposition: "no_issue_found",
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
+            },
+            {
+              id: candidateId,
+              label: "Reviewed input-validation candidate",
+              disposition: "reported",
+              receiptRefs: [],
+            },
+          ],
+        })}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    const reportableCoverage = JSON.parse(
+      await readFile(join(scanDir, "coverage.json"), "utf8"),
+    ) as Record<string, unknown>;
+    for (const deferredId of [candidateId, "candidate-not-in-ledger"]) {
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          ...reportableCoverage,
+          completeness: "partial",
+          deferred: [
+            {
+              id: deferredId,
+              reason: "This candidate was not actually deferred.",
+            },
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /deferred.*candidate|candidate.*deferred/iu,
+      );
+    }
+
+    await restore();
+    await Promise.all([
+      writeFile(
+        reviewLedger,
+        [
+          {
+            path: "hidden.ts",
+            disposition: "deferred",
+            reason: "Needs follow-up",
+          },
+          { path: "safe.ts", disposition: "reviewed" },
+        ]
+          .map((row) => JSON.stringify(row))
+          .join("\n") + "\n",
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "partial",
+          surfaces: [
+            {
+              id: "scope-review",
+              label: "Exhaustive standard scope review",
+              disposition: "needs_follow_up",
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
+            },
+          ],
+        })}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+    await rm(join(repository, "hidden.ts"));
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    await restore();
+    const proofGap =
+      "A deployed caller must be reproduced before exploitability is known.";
+    const deferredValidation = {
+      ...completeValidation,
+      disposition: "deferred",
+      counterevidence_or_proof_gap: proofGap,
+      remaining_uncertainty: "The production caller has not been exercised.",
+    };
+    const deferredAttackPath = {
+      ...completeAttackPath,
+      decision: "deferred",
+      proof_gap: proofGap,
+    };
+    const deferredCoverage = {
+      completeness: "partial",
+      surfaces: [
+        {
+          id: "scope-review",
+          label: "Exhaustive standard scope review",
+          disposition: "no_issue_found",
+          receiptRefs: STANDARD_SCOPE_RECEIPTS,
+        },
+        {
+          id: candidateId,
+          label: "Deferred input-validation candidate",
+          disposition: "needs_follow_up",
+          receiptRefs: [],
+        },
+      ],
+      deferred: [{ id: candidateId, reason: proofGap }],
+    };
+    await Promise.all([
+      writeFile(
+        candidateLedger,
+        `${JSON.stringify({
+          ...candidate,
+          validation: deferredValidation,
+          attack_path: deferredAttackPath,
+        })}\n`,
+      ),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify(deferredCoverage)}\n`,
+      ),
+    ]);
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+
+    for (const duplicateReason of [proofGap, "Fabricated proof gap."]) {
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          ...deferredCoverage,
+          deferred: [
+            { id: candidateId, reason: proofGap },
+            { id: candidateId, reason: duplicateReason },
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        /duplicate deferred|repeats.*deferred|deferred.*repeats/iu,
+      );
+    }
+
+    for (const invalidDeferred of [
+      {
+        entry: { id: " ", reason: proofGap },
+        message: /deferred outcome.*valid id/iu,
+      },
+      {
+        entry: { id: "additional-follow-up", reason: " " },
+        message: /deferred outcome.*valid reason/iu,
+      },
+    ]) {
+      await writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          ...deferredCoverage,
+          deferred: [
+            { id: candidateId, reason: proofGap },
+            invalidDeferred.entry,
+          ],
+        })}\n`,
+      );
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        invalidDeferred.message,
+      );
+    }
+
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        ...deferredCoverage,
+        completeness: "complete",
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /complete.*deferred/iu,
+    );
+
+    await writeFile(
+      join(scanDir, "coverage.json"),
+      `${JSON.stringify({
+        ...deferredCoverage,
+        deferred: [{ id: candidateId, reason: "Fabricated proof gap." }],
+      })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /deferred.*proof gap|proof gap.*deferred/iu,
+    );
+
+    const attacks: Array<{
+      mutate: () => Promise<unknown>;
+      message: RegExp;
+    }> = [
+      {
+        mutate: () => rm(join(repository, "hidden.ts")),
+        message: /marks unavailable inventory paths as reviewed/iu,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            `${JSON.stringify({ path: "safe.ts", disposition: "reviewed" })}\n`,
+          ),
+        message: /omits authoritative inventory paths/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            ["safe.ts", "safe.ts"]
+              .map((path) => JSON.stringify({ path, disposition: "reviewed" }))
+              .join("\n") + "\n",
+          ),
+        message: /duplicate paths/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            ["hidden.ts", "safe.ts", "forged.ts"]
+              .map((path) => JSON.stringify({ path, disposition: "reviewed" }))
+              .join("\n") + "\n",
+          ),
+        message: /outside the authoritative scope inventory/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            reviewLedger,
+            [
+              {
+                path: "hidden.ts",
+                disposition: "deferred",
+                reason: "Unreadable",
+              },
+              { path: "safe.ts", disposition: "reviewed" },
+            ]
+              .map((row) => JSON.stringify(row))
+              .join("\n") + "\n",
+          ),
+        message: /cannot contain deferred inventory paths/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            join(scanDir, "coverage.json"),
+            `${JSON.stringify({
+              completeness: "complete",
+              surfaces: [
+                {
+                  id: "scope-review",
+                  label: "Exhaustive standard scope review",
+                  disposition: "no_issue_found",
+                  receiptRefs: [],
+                },
+              ],
+            })}\n`,
+          ),
+        message: /must reference the exhaustive scope-review ledger/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              candidate_id: "candidate-forged",
+              cwe_ids: ["CWE-20"],
+              locations: [
+                { path: "../outside.ts", start_line: 1, role: "evidence" },
+              ],
+              summary: "Forged candidate",
+              evidence: "Must not leave the repository",
+              validation: completeValidation,
+              attack_path: completeAttackPath,
+            })}\n`,
+          ),
+        message: /repository-relative path without traversal/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            join(scanDir, "findings.json"),
+            `${JSON.stringify({
+              findings: [{ locations: [{ path: "forged.ts" }] }],
+            })}\n`,
+          ),
+        message: /no location in the authoritative scope inventory/u,
+      },
+      {
+        mutate: () =>
+          writeFile(candidateLedger, `${JSON.stringify(candidate)}\n`),
+        message: /reportable candidate has no matching final finding/iu,
+      },
+      {
+        mutate: async () => {
+          await Promise.all([
+            writeFile(
+              candidateLedger,
+              `${JSON.stringify({
+                ...candidate,
+                validation: {
+                  ...completeValidation,
+                  disposition: "suppressed",
+                },
+                attack_path: undefined,
+              })}\n`,
+            ),
+            writeFile(
+              join(scanDir, "findings.json"),
+              `${JSON.stringify({
+                findings: [
+                  {
+                    locations: [{ path: "safe.ts" }],
+                    extensions: { candidateId },
+                  },
+                ],
+              })}\n`,
+            ),
+          ]);
+        },
+        message: /does not match a reportable candidate/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              ...candidate,
+              validation: { disposition: "reportable" },
+            })}\n`,
+          ),
+        message: /incomplete validation closure/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              ...candidate,
+              attack_path: { decision: "reportable" },
+            })}\n`,
+          ),
+        message: /incomplete attack-path closure/u,
+      },
+      {
+        mutate: () =>
+          writeFile(
+            candidateLedger,
+            `${JSON.stringify({
+              ...candidate,
+              attack_path: {
+                ...completeAttackPath,
+                severity: "ignore",
+              },
+            })}\n`,
+          ),
+        message: /reportable attack path requires reportable severity/u,
+      },
+    ];
+
+    for (const attack of attacks) {
+      await restore();
+      await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+      await attack.mutate();
+      await expect(verifyScopeCoverage(options)).rejects.toThrow(
+        attack.message,
+      );
+    }
+
+    await restore();
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+  });
+
+  test("verifies empty scope ledgers and rejects out-of-scope findings", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const coverageDirectory = join(scanDir, "artifacts", "03_coverage");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(coverageDirectory, { recursive: true }),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: {},
+    });
+    expect(inventory.fileCount).toBe(0);
+    const review = join(coverageDirectory, "scope_review.jsonl");
+    const ledger = join(
+      scanDir,
+      "artifacts",
+      "02_discovery",
+      "candidate_ledger.jsonl",
+    );
+    const findings = join(scanDir, "findings.json");
+    await Promise.all([
+      writeFile(review, ""),
+      writeFile(ledger, ""),
+      writeFile(findings, '{"findings":[]}\n'),
+      writeFile(
+        join(scanDir, "coverage.json"),
+        `${JSON.stringify({
+          completeness: "complete",
+          surfaces: [
+            {
+              id: "scope-review",
+              label: "Exhaustive standard scope review",
+              disposition: "no_issue_found",
+              receiptRefs: STANDARD_SCOPE_RECEIPTS,
+            },
+          ],
+        })}\n`,
+      ),
+    ]);
+    const options = {
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      inventory,
+      environment: {},
+    };
+    await expect(verifyScopeCoverage(options)).resolves.toBeUndefined();
+    await writeFile(
+      findings,
+      `${JSON.stringify({ findings: [{ locations: [{ path: "outside.ts" }] }] })}\n`,
+    );
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /no location in the authoritative scope inventory/u,
+    );
+    await writeFile(findings, '{"findings":[]}\n');
+    await rm(review);
+    await expect(verifyScopeCoverage(options)).rejects.toThrow(
+      /Scope-review ledger is missing/u,
+    );
+  });
+
+  test("enforces inventory file and byte limits during traversal", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await Promise.all([
+      writeFile(join(repository, "first.ts"), "export const first = true;\n"),
+      writeFile(join(repository, "second.ts"), "export const second = true;\n"),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    for (const [label, flag, limit] of [
+      ["files", "--max-files", "1"],
+      ["bytes", "--max-bytes", "8"],
+    ] as const) {
+      const output = join(root, `${label}-inventory.jsonl`);
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-scope-inventory",
+          "--repo",
+          repository,
+          flag,
+          limit,
+          "--out",
+          output,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("standard scan scope inventory limit");
+      expect(existsSync(output)).toBe(false);
+    }
+  });
+
+  test("bounds source hashing before reading oversized scope files", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const source = join(repository, "oversized.ts");
+    const output = join(root, "inventory.jsonl");
+    await mkdir(repository);
+    await writeFile(source, "");
+    await truncate(source, 512 * 1024 * 1024 + 1);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--out",
+        output,
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("standard scan scope source byte limit");
+    expect(existsSync(output)).toBe(false);
+  });
+
+  testPosix("rejects unsupported non-regular scope entries", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const fifo = join(repository, "unaccounted.pipe");
+    const output = join(root, "inventory.jsonl");
+    await mkdir(repository);
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+        "make-scope-inventory",
+        "--repo",
+        repository,
+        "--out",
+        output,
+      ],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      "Unsupported non-regular standard scan scope entry: unaccounted.pipe",
+    );
+    expect(existsSync(output)).toBe(false);
+  });
+
+  test("rejects oversized or substituted standard inventories after attestation", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const outside = join(root, "outside-inventory.jsonl");
+    await Promise.all([mkdir(repository), mkdir(scanDir)]);
+    await Promise.all([
+      writeFile(join(repository, "safe.ts"), "export {};\n"),
+      writeFile(outside, '{"path":"outside.ts"}\n'),
+    ]);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const inventory = await prepareScopeInventory({
+      python: python!,
+      pluginRoot: PLUGIN_ROOT,
+      repository,
+      scanDir,
+      environment: { PATH: process.env["PATH"] },
+    });
+    const original = await readFile(inventory.path);
+
+    await truncate(inventory.path, 64 * 1024 * 1024 + 1);
+    await expect(verifyScopeInventory(inventory)).rejects.toThrow(
+      "bounded, regular, non-symlink file",
+    );
+    await writeFile(inventory.path, original);
+    await expect(verifyScopeInventory(inventory)).resolves.toBeUndefined();
+
+    if (process.platform !== "win32") {
+      await rm(inventory.path);
+      await symlink(outside, inventory.path);
+      await expect(verifyScopeInventory(inventory)).rejects.toThrow(
+        "bounded, regular, non-symlink file",
+      );
+      expect(await readFile(outside, "utf8")).toBe('{"path":"outside.ts"}\n');
+    }
   });
 
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {

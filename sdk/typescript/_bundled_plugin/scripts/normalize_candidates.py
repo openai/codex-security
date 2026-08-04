@@ -13,6 +13,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 CWE = re.compile(r"(?i)CWE-(\d+)")
+MAX_SCOPE_INVENTORY_FILES = 250_000
+MAX_SCOPE_INVENTORY_BYTES = 64 * 1024 * 1024
 ROLES = {
     "entrypoint": 0,
     "entrypoint/wrapper": 1,
@@ -86,6 +88,24 @@ def positive_line(value: Any, field: str) -> int:
     return value
 
 
+def source_line_count(source: Path, stop_after: int | None = None) -> int:
+    """Count universal-newline source lines without loading the entire file."""
+
+    count = 0
+    previous: int | None = None
+    with source.open("rb") as contents:
+        while chunk := contents.read(64 * 1024):
+            if stop_after == 1 and chunk:
+                return 1
+            count += chunk.count(b"\n") + chunk.count(b"\r") - chunk.count(b"\r\n")
+            if previous == ord("\r") and chunk[0] == ord("\n"):
+                count -= 1
+            previous = chunk[-1]
+            if stop_after is not None and count >= stop_after:
+                return count
+    return count + int(previous is not None and previous not in (ord("\r"), ord("\n")))
+
+
 def normalize_locations(
     row: dict[str, Any], repo_root: Path, line_counts: dict[Path, int]
 ) -> list[dict[str, Any]]:
@@ -102,16 +122,21 @@ def normalize_locations(
         relative, source = relative_file(item.get("path"), repo_root)
         if (
             not relative.strip()
-            or "\\" in relative
-            or any(":" in part for part in PurePosixPath(relative).parts)
+            or (
+                sys.platform == "win32"
+                and (
+                    "\\" in relative
+                    or any(":" in part for part in PurePosixPath(relative).parts)
+                )
+            )
         ):
             raise ValueError("path: expected a safe repository-relative POSIX path")
         start = positive_line(item.get("start_line"), "start_line")
         end = positive_line(item.get("end_line", start), "end_line")
         if end < start:
             raise ValueError("end_line: must be greater than or equal to start_line")
-        if source not in line_counts:
-            line_counts[source] = len(source.read_bytes().splitlines())
+        if line_counts.get(source, 0) < end:
+            line_counts[source] = source_line_count(source, end)
         if end > line_counts[source]:
             raise ValueError(f"line range {start}-{end} exceeds {relative}:{line_counts[source]}")
         role = item.get("role")
@@ -188,6 +213,64 @@ def read_scope(path: Path, repo_root: Path) -> set[str]:
     return scope
 
 
+def read_scope_inventory(
+    path: Path, repo_root: Path, *, content_digests: dict[str, str] | None = None
+) -> set[str]:
+    if path.stat().st_size > MAX_SCOPE_INVENTORY_BYTES:
+        raise ValueError("in-scope inventory exceeds the size limit")
+    scope: set[str] = set()
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if number > MAX_SCOPE_INVENTORY_FILES:
+                raise ValueError("in-scope inventory exceeds the maximum file count")
+            if not line.strip():
+                raise ValueError(f"in-scope inventory row {number}: blank rows are not allowed")
+            try:
+                row: object = json.loads(line)
+                if not isinstance(row, dict) or set(row) not in ({"path"}, {"path", "sha256"}):
+                    raise ValueError("expected an object with a path and optional content digest")
+                value = row["path"]
+                if not isinstance(value, str) or not value or "\0" in value:
+                    raise ValueError("path: expected a non-empty repository-relative path")
+                lexical_path = PurePosixPath(value)
+                if (
+                    lexical_path.is_absolute()
+                    or ".." in lexical_path.parts
+                    or (
+                        sys.platform == "win32"
+                        and ("\\" in value or re.match(r"^[A-Za-z]:", value))
+                    )
+                ):
+                    raise ValueError("path: expected a repository-relative path without traversal")
+                relative = lexical_path.as_posix()
+                if relative != value or any(
+                    part in {"", "."} for part in value.split("/")
+                ):
+                    raise ValueError("path: expected a canonical repository-relative path")
+                current = repo_root
+                for part in lexical_path.parts:
+                    current = current / part
+                    if current.is_symlink():
+                        try:
+                            current.resolve(strict=True).relative_to(repo_root)
+                        except (OSError, ValueError) as error:
+                            raise ValueError("path: must resolve inside --repo-root") from error
+                        raise ValueError("path: expected a regular non-symlink file")
+                if relative in scope:
+                    raise ValueError("path: duplicate inventory path")
+                digest = row.get("sha256")
+                if digest is not None and (
+                    not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None
+                ):
+                    raise ValueError("sha256: expected a lowercase SHA-256 content digest")
+                if content_digests is not None and isinstance(digest, str):
+                    content_digests[relative] = digest
+            except (OSError, TypeError, ValueError) as error:
+                raise ValueError(f"in-scope inventory row {number}: {error}") from error
+            scope.add(relative)
+    return scope
+
+
 def normalize_candidate(
     row: dict[str, Any], repo_root: Path, scope: set[str], line_counts: dict[Path, int]
 ) -> dict[str, Any]:
@@ -260,20 +343,33 @@ def main() -> None:
     parser.add_argument("--input", nargs="+", required=True, help="Candidate JSONL inputs.")
     parser.add_argument("--out", required=True, help="Combined candidate JSONL output.")
     parser.add_argument("--repo-root", required=True, help="Repository root for candidate paths.")
-    parser.add_argument("--in-scope-files", required=True, help="Repository-relative file list.")
+    scope_inputs = parser.add_mutually_exclusive_group(required=True)
+    scope_inputs.add_argument(
+        "--in-scope-files", help="Newline-delimited repository-relative file list."
+    )
+    scope_inputs.add_argument(
+        "--in-scope-inventory", help="JSONL standard-scan inventory with one path per row."
+    )
     args = parser.parse_args()
     try:
         repo_root = Path(args.repo_root).expanduser().resolve(strict=True)
         if not repo_root.is_dir():
             raise ValueError("--repo-root: expected a directory")
         output = Path(args.out).expanduser().resolve(strict=False)
-        scope_path = Path(args.in_scope_files).expanduser().resolve(strict=True)
+        inventory_requested = args.in_scope_inventory is not None
+        scope_input = args.in_scope_inventory if inventory_requested else args.in_scope_files
+        scope_path = Path(scope_input).expanduser().resolve(strict=True)
         inputs = sorted({Path(value).expanduser().resolve(strict=True) for value in args.input})
         if output in inputs:
             raise ValueError("--out: must not also be an input")
         if output == scope_path:
-            raise ValueError("--out: must not replace --in-scope-files")
-        scope = read_scope(scope_path, repo_root)
+            scope_flag = "--in-scope-inventory" if inventory_requested else "--in-scope-files"
+            raise ValueError(f"--out: must not replace {scope_flag}")
+        scope = (
+            read_scope_inventory(scope_path, repo_root)
+            if inventory_requested
+            else read_scope(scope_path, repo_root)
+        )
         line_counts: dict[Path, int] = {}
         rows: list[dict[str, Any]] = []
         for source in inputs:

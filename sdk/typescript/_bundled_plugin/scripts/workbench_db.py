@@ -43,6 +43,7 @@ from filesystem_identity import serialize_filesystem_identity as serialize_files
 from filesystem_identity import (
     stored_filesystem_identity_matches as stored_filesystem_identity_matches,
 )
+from generate_rank_input import standard_scope_exclusions, verify_scope_coverage
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -125,6 +126,7 @@ FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 SCAN_RECIPE_MAX_BYTES = 256 * 1024
+STANDARD_SCOPE_EXCLUSIONS_MAX_BYTES = 1024 * 1024
 
 
 def now() -> str:
@@ -514,8 +516,63 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     return [scan["scope"]]
 
 
+def registered_standard_scope_exclusions(scan: sqlite3.Row) -> list[dict[str, str]]:
+    """Use the host-owned exclusions captured before the scan started."""
+
+    attestation = os.environ.get("CODEX_SECURITY_SCOPE_EXCLUSIONS_FILE")
+    serialized = (
+        scan["scope_exclusions_json"]
+        if "scope_exclusions_json" in scan.keys()
+        else None
+    )
+    if serialized is None:
+        if attestation:
+            raise SystemExit(
+                "Stored standard scope exclusions do not match their protected snapshot."
+            )
+        return []
+    try:
+        exclusions: Any = json.loads(
+            serialized, parse_constant=reject_non_finite_json
+        )
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Stored standard scope exclusions are invalid.") from exc
+    if not isinstance(exclusions, list) or any(
+        not isinstance(exclusion, dict)
+        or set(exclusion) != {"pattern", "reason"}
+        or not isinstance(exclusion.get("pattern"), str)
+        or not exclusion["pattern"]
+        or not isinstance(exclusion.get("reason"), str)
+        or not exclusion["reason"].strip()
+        for exclusion in exclusions
+    ):
+        raise SystemExit("Stored standard scope exclusions are invalid.")
+    patterns = [exclusion["pattern"] for exclusion in exclusions]
+    if patterns != sorted(set(patterns)):
+        raise SystemExit("Stored standard scope exclusions are invalid.")
+    if attestation:
+        try:
+            expected = json.loads(
+                Path(attestation).read_text(encoding="utf-8"),
+                parse_constant=reject_non_finite_json,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise SystemExit("Protected standard scope exclusions are invalid.") from exc
+        if (
+            not isinstance(expected, list)
+            or exclusions != expected
+        ):
+            raise SystemExit("Stored standard scope exclusions do not match their protected snapshot.")
+    return exclusions
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
+    explicit_exclusions = (
+        registered_standard_scope_exclusions(scan)
+        if scan["mode"] == "standard"
+        else []
+    )
     target_contract = {
         "allowedKinds": expected_target_kinds(scan),
         "displayName": target.name,
@@ -533,7 +590,10 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     return {
         "diffTarget": stored_diff_target(scan),
         "scope": {
-            "requiredExcludePaths": [],
+            "requiredExcludePaths": [
+                exclusion["pattern"] for exclusion in explicit_exclusions
+            ],
+            "requiredExplicitExclusions": explicit_exclusions,
             "requestedPath": scan["scope"],
             **(
                 {"requiredIncludePaths": requested_scan_paths(scan)}
@@ -582,7 +642,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
+        if scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -595,7 +655,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
 
-    return {
+    binding = {
         "scanId": scan["id"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
@@ -605,6 +665,11 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
+    if scan["mode"] == "standard":
+        binding["explicitExclusions"] = contract["scope"].get(
+            "requiredExplicitExclusions", []
+        )
+    return binding
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
@@ -664,7 +729,7 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
     include_paths = scope.get("includePaths")
     if not isinstance(include_paths, list):
         raise SystemExit("scan-manifest.json scope includePaths must be an array.")
-    if scope.get("excludePaths") != []:
+    if scope.get("excludePaths") != expected_contract["scope"]["requiredExcludePaths"]:
         raise SystemExit(
             "scan-manifest.json scope excludePaths must match the workbench scan scope."
         )
@@ -1115,6 +1180,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         scope_file_count = directory_snapshot_regular_file_count(
             target if scope == "." else target / scope
         )
+        scope_exclusions = (
+            standard_scope_exclusions(target, [scope])
+            if workspace["default_mode"] == "standard"
+            else None
+        )
         target_identity = scan_target_identity(
             target,
             diff_target,
@@ -1172,6 +1242,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             target_summary=target_summary,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            scope_exclusions=scope_exclusions,
         )
         if manages_transaction:
             connection.commit()
@@ -1207,6 +1278,9 @@ def start_prompt_only_scan(
         target_summary = diff_target_summary(diff_target)
     scope_file_count = directory_snapshot_regular_file_count(
         target if scope == "." else target / scope
+    )
+    scope_exclusions = (
+        standard_scope_exclusions(target, [scope]) if args.mode == "standard" else None
     )
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
@@ -1308,6 +1382,7 @@ def start_prompt_only_scan(
             target_summary=target_summary,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            scope_exclusions=scope_exclusions,
             handoff_status="delivered",
         )
         connection.commit()
@@ -1384,6 +1459,7 @@ def complete_scan_locked(
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        verify_standard_scope_completion(scan, scan_dir)
         require_recorded_manifest_digest(scan, scan_dir)
         verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
         try:
@@ -1411,6 +1487,7 @@ def complete_scan_locked(
     if warning is not None and warning not in warnings:
         warnings.append(warning)
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    verify_standard_scope_completion(scan, scan_dir)
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
     if scan["recipe_json"] is not None:
@@ -1450,6 +1527,7 @@ def complete_scan_locked(
         warning = scan_target_warning(scan)
         if warning is not None and warning not in warnings:
             warnings.append(warning)
+        verify_standard_scope_completion(scan, scan_dir, prepared=prepared)
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1533,6 +1611,53 @@ def complete_scan_locked(
     return scan_context(connection, scan["id"])
 
 
+def verify_standard_scope_completion(
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    *,
+    prepared: tuple[Any, ...] | None = None,
+) -> None:
+    if scan["mode"] != "standard":
+        return
+    protected_scope_paths = os.environ.get("CODEX_SECURITY_SCOPE_PATHS_FILE")
+    if protected_scope_paths:
+        try:
+            expected_scope_paths = json.loads(
+                Path(protected_scope_paths).read_text(encoding="utf-8"),
+                parse_constant=reject_non_finite_json,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise SystemExit("Protected standard scan scope paths are invalid.") from exc
+        if not isinstance(expected_scope_paths, list) or any(
+            not isinstance(path, str) or not path for path in expected_scope_paths
+        ):
+            raise SystemExit("Protected standard scan scope paths are invalid.")
+        if requested_scan_paths(scan) != expected_scope_paths:
+            raise SystemExit(
+                "Stored standard scan scope paths do not match their protected snapshot."
+            )
+
+    durable = scan_dir / "artifacts" / "02_discovery" / "scope_inventory.jsonl"
+    protected_inventory = os.environ.get("CODEX_SECURITY_SCOPE_INVENTORY_FILE")
+    if not durable.exists():
+        if protected_inventory:
+            raise SystemExit("Durable standard scope inventory is missing.")
+        return
+    inventory = Path(protected_inventory or durable)
+    verify_scope_coverage(
+        argparse.Namespace(
+            repo=scan["target_path"],
+            inventory=str(inventory),
+            scan_dir=str(scan_dir),
+            **(
+                {"findings": prepared[3], "coverage": prepared[4]}
+                if prepared is not None
+                else {}
+            ),
+        )
+    )
+
+
 def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     repository = require_target(args.repository)
     require_scannable_target(repository)
@@ -1561,6 +1686,20 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
+    scope_exclusions = (
+        standard_scope_exclusions(repository, paths or ["."])
+        if mode == "standard"
+        else None
+    )
+    if scope_exclusions is not None and len(
+        json.dumps(scope_exclusions, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ) > STANDARD_SCOPE_EXCLUSIONS_MAX_BYTES:
+        raise SystemExit(
+            "Standard scan scope exclusions exceed the 1 MiB registration limit; "
+            "select a narrower scan scope."
+        )
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
         directory_snapshot_regular_file_count(repository)
@@ -1623,6 +1762,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             target_summary=None,
             scope_file_count=scope_file_count,
             timestamp=timestamp,
+            scope_exclusions=scope_exclusions,
             handoff_status="delivered",
             scan_dir=scan_dir,
         )
