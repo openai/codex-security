@@ -16,7 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
+from workbench_constants import EMPTY_GIT_TREE, EMPTY_GIT_TREES, GIT_REPOSITORY_ENVIRONMENT
 
 
 def git_output(
@@ -71,6 +71,19 @@ def git_command(
         # any other failed Git probe so the target falls back to a directory snapshot.
         empty_output = "" if text else b""
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
+
+
+def empty_git_tree(target: Path) -> str:
+    """The empty-tree object id a root commit is diffed against.
+
+    The id belongs to the repository's object format, so a SHA-256 repository
+    cannot reuse the SHA-1 constant: Git rejects it as an unknown revision and
+    the root commit becomes unselectable. Git before 2.29 cannot report a format
+    and only ever wrote SHA-1, which the fallback covers.
+    """
+
+    object_format = git_output(target, "rev-parse", "--show-object-format")
+    return EMPTY_GIT_TREES.get(object_format or "", EMPTY_GIT_TREE)
 
 
 def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:

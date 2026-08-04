@@ -97,6 +97,7 @@ from workbench_target import (
     copy_git_worktree_files,
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    empty_git_tree,
     git_command,
     git_output,
     git_revision,
@@ -359,6 +360,29 @@ def resolve_git_commit(target: Path, revision: str, label: str) -> str:
     return resolved
 
 
+def require_committed_diff_digest(
+    target: Path,
+    base: str,
+    head: str,
+    content_digest: str | None,
+) -> str:
+    """Digest a committed range, rejecting a digest that no longer matches.
+
+    Commit ids pin the revisions but not the bytes Git reports for them: a
+    replace ref swaps the objects Git reads, and diff configuration changes the
+    generated patch. Revalidating a recorded digest the way the working-tree
+    branch does keeps a scan from reviewing a snapshot nobody selected.
+    """
+
+    current_digest = committed_diff_content_digest(target, base, head)
+    if content_digest and content_digest != current_digest:
+        raise SystemExit(
+            "The committed changes selected for review no longer produce the same "
+            "diff. Select the changes to review again."
+        )
+    return current_digest
+
+
 def require_diff_target(
     target: Path,
     kind: str | None,
@@ -399,7 +423,7 @@ def require_diff_target(
             None,
         )
         if parent_line is None:
-            parent = EMPTY_GIT_TREE
+            parent = empty_git_tree(target)
         else:
             parent = resolve_git_commit(
                 target,
@@ -418,7 +442,9 @@ def require_diff_target(
             "kind": kind,
             "baseRevision": parent,
             "headRevision": head,
-            "contentDigest": committed_diff_content_digest(target, parent, head),
+            "contentDigest": require_committed_diff_digest(
+                target, parent, head, content_digest
+            ),
         }
     base = resolve_git_commit(target, base_revision or "", "Base revision")
     head = resolve_git_commit(target, head_revision or "", "Head revision")
@@ -428,7 +454,7 @@ def require_diff_target(
         "kind": kind,
         "baseRevision": base,
         "headRevision": head,
-        "contentDigest": committed_diff_content_digest(target, base, head),
+        "contentDigest": require_committed_diff_digest(target, base, head, content_digest),
     }
 
 

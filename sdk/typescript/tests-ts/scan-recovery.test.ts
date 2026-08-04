@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import {
   cp,
   mkdir,
@@ -1080,5 +1081,203 @@ describe("malformed scan artifact recovery", () => {
 
     await expect(completeScan(fixture)).rejects.toThrow("inventoryStrategy");
     expect(await readFile(path, "utf8")).toBe(original);
+  });
+});
+
+const SHA1_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const SHA256_EMPTY_TREE =
+  "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
+const CONTENT_DIGEST = /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/;
+const FOREIGN_DIGEST = `codex-security-snapshot/v1:sha256:${"0".repeat(64)}`;
+const sha256Repositories = (() => {
+  const probe = mkdtempSync(join(tmpdir(), "codex-security-object-format-"));
+  try {
+    return (
+      spawnSync("git", ["init", "--quiet", "--object-format=sha256", probe], {
+        encoding: "utf8",
+      }).status === 0
+    );
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+const testSha256 = sha256Repositories ? test : test.skip;
+
+type GitFixture = {
+  repository: string;
+  git: (...args: string[]) => string;
+  commit: (message: string) => string;
+  python: string;
+};
+
+async function gitFixture(
+  objectFormat: "sha1" | "sha256",
+): Promise<GitFixture> {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-diff-target-")),
+  );
+  temporaryDirectories.push(root);
+  const repository = join(root, "repository");
+  await mkdir(repository, { recursive: true });
+  const initialized = spawnSync(
+    "git",
+    [
+      "init",
+      "--quiet",
+      ...(objectFormat === "sha256" ? ["--object-format=sha256"] : []),
+      repository,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(initialized.status, initialized.stderr).toBe(0);
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", repository, ...args], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    return result.stdout.trim();
+  };
+  const commit = (message: string) => {
+    git(
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      message,
+    );
+    return git("rev-parse", "HEAD");
+  };
+  return { commit, git, python: python!, repository };
+}
+
+// require_diff_target is what the workbench runs whenever a diff selection is
+// made, saved, or revalidated at scan start; no CLI subcommand exposes it in
+// isolation, so drive it directly.
+function requireDiffTarget(
+  fixture: GitFixture,
+  kind: string,
+  baseRevision: string,
+  headRevision: string,
+  contentDigest: string,
+): Record<string, unknown> {
+  const result = spawnSync(
+    fixture.python,
+    [
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_db as workbench",
+        "try:",
+        "    target = workbench.require_diff_target(",
+        "        Path(sys.argv[2]),",
+        "        sys.argv[3],",
+        "        sys.argv[4] or None,",
+        "        sys.argv[5] or None,",
+        "        sys.argv[6] or None,",
+        "    )",
+        "except SystemExit as error:",
+        "    print(json.dumps({'accepted': False, 'error': str(error)}))",
+        "else:",
+        "    print(json.dumps({'accepted': True, **target}))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      fixture.repository,
+      kind,
+      baseRevision,
+      headRevision,
+      contentDigest,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.stderr).toBe("");
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as Record<string, unknown>;
+}
+
+describe("committed diff target selection", () => {
+  test("diffs a root commit against the SHA-1 empty tree", async () => {
+    const fixture = await gitFixture("sha1");
+    await writeFile(join(fixture.repository, "a.txt"), "fixture\n");
+    fixture.git("add", "--", "a.txt");
+    const head = fixture.commit("root");
+
+    expect(requireDiffTarget(fixture, "commit", "", head, "")).toEqual({
+      accepted: true,
+      kind: "commit",
+      baseRevision: SHA1_EMPTY_TREE,
+      headRevision: head,
+      contentDigest: expect.stringMatching(CONTENT_DIGEST),
+    });
+    // A single commit revalidates its recorded digest the way a range does.
+    expect(
+      requireDiffTarget(fixture, "commit", "", head, FOREIGN_DIGEST),
+    ).toMatchObject({
+      accepted: false,
+      error: expect.stringContaining("no longer produce the same diff"),
+    });
+  });
+
+  testSha256(
+    "diffs a root commit against a SHA-256 repository's empty tree",
+    async () => {
+      const fixture = await gitFixture("sha256");
+      await writeFile(join(fixture.repository, "a.txt"), "fixture\n");
+      fixture.git("add", "--", "a.txt");
+      const head = fixture.commit("root");
+
+      // Git only resolves an empty tree whose id matches the object format, so a
+      // digest at all proves the base revision is the SHA-256 one.
+      expect(requireDiffTarget(fixture, "commit", "", head, "")).toEqual({
+        accepted: true,
+        kind: "commit",
+        baseRevision: SHA256_EMPTY_TREE,
+        headRevision: head,
+        contentDigest: expect.stringMatching(CONTENT_DIGEST),
+      });
+    },
+  );
+
+  test("rejects a committed range whose recorded digest no longer matches", async () => {
+    const fixture = await gitFixture("sha1");
+    const path = join(fixture.repository, "f.txt");
+    await writeFile(path, "base\n");
+    fixture.git("add", "--", "f.txt");
+    const base = fixture.commit("base");
+    await writeFile(path, "reviewed\n");
+    fixture.git("add", "--", "f.txt");
+    const head = fixture.commit("head");
+
+    const selected = requireDiffTarget(fixture, "range", base, head, "");
+    const digest = String(selected["contentDigest"]);
+    expect(digest).toMatch(CONTENT_DIGEST);
+    expect(
+      requireDiffTarget(fixture, "range", base, head, digest),
+    ).toMatchObject({ accepted: true, contentDigest: digest });
+
+    // A replace ref leaves both revision IDs intact while swapping the objects
+    // Git reads for them, so the range now reviews content nobody selected.
+    await writeFile(path, "substituted\n");
+    fixture.git("add", "--", "f.txt");
+    fixture.git("replace", "-f", head, fixture.commit("substituted"));
+
+    expect(
+      requireDiffTarget(fixture, "range", base, head, digest),
+    ).toMatchObject({
+      accepted: false,
+      error: expect.stringContaining("no longer produce the same diff"),
+    });
+    // Selections saved before the workbench recorded digests still revalidate.
+    expect(requireDiffTarget(fixture, "range", base, head, "")).toMatchObject({
+      accepted: true,
+    });
   });
 });
