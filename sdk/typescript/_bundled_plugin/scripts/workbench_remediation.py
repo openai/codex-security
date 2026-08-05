@@ -5,13 +5,31 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_constants import CLAIM_LEASE_SECONDS, DELIVERED_ACTION_LEASE_SECONDS
 from workbench_validation import require_occurrence, require_uuid
+
+
+def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
+    if remediation["pending_action_claim_token"] is None:
+        return False
+    delivered_at = remediation["pending_action_delivered_at"]
+    claimed_at = delivered_at or remediation["pending_action_claimed_at"]
+    if not isinstance(claimed_at, str):
+        return True
+    try:
+        parsed = datetime.fromisoformat(claimed_at)
+        if parsed.tzinfo is None:
+            return True
+    except ValueError:
+        return True
+    lease_seconds = DELIVERED_ACTION_LEASE_SECONDS if delivered_at else CLAIM_LEASE_SECONDS
+    return parsed > datetime.now(timezone.utc) - timedelta(seconds=lease_seconds)
 
 
 def register_cancel_finding_remediation_request(subparsers: Any) -> None:

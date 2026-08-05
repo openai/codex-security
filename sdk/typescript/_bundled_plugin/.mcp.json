@@ -12,7 +12,14 @@
         "PYTHON",
         "CODEX_SECURITY_KNOWLEDGE_BASE",
         "CODEX_SECURITY_SCAN_ROOT",
-        "CODEX_SECURITY_STATE_DIR"
+        "CODEX_SECURITY_STATE_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS"
       ],
       "tool_timeout_sec": 86400
     }
