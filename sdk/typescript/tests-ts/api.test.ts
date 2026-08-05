@@ -44,6 +44,7 @@ import {
 import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  scanModelProvider,
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
@@ -1138,6 +1139,78 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each(EXTERNAL_PROVIDER_CASES)(
+    "preserves the selected %s profile provider in saved scan recipes",
+    (_name, provider, _apiKey, model, providerConfig) => {
+      const config = scanPreflightCodexConfig({
+        model_provider: "openai",
+        profile: "selected",
+        profiles: { selected: { model, model_provider: provider } },
+        model_providers: {
+          [provider]: {
+            ...providerConfig,
+            api_key: "synthetic-provider-secret",
+          },
+          private: { bearer_token: "synthetic-unrelated-secret" },
+        },
+      });
+
+      expect(config).toEqual({
+        model_provider: "openai",
+        profile: "selected",
+        profiles: { selected: { model, model_provider: provider } },
+        model_providers: { [provider]: providerConfig },
+      });
+      expect(scanModelProvider(config)).toBe(provider);
+      expect(JSON.stringify(config)).not.toContain("synthetic-");
+    },
+  );
+
+  test("preserves safe Bedrock provider settings in profile-selected scan recipes", () => {
+    const config = scanPreflightCodexConfig({
+      model_provider: "openai",
+      profile: "bedrock",
+      profiles: {
+        bedrock: {
+          model: "openai.gpt-5.6-luna",
+          model_provider: "amazon-bedrock",
+        },
+      },
+      model_providers: {
+        "amazon-bedrock": {
+          aws: {
+            region: "us-east-2",
+            profile: "security-prod",
+            access_key_id: "synthetic-aws-access-key",
+            secret_access_key: "synthetic-aws-secret-key",
+            session_token: "synthetic-aws-session-token",
+            bearer_token: "synthetic-bedrock-bearer",
+          },
+          api_key: "synthetic-provider-key",
+        },
+        openrouter: { api_key: "synthetic-unrelated-key" },
+      },
+    });
+
+    expect(config).toEqual({
+      model_provider: "openai",
+      profile: "bedrock",
+      profiles: {
+        bedrock: {
+          model: "openai.gpt-5.6-luna",
+          model_provider: "amazon-bedrock",
+        },
+      },
+      model_providers: {
+        "amazon-bedrock": {
+          aws: { region: "us-east-2", profile: "security-prod" },
+        },
+      },
+    });
+    expect(scanModelProvider(config)).toBe("amazon-bedrock");
+    expect(JSON.stringify(config)).not.toContain("synthetic-");
+  });
+
+  test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting another provider's credentials",
     async (name, provider, apiKey, model, providerConfig) => {
       const root = await temporaryDirectory();
@@ -1379,6 +1452,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     let codexOptions: CodexOptions | null = null;
     let authentication: ScanAuthentication | undefined;
+    let savedRecipe: Record<string, unknown> | undefined;
     const environment = {
       OPENAI_API_KEY: "synthetic-openai-key-must-not-be-used",
       AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
@@ -1395,6 +1469,11 @@ describe("CodexSecurity orchestration", () => {
               model_provider: "amazon-bedrock",
             },
           },
+          model_providers: {
+            "amazon-bedrock": {
+              aws: { region: "us-east-2", profile: "security-prod" },
+            },
+          },
         },
       },
       {
@@ -1407,6 +1486,12 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          if (args[0] === "register-cli-scan") {
+            savedRecipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+          }
+          return mockWorkbench(args);
+        },
         resolveCodexCommand: () => {
           throw new Error("The Bedrock profile must not sign in to OpenAI");
         },
@@ -1457,6 +1542,23 @@ describe("CodexSecurity orchestration", () => {
       "OPENAI_API_KEY",
     );
     expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
+    expect(savedRecipe).toMatchObject({
+      config: {
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+          },
+        },
+        model_providers: {
+          "amazon-bedrock": {
+            aws: { region: "us-east-2", profile: "security-prod" },
+          },
+        },
+      },
+    });
     await client.close();
   });
 

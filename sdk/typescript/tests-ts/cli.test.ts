@@ -36,6 +36,7 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import { scanPreflightCodexConfig } from "../src/api.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -2778,6 +2779,67 @@ describe("CLI", () => {
     expect(configuration).toContain('model="gpt-5.6-terra"');
     expect(configuration).toContain('reasoning_effort="high"');
   });
+
+  test.each([
+    [
+      "Amazon Bedrock",
+      "amazon-bedrock",
+      "openai.gpt-5.6-luna",
+      { aws: { region: "us-east-2", profile: "security-prod" } },
+      { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
+    ],
+    [
+      "OpenRouter",
+      "openrouter",
+      "anthropic/claude-sonnet-4.5",
+      OPENROUTER_CODEX_PROVIDER,
+      { OPENROUTER_API_KEY: "synthetic-openrouter-key" },
+    ],
+    [
+      "Fireworks AI",
+      "fireworks",
+      "accounts/fireworks/models/qwen3-235b-a22b",
+      FIREWORKS_CODEX_PROVIDER,
+      { FIREWORKS_API_KEY: "synthetic-fireworks-key" },
+    ],
+  ] as const)(
+    "reruns profile-selected %s scans with their saved provider configuration",
+    async (_name, provider, model, providerConfig, environment) => {
+      const savedConfig = scanPreflightCodexConfig({
+        model_provider: "openai",
+        profile: "selected",
+        profiles: { selected: { model, model_provider: provider } },
+        model_providers: { [provider]: providerConfig },
+      });
+      let rerunConfig: CodexSecurityConfig | undefined;
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original", "--json"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            environment,
+            onConfig: (value) => (rerunConfig = value),
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: savedConfig,
+              },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      expect(rerunConfig?.codexOverrides).toMatchObject({
+        model_provider: "openai",
+        profile: "selected",
+        profiles: { selected: { model, model_provider: provider } },
+        model_providers: { [provider]: providerConfig },
+      });
+    },
+  );
 
   test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {
     const stdout = capture();

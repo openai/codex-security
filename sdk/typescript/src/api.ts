@@ -2327,12 +2327,6 @@ export function scanPreflightCodexConfig(
   };
 
   const result = executionConfig(config);
-  const modelProvider = result["model_provider"];
-  if (isExternalModelProvider(modelProvider)) {
-    result["model_providers"] = {
-      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
-    };
-  }
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]
     : undefined;
@@ -2355,6 +2349,28 @@ export function scanPreflightCodexConfig(
       if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
+  }
+  const modelProvider = scanModelProvider(result);
+  if (isExternalModelProvider(modelProvider)) {
+    result["model_providers"] = {
+      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
+    };
+  } else if (modelProvider === "amazon-bedrock") {
+    const providers = config["model_providers"];
+    const provider = isRecord(providers) ? providers[modelProvider] : undefined;
+    const aws = isRecord(provider) ? provider["aws"] : undefined;
+    if (isRecord(aws)) {
+      const sanitized: JsonObject = {};
+      for (const key of ["region", "profile"]) {
+        const value = aws[key];
+        if (safeString(value, 512)) sanitized[key] = value;
+      }
+      if (Object.keys(sanitized).length > 0) {
+        result["model_providers"] = {
+          [modelProvider]: { aws: sanitized },
+        };
+      }
+    }
   }
   const rootMarkers = config["project_root_markers"];
   if (Array.isArray(rootMarkers)) {
