@@ -43,6 +43,7 @@ import {
 } from "../src/api.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
+  HUGGINGFACE_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   writeCodexConfig,
   type JsonObject,
@@ -78,6 +79,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "FIREWORKS_API_KEY",
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Hugging Face",
+    "huggingface",
+    "HF_TOKEN",
+    "openai/gpt-oss-120b",
+    HUGGINGFACE_CODEX_PROVIDER,
   ],
 ] as const;
 const TestClientBase = CodexSecurity as unknown as new (

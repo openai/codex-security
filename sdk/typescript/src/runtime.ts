@@ -45,7 +45,10 @@ import {
   PluginPythonUnavailableError,
   redactedErrorMessage,
 } from "./errors.js";
-import type { JsonObject } from "./config.js";
+import {
+  EXTERNAL_CODEX_PROVIDER_ENV_KEYS,
+  type JsonObject,
+} from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -1248,13 +1251,14 @@ export async function runWorkbench(
       ],
       {
         env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY" &&
-              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-              name.toUpperCase() !== "FIREWORKS_API_KEY",
-          ),
+          Object.entries(options.environment).filter(([name]) => {
+            const key = name.toUpperCase();
+            return (
+              key !== "OPENAI_API_KEY" &&
+              key !== "CODEX_API_KEY" &&
+              !EXTERNAL_CODEX_PROVIDER_ENV_KEYS.has(key)
+            );
+          }),
         ),
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
