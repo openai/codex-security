@@ -10,7 +10,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
-from workbench_validation import require_uuid
+from workbench_validation import optional_text, require_uuid, user_text
 
 MAX_PREFLIGHT_ISSUES_JSON_BYTES = 64 * 1024
 MAX_PREFLIGHT_ISSUES = 32
@@ -77,6 +77,86 @@ def reportable_count(
     return count
 
 
+def update_context(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    now: Callable[[], str],
+    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
+    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row],
+    scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
+) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    context = user_text(args.user_context)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        scan = require_scan(connection, scan_id)
+        if scan["status"] != "running" or scan["canceled_at"] is not None:
+            raise SystemExit("Only a running scan can update context.")
+        workspace = require_workspace(connection, scan["workspace_id"])
+        if args.workspace_id is not None:
+            if args.claim_token is not None:
+                raise SystemExit("claim-token is only valid with thread-id.")
+            if require_uuid(args.workspace_id, "workspace-id") != workspace["id"]:
+                raise SystemExit("This scan does not belong to the selected workspace.")
+        else:
+            thread_id = optional_text(args.thread_id, maximum=512)
+            owning_thread_id = scan["continuation_thread_id"] or workspace["thread_id"]
+            if thread_id is None or thread_id != owning_thread_id:
+                raise SystemExit("This scan does not belong to the current Codex thread.")
+            require_current_continuation(
+                scan,
+                args.claim_token,
+                error_message="Scan context updates are owned by another continuation.",
+            )
+        timestamp = now()
+        connection.execute(
+            "UPDATE scans SET user_context = ?, updated_at = ? WHERE id = ?",
+            (context, timestamp, scan["id"]),
+        )
+        if args.workspace_id is not None:
+            connection.execute(
+                "UPDATE workspaces SET user_context = ?, updated_at = ? WHERE id = ?",
+                (context, timestamp, workspace["id"]),
+            )
+        else:
+            connection.execute(
+                "UPDATE workspaces SET updated_at = ? WHERE id = ?",
+                (timestamp, workspace["id"]),
+            )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return scan_context(connection, scan_id)
+
+
+def update(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    now: Callable[[], str],
+    require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
+    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row],
+    scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
+) -> dict[str, Any]:
+    if args.command == "update-scan-context":
+        return update_context(
+            connection,
+            args,
+            now=now,
+            require_scan=require_scan,
+            require_workspace=require_workspace,
+            scan_context=scan_context,
+        )
+    return update_progress(
+        connection,
+        args,
+        now=now,
+        require_scan=require_scan,
+        scan_context=scan_context,
+    )
+
+
 def update_progress(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
@@ -86,6 +166,8 @@ def update_progress(
     scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
+    model = optional_text(args.model, maximum=200)
+    reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
     serialized_preflight_issues = preflight_issues_json(args.preflight_issues_json)
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -189,10 +271,11 @@ def update_progress(
         updated = connection.execute(
             """
             UPDATE scans
-            SET phase = COALESCE(?, phase), updated_at = ?
+            SET phase = COALESCE(?, phase), model = COALESCE(?, model),
+                reasoning_effort = COALESCE(?, reasoning_effort), updated_at = ?
             WHERE id = ? AND status = 'running'
             """,
-            (args.phase, timestamp, scan["id"]),
+            (args.phase, model, reasoning_effort, timestamp, scan["id"]),
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can update progress.")
