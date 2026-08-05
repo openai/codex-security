@@ -204,7 +204,12 @@ describe("scan history renderer", () => {
       findingsTruncated: true,
       artifacts: { markdownReport: "/demo/results/report.md" },
       recipe: {
-        config: { model: "gpt-5.6-sol", model_reasoning_effort: "high" },
+        config: {
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "high",
+          features: { goals: true, multi_agent_v2: { enabled: true } },
+          trusted_paths: ["src", "packages/core"],
+        },
       },
       findings: Array.from({ length: 20 }, (_, index) => ({
         severity: { level: "high" },
@@ -218,6 +223,8 @@ describe("scan history renderer", () => {
       "PARENT SCAN  87654321",
       "CONFIGURATION",
       "model=gpt-5.6-sol",
+      'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
+      'trusted_paths=["src","packages/core"]',
       "COVERAGE",
       "12 of 15 reviewed",
       "9 files",
