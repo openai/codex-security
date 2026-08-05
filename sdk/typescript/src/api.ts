@@ -30,6 +30,7 @@ import {
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
   type JsonObject,
   writeCodexConfig,
@@ -328,6 +329,7 @@ export class CodexSecurity {
     );
     const configuration = await mergedCodexConfig(this.config);
     const model = scanModelConfiguration(configuration);
+    const modelProvider = scanModelProvider(configuration);
     validateScanCostLimit(options.maxCostUsd, model.model);
     const archiveDir =
       options.archiveExisting === true
@@ -347,12 +349,10 @@ export class CodexSecurity {
       authentication: scanAuthentication(
         this.#dependencies.environment,
         options.auth,
-        configuration["model_provider"],
+        modelProvider,
       ),
       ...model,
-      ...(typeof configuration["model_provider"] === "string"
-        ? { modelProvider: configuration["model_provider"] }
-        : {}),
+      ...(typeof modelProvider === "string" ? { modelProvider } : {}),
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
@@ -425,7 +425,7 @@ export class CodexSecurity {
       checkOpen();
 
       const requestedConfig = await mergedCodexConfig(this.config);
-      const modelProvider = requestedConfig["model_provider"];
+      const modelProvider = scanModelProvider(requestedConfig);
       const externalProvider = isExternalModelProvider(modelProvider)
         ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
         : null;

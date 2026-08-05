@@ -31,7 +31,14 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
+
+Amazon Bedrock also supports standard AWS access keys, profiles, web identity,
+container credentials, and the default AWS credential chain.
 
 Local sign-in honors Codex's configured credential backend, including a system
 keyring required by a managed device. Codex Security keeps login and scan

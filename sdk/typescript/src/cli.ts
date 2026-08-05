@@ -51,6 +51,7 @@ import {
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
   type ExternalModelProvider,
   type JsonObject,
@@ -200,7 +201,7 @@ const VALUE_OPTIONS = new Set([
   "--reason",
 ]);
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks"])
+  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
 
@@ -259,7 +260,7 @@ interface ScanArguments extends DeepScanOptions {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
-  provider?: "openai" | ExternalModelProvider;
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -2729,13 +2730,14 @@ async function runScan(
         ),
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
+    const effectiveConfiguration = {
+      ...DEFAULT_CODEX_CONFIG,
+      ...config.codexOverrides,
+    };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
-      scanModelConfiguration({
-        ...DEFAULT_CODEX_CONFIG,
-        ...config.codexOverrides,
-      }));
+      scanModelConfiguration(effectiveConfiguration));
     let auth = arguments_.auth;
-    const provider = config.codexOverrides?.["model_provider"];
+    const provider = scanModelProvider(effectiveConfiguration);
     selectedAuthentication = scanAuthentication(
       dependencies.environment,
       auth,
@@ -3543,7 +3545,7 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelReasoningEffort,
-  provider?: "openai" | ExternalModelProvider,
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
@@ -3553,6 +3555,8 @@ export function parseCodexOverrides(
     result["model_providers"] = {
       [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
     };
+  } else if (provider === "amazon-bedrock") {
+    result["model_provider"] = provider;
   }
   for (const value of values) {
     const separator = value.indexOf("=");
@@ -3609,7 +3613,10 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
-      if (isExternalModelProvider(provider) && key === "model_provider") {
+      if (
+        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+        key === "model_provider"
+      ) {
         throw new CodexSecurityError(
           "--provider conflicts with --codex model_provider",
         );
@@ -3618,7 +3625,10 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
-  if (isExternalModelProvider(provider) && !("model" in result)) {
+  if (
+    (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+    !("model" in result)
+  ) {
     throw new CodexSecurityError(
       `--model is required when using --provider ${provider}`,
     );

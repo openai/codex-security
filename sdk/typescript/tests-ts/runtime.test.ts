@@ -120,6 +120,49 @@ describe("plugin runtime preparation", () => {
     ).toBe(true);
   });
 
+  test("forwards bundled Bedrock credentials through the MCP worker environment", async () => {
+    const awsKeys = [
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "AWS_PROFILE",
+      "AWS_REGION",
+      "AWS_DEFAULT_REGION",
+      "AWS_CONFIG_FILE",
+      "AWS_SHARED_CREDENTIALS_FILE",
+      "AWS_ROLE_ARN",
+      "AWS_ROLE_SESSION_NAME",
+      "AWS_WEB_IDENTITY_TOKEN_FILE",
+      "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+      "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+      "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+      "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    ];
+    const configuration = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+    ) as {
+      mcpServers: Record<string, { env_vars: string[] }>;
+    };
+    const parentEnvironment = Object.fromEntries(
+      awsKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
+    );
+    const allowed = new Set(
+      configuration.mcpServers["codex-security"]!.env_vars,
+    );
+    const mcpEnvironment = Object.fromEntries(
+      Object.entries(parentEnvironment).filter(([name]) => allowed.has(name)),
+    );
+    const worker = spawnSync(
+      process.execPath,
+      ["-e", "process.stdout.write(JSON.stringify(process.env))"],
+      { encoding: "utf8", env: mcpEnvironment },
+    );
+
+    expect(worker.status).toBe(0);
+    expect(JSON.parse(worker.stdout)).toMatchObject(parentEnvironment);
+  });
+
   test("rejects control characters in bundled artifact paths and candidate IDs", async () => {
     const schema = JSON.parse(
       await readFile(

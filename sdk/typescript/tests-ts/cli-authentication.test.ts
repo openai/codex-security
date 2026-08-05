@@ -373,8 +373,10 @@ describe("CLI authentication", () => {
         await main(
           [
             "scan",
-            "--codex",
-            'model_provider="amazon-bedrock"',
+            "--provider",
+            "amazon-bedrock",
+            "--model",
+            "openai.gpt-5.6-luna",
             "--json",
             "--verbose",
           ],

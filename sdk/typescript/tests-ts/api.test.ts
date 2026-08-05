@@ -1288,7 +1288,7 @@ describe("CodexSecurity orchestration", () => {
       const client = new TestClient(
         {
           codexOverrides: {
-            model: "openai.gpt-oss-120b-1:0",
+            model: "openai.gpt-5.6-luna",
             model_provider: "amazon-bedrock",
           },
         },
@@ -1320,14 +1320,16 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
-      const preflight = await client.preflight(repository);
+      const preflight = await client.preflight(repository, { maxCostUsd: 1 });
       expect(preflight).toMatchObject({
-        model: "openai.gpt-oss-120b-1:0",
+        model: "openai.gpt-5.6-luna",
         modelProvider: "amazon-bedrock",
         authentication: { method: "aws_credentials", source, verified: false },
+        maxCostUsd: 1,
       });
       expect(JSON.stringify(preflight)).not.toContain("synthetic-");
       const result = await client.run(repository, {
+        maxCostUsd: 1,
         onAuthentication: (selected) => {
           authentication = selected;
         },
@@ -1341,6 +1343,17 @@ describe("CodexSecurity orchestration", () => {
       expect((codexOptions as CodexOptions | null)?.env).toMatchObject(
         credentials,
       );
+      const configuration = JSON.parse(
+        await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+      ) as { mcpServers: Record<string, { env_vars: string[] }> };
+      const mcpEnvironment = Object.fromEntries(
+        Object.entries((codexOptions as CodexOptions | null)?.env ?? {}).filter(
+          ([name]) =>
+            configuration.mcpServers["codex-security"]!.env_vars.includes(name),
+        ),
+      );
+      expect(mcpEnvironment).toMatchObject(credentials);
+      expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
       for (const key of [
         "OPENAI_API_KEY",
         "CODEX_API_KEY",
@@ -1355,6 +1368,97 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     },
   );
+
+  test("uses the selected Bedrock profile for authentication and cost limits", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let codexOptions: CodexOptions | null = null;
+    let authentication: ScanAuthentication | undefined;
+    const environment = {
+      OPENAI_API_KEY: "synthetic-openai-key-must-not-be-used",
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-east-2",
+    };
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          profile: "bedrock",
+          model_provider: "openai",
+          profiles: {
+            bedrock: {
+              model: "openai.gpt-5.6-luna",
+              model_provider: "amazon-bedrock",
+            },
+          },
+        },
+      },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+          credentialsAvailable: false,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        resolveCodexCommand: () => {
+          throw new Error("The Bedrock profile must not sign in to OpenAI");
+        },
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          };
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { maxCostUsd: 1 }),
+    ).resolves.toMatchObject({
+      model: "openai.gpt-5.6-luna",
+      modelProvider: "amazon-bedrock",
+      maxCostUsd: 1,
+      authentication: {
+        method: "aws_credentials",
+        source: "AWS_BEARER_TOKEN_BEDROCK",
+        verified: false,
+      },
+    });
+    const result = await client.run(repository, {
+      maxCostUsd: 1,
+      onAuthentication: (selected) => {
+        authentication = selected;
+      },
+    });
+
+    expect(authentication).toEqual({
+      method: "aws_credentials",
+      source: "AWS_BEARER_TOKEN_BEDROCK",
+      verified: false,
+    });
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-east-2",
+    });
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "OPENAI_API_KEY",
+    );
+    expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
+    await client.close();
+  });
 
   test("does not accept Bedrock credentials for an OpenAI scan", async () => {
     const root = await temporaryDirectory();

@@ -121,7 +121,9 @@ describe("CLI", () => {
           model: { type: "string" },
           verbose: { type: "boolean" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
-          provider: { enum: ["openai", "openrouter", "fireworks"] },
+          provider: {
+            enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
+          },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           headless: { type: "boolean" },
         },
@@ -1894,7 +1896,9 @@ describe("CLI", () => {
       "Use plain text progress instead of the interactive dashboard.",
     );
     expect(help.text()).toContain("--model <string>");
-    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
+    expect(help.text()).toContain(
+      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+    );
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
@@ -1960,7 +1964,9 @@ describe("CLI", () => {
     );
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
+    expect(help.text()).toContain(
+      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+    );
     expect(stderr.text()).toBe("");
   });
 
@@ -2048,6 +2054,31 @@ describe("CLI", () => {
       }
     },
   );
+
+  test("routes scans through the built-in Amazon Bedrock provider", async () => {
+    for (const options of [
+      ["--provider", "amazon-bedrock", "--model", "openai.gpt-5.6-luna"],
+      ["--provider=amazon-bedrock", "--codex", 'model="openai.gpt-5.6-luna"'],
+    ] as const) {
+      let config: CodexSecurityConfig | undefined;
+      expect(
+        await main(
+          ["scan", ".", ...options],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock" },
+            onConfig: (value) => (config = value),
+          }),
+        ),
+      ).toBe(0);
+      expect(config?.codexOverrides).toEqual({
+        model: "openai.gpt-5.6-luna",
+        model_provider: "amazon-bedrock",
+      });
+      expect(config?.codexOverrides).not.toHaveProperty("model_providers");
+    }
+  });
 
   test("parses repeatable options and every scan target through Incur", async () => {
     const pathOutput = capture();
@@ -2164,7 +2195,11 @@ describe("CLI", () => {
         "high",
       ),
     ).toThrow("--effort conflicts with --codex model_reasoning_effort");
-    for (const provider of ["openrouter", "fireworks"] as const) {
+    for (const provider of [
+      "openrouter",
+      "fireworks",
+      "amazon-bedrock",
+    ] as const) {
       expect(() =>
         parseCodexOverrides([], undefined, undefined, provider),
       ).toThrow(`--model is required when using --provider ${provider}`);
