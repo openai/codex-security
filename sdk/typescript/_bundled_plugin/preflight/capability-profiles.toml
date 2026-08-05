@@ -1,16 +1,5 @@
 version = 1
 
-[capabilities.deep_scan_phase_skills]
-kind = "plugin_skills"
-plugin = "codex-security"
-required = [
-  "attack-path-analysis",
-  "finding-discovery",
-  "security-scan",
-  "threat-model",
-  "validation",
-]
-
 [capabilities.delegated_workers]
 kind = "runtime"
 check = "delegation_available"
@@ -44,15 +33,6 @@ path = "features.goals"
 op = "=="
 value = true
 default = true
-
-[capabilities.native_multi_agent_v2]
-kind = "multi_agent_mode"
-owner = "native"
-version = "v2"
-
-[capabilities.sdk_v2_child_config_compatible]
-kind = "config_absent"
-path = "agents.max_threads"
 
 [profiles.security_diff_scan]
 description = "Capabilities for Git-backed Codex Security diff scans."
@@ -99,21 +79,6 @@ reason = "Enabling goals makes long scans easier to resume and audit."
 description = "Capabilities for deep repository-wide Codex Security scans."
 
 [[profiles.deep_security_scan.requirements]]
-capability = "deep_scan_phase_skills"
-severity = "block"
-reason = "Deep scan depends on Codex Security phase skills loaded in the current runtime."
-
-[[profiles.deep_security_scan.requirements]]
-capability = "native_multi_agent_v2"
-severity = "block"
-reason = "Deep scan launches SDK discovery workers with native Subagents v2; legacy V1 and bridge-owned parent configurations are incompatible with that worker runtime."
-
-[[profiles.deep_security_scan.requirements]]
-capability = "sdk_v2_child_config_compatible"
-severity = "block"
-reason = "Deep scan child sessions inherit Codex configuration while enabling Subagents v2, so the legacy agents.max_threads setting must be removed before those sessions can start."
-
-[[profiles.deep_security_scan.requirements]]
 capability = "goal_tools"
 severity = "suggest"
 reason = "Goal tools help long deep scans preserve completion criteria across many rounds."
@@ -143,28 +108,6 @@ summary = "Recommended Codex setup for deep repository-wide scans."
 [[profiles.deep_security_scan.remediation.patches]]
 path = "features.goals"
 value = true
-
-[[profiles.deep_security_scan.remediation.variants]]
-mode = "v1"
-
-[[profiles.deep_security_scan.remediation.variants.patches]]
-kind = "remove"
-path = "agents.max_threads"
-
-[[profiles.deep_security_scan.remediation.variants.patches]]
-path = "features.multi_agent_v2.enabled"
-value = true
-
-[[profiles.deep_security_scan.remediation.variants.patches]]
-path = "features.multi_agent_v2.max_concurrent_threads_per_session"
-value = 4
-
-[[profiles.deep_security_scan.remediation.variants]]
-mode = "v2"
-
-[[profiles.deep_security_scan.remediation.variants.patches]]
-kind = "remove"
-path = "agents.max_threads"
 
 [[routes]]
 skill = "security-diff-scan"
