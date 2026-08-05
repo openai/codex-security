@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, type Stats } from "node:fs";
 import {
@@ -31,6 +31,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { crc32 } from "node:zlib";
@@ -65,6 +66,7 @@ const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
+const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -553,17 +555,25 @@ function windowsAceAllowsAncestorReplacement(
   inheritanceFlags: ReadonlySet<string>,
 ): boolean {
   if (inheritanceFlags.has("IO")) return false;
-  if (["FA", "GA", "FW", "GW"].includes(rights)) return true;
   if (/^0x[\da-f]+$/iu.test(rights)) {
     return (BigInt(rights) & 0x100d0040n) !== 0n;
   }
-  return ["SD", "WD", "WO", "DC", "DT"].some((right) => rights.includes(right));
+  for (let index = 0; index < rights.length; index += 2) {
+    if (
+      ["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(
+        rights.slice(index, index + 2),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
-export async function readStableWindowsCredentialDescendantDescriptors(
+export async function verifyStableWindowsCredentialDescendants(
   path: string,
-  readDescriptors: () => Promise<string[]>,
-): Promise<string[]> {
+  inspectDescriptors: () => Promise<number>,
+): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let descendants = 0;
     const pending = [path];
@@ -585,13 +595,71 @@ export async function readStableWindowsCredentialDescendantDescriptors(
         if (metadata.isDirectory()) pending.push(child);
       }
     }
-    if (descendants === 0) return [];
+    if (descendants === 0) return;
 
-    const descriptors = await readDescriptors();
-    if (descriptors.length === descendants) return descriptors;
+    if ((await inspectDescriptors()) === descendants) return;
   }
 
   throw new Error("Windows credential descendants could not be verified");
+}
+
+export async function streamWindowsCredentialAclDescriptors(
+  command: string,
+  args: readonly string[],
+  inspectDescriptor: (descriptor: string) => Promise<void>,
+  options: { environment?: NodeJS.ProcessEnv } = {},
+): Promise<number> {
+  const child = spawn(command, [...args], {
+    env: options.environment,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    const remaining = MAX_WINDOWS_CREDENTIAL_ACL_STDERR - stderr.length;
+    if (remaining > 0) stderr += chunk.slice(0, remaining);
+  });
+
+  const completion = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const reason = signal === null ? `exit code ${code}` : `signal ${signal}`;
+      reject(
+        Object.assign(
+          new Error(`Windows credential ACL inspection failed with ${reason}`),
+          { code, signal, stderr },
+        ),
+      );
+    });
+  });
+
+  let descriptors = 0;
+  try {
+    await Promise.all([
+      completion,
+      (async () => {
+        const lines = createInterface({
+          input: child.stdout,
+          crlfDelay: Infinity,
+        });
+        for await (const descriptor of lines) {
+          if (descriptor === "") continue;
+          await inspectDescriptor(descriptor);
+          descriptors += 1;
+        }
+      })(),
+    ]);
+  } catch (error) {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    throw error;
+  }
+
+  return descriptors;
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
@@ -747,54 +815,16 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   if (ancestorDescriptors.length !== ancestorPaths.length) {
     throw new Error("Windows credential-home ancestry could not be verified");
   }
-  for (const [index, descriptor] of ancestorDescriptors.entries()) {
+  for (const descriptor of ancestorDescriptors) {
     await resolveDescriptorAliases(descriptor);
     const ancestor = inspectWindowsCredentialAcl(descriptor, sid, {
       resolvedAliases,
       scope: "ancestor",
     });
     if (ancestor.untrustedPrincipals.length === 0) continue;
-    const ancestorPath = ancestorPaths[index]!;
-    if (ancestor.owner !== sid || ancestorPath === dirname(ancestorPath)) {
-      throw new Error(
-        "Windows credential-home ancestor allows another identity to replace the directory",
-      );
-    }
-    await installTrustedAcl(ancestorPath);
-    for (const principal of ancestor.untrustedPrincipals) {
-      if (!WINDOWS_SID.test(principal)) {
-        throw new Error(
-          "Windows credential ACL contains an unresolvable identity",
-        );
-      }
-      await execFile(
-        icacls,
-        [ancestorPath, "/remove:g", `*${principal}`],
-        processOptions,
-      );
-    }
-    const repairedDescriptor = await execFile(
-      powershell,
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-      {
-        ...processOptions,
-        env: {
-          ...processOptions.env,
-          CODEX_SECURITY_CREDENTIAL_ACL_PATH: ancestorPath,
-        },
-      },
+    throw new Error(
+      "Windows credential-home ancestor allows another identity to replace the directory",
     );
-    await resolveDescriptorAliases(repairedDescriptor.stdout);
-    const repaired = inspectWindowsCredentialAcl(
-      repairedDescriptor.stdout,
-      sid,
-      { resolvedAliases, scope: "ancestor" },
-    );
-    if (repaired.untrustedPrincipals.length !== 0) {
-      throw new Error(
-        "Windows credential-home ancestor allows another identity to replace the directory",
-      );
-    }
   }
 
   const descendantsArePrivate = async (): Promise<boolean> => {
@@ -802,39 +832,35 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       "$ErrorActionPreference = 'Stop'",
       "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Security\\Get-Acl | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
     ].join("; ");
-    const descriptors = await readStableWindowsCredentialDescendantDescriptors(
-      path,
-      async () => {
-        const result = await execFile(
-          powershell,
-          [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            descendantScript,
-          ],
-          processOptions,
-        );
-        return result.stdout
-          .split(/\r?\n/u)
-          .filter((descriptor) => descriptor !== "");
-      },
-    );
-    for (const descriptor of descriptors) {
-      await resolveDescriptorAliases(descriptor);
-      const descendant = inspectWindowsCredentialAcl(descriptor, sid, {
-        resolvedAliases,
-        scope: "file",
-      });
-      if (
-        !descendant.grantsCurrentUserAccess ||
-        descendant.untrustedPrincipals.length !== 0
-      ) {
-        return false;
-      }
-    }
-    return true;
+    let privateDescendants = true;
+    await verifyStableWindowsCredentialDescendants(path, async () => {
+      privateDescendants = true;
+      return streamWindowsCredentialAclDescriptors(
+        powershell,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          descendantScript,
+        ],
+        async (descriptor) => {
+          await resolveDescriptorAliases(descriptor);
+          const descendant = inspectWindowsCredentialAcl(descriptor, sid, {
+            resolvedAliases,
+            scope: "file",
+          });
+          if (
+            !descendant.grantsCurrentUserAccess ||
+            descendant.untrustedPrincipals.length !== 0
+          ) {
+            privateDescendants = false;
+          }
+        },
+        { environment: processOptions.env },
+      );
+    });
+    return privateDescendants;
   };
 
   let existing: WindowsCredentialAcl | undefined;

@@ -61,7 +61,6 @@ import {
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentScanRoot,
-  readStableWindowsCredentialDescendantDescriptors,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -70,6 +69,8 @@ import {
   requireTrustedOutputAncestor,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  streamWindowsCredentialAclDescriptors,
+  verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -1823,16 +1824,12 @@ describe("runtime directories and plugin Python boundary", () => {
     await writeFile(temporary, "temporary credential\n");
     let attempts = 0;
 
-    const descriptors = await readStableWindowsCredentialDescendantDescriptors(
-      home,
-      async () => {
-        attempts += 1;
-        if (attempts === 1) await rm(temporary);
-        return ["trusted credential descriptor"];
-      },
-    );
+    await verifyStableWindowsCredentialDescendants(home, async () => {
+      attempts += 1;
+      if (attempts === 1) await rm(temporary);
+      return 1;
+    });
 
-    expect(descriptors).toEqual(["trusted credential descriptor"]);
     expect(attempts).toBe(2);
   });
 
@@ -1844,12 +1841,49 @@ describe("runtime directories and plugin Python boundary", () => {
     let attempts = 0;
 
     await expect(
-      readStableWindowsCredentialDescendantDescriptors(home, async () => {
+      verifyStableWindowsCredentialDescendants(home, async () => {
         attempts += 1;
-        return [];
+        return 0;
       }),
     ).rejects.toThrow("Windows credential descendants could not be verified");
     expect(attempts).toBe(3);
+  });
+
+  test("streams Windows credential ACL output larger than the subprocess buffer", async () => {
+    const descriptor =
+      "O:S-1-5-21-111-222-333-1001G:SYD:P(A;;FA;;;S-1-5-21-111-222-333-1001)";
+    const expected = Math.ceil((1024 * 1024) / (descriptor.length + 1)) + 1;
+    let observed = 0;
+
+    const count = await streamWindowsCredentialAclDescriptors(
+      process.execPath,
+      [
+        "--eval",
+        `process.stdout.write(${JSON.stringify(`${descriptor}\n`)}.repeat(${expected}))`,
+      ],
+      async (received) => {
+        if (observed === 0 || observed === expected - 1) {
+          expect(received).toBe(descriptor);
+        }
+        observed += 1;
+      },
+    );
+
+    expect(count).toBe(expected);
+    expect(observed).toBe(expected);
+  });
+
+  test("preserves Windows credential ACL subprocess failures while streaming", async () => {
+    await expect(
+      streamWindowsCredentialAclDescriptors(
+        process.execPath,
+        [
+          "--eval",
+          'process.stderr.write("synthetic ACL inspection failure"); process.exitCode = 1',
+        ],
+        async () => {},
+      ),
+    ).rejects.toMatchObject({ stderr: "synthetic ACL inspection failure" });
   });
 
   test("accepts managed Windows ACLs with trusted system principals", () => {
@@ -1886,6 +1920,12 @@ describe("runtime directories and plugin Python boundary", () => {
       "GA",
       "FW",
       "GW",
+      "GAGX",
+      "GXGA",
+      "GWGX",
+      "GXGW",
+      "FAGX",
+      "FWGX",
       "SD",
       "WD",
       "WO",
@@ -1907,6 +1947,8 @@ describe("runtime directories and plugin Python boundary", () => {
 
     for (const [flags, rights] of [
       ["", "FR"],
+      ["", "FRGX"],
+      ["", "GRGX"],
       ["", "0x1200a9"],
       ["IO", "FA"],
     ] as const) {
@@ -2531,7 +2573,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "repairs attacker-writable Windows credential-home ancestry",
+    "rejects attacker-writable Windows credential-home ancestry without changing it",
     async () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
@@ -2563,11 +2605,13 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(writable.status).toBe(0);
       }
 
-      expect(
-        await prepareCodexSecurityCredentialHome({
+      await expect(
+        prepareCodexSecurityCredentialHome({
           CODEX_SECURITY_STATE_DIR: state,
         }),
-      ).toBe(await realpath(join(state, "codex-home")));
+      ).rejects.toThrow(
+        "Windows credential-home ancestor allows another identity to replace the directory",
+      );
 
       for (const ancestor of [root, state]) {
         const inspection = spawnSync(
@@ -2590,10 +2634,7 @@ describe("runtime directories and plugin Python boundary", () => {
           },
         );
         expect(inspection.status).toBe(0);
-        expect(JSON.parse(inspection.stdout)).toEqual({
-          protected: true,
-          everyone: 0,
-        });
+        expect(JSON.parse(inspection.stdout).everyone).toBeGreaterThan(0);
       }
     },
   );
