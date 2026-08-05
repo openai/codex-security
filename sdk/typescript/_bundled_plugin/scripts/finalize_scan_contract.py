@@ -17,7 +17,7 @@ import re
 import secrets
 import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, TextIO
@@ -1979,6 +1979,32 @@ def _validate_sarif(sarif: dict[str, Any]) -> None:
             raise ContractError("SARIF: result references an unknown rule")
         if not result.get("partialFingerprints"):
             raise ContractError("SARIF: result is missing partialFingerprints")
+    _validate_sarif_invocations(run.get("invocations"))
+
+
+def _validate_sarif_invocations(invocations: Any) -> None:
+    if invocations is None:
+        return
+    if not isinstance(invocations, list) or not invocations:
+        raise ContractError("SARIF: invocations must be a non-empty array when present")
+    for invocation in invocations:
+        if not isinstance(invocation, dict):
+            raise ContractError("SARIF: expected an invocation object")
+        if invocation.get("executionSuccessful") is not True:
+            raise ContractError("SARIF: invocation is missing executionSuccessful")
+        notifications = invocation.get("toolExecutionNotifications")
+        if not isinstance(notifications, list) or not notifications:
+            raise ContractError("SARIF: invocation has no toolExecutionNotifications")
+        for notification in notifications:
+            if not isinstance(notification, dict):
+                raise ContractError("SARIF: expected a notification object")
+            if notification.get("level") not in {"none", "note", "warning", "error"}:
+                raise ContractError("SARIF: notification has an unsupported level")
+            message = notification.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("text"), str):
+                raise ContractError("SARIF: notification is missing message text")
+            if not message["text"].strip():
+                raise ContractError("SARIF: notification message text is empty")
 
 
 def _artifact_record(
@@ -2085,7 +2111,10 @@ def _read_sealed_scan(
 
 
 def build_sarif_projection(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+    scan_dir: Path,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+    warnings: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     if source_root is not None:
         try:
@@ -2097,27 +2126,39 @@ def build_sarif_projection(
             raise ContractError("source root: expected an existing directory")
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
+    run = sarif["runs"][0]
+    notifications: list[dict[str, Any]] = []
+    reported: set[str] = set()
     if coverage["completeness"] != "complete":
-        run = sarif["runs"][0]
         run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
-        if coverage["deferred"]:
-            run["invocations"] = [
-                {
-                    "executionSuccessful": True,
-                    "toolExecutionNotifications": [
-                        {"level": "warning", "message": {"text": item["reason"]}}
-                        for item in coverage["deferred"]
-                    ],
-                }
-            ]
+        for item in coverage["deferred"]:
+            reported.add(item["reason"])
+            notifications.append({"level": "warning", "message": {"text": item["reason"]}})
+    # Run warnings are reported whatever the completeness. A scan whose target drifted
+    # reviewed everything it set out to review, so it stays complete; the tree simply moved
+    # underneath it, and `toolExecutionNotifications` is where SARIF expects to read that.
+    # Deferred coverage already contributes its reason verbatim as a warning, so the same
+    # text is not notified twice.
+    for warning in warnings or ():
+        if not isinstance(warning, str) or not warning or warning in reported:
+            continue
+        reported.add(warning)
+        notifications.append({"level": "warning", "message": {"text": warning}})
+    if notifications:
+        run["invocations"] = [
+            {"executionSuccessful": True, "toolExecutionNotifications": notifications}
+        ]
     _validate_sarif(sarif)
     return sarif
 
 
 def write_sarif_projection(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+    scan_dir: Path,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+    warnings: Sequence[str] | None = None,
 ) -> None:
-    sarif = build_sarif_projection(scan_dir, source_root, schema_dir)
+    sarif = build_sarif_projection(scan_dir, source_root, schema_dir, warnings)
     _write_scan_local_json(scan_dir, "exports/results.sarif", sarif)
 
 
@@ -2296,10 +2337,13 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
 
 
 def _write_sarif_projection_if_possible(
-    scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
+    scan_dir: Path,
+    source_root: Path | None = None,
+    schema_dir: Path | None = None,
+    warnings: Sequence[str] | None = None,
 ) -> None:
     try:
-        write_sarif_projection(scan_dir, source_root, schema_dir)
+        write_sarif_projection(scan_dir, source_root, schema_dir, warnings)
     except (ContractError, OSError) as error:
         print(
             f"codex-security: warning: automatic SARIF export failed: {error}. "
@@ -2444,6 +2488,7 @@ def _prepare_scan_finalization(
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
+    warnings: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
@@ -2460,7 +2505,7 @@ def _write_prepared_scan_finalization(
     if was_sealed:
         write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
         _remove_scan_local_file_if_exists(scan_dir, "report.html")
-        _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
+        _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir, warnings)
         return manifest, findings, coverage
 
     _write_scan_local_json(scan_dir, "findings.json", findings)
@@ -2469,7 +2514,7 @@ def _write_prepared_scan_finalization(
     _remove_scan_local_file_if_exists(scan_dir, "report.html")
     _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
     _validate_existing_seal(scan_dir, scan)
-    _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
+    _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir, warnings)
     return manifest, findings, coverage
 
 
@@ -2480,6 +2525,7 @@ def finalize_scan(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
+    warnings: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     prepared = _prepare_scan_finalization(
         scan_dir,
@@ -2487,7 +2533,7 @@ def finalize_scan(
         expected_coverage_mode=expected_coverage_mode,
         completion_binding=completion_binding,
     )
-    return _write_prepared_scan_finalization(prepared, source_root)
+    return _write_prepared_scan_finalization(prepared, source_root, warnings)
 
 
 def main() -> int:

@@ -1461,7 +1461,7 @@ def complete_scan_locked(
                 target_warnings.append(warning)
             if warning not in warnings:
                 warnings.append(warning)
-        manifest, findings, _ = _write_prepared_scan_finalization(prepared)
+        manifest, findings, _ = _write_prepared_scan_finalization(prepared, warnings=warnings)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
     artifacts = {
@@ -2362,10 +2362,14 @@ def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) ->
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     require_recorded_manifest_digest(scan, scan_dir)
     verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
+    # Re-exporting has to reproduce the notifications the scan recorded at completion,
+    # so the warnings are read back rather than left behind with the completed scan.
+    completion_warnings = json.loads(scan["completion_warnings_json"])
     try:
         manifest, _, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
+            warnings=completion_warnings,
         )
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
@@ -2376,7 +2380,7 @@ def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) ->
         path = artifact_path(scan_dir, ARTIFACTS["findings"], required=True)
     elif args.format == "sarif":
         try:
-            write_sarif_projection(scan_dir)
+            write_sarif_projection(scan_dir, warnings=completion_warnings)
         except ContractError as exc:
             raise SystemExit(str(exc)) from exc
         path = artifact_path(scan_dir, "exports/results.sarif", required=True)
