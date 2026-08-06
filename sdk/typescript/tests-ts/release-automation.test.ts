@@ -1585,23 +1585,27 @@ describe("GitHub release workflow safeguards", () => {
 
       try {
         const outputPath = join(workspace, "outputs");
-        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
-          cwd: fileURLToPath(new URL("../../../", import.meta.url)),
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            GITHUB_EVENT_NAME: event,
-            GITHUB_OUTPUT: outputPath,
-            GITHUB_REF: "refs/heads/main",
-            GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            MOCK_PREVIOUS_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            MOCK_PREVIOUS_VERSION: previousVersion,
-            MOCK_PUBLISHED_VERSIONS: JSON.stringify(publishedVersions),
-            MOCK_RELEASE_VERSION: currentVersion,
-            RELEASE_SHA: releaseCommit,
+        const result = spawnSync(
+          releaseTestBash,
+          ["-c", `${mocks}\n${script}`],
+          {
+            cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GITHUB_EVENT_NAME: event,
+              GITHUB_OUTPUT: outputPath,
+              GITHUB_REF: "refs/heads/main",
+              GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              MOCK_PREVIOUS_SHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              MOCK_PREVIOUS_VERSION: previousVersion,
+              MOCK_PUBLISHED_VERSIONS: JSON.stringify(publishedVersions),
+              MOCK_RELEASE_VERSION: currentVersion,
+              RELEASE_SHA: releaseCommit,
+            },
+            timeout: 10_000,
           },
-          timeout: 10_000,
-        });
+        );
 
         expect(result.stderr).toBe("");
         expect(result.status).toBe(0);
@@ -1716,6 +1720,7 @@ describe("GitHub release workflow safeguards", () => {
       "Create the exact merged release tag",
     );
     const mock = [
+      "jq() { printf '404\\n'; }",
       "gh() {",
       '  if [[ "$1" != "api" ]]; then return 64; fi',
       "  shift",
@@ -1732,7 +1737,7 @@ describe("GitHub release workflow safeguards", () => {
       "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(releaseTestBash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
