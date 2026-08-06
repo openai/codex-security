@@ -211,6 +211,7 @@ npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --su
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
+npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
@@ -476,6 +477,11 @@ Private checkouts reuse your GitHub CLI sign-in without changing your global Git
 configuration. The selected repositories are saved to
 `<output-dir>/repositories.csv` for review or resumption.
 
+Interactive discovery accepts the same `--workers`, `--mode`, `--max-attempts`,
+`--model`, `--effort`, `--plugin-path`, `--python`, and `--codex` settings as
+CSV-driven scans. It prompts for the output directory; `--output-dir` is only
+valid when a repository CSV is supplied.
+
 To use an existing repository list or run in CI, pass a CSV with required `id`,
 `repository`, and `revision` columns. Revisions must be full commit hashes;
 optional `scope` and `mode` columns narrow individual scans:
@@ -624,6 +630,10 @@ Reports and resumable scan results are written to `results/`; the reusable
 device login remains in `state/`. For unattended scans, set `OPENAI_API_KEY`
 or `CODEX_API_KEY` instead. Set `GH_TOKEN` or `GITHUB_TOKEN` for private
 GitHub repositories.
+
+The container accepts the repository CSV before or after bulk-scan options.
+Interactive repository discovery remains disabled, including when global CLI
+options appear before `bulk-scan`.
 
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
 can install the optional, narrowly scoped AppArmor profile once:
