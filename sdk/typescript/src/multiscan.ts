@@ -14,7 +14,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
-import type { CodexSecurity } from "./api.js";
+import type { CodexSecurity, ScanWarningDetails } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { redactedErrorMessage } from "./errors.js";
@@ -37,12 +37,22 @@ interface MultiscanTask {
   scope?: string;
 }
 
+/**
+ * A warning the scan raised while still completing. `kind` is carried so a
+ * consumer can single out drift without matching on message text.
+ */
+interface MultiscanWarning {
+  message: string;
+  kind?: ScanWarningDetails["kind"];
+}
+
 interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "failed";
   attempt: number;
   outputDir: string;
   cost?: ScanCost;
   error?: string;
+  warnings?: MultiscanWarning[];
 }
 
 export interface MultiscanOptions {
@@ -159,6 +169,9 @@ async function runCampaign(
         options.onProgress?.({ ...progress, status: "started" });
         let failure: string | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        // Per attempt, so a retry does not inherit the previous attempt's
+        // warnings alongside its own.
+        const warnings: MultiscanWarning[] = [];
         try {
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
           await rm(checkout, { recursive: true, force: true });
@@ -187,6 +200,17 @@ async function runCampaign(
               : {}),
             mode: task.mode,
             outputDir: scanDir,
+            // Without an observer the scan's warnings are dropped on the floor.
+            // A repository whose target drifted mid-run still completes, so it
+            // lands in the ledger as "completed" with nothing recording that
+            // the results describe a tree that moved. Redacted on the way in
+            // for the same reason failures are: this is written to a file.
+            onWarning: (warning, details) => {
+              warnings.push({
+                message: redactedErrorMessage(warning),
+                ...(details === undefined ? {} : { kind: details.kind }),
+              });
+            },
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
@@ -209,6 +233,7 @@ async function runCampaign(
             outputDir: scanDir,
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
+            ...(warnings.length === 0 ? {} : { warnings }),
           })}\n`,
         );
         options.onProgress?.({

@@ -742,4 +742,99 @@ describe("multiscan", () => {
       { id: "complete", status: "completed", attempt: 1 },
     ]);
   });
+
+  test("records run warnings in the receipt for a repository that still completed", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "drifted");
+    await writeFile(
+      paths.input,
+      `id,repository,revision
+drifted,${source.path},${source.revision}
+`,
+    );
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_target, scanOptions) => {
+          scanOptions?.onWarning?.("Scan target changed during the run.", {
+            kind: "target_changed",
+          });
+          return await completedScan(scanOptions?.outputDir ?? paths.output);
+        }),
+        { maxAttempts: 1 },
+      ),
+    );
+
+    expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
+    // The repository did complete, so the status is right; without the warning
+    // beside it the receipt says a drifted tree was scanned cleanly.
+    expect(await results(summary.resultsPath)).toMatchObject([
+      {
+        id: "drifted",
+        status: "completed",
+        warnings: [
+          {
+            message: "Scan target changed during the run.",
+            kind: "target_changed",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("omits the warnings field when a repository raised none", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "quiet");
+    await writeFile(
+      paths.input,
+      `id,repository,revision
+quiet,${source.path},${source.revision}
+`,
+    );
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_target, scanOptions) =>
+          completedScan(scanOptions?.outputDir ?? paths.output),
+        ),
+        { maxAttempts: 1 },
+      ),
+    );
+
+    const [receipt] = await results(summary.resultsPath);
+    expect(receipt).toMatchObject({ id: "quiet", status: "completed" });
+    expect(receipt).not.toHaveProperty("warnings");
+  });
+
+  test("redacts credential-shaped values in recorded warnings", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "leaky");
+    await writeFile(
+      paths.input,
+      `id,repository,revision
+leaky,${source.path},${source.revision}
+`,
+    );
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_target, scanOptions) => {
+          scanOptions?.onWarning?.(
+            "Remote rejected token=ghp_0123456789abcdefghijklmnopqrstuvwxyz.",
+          );
+          return await completedScan(scanOptions?.outputDir ?? paths.output);
+        }),
+        { maxAttempts: 1 },
+      ),
+    );
+
+    const [receipt] = await results(summary.resultsPath);
+    const [warning] = (receipt as { warnings: { message: string }[] }).warnings;
+    // The ledger is a file on disk, so warnings get the same treatment errors do.
+    expect(warning.message).not.toContain("ghp_0123456789");
+    expect(warning.message).toContain("[redacted]");
+  });
 });
