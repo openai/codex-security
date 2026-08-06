@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/definitions/discovery-candidate.schema.json",
+  "$defs": {
+    "nonEmptyText": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "cweId": {
+      "type": "string",
+      "pattern": "^\\s*[Cc][Ww][Ee]-0*[1-9][0-9]*\\s*$"
+    },
+    "locationRole": {
+      "enum": [
+        "entrypoint",
+        "entrypoint/wrapper",
+        "source",
+        "root_control",
+        "sink",
+        "concrete_implementation",
+        "evidence"
+      ]
+    },
+    "rawDiscoveryLocation": {
+      "type": "object",
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyText" },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "role": { "$ref": "#/$defs/locationRole" }
+      },
+      "required": ["path", "start_line", "role"],
+      "additionalProperties": false
+    },
+    "normalizedDiscoveryLocation": {
+      "type": "object",
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyText" },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "role": { "$ref": "#/$defs/locationRole" }
+      },
+      "required": ["path", "start_line", "end_line", "role"],
+      "additionalProperties": false
+    },
+    "rawDiscoveryCandidate": {
+      "type": "object",
+      "properties": {
+        "cwe_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/cweId" }
+        },
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/rawDiscoveryLocation" }
+        },
+        "summary": { "$ref": "#/$defs/nonEmptyText" },
+        "evidence": { "$ref": "#/$defs/nonEmptyText" },
+        "context": { "$ref": "#/$defs/nonEmptyText" },
+        "instance": { "$ref": "#/$defs/nonEmptyText" }
+      },
+      "required": ["cwe_ids", "locations", "summary", "evidence"],
+      "additionalProperties": false
+    },
+    "discoveryCandidate": {
+      "type": "object",
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^(?!\\.{1,2}$)[^/\\\\]+$"
+        },
+        "cwe_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^CWE-[1-9][0-9]*$"
+          }
+        },
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/normalizedDiscoveryLocation" }
+        },
+        "summary": { "$ref": "#/$defs/nonEmptyText" },
+        "evidence": { "$ref": "#/$defs/nonEmptyText" },
+        "context": { "$ref": "#/$defs/nonEmptyText" },
+        "instance": { "$ref": "#/$defs/nonEmptyText" }
+      },
+      "required": [
+        "candidate_id",
+        "cwe_ids",
+        "locations",
+        "summary",
+        "evidence"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -75,7 +75,7 @@ def parse_args(description: str) -> argparse.Namespace:
     begin_diff_resolution.add_argument("--workspace-id", required=True)
     begin_diff_resolution.add_argument("--request-id", required=True)
     begin_diff_resolution.add_argument("--target-path", required=True)
-    begin_diff_resolution.add_argument("--user-context", required=True)
+    begin_diff_resolution.add_argument("--user-context")
 
     cancel_diff_resolution = subparsers.add_parser("cancel-diff-resolution")
     cancel_diff_resolution.add_argument("--workspace-id", required=True)
@@ -113,6 +113,8 @@ def parse_args(description: str) -> argparse.Namespace:
     start_scan = subparsers.add_parser("start-scan")
     start_scan.add_argument("--workspace-id", required=True)
     start_scan.add_argument("--scan-root")
+    start_scan.add_argument("--model")
+    start_scan.add_argument("--reasoning-effort")
 
     disable_setup_ui = subparsers.add_parser("disable-setup-ui")
     disable_setup_ui.add_argument("--workspace-id", required=True)
@@ -129,6 +131,25 @@ def parse_args(description: str) -> argparse.Namespace:
     start_prompt_only_scan.add_argument("--diff-head-revision")
     start_prompt_only_scan.add_argument("--diff-content-digest")
     start_prompt_only_scan.add_argument("--scan-root")
+    start_prompt_only_scan.add_argument("--model")
+    start_prompt_only_scan.add_argument("--reasoning-effort")
+
+    start_headless_standard_scan = subparsers.add_parser("start-headless-standard-scan")
+    start_headless_standard_scan.add_argument("--thread-id", required=True)
+    start_headless_standard_scan.add_argument("--target-path", required=True)
+    start_headless_standard_scan.add_argument("--scope", required=True)
+    start_headless_standard_scan.add_argument("--target-summary")
+    start_headless_standard_scan.add_argument("--user-context")
+    start_headless_standard_scan.add_argument("--scan-root")
+    start_headless_standard_scan.add_argument("--model")
+    start_headless_standard_scan.add_argument("--reasoning-effort")
+    start_headless_standard_scan.set_defaults(
+        mode="standard",
+        diff_target_kind=None,
+        diff_base_revision=None,
+        diff_head_revision=None,
+        diff_content_digest=None,
+    )
 
     deep_scan.register_subcommands(subparsers, positive_int)
 
@@ -138,6 +159,14 @@ def parse_args(description: str) -> argparse.Namespace:
 
     get_scan_feedback = subparsers.add_parser("get-scan-feedback")
     get_scan_feedback.add_argument("--scan-id", required=True)
+
+    update_scan_context = subparsers.add_parser("update-scan-context")
+    update_scan_context.add_argument("--scan-id", required=True)
+    update_scan_context.add_argument("--user-context", required=True)
+    update_scan_context_owner = update_scan_context.add_mutually_exclusive_group(required=True)
+    update_scan_context_owner.add_argument("--workspace-id")
+    update_scan_context_owner.add_argument("--thread-id")
+    update_scan_context.add_argument("--claim-token")
 
     list_scans = subparsers.add_parser("list-scans")
     list_scans.add_argument("--query")
@@ -209,6 +238,8 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
+    update_progress.add_argument("--model")
+    update_progress.add_argument("--reasoning-effort")
 
     prepare_scan_completion = subparsers.add_parser("prepare-scan-completion")
     prepare_scan_completion.add_argument("--scan-id", required=True)
@@ -218,6 +249,7 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan.add_argument("--scan-id", required=True)
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
+    complete_scan.add_argument("--thread-id")
 
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
