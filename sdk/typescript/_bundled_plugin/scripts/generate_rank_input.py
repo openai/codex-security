@@ -502,6 +502,10 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         check=True,
         capture_output=True,
         text=True,
+        # Git emits path names as UTF-8; decoding them with the process locale
+        # leaves stdout None for the split below when one tracked file has a
+        # non-ASCII name and the host codepage cannot represent it.
+        encoding="utf-8",
     )
     fields = result.stdout.split("\0")
     if fields and not fields[-1]:
