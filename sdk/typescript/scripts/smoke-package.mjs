@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -9,8 +10,16 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
 const PACKAGE_SMOKE_TIMEOUT_MS = packageSmokeTimeouts().commandTimeoutMs;
@@ -59,10 +68,11 @@ async function resolveArchive() {
 function run(
   command,
   args,
-  { cwd, capture = false, windowsVerbatimArguments = false } = {},
+  { cwd, env, capture = false, windowsVerbatimArguments = false } = {},
 ) {
   const result = spawnSync(command, args, {
     cwd,
+    env,
     encoding: "utf8",
     stdio: capture ? "pipe" : "inherit",
     timeout: PACKAGE_SMOKE_TIMEOUT_MS,
@@ -144,6 +154,115 @@ async function pluginFiles(directory) {
   }
 
   return files.sort();
+}
+
+async function smokeNestedDeepScanWorker(installedRoot, consumer) {
+  const sdk = await import(
+    pathToFileURL(join(installedRoot, "dist", "index.js")).href
+  );
+  const codexCommand = sdk.resolveCodexCommand();
+  assert.equal(
+    isAbsolute(codexCommand.command),
+    true,
+    "The bundled Codex executable must resolve to an absolute path.",
+  );
+
+  const workerHome = join(consumer, "nested-worker-home");
+  await mkdir(workerHome, { recursive: true, mode: 0o700 });
+  const parentEnvironment = sdk.pluginExecutionEnvironment(process.execPath, {
+    PATH: "",
+    HOME: workerHome,
+    USERPROFILE: workerHome,
+    CODEX_HOME: workerHome,
+    ...(process.env.SystemRoot === undefined
+      ? {}
+      : { SystemRoot: process.env.SystemRoot }),
+    ...(process.env.WINDIR === undefined ? {} : { WINDIR: process.env.WINDIR }),
+  });
+  const mcpConfiguration = JSON.parse(
+    await readFile(join(installedRoot, "_bundled_plugin", ".mcp.json"), "utf8"),
+  );
+  const inherited = new Set([
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SystemRoot",
+    "WINDIR",
+    ...mcpConfiguration.mcpServers["codex-security"].env_vars,
+  ]);
+  const workerEnvironment = Object.fromEntries(
+    Object.entries(parentEnvironment).filter(
+      ([name, value]) => value !== undefined && inherited.has(name),
+    ),
+  );
+  assert.equal(
+    workerEnvironment.CODEX_CLI_PATH,
+    codexCommand.command,
+    "The installed plugin must propagate the bundled Codex path into nested workers.",
+  );
+
+  const globalCodex = spawnSync("codex", ["--version"], {
+    cwd: consumer,
+    encoding: "utf8",
+    env: workerEnvironment,
+    windowsHide: true,
+  });
+  assert.equal(
+    globalCodex.error?.code,
+    "ENOENT",
+    "Nested-worker smoke must not depend on a globally installed codex executable.",
+  );
+  const codexVersion = run(codexCommand.command, ["--version"], {
+    cwd: consumer,
+    env: workerEnvironment,
+    capture: true,
+  });
+  assert.match(codexVersion, /^codex-cli\s+\d/u);
+
+  const workerSdkBridge = join(consumer, "nested-worker-sdk.mjs");
+  await writeFile(
+    workerSdkBridge,
+    'export { Codex } from "@openai/codex-sdk";\n',
+  );
+  const { Codex } = await import(pathToFileURL(workerSdkBridge).href);
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error("The nested Codex worker did not start.")),
+    15_000,
+  );
+  let started = false;
+  try {
+    const codex = new Codex({
+      codexPathOverride: workerEnvironment.CODEX_CLI_PATH,
+      env: workerEnvironment,
+      baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "synthetic-codex-security-package-smoke",
+    });
+    const { events } = await codex
+      .startThread({
+        workingDirectory: workerHome,
+        skipGitRepoCheck: true,
+        sandboxMode: "read-only",
+      })
+      .runStreamed("Validate packaged nested worker startup.", {
+        signal: controller.signal,
+      });
+    for await (const event of events) {
+      if (event.type === "thread.started") {
+        started = true;
+        controller.abort();
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+  }
+  assert.equal(
+    started,
+    true,
+    "The installed package must launch an actual nested Codex worker without codex on PATH.",
+  );
 }
 
 const archive = await resolveArchive();
@@ -279,9 +398,16 @@ try {
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
 
+  await smokeNestedDeepScanWorker(installedRoot, consumer);
+
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, and ${expectedPluginFiles.length} bundled plugin files.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
   );
 } finally {
-  await rm(consumer, { recursive: true, force: true });
+  await rm(consumer, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 100,
+  });
 }

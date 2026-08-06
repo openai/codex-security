@@ -2092,11 +2092,19 @@ async function codexSecurityPluginRegistration(
 
 export function resolveCodexCommand(): CodexCommand {
   const { packageName, targetTriple } = codexPlatformPackage();
-  const require = createRequire(import.meta.url);
-  const codexPackageJson = require.resolve("@openai/codex/package.json");
-  const packageJson = createRequire(codexPackageJson).resolve(
-    `${packageName}/package.json`,
-  );
+  let packageJson: string;
+  try {
+    const require = createRequire(import.meta.url);
+    const codexPackageJson = require.resolve("@openai/codex/package.json");
+    packageJson = createRequire(codexPackageJson).resolve(
+      `${packageName}/package.json`,
+    );
+  } catch (error) {
+    throw new PluginBootstrapError(
+      `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
+      { cause: error },
+    );
+  }
   const command = join(
     dirname(packageJson),
     "vendor",
@@ -2106,7 +2114,7 @@ export function resolveCodexCommand(): CodexCommand {
   );
   if (!existsSync(command)) {
     throw new PluginBootstrapError(
-      `The ${packageName} package does not contain the Codex executable for ${targetTriple}.`,
+      `The ${packageName} package does not contain the Codex executable for ${targetTriple}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
     );
   }
   return { command, prefixArgs: [] };
@@ -2405,7 +2413,12 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  return { ...environment, PYTHON: python };
+  return {
+    ...environment,
+    PYTHON: python,
+    CODEX_CLI_PATH:
+      environment["CODEX_CLI_PATH"]?.trim() || resolveCodexCommand().command,
+  };
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {
