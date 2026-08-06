@@ -2559,6 +2559,77 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("uses the registered scan ID in standard and deep prompts", async () => {
+    const scanId = "123e4567-e89b-12d3-a456-426614174000";
+
+    for (const mode of ["standard", "deep"] as const) {
+      for (const withFeedback of [false, true]) {
+        const root = await temporaryDirectory();
+        const repository = join(root, "repository");
+        const codexHome = join(root, "codex-home");
+        const scanDir = join(root, "scan");
+        await mkdir(repository);
+        await mkdir(codexHome);
+        await mkdir(scanDir, { mode: 0o700 });
+        let prompt = "";
+        const client = new TestClient(
+          {},
+          {
+            environment: {},
+            prepareRuntime: async () => preparedRuntime(codexHome),
+            resolvePluginPython: async () => "/managed/python",
+            prepareOutputDir: async () => scanDir,
+            repositoryRevision: async () => "deadbeef",
+            runWorkbench: async (
+              _options: unknown,
+              args: readonly string[],
+            ) => {
+              if (args[0] === "register-cli-scan") {
+                return { ...mockScanRegistration(args), scanId };
+              }
+              if (args[0] === "get-scan-feedback") {
+                return {
+                  scanId,
+                  targetId: "target_sha256_example",
+                  falsePositives: withFeedback
+                    ? [{ reason: "The finding is no longer reproducible." }]
+                    : [],
+                };
+              }
+              return {};
+            },
+            createCodex: () => ({
+              startThread: () => ({
+                id: null,
+                async runStreamed(input: string) {
+                  prompt = input;
+                  throw new Error("prompt captured");
+                },
+              }),
+            }),
+          },
+        );
+
+        await expect(client.run(repository, { mode })).rejects.toThrow(
+          "prompt captured",
+        );
+        expect(prompt).toContain(
+          `Use exactly "${scanId}" as the scan ID in the manifest, findings, and coverage.`,
+        );
+        expect(prompt).not.toContain("$CODEX_SECURITY_SCAN_ID");
+        if (mode === "deep") {
+          expect(prompt).toContain(
+            `start_codex_security_deep_scan with { scanId: "${scanId}" }`,
+          );
+        }
+        if (withFeedback) {
+          expect(prompt).toContain("false_positive_feedback.json");
+        }
+        await client.close();
+      }
+    }
+  });
+
   test("rejects feedback from another scan or invalid reviewer feedback", async () => {
     const scanId = "scan_example_001";
     const targetId = "target_sha256_example";
@@ -3986,7 +4057,7 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(prompt).toContain("$codex-security:deep-security-scan");
     expect(prompt).toContain(
-      'start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }',
+      'start_codex_security_deep_scan with { scanId: "scan_example_001" }',
     );
     expect(prompt).not.toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
