@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   appendFile,
   chmod,
@@ -12,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
+import type { ScanActivity } from "../src/scan-activity.js";
+import type { ScanProgress } from "../src/worker-progress.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -107,14 +110,139 @@ function failingOpen(
   };
 }
 
+async function appendSessionItem(
+  path: string,
+  payload: Readonly<Record<string, unknown>>,
+): Promise<void> {
+  await appendFile(
+    path,
+    `${JSON.stringify({ type: "response_item", payload })}\n`,
+  );
+}
+
+function progressMessage(
+  filesCompleted: number,
+  filesTotal = 8,
+  phase: ScanProgress["phase"] = "discovery",
+): Record<string, unknown> {
+  return {
+    type: "message",
+    role: "assistant",
+    content: [
+      {
+        type: "output_text",
+        text: `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+          phase,
+          filesCompleted,
+          filesTotal,
+        })}`,
+      },
+    ],
+  };
+}
+
 describe("scan cost", () => {
+  test("retains cached and alternate cache-write usage in workbench totals", async () => {
+    const { PLUGIN_ROOT } = await import("./plugin-root.js");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const usage = {
+      input_tokens: 100,
+      cached_input_tokens: 40,
+      cache_write_tokens: 15,
+      output_tokens: 20,
+      reasoning_output_tokens: 5,
+      total_tokens: 120,
+    };
+    const probe = [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_scan_usage",
+      "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
+      "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
+    ].join("\n");
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        probe,
+        join(PLUGIN_ROOT, "scripts"),
+        JSON.stringify(usage),
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      cacheWriteInputTokens: 15,
+      outputTokens: 20,
+      totalTokens: 120,
+    });
+  });
+
   test("uses published GPT-5.6 model rates", () => {
     const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
 
     expect(estimateScanCost("gpt-5.6", usage)?.estimatedUsd).toBe(35);
     expect(estimateScanCost("gpt-5.6-sol", usage)?.estimatedUsd).toBe(35);
-    expect(estimateScanCost("gpt-5.6-terra", usage)?.estimatedUsd).toBe(17.5);
-    expect(estimateScanCost("gpt-5.6-luna", usage)?.estimatedUsd).toBe(7);
+    expect(estimateScanCost("gpt-5.6-terra", usage)?.estimatedUsd).toBe(14);
+    expect(estimateScanCost("gpt-5.6-luna", usage)?.estimatedUsd).toBe(1.4);
+  });
+
+  test("uses canonical OpenAI pricing for Amazon Bedrock model identifiers", () => {
+    const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
+
+    for (const [model, expectedUsd] of [
+      ["openai.gpt-5.6", 35],
+      ["openai.gpt-5.6-sol", 35],
+      ["openai.gpt-5.6-terra", 14],
+      ["openai.gpt-5.6-luna", 1.4],
+    ] as const) {
+      expect(estimateScanCost(model, usage)).toMatchObject({
+        model,
+        estimatedUsd: expectedUsd,
+      });
+    }
+
+    expect(estimateScanCost("openai.unknown-model", usage)).toBeNull();
+  });
+
+  test("uses current Terra and Luna input, cache, and output rates", () => {
+    for (const [model, input, cached, write, output] of [
+      ["gpt-5.6-terra", 2, 0.2, 2.5, 12],
+      ["gpt-5.6-luna", 0.2, 0.02, 0.25, 1.2],
+    ] as const) {
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 1_000_000,
+          output_tokens: 0,
+        })?.estimatedUsd,
+      ).toBe(input);
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 1_000_000,
+          cached_input_tokens: 1_000_000,
+          output_tokens: 0,
+        })?.estimatedUsd,
+      ).toBe(cached);
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 1_000_000,
+          cache_write_input_tokens: 1_000_000,
+          output_tokens: 0,
+        })?.estimatedUsd,
+      ).toBe(write);
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 0,
+          output_tokens: 1_000_000,
+        })?.estimatedUsd,
+      ).toBe(output);
+    }
   });
 
   test("charges cached input at its discounted rate", () => {
@@ -252,6 +380,38 @@ describe("live scan cost tracking", () => {
     expect((await tracker.stop()).cost?.inputTokens).toBe(100);
   });
 
+  test("reports live token use and cost without a spending limit", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+    let reportCost!: (cost: unknown) => void;
+    const reportedCost = new Promise<unknown>((resolve) => {
+      reportCost = resolve;
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onCost: reportCost,
+    });
+    tracker.start("scan-thread");
+
+    try {
+      await expect(reportedCost).resolves.toEqual({
+        model: "gpt-5.6-sol",
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        cacheWriteInputTokens: 0,
+        outputTokens: 30,
+        estimatedUsd: 0.00625,
+      });
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
@@ -302,6 +462,922 @@ describe("live scan cost tracking", () => {
     });
   });
 
+  test("ignores replayed parent history in forked worker sessions", async () => {
+    const home = await codexHome();
+    const inherited = {
+      input_tokens: 1_000,
+      cached_input_tokens: 500,
+      cache_write_input_tokens: 100,
+      output_tokens: 100,
+      reasoning_output_tokens: 20,
+    };
+    await writeSession(home, "scan-thread", inherited);
+    const worker = await writeSession(home, "worker-thread", inherited);
+    const command =
+      'rg "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"';
+
+    await writeFile(
+      worker,
+      [
+        {
+          type: "session_meta",
+          payload: {
+            id: "worker-thread",
+            timestamp: "2026-07-26T12:02:00.250Z",
+            source: {
+              subagent: {
+                thread_spawn: { parent_thread_id: "scan-thread" },
+              },
+            },
+          },
+        },
+        {
+          type: "session_meta",
+          payload: {
+            id: "scan-thread",
+            timestamp: "2026-07-26T12:00:00.000Z",
+            source: "exec",
+          },
+        },
+        {
+          type: "event_msg",
+          payload: { type: "task_started", started_at: 1_785_067_200 },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "Inherited parent commentary.",
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "inherited-search",
+            arguments: JSON.stringify({ cmd: command }),
+          },
+        },
+        { type: "response_item", payload: progressMessage(7) },
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { total_token_usage: inherited },
+          },
+        },
+        {
+          type: "event_msg",
+          payload: { type: "task_started", started_at: 1_785_067_320 },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-07-26T12:02:01.000Z",
+          payload: {
+            type: "agent_message",
+            message: "Reviewing the login query.",
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "worker-search",
+            arguments: JSON.stringify({ cmd: command }),
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "worker-search",
+            output:
+              "Batch reviewed.\n" +
+              'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 1_300,
+                cached_input_tokens: 650,
+                cache_write_input_tokens: 150,
+                output_tokens: 130,
+                reasoning_output_tokens: 30,
+              },
+            },
+          },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n") + "\n",
+    );
+
+    const activities: ScanActivity[] = [];
+    const progress: ScanProgress[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      repository: "/code/juice-shop",
+      expectedFilesTotal: 8,
+      onActivity: (activity) => activities.push(activity),
+      onProgress: (update) => progress.push(update),
+    });
+    tracker.start("scan-thread");
+
+    expect(await tracker.stop()).toEqual({
+      usage: {
+        input_tokens: 1_300,
+        cached_input_tokens: 650,
+        cache_write_input_tokens: 150,
+        output_tokens: 130,
+        reasoning_output_tokens: 30,
+        total_tokens: 1_430,
+      },
+      cost: {
+        model: "gpt-5.6-terra",
+        inputTokens: 1_300,
+        cachedInputTokens: 650,
+        cacheWriteInputTokens: 150,
+        outputTokens: 130,
+        estimatedUsd: 0.003065,
+      },
+    });
+    expect(activities).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        description: "Reviewing the login query.",
+        worker: 1,
+      }),
+      expect.objectContaining({
+        id: "worker-thread:worker-search",
+        kind: "command",
+        status: "running",
+        worker: 1,
+      }),
+      expect.objectContaining({
+        id: "worker-thread:worker-search",
+        kind: "command",
+        status: "completed",
+        worker: 1,
+      }),
+    ]);
+    expect(progress).toEqual([
+      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+    ]);
+  });
+
+  test("forwards actions from this scan's delegated workers only", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    const parentPath = await writeSession(home, "scan-thread", usage);
+    const workerPath = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const unrelatedPath = await writeSession(home, "unrelated-thread", usage);
+    const command =
+      'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"';
+
+    for (const [path, callId] of [
+      [parentPath, "parent-command"],
+      [workerPath, "worker-command"],
+      [unrelatedPath, "unrelated-command"],
+    ] as const) {
+      await appendSessionItem(path, {
+        type: "function_call",
+        name: "exec_command",
+        call_id: callId,
+        arguments: JSON.stringify({ cmd: command }),
+      });
+      await appendSessionItem(path, {
+        type: "function_call_output",
+        call_id: callId,
+      });
+    }
+
+    const activities: ScanActivity[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(activities).toEqual([
+      {
+        id: "worker-thread:worker-command",
+        kind: "command",
+        status: "running",
+        description: command,
+        paths: ["routes/login.ts"],
+        worker: 1,
+      },
+      {
+        id: "worker-thread:worker-command",
+        kind: "command",
+        status: "completed",
+        description: command,
+        paths: ["routes/login.ts"],
+        worker: 1,
+      },
+    ]);
+  });
+
+  test("forwards genuine worker reasoning and transcript text", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const path = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    await appendSessionItem(path, {
+      id: "thinking-1",
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Following the login query." }],
+      encrypted_content: "do-not-display",
+    });
+    await appendSessionItem(path, {
+      id: "message-1",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "The query uses request input." }],
+    });
+
+    const activities: ScanActivity[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(activities).toEqual([
+      {
+        id: "worker-thread:thinking-1",
+        kind: "reasoning",
+        status: "completed",
+        description: "Following the login query.",
+        paths: [],
+        worker: 1,
+      },
+      {
+        id: "worker-thread:message-1",
+        kind: "message",
+        status: "completed",
+        description: "The query uses request input.",
+        paths: [],
+        worker: 1,
+      },
+    ]);
+  });
+
+  test("streams worker reasoning and commentary from live session events once", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    await appendFile(
+      worker,
+      [
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-07-26T12:00:00.000Z",
+          payload: {
+            type: "agent_reasoning",
+            text: "Tracing the login query.",
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            id: "reasoning-1",
+            type: "reasoning",
+            summary: [
+              { type: "summary_text", text: "Tracing the login query." },
+            ],
+            encrypted_content: "must-never-be-displayed",
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-07-26T12:00:01.000Z",
+          payload: {
+            type: "agent_message",
+            message:
+              "Reviewed the login query.\n" +
+              'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            id: "message-1",
+            type: "message",
+            role: "assistant",
+            content: [
+              { type: "output_text", text: "Reviewed the login query." },
+            ],
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const activities: ScanActivity[] = [];
+    const updates: ScanProgress[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      expectedFilesTotal: 8,
+      onActivity: (activity) => activities.push(activity),
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(activities).toEqual([
+      expect.objectContaining({
+        kind: "reasoning",
+        description: "Tracing the login query.",
+        worker: 1,
+      }),
+      expect.objectContaining({
+        kind: "message",
+        description: "Reviewed the login query.",
+        worker: 1,
+      }),
+    ]);
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+    ]);
+  });
+
+  test("expands streamed worker reasoning without duplicating summaries or exposing encrypted content", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const details = `${"The query reaches a privileged tenant boundary. ".repeat(30)}Final authorization check.`;
+    const raw = `**The route builds SQL from request parameters.** ${details}`;
+    await appendFile(
+      worker,
+      [
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_reasoning_delta",
+            delta: "Checking whether ",
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_reasoning_delta",
+            delta: "the login query escapes user input.",
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_reasoning",
+            text: "Checking whether the login query escapes user input.",
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_reasoning_raw_content_delta",
+            delta: "The route builds SQL ",
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_reasoning_raw_content_delta",
+            delta: "from request parameters.",
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_reasoning_raw_content",
+            text: raw,
+          },
+        },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_reasoning",
+            text: "This summary must not replace public raw reasoning.",
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            id: "reasoning-1",
+            type: "reasoning",
+            summary: [
+              {
+                type: "summary_text",
+                text: "Checking whether the login query escapes user input.",
+              },
+              { type: "summary_text", text: "Preparing SQL validation." },
+            ],
+            encrypted_content: "never-display-encrypted-reasoning",
+          },
+        },
+        "",
+      ]
+        .map((event) =>
+          typeof event === "string" ? event : JSON.stringify(event),
+        )
+        .join("\n"),
+    );
+
+    const activities: ScanActivity[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(new Set(activities.map((activity) => activity.id))).toEqual(
+      new Set(["worker-thread:reasoning-1"]),
+    );
+    expect(activities).toContainEqual(
+      expect.objectContaining({
+        kind: "reasoning",
+        status: "running",
+        description: "Checking whether the login query escapes user input.",
+        worker: 1,
+      }),
+    );
+    expect(activities.at(-1)).toEqual({
+      id: "worker-thread:reasoning-1",
+      kind: "reasoning",
+      status: "completed",
+      description: `The route builds SQL from request parameters. ${details}`,
+      paths: [],
+      worker: 1,
+    });
+    expect(activities.at(-1)!.description.length).toBeGreaterThan(1_000);
+    expect(JSON.stringify(activities)).not.toContain("encrypted-reasoning");
+  });
+
+  test("keeps distinct streamed worker reasoning summaries separate", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const summaries = [
+      "**Planning discovery worker tasks**",
+      "**Preparing thorough file batch reading**",
+      "**Verifying repository read access and tools**",
+    ];
+    await appendFile(
+      worker,
+      [
+        ...summaries.map((text) => ({
+          type: "event_msg",
+          payload: { type: "agent_reasoning", text },
+        })),
+        {
+          type: "response_item",
+          payload: {
+            id: "reasoning-1",
+            type: "reasoning",
+            summary: summaries.map((text) => ({ type: "summary_text", text })),
+            encrypted_content: "must-never-be-displayed",
+          },
+        },
+        "",
+      ]
+        .map((event) =>
+          typeof event === "string" ? event : JSON.stringify(event),
+        )
+        .join("\n"),
+    );
+
+    const activities: ScanActivity[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(activities).toEqual(
+      summaries.map((text, index) => ({
+        id: `worker-thread:reasoning-${index + 1}`,
+        kind: "reasoning",
+        status: "completed",
+        description: text.replaceAll("**", ""),
+        paths: [],
+        worker: 1,
+      })),
+    );
+  });
+
+  test("splits worker reasoning summaries without streamed events", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    await appendSessionItem(worker, {
+      id: "reasoning-1",
+      type: "reasoning",
+      summary: [
+        { type: "summary_text", text: "**Planning discovery worker tasks**" },
+        {
+          type: "summary_text",
+          text: "**Preparing thorough file batch reading**",
+        },
+      ],
+      encrypted_content: "must-never-be-displayed",
+    });
+
+    const activities: ScanActivity[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(activities).toEqual([
+      {
+        id: "worker-thread:reasoning-1:0",
+        kind: "reasoning",
+        status: "completed",
+        description: "Planning discovery worker tasks",
+        paths: [],
+        worker: 1,
+      },
+      {
+        id: "worker-thread:reasoning-1:1",
+        kind: "reasoning",
+        status: "completed",
+        description: "Preparing thorough file batch reading",
+        paths: [],
+        worker: 1,
+      },
+    ]);
+    expect(JSON.stringify(activities)).not.toContain("must-never-be-displayed");
+  });
+
+  test("forwards reviewed-file progress from descendant workers only", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    const parent = await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const descendant = await writeSession(
+      home,
+      "nested-worker-thread",
+      usage,
+      "worker-thread",
+    );
+    const unrelated = await writeSession(home, "unrelated-thread", usage);
+
+    await appendSessionItem(parent, progressMessage(1));
+    await appendSessionItem(worker, progressMessage(3));
+    await appendSessionItem(worker, progressMessage(4, 9));
+    await appendSessionItem(descendant, progressMessage(5));
+    await appendSessionItem(unrelated, progressMessage(7));
+
+    const updates: ScanProgress[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      expectedFilesTotal: 8,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: expect.any(Number), filesTotal: 8 },
+      { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+    ]);
+    expect([3, 5]).toContain(updates[0]!.filesCompleted);
+  });
+
+  test("aggregates worker progress without regressing or changing assigned shards", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    const parent = await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const otherWorker = await writeSession(
+      home,
+      "other-worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const unrelated = await writeSession(home, "unrelated-thread", usage);
+    const updates: ScanProgress[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      expectedFilesTotal: 1_258,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+
+    await appendSessionItem(worker, progressMessage(3, 1_249));
+    await tracker.refresh();
+
+    await appendSessionItem(otherWorker, progressMessage(2, 2));
+    await appendSessionItem(otherWorker, progressMessage(3, 3));
+    await appendSessionItem(otherWorker, progressMessage(1, 1_259));
+    await appendSessionItem(parent, progressMessage(1_200, 1_258));
+    await appendSessionItem(unrelated, progressMessage(1_200, 1_258));
+
+    const marker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+      phase: "discovery",
+      filesCompleted: 1_200,
+      filesTotal: 1_249,
+    })}`;
+    await appendSessionItem(otherWorker, {
+      type: "custom_tool_call_output",
+      call_id: "failed-shard-review",
+      status: "failed",
+      output: [{ type: "input_text", text: marker }],
+    });
+    await appendSessionItem(otherWorker, {
+      type: "custom_tool_call_output",
+      call_id: "documented-shard-example",
+      status: "completed",
+      output: [{ type: "input_text", text: `\`\`\`text\n${marker}\n\`\`\`` }],
+    });
+    await tracker.refresh();
+
+    await appendSessionItem(worker, progressMessage(1_249, 1_249));
+    await tracker.refresh();
+    await appendSessionItem(
+      worker,
+      progressMessage(1_249, 1_249, "validation"),
+    );
+    await tracker.refresh();
+    await tracker.stop();
+
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
+      { phase: "discovery", filesCompleted: 5, filesTotal: 1_258 },
+      { phase: "discovery", filesCompleted: 1_251, filesTotal: 1_258 },
+      { phase: "validation", filesCompleted: 1_251, filesTotal: 1_258 },
+    ]);
+  });
+
+  test("adds reviewed files from independent delegated-worker shards", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const first = await writeSession(home, "worker-a", usage, "scan-thread");
+    const second = await writeSession(home, "worker-b", usage, "scan-thread");
+    const unrelated = await writeSession(home, "unrelated-worker", usage);
+    const updates: ScanProgress[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      expectedFilesTotal: 4_198,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+
+    await appendSessionItem(first, progressMessage(250, 840));
+    await tracker.refresh();
+    await appendSessionItem(second, progressMessage(100, 839));
+    await tracker.refresh();
+    await appendSessionItem(unrelated, progressMessage(839, 839));
+    await appendSessionItem(first, progressMessage(840, 840));
+    await tracker.refresh();
+    await appendSessionItem(second, progressMessage(839, 839));
+    await tracker.refresh();
+    await tracker.stop();
+
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 250, filesTotal: 4_198 },
+      { phase: "discovery", filesCompleted: 350, filesTotal: 4_198 },
+      { phase: "discovery", filesCompleted: 940, filesTotal: 4_198 },
+      { phase: "discovery", filesCompleted: 1_679, filesTotal: 4_198 },
+    ]);
+  });
+
+  test("counts only explicit successful worker review receipts", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const marker = (filesCompleted: number) =>
+      `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+        phase: "discovery",
+        filesCompleted,
+        filesTotal: 8,
+      })}`;
+
+    for (const payload of [
+      {
+        type: "function_call",
+        name: "exec_command",
+        call_id: "search",
+        arguments: JSON.stringify({
+          cmd: 'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+        }),
+      },
+      {
+        type: "function_call_output",
+        call_id: "search",
+        output: "routes/login.ts:12: const password = request.body.password;",
+      },
+      {
+        type: "function_call_output",
+        call_id: "failed-review",
+        status: "failed",
+        output: marker(2),
+      },
+      {
+        type: "function_call_output",
+        call_id: "malformed-review",
+        output:
+          'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "completed-review",
+        output: `Batch reviewed.\n${marker(3)}`,
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "documented-example",
+        output: [
+          { type: "input_text", text: "Example:" },
+          { type: "input_text", text: `\`\`\`text\n${marker(4)}\n\`\`\`` },
+        ],
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "completed-structured-review",
+        status: "completed",
+        output: [
+          { type: "input_text", text: "Batch reviewed." },
+          { type: "input_text", text: marker(4) },
+        ],
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "completed-custom-review",
+        output: marker(5),
+      },
+      progressMessage(9),
+    ]) {
+      await appendSessionItem(worker, payload);
+    }
+
+    const updates: ScanProgress[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      expectedFilesTotal: 8,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.stop();
+
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+      { phase: "discovery", filesCompleted: 4, filesTotal: 8 },
+      { phase: "discovery", filesCompleted: 5, filesTotal: 8 },
+    ]);
+  });
+
+  test("polls worker file progress without another observer", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    await appendSessionItem(worker, progressMessage(3));
+
+    let reportProgress!: (progress: ScanProgress) => void;
+    const reportedProgress = new Promise<ScanProgress>((resolve) => {
+      reportProgress = resolve;
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      expectedFilesTotal: 8,
+      onProgress: reportProgress,
+    });
+    tracker.start("scan-thread");
+
+    try {
+      await expect(reportedProgress).resolves.toEqual({
+        phase: "discovery",
+        filesCompleted: 3,
+        filesTotal: 8,
+      });
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("reports newly completed worker batches once per progress update", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      usage,
+      "scan-thread",
+    );
+    const updates: ScanProgress[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      expectedFilesTotal: 8,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+
+    await appendSessionItem(worker, progressMessage(3));
+    await tracker.refresh();
+    await appendSessionItem(worker, progressMessage(3));
+    await tracker.refresh();
+    await appendSessionItem(worker, progressMessage(5));
+    await tracker.refresh();
+    await tracker.stop();
+
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+      { phase: "discovery", filesCompleted: 5, filesTotal: 8 },
+    ]);
+  });
+
   test("uses each session's final cumulative usage without double counting", async () => {
     const home = await codexHome();
     const path = await writeSession(home, "scan-thread", {
@@ -313,7 +1389,7 @@ describe("live scan cost tracking", () => {
       model: "gpt-5.6-terra",
     });
     tracker.start("scan-thread");
-    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.0004);
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00032);
 
     const latest = JSON.stringify({
       type: "event_msg",
@@ -332,7 +1408,7 @@ describe("live scan cost tracking", () => {
       cachedInputTokens: 0,
       cacheWriteInputTokens: 0,
       outputTokens: 20,
-      estimatedUsd: 0.000925,
+      estimatedUsd: 0.00074,
     });
   });
 
@@ -388,7 +1464,7 @@ describe("live scan cost tracking", () => {
       cachedInputTokens: 0,
       cacheWriteInputTokens: 0,
       outputTokens: 10,
-      estimatedUsd: 0.0004,
+      estimatedUsd: 0.00032,
     });
   });
 
@@ -516,7 +1592,7 @@ describe("live scan cost tracking", () => {
         cachedInputTokens: 0,
         cacheWriteInputTokens: 0,
         outputTokens: 20,
-        estimatedUsd: 0.00112,
+        estimatedUsd: 0.000224,
       },
     });
   });
@@ -534,7 +1610,7 @@ describe("live scan cost tracking", () => {
       onCost: (cost) => updates.push(cost.estimatedUsd),
     });
     tracker.start("scan-thread");
-    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.0004);
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00032);
 
     await appendFile(path, "x".repeat(1 * 1_024 * 1_024 + 1));
     const usage = { input_tokens: 1_000, output_tokens: 100 };
@@ -547,10 +1623,10 @@ describe("live scan cost tracking", () => {
         cachedInputTokens: 0,
         cacheWriteInputTokens: 0,
         outputTokens: 100,
-        estimatedUsd: 0.004,
+        estimatedUsd: 0.0032,
       },
     });
-    expect(updates).toEqual([0.0004, 0.004]);
+    expect(updates).toEqual([0.00032, 0.0032]);
   });
 
   test("keeps the observed usage when the completed turn charges less", async () => {
@@ -573,7 +1649,7 @@ describe("live scan cost tracking", () => {
     expect(
       (await tracker.stop({ input_tokens: 10, output_tokens: 1 })).cost,
     ).toMatchObject({ inputTokens: 100, outputTokens: 10 });
-    expect(updates).toEqual([0.0004]);
+    expect(updates).toEqual([0.00032]);
   });
 
   test("retries a session log after a transient open failure", async () => {
@@ -720,7 +1796,7 @@ describe("live scan cost tracking", () => {
             cachedInputTokens: 0,
             cacheWriteInputTokens: 0,
             outputTokens: 20,
-            estimatedUsd: 0.00112,
+            estimatedUsd: 0.000224,
           },
         });
       } finally {

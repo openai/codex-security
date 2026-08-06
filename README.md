@@ -4,7 +4,9 @@
 
 **See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for more details.
 
-> Note: for best results, we recommend that your account is verified for [Trusted Access](https://chatgpt.com/cyber).
+Some cybersecurity requests and protected findings require approval through
+Trusted Access for Cyber. To apply or check your access, visit
+[chatgpt.com/cyber](https://chatgpt.com/cyber).
 
 ## Quick start
 
@@ -19,9 +21,26 @@ npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
 ```
 
-For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in. Environment API keys are
-passed directly to the current scan and are never stored in Codex's credential
-home or system keyring.
+For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
+Environment API keys are passed directly to the current scan and are never
+stored in Codex's credential home or system keyring.
+
+To use another inference provider, set its API key and select a model:
+
+```bash
+export OPENROUTER_API_KEY="<your-openrouter-api-key>"
+npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
+
+export FIREWORKS_API_KEY="<your-fireworks-api-key>"
+npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+```
+
+Amazon Bedrock also supports standard AWS access keys, profiles, web identity,
+container credentials, and the default AWS credential chain.
 
 Local sign-in honors Codex's configured credential backend, including a system
 keyring required by a managed device. Codex Security keeps login and scan
@@ -51,6 +70,18 @@ directory outside the repository.
 root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is
 incomplete or their original location was not reviewed.
+
+## Verbose diagnostics
+
+Add `--verbose` to print redacted scan diagnostics to stderr:
+
+```bash
+npx @openai/codex-security scan . --verbose
+```
+
+`CODEX_SECURITY_LOG_LEVEL=debug` also enables diagnostics;
+`LOG_LEVEL=debug` is its fallback. JSON results remain on stdout, and
+credentials and provider identifiers remain redacted.
 
 ## TypeScript SDK
 

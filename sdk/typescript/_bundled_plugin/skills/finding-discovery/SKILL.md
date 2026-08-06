@@ -33,7 +33,7 @@ If the scan target is for a targeted code-diff:
 
 ### Exhaustive Repository Or Scoped-Path Workflow
 
-If the scan target is repository-wide or a scoped path, use only the concise detection-first procedure in `../security-scan/references/repository-wide-scan.md`. It replaces the checklist, phase-specific output, and receipt requirements below for standard scans; do not load additional repository-wide ranking, ledger, validation, or attack-path references. The remaining guidance in this skill continues to apply to diff-scoped discovery.
+If the scan target is repository-wide or a scoped path, use only the concise detection-first procedure in `../security-scan/references/repository-wide-scan.md`. Obtain assigned repository source paths with `list_codex_security_review_items`, and record all discovered candidates once with `record_codex_security_discovery_candidates`. A Standard parent includes `scanId`; an independent Deep discovery worker uses its bound worker context. This replaces the checklist, phase-specific output, and receipt requirements below for Standard scans and independent Deep discovery workers; do not load additional repository-wide ranking, ledger, validation, or attack-path references. The remaining guidance in this skill continues to apply to diff-scoped discovery.
 
 ## Discovery Checklist
 

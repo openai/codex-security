@@ -1,5 +1,13 @@
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  scanActivityFromSessionEvent,
+  type ScanActivity,
+} from "./scan-activity.js";
+import {
+  scanProgressUpdatesFromEvent,
+  type ScanProgress,
+} from "./worker-progress.js";
 
 export interface ScanCost {
   model: string;
@@ -26,6 +34,13 @@ interface ScanTokenUsage {
   total_tokens: number;
 }
 
+interface SessionReasoning {
+  id: string;
+  text: string;
+  raw: boolean;
+  activity: ScanActivity | null;
+}
+
 interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
@@ -34,14 +49,29 @@ interface SessionUsage {
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
+  startedAt: number | null;
+  inheritedUsage: ScanTokenUsage | null;
+  replaying: boolean;
   usage: ScanTokenUsage | null;
+  calls: Map<string, ScanActivity>;
+  activities: ScanActivity[];
+  progress: ScanProgress[];
+  filesCompleted: number;
+  filesTotal: number | null;
+  prose: Set<string>;
+  reasoning: SessionReasoning | null;
+  reasoningCount: number;
 }
 
 interface ScanCostTrackerOptions {
   codexHome: string;
   model: string;
+  repository?: string;
   maxCostUsd?: number;
+  expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
+  onActivity?: (activity: ScanActivity) => void;
+  onProgress?: (progress: ScanProgress) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -53,8 +83,8 @@ interface ScanCostSnapshot {
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
-  "gpt-5.6-terra": [2_500, 250, 3_125, 15_000],
-  "gpt-5.6-luna": [1_000, 100, 1_250, 6_000],
+  "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
+  "gpt-5.6-luna": [200, 20, 250, 1_200],
 };
 
 // Open failures that cannot succeed again until the file itself changes, so
@@ -80,20 +110,37 @@ const MAX_SESSION_EVENT_BYTES = 1 * 1_024 * 1_024;
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
   readonly #sessions = new Map<string, SessionUsage>();
+  readonly #workers = new Map<string, number>();
+  readonly #workerProgress = new Map<string, number>();
+  readonly #reportedProgress = new Set<string>();
   #threadId: string | null = null;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: number | null = null;
+  #highestFilesCompleted = 0;
+  #expectedFilesTotal: number | undefined;
 
   public constructor(options: ScanCostTrackerOptions) {
     this.#options = options;
+    this.#expectedFilesTotal = options.expectedFilesTotal;
+  }
+
+  public setExpectedFilesTotal(filesTotal: number): void {
+    this.#expectedFilesTotal = filesTotal;
   }
 
   public start(threadId: string): void {
     if (this.#threadId !== null) return;
     this.#threadId = threadId;
-    if (this.#options.maxCostUsd === undefined) return;
+    if (
+      this.#options.maxCostUsd === undefined &&
+      this.#options.onCost === undefined &&
+      this.#options.onActivity === undefined &&
+      this.#options.onProgress === undefined
+    ) {
+      return;
+    }
     let polling = false;
     let rerun = false;
     const poll = () => {
@@ -171,12 +218,23 @@ export class ScanCostTracker {
           unreadable: false,
           threadId: null,
           parentThreadId: null,
+          startedAt: null,
+          inheritedUsage: null,
+          replaying: false,
           usage: null,
+          calls: new Map(),
+          activities: [],
+          progress: [],
+          filesCompleted: 0,
+          filesTotal: null,
+          prose: new Set(),
+          reasoning: null,
+          reasoningCount: 0,
         };
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session);
+        await readSessionUsage(path, session, this.#options.repository);
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
@@ -205,18 +263,78 @@ export class ScanCostTracker {
 
     let usage: ScanTokenUsage | null = null;
     for (const session of this.#sessions.values()) {
-      if (
-        session.threadId !== null &&
-        included.has(session.threadId) &&
-        session.usage !== null
-      ) {
-        usage = addTokenUsage(usage, session.usage);
+      if (session.threadId !== null && included.has(session.threadId)) {
+        if (session.threadId !== this.#threadId) {
+          this.#reportWorkerActivities(session);
+          this.#reportWorkerProgress(session);
+        }
+        if (session.usage !== null) {
+          usage = addTokenUsage(usage, session.usage);
+        }
       }
     }
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
     this.#reportCost(cost);
+  }
+
+  #reportWorkerActivities(session: SessionUsage): void {
+    if (this.#options.onActivity === undefined || session.threadId === null) {
+      return;
+    }
+    let worker = this.#workers.get(session.threadId);
+    if (worker === undefined) {
+      worker = this.#workers.size + 1;
+      this.#workers.set(session.threadId, worker);
+    }
+    for (const activity of session.activities.splice(0)) {
+      this.#options.onActivity({
+        ...activity,
+        id: `${session.threadId}:${activity.id}`,
+        worker,
+      });
+    }
+  }
+
+  #reportWorkerProgress(session: SessionUsage): void {
+    if (this.#options.onProgress === undefined || session.threadId === null) {
+      return;
+    }
+    for (const progress of session.progress.splice(0)) {
+      const expectedFilesTotal = this.#expectedFilesTotal;
+      if (
+        (expectedFilesTotal !== undefined &&
+          progress.filesTotal > expectedFilesTotal) ||
+        (session.filesTotal !== null &&
+          progress.filesTotal !== session.filesTotal) ||
+        progress.filesCompleted < session.filesCompleted
+      ) {
+        continue;
+      }
+      session.filesTotal = progress.filesTotal;
+      session.filesCompleted = progress.filesCompleted;
+      this.#workerProgress.set(session.threadId, progress.filesCompleted);
+      const filesCompleted = Math.min(
+        expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
+        [...this.#workerProgress.values()].reduce(
+          (total, reviewed) => total + reviewed,
+          0,
+        ),
+      );
+      if (filesCompleted < this.#highestFilesCompleted) continue;
+      const update = {
+        ...progress,
+        filesCompleted,
+        filesTotal:
+          expectedFilesTotal ?? Math.max(progress.filesTotal, filesCompleted),
+      };
+      const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
+      if (this.#reportedProgress.has(key)) continue;
+      this.#reportedProgress.add(key);
+      this.#highestFilesCompleted = update.filesCompleted;
+      this.#options.onProgress(update);
+    }
   }
 
   #reportCost(cost: ScanCost | null): void {
@@ -247,6 +365,7 @@ async function* sessionFiles(directory: string): AsyncGenerator<string> {
 async function readSessionUsage(
   path: string,
   session: SessionUsage,
+  repository?: string,
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
@@ -280,7 +399,7 @@ async function readSessionUsage(
       if (bytesRead === 0) return;
       session.offset += bytesRead;
       try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session);
+        readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
       } catch (error) {
         quarantineSession(session);
         throw error;
@@ -297,7 +416,11 @@ function quarantineSession(session: SessionUsage): void {
   session.pendingLineBytes = 0;
 }
 
-function readSessionChunk(contents: Buffer, session: SessionUsage): void {
+function readSessionChunk(
+  contents: Buffer,
+  session: SessionUsage,
+  repository?: string,
+): void {
   let lineStart = 0;
   while (lineStart < contents.length) {
     const newline = contents.indexOf(0x0a, lineStart);
@@ -317,12 +440,13 @@ function readSessionChunk(contents: Buffer, session: SessionUsage): void {
     }
 
     if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session);
+      readSessionEvent(fragment.toString("utf8"), session, repository);
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
         Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
         session,
+        repository,
       );
       session.pendingLine = [];
       session.pendingLineBytes = 0;
@@ -331,7 +455,11 @@ function readSessionChunk(contents: Buffer, session: SessionUsage): void {
   }
 }
 
-function readSessionEvent(line: string, session: SessionUsage): void {
+function readSessionEvent(
+  line: string,
+  session: SessionUsage,
+  repository?: string,
+): void {
   if (line.length === 0) return;
   let event: unknown;
   try {
@@ -342,8 +470,15 @@ function readSessionEvent(line: string, session: SessionUsage): void {
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {
+    if (session.threadId !== null) {
+      session.replaying = payload["id"] !== session.threadId;
+      return;
+    }
     if (typeof payload["id"] === "string") {
       session.threadId = payload["id"];
+    }
+    if (typeof payload["timestamp"] === "string") {
+      session.startedAt = Math.floor(Date.parse(payload["timestamp"]) / 1_000);
     }
     const source = payload["source"];
     const subagent = isRecord(source) ? source["subagent"] : undefined;
@@ -354,6 +489,146 @@ function readSessionEvent(line: string, session: SessionUsage): void {
     if (typeof parent === "string") session.parentThreadId = parent;
     return;
   }
+  if (session.replaying) {
+    if (event["type"] !== "event_msg") return;
+    if (payload["type"] === "token_count" && isRecord(payload["info"])) {
+      const usage = tokenUsage(payload["info"]["total_token_usage"]);
+      if (usage !== null) session.inheritedUsage = usage;
+    }
+    if (
+      payload["type"] === "task_started" &&
+      typeof payload["started_at"] === "number" &&
+      session.startedAt !== null &&
+      payload["started_at"] >= session.startedAt
+    ) {
+      session.replaying = false;
+    }
+    return;
+  }
+  if (event["type"] === "response_item") {
+    session.progress.push(...sessionProgressUpdates(payload));
+    if (repository === undefined) return;
+    if (
+      payload["type"] === "reasoning" &&
+      typeof payload["id"] === "string" &&
+      Array.isArray(payload["summary"]) &&
+      payload["summary"].length > 1 &&
+      session.reasoning?.raw !== true
+    ) {
+      for (const [index, summary] of payload["summary"].entries()) {
+        const activity = scanActivityFromSessionEvent(
+          {
+            ...event,
+            payload: {
+              ...payload,
+              id: `${payload["id"]}:${index}`,
+              summary: [summary],
+            },
+          },
+          repository,
+        );
+        if (
+          activity === null ||
+          session.prose.has(`${activity.kind}:${activity.description}`)
+        ) {
+          continue;
+        }
+        session.reasoning = {
+          id: activity.id,
+          text: activity.description,
+          raw: false,
+          activity: null,
+        };
+        recordReasoningActivity(session, activity);
+      }
+      return;
+    }
+    const activity = scanActivityFromSessionEvent(event, repository);
+    if (activity !== null) {
+      if (activity.kind === "reasoning") {
+        const reasoning = (session.reasoning ??= {
+          id: activity.id,
+          text: activity.description,
+          raw: false,
+          activity: null,
+        });
+        recordReasoningActivity(session, {
+          ...activity,
+          id: reasoning.id,
+          description:
+            reasoning.raw && reasoning.activity !== null
+              ? reasoning.activity.description
+              : activity.description,
+        });
+        return;
+      }
+      session.reasoning = null;
+      if (
+        activity.kind === "message" &&
+        session.prose.has(`${activity.kind}:${activity.description}`)
+      ) {
+        return;
+      }
+      if (activity.kind === "message") {
+        session.prose.add(`${activity.kind}:${activity.description}`);
+      }
+      if (activity.status === "running") {
+        session.calls.set(activity.id, activity);
+      }
+      session.activities.push(activity);
+      return;
+    }
+    if (
+      (payload["type"] === "function_call_output" ||
+        payload["type"] === "custom_tool_call_output") &&
+      typeof payload["call_id"] === "string"
+    ) {
+      const call = session.calls.get(payload["call_id"]);
+      if (call !== undefined) {
+        session.activities.push({
+          ...call,
+          status: payload["status"] === "failed" ? "failed" : "completed",
+        });
+        session.calls.delete(call.id);
+      }
+    }
+    return;
+  }
+  if (
+    event["type"] === "event_msg" &&
+    (payload["type"] === "agent_reasoning" ||
+      payload["type"] === "agent_reasoning_delta" ||
+      payload["type"] === "agent_reasoning_raw_content" ||
+      payload["type"] === "agent_reasoning_raw_content_delta" ||
+      payload["type"] === "agent_message")
+  ) {
+    if (
+      payload["type"] === "agent_message" &&
+      typeof payload["message"] === "string"
+    ) {
+      session.progress.push(
+        ...scanProgressUpdatesFromEvent({
+          type: "item.completed",
+          item: { type: "agent_message", text: payload["message"] },
+        }),
+      );
+    }
+    if (repository === undefined) return;
+    if (payload["type"] !== "agent_message") {
+      readSessionReasoning(event, payload, session, repository);
+      return;
+    }
+    session.reasoning = null;
+    const activity = scanActivityFromSessionEvent(event, repository);
+    if (
+      activity !== null &&
+      !session.prose.has(`${activity.kind}:${activity.description}`)
+    ) {
+      session.prose.add(`${activity.kind}:${activity.description}`);
+      session.activities.push(activity);
+    }
+    return;
+  }
   if (
     event["type"] !== "event_msg" ||
     payload["type"] !== "token_count" ||
@@ -362,7 +637,133 @@ function readSessionEvent(line: string, session: SessionUsage): void {
     return;
   }
   const usage = tokenUsage(payload["info"]["total_token_usage"]);
-  if (usage !== null) session.usage = usage;
+  if (usage === null) return;
+  const ownUsage =
+    session.inheritedUsage === null
+      ? usage
+      : subtractTokenUsage(usage, session.inheritedUsage);
+  if (ownUsage !== null) session.usage = ownUsage;
+}
+
+function readSessionReasoning(
+  event: Readonly<Record<string, unknown>>,
+  payload: Readonly<Record<string, unknown>>,
+  session: SessionUsage,
+  repository: string,
+): void {
+  const type = payload["type"];
+  const raw =
+    type === "agent_reasoning_raw_content" ||
+    type === "agent_reasoning_raw_content_delta";
+  const delta =
+    type === "agent_reasoning_delta" ||
+    type === "agent_reasoning_raw_content_delta";
+  const text = payload[delta ? "delta" : "text"];
+  if (typeof text !== "string") return;
+
+  if (
+    !delta &&
+    !raw &&
+    session.reasoning?.raw !== true &&
+    session.reasoning?.activity?.status === "completed" &&
+    session.reasoning.text !== text
+  ) {
+    session.reasoning = null;
+  }
+  const reasoning = (session.reasoning ??= {
+    id: `reasoning-${++session.reasoningCount}`,
+    text: "",
+    raw: false,
+    activity: null,
+  });
+  if (reasoning.raw && !raw) return;
+  if (raw && !reasoning.raw) {
+    reasoning.text = "";
+    reasoning.raw = true;
+  }
+  reasoning.text = delta ? `${reasoning.text}${text}` : text;
+
+  const activity = scanActivityFromSessionEvent(
+    {
+      ...event,
+      payload: {
+        ...payload,
+        [delta ? "delta" : "text"]: reasoning.text,
+      },
+    },
+    repository,
+  );
+  if (activity === null) return;
+  recordReasoningActivity(session, { ...activity, id: reasoning.id });
+}
+
+function recordReasoningActivity(
+  session: SessionUsage,
+  activity: ScanActivity,
+): void {
+  const reasoning = session.reasoning!;
+  if (
+    reasoning.activity?.description === activity.description &&
+    reasoning.activity.status === activity.status
+  ) {
+    return;
+  }
+  reasoning.activity = activity;
+  session.prose.add(`${activity.kind}:${activity.description}`);
+  session.activities.push(activity);
+}
+
+function sessionProgressUpdates(
+  payload: Readonly<Record<string, unknown>>,
+): ScanProgress[] {
+  if (payload["type"] === "message" && payload["role"] === "assistant") {
+    const content = payload["content"];
+    if (!Array.isArray(content)) return [];
+    return scanProgressUpdatesFromEvent({
+      type: "item.completed",
+      item: {
+        type: "agent_message",
+        text: sessionContentText(content, false),
+      },
+    });
+  }
+  if (
+    payload["type"] !== "function_call_output" &&
+    payload["type"] !== "custom_tool_call_output" &&
+    payload["type"] !== "local_shell_call_output"
+  ) {
+    return [];
+  }
+  const value = payload["output"];
+  const output =
+    typeof value === "string"
+      ? value
+      : Array.isArray(value)
+        ? sessionContentText(value, true)
+        : null;
+  if (payload["status"] === "failed" || output === null) {
+    return [];
+  }
+  return scanProgressUpdatesFromEvent({
+    type: "item.completed",
+    item: { type: "command_execution", aggregated_output: output },
+  });
+}
+
+function sessionContentText(
+  content: readonly unknown[],
+  includeInputText: boolean,
+): string {
+  return content
+    .filter(
+      (item): item is Record<string, unknown> & { text: string } =>
+        isRecord(item) &&
+        (item["type"] === "output_text" ||
+          (includeInputText && item["type"] === "input_text")) &&
+        typeof item["text"] === "string",
+    )
+    .map((item) => item.text)
+    .join("\n");
 }
 
 function tokenUsage(value: unknown): ScanTokenUsage | null {
@@ -412,6 +813,22 @@ function addTokenUsage(
   };
 }
 
+function subtractTokenUsage(
+  usage: ScanTokenUsage,
+  inherited: ScanTokenUsage,
+): ScanTokenUsage | null {
+  return tokenUsage({
+    input_tokens: usage.input_tokens - inherited.input_tokens,
+    cached_input_tokens:
+      usage.cached_input_tokens - inherited.cached_input_tokens,
+    cache_write_input_tokens:
+      usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    output_tokens: usage.output_tokens - inherited.output_tokens,
+    reasoning_output_tokens:
+      usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -439,7 +856,10 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const pricing = MODEL_PRICING_NANODOLLARS[model];
+  const pricingModel = model.startsWith("openai.")
+    ? model.slice("openai.".length)
+    : model;
+  const pricing = MODEL_PRICING_NANODOLLARS[pricingModel];
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;
