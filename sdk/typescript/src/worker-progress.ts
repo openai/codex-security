@@ -1,6 +1,7 @@
 const MAX_WORKER_STATUS_BYTES = 64 * 1024;
 const MAX_WORKER_COUNT = 1024;
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
+const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
 const PREFLIGHT_COMMAND = /(?:^|[\\/])config_preflight\.py(?=$|["'\s])/u;
 const WORKER_PHASES = new Set([
   "ranking",
@@ -14,6 +15,20 @@ export type ScanWorkerPhase =
   | "file_review"
   | "validation"
   | "attack_path";
+
+export type ScanPhase =
+  | "preflight"
+  | "threat_model"
+  | "discovery"
+  | "validation"
+  | "attack_path"
+  | "reporting";
+
+export interface ScanProgress {
+  phase: ScanPhase;
+  filesCompleted: number;
+  filesTotal: number;
+}
 
 export type ScanWorkerStatus =
   | {
@@ -38,6 +53,70 @@ export function workerStatusFromEvent(
   if (item["type"] === "command_execution") return preflightStatus(item);
   if (item["type"] === "agent_message") return dispatchStatus(item);
   return null;
+}
+
+export function scanProgressUpdatesFromEvent(
+  event: Readonly<Record<string, unknown>>,
+): ScanProgress[] {
+  if (event["type"] !== "item.completed" || !isRecord(event["item"])) {
+    return [];
+  }
+  const item = event["item"];
+  const output =
+    item["type"] === "agent_message"
+      ? item["text"]
+      : item["type"] === "command_execution"
+        ? item["aggregated_output"]
+        : null;
+  if (
+    typeof output !== "string" ||
+    Buffer.byteLength(output, "utf8") > MAX_WORKER_STATUS_BYTES
+  ) {
+    return [];
+  }
+  const updates: ScanProgress[] = [];
+  let codeFence = false;
+  for (const line of output.split(/\r?\n/u)) {
+    if (/^\s*```/u.test(line)) {
+      codeFence = !codeFence;
+      continue;
+    }
+    if (codeFence || !line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
+    if (
+      updates.length === MAX_WORKER_COUNT ||
+      (item["type"] === "agent_message" && updates.length > 0)
+    ) {
+      return [];
+    }
+    const progress = scanProgressFromMarker(line);
+    if (progress === null) return [];
+    updates.push(progress);
+  }
+  return updates;
+}
+
+function scanProgressFromMarker(marker: string): ScanProgress | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(marker.slice(SCAN_PROGRESS_PREFIX.length));
+  } catch {
+    return null;
+  }
+  if (
+    !isRecord(payload) ||
+    Object.keys(payload).length !== 3 ||
+    !isScanPhase(payload["phase"]) ||
+    !isProgressCount(payload["filesCompleted"]) ||
+    !isProgressCount(payload["filesTotal"]) ||
+    payload["filesCompleted"] > payload["filesTotal"]
+  ) {
+    return null;
+  }
+  return {
+    phase: payload["phase"],
+    filesCompleted: payload["filesCompleted"],
+    filesTotal: payload["filesTotal"],
+  };
 }
 
 function preflightStatus(
@@ -144,6 +223,21 @@ function isWorkerCount(value: unknown): value is number {
     Number.isSafeInteger(value) &&
     value >= 0 &&
     value <= MAX_WORKER_COUNT
+  );
+}
+
+function isProgressCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isScanPhase(value: unknown): value is ScanPhase {
+  return (
+    value === "preflight" ||
+    value === "threat_model" ||
+    value === "discovery" ||
+    value === "validation" ||
+    value === "attack_path" ||
+    value === "reporting"
   );
 }
 
