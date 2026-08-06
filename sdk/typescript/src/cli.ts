@@ -1382,6 +1382,11 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
+            if (options.outputDir !== undefined) {
+              throw new Error(
+                "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
+              );
+            }
             let optionIndex = 1;
             while (optionIndex < argv.length) {
               const argument = argv[optionIndex]!;
@@ -1390,7 +1395,12 @@ export async function main(
                 argument === "--effort" ||
                 argument === "--provider" ||
                 argument === "--codex" ||
-                argument === "--knowledge-base"
+                argument === "--knowledge-base" ||
+                argument === "--workers" ||
+                argument === "--mode" ||
+                argument === "--max-attempts" ||
+                argument === "--plugin-path" ||
+                argument === "--python"
               ) {
                 optionIndex += 2;
               } else if (
@@ -1398,7 +1408,12 @@ export async function main(
                 argument.startsWith("--effort=") ||
                 argument.startsWith("--provider=") ||
                 argument.startsWith("--codex=") ||
-                argument.startsWith("--knowledge-base=")
+                argument.startsWith("--knowledge-base=") ||
+                argument.startsWith("--workers=") ||
+                argument.startsWith("--mode=") ||
+                argument.startsWith("--max-attempts=") ||
+                argument.startsWith("--plugin-path=") ||
+                argument.startsWith("--python=")
               ) {
                 optionIndex += 1;
               } else {
@@ -1407,7 +1422,7 @@ export async function main(
             }
             if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
+                "Run 'codex-security bulk-scan [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--workers COUNT] [--mode MODE] [--max-attempts COUNT] [--plugin-path PATH] [--python PATH] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
               );
             }
             const wizard = await runBulkScanWizard(

@@ -888,6 +888,12 @@ describe("CLI", () => {
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
+      ["bulk-scan", "--workers", "8"],
+      ["bulk-scan", "--workers=8"],
+      ["bulk-scan", "--mode", "deep"],
+      ["bulk-scan", "--max-attempts=3"],
+      ["bulk-scan", "--plugin-path", "./plugin"],
+      ["bulk-scan", "--python=python3"],
       ["bulk-scan", "--knowledge-base", "/shared/threat-models"],
       [
         "bulk-scan",
@@ -928,6 +934,22 @@ describe("CLI", () => {
     }
   });
 
+  test("rejects prefixed interactive bulk scans before discovery", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["--format", "toon", "bulk-scan", "--workers", "8"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Run 'codex-security bulk-scan");
+  });
+
   test("requires an output directory for a supplied bulk scan CSV", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -941,6 +963,24 @@ describe("CLI", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("--output-dir is required");
+    expect(stdout.text()).toBe("");
+  });
+
+  test("lets the discovery wizard choose its output directory", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["bulk-scan", "--output-dir", "results"],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--output-dir can only be used with a repository CSV",
+    );
     expect(stdout.text()).toBe("");
   });
 
