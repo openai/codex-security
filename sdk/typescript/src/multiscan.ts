@@ -293,12 +293,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     hostname: hostname(),
     processStartedAt: performance.timeOrigin,
   })}\n`;
-  try {
-    await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
-  } catch (error) {
-    await rm(path, { recursive: true, force: true });
-    throw error;
-  }
+  await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
 
   let heartbeat = Promise.resolve();
   const timer = setInterval(() => {
