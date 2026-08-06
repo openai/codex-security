@@ -109,8 +109,9 @@ async function runCampaign(
   await ensureOutputDirectory(join(output, "artifacts"));
   await ensureManifest(join(output, "manifest.json"), tasks);
   const receipts = await readReceipts(ledger);
-  const pending: MultiscanTask[] = [];
+  const pending: Array<{ task: MultiscanTask; attempt: number }> = [];
   let completed = 0;
+  let failed = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
     if (
@@ -120,8 +121,10 @@ async function runCampaign(
       (await hasArtifacts(receipt.outputDir))
     ) {
       completed += 1;
+    } else if ((receipt?.attempt ?? 0) >= options.maxAttempts) {
+      failed += 1;
     } else {
-      pending.push(task);
+      pending.push({ task, attempt: receipt?.attempt ?? 0 });
     }
   }
   const skipped = completed;
@@ -129,23 +132,23 @@ async function runCampaign(
     return {
       total: tasks.length,
       completed,
-      failed: 0,
+      failed,
       skipped,
       resultsPath: ledger,
     };
   }
 
   let next = 0;
-  let failed = 0;
   const worker = async (
     security: Pick<CodexSecurity, "run" | "close">,
   ): Promise<void> => {
     for (;;) {
       options.signal?.throwIfAborted();
-      const task = pending[next++];
-      if (task === undefined) return;
-      let attempt = receipts.get(task.id.toLowerCase())?.attempt ?? 0;
-      for (let retry = 0; retry < options.maxAttempts; retry += 1) {
+      const pendingTask = pending[next++];
+      if (pendingTask === undefined) return;
+      const { task } = pendingTask;
+      let { attempt } = pendingTask;
+      while (attempt < options.maxAttempts) {
         options.signal?.throwIfAborted();
         attempt += 1;
         const checkout = join(output, "checkouts", task.id);
@@ -220,7 +223,7 @@ async function runCampaign(
           completed += 1;
           break;
         }
-        if (retry === options.maxAttempts - 1) failed += 1;
+        if (attempt === options.maxAttempts) failed += 1;
       }
     }
   };

@@ -515,6 +515,70 @@ describe("multiscan", () => {
     expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
   });
 
+  test("does not exceed the durable maximum attempt count across resumes", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "attempt-budget");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nattempt-budget,${source.path},${source.revision}\n`,
+    );
+    let attempts = 0;
+    let clients = 0;
+    const security = client(async () => {
+      attempts += 1;
+      throw new Error("persistent failure");
+    });
+    const run = async (maxAttempts: number) =>
+      await runMultiscan(
+        options(paths, security, {
+          maxAttempts,
+          createSecurity: () => {
+            clients += 1;
+            return security;
+          },
+        }),
+      );
+
+    expect(await run(2)).toMatchObject({
+      total: 1,
+      completed: 0,
+      failed: 1,
+      skipped: 0,
+    });
+    expect(attempts).toBe(2);
+    expect(clients).toBe(1);
+    expect(await results(join(paths.output, "results.jsonl"))).toMatchObject([
+      { status: "failed", attempt: 1 },
+      { status: "failed", attempt: 2 },
+    ]);
+
+    expect(await run(2)).toMatchObject({
+      total: 1,
+      completed: 0,
+      failed: 1,
+      skipped: 0,
+    });
+    expect(attempts).toBe(2);
+    expect(clients).toBe(1);
+    expect(await results(join(paths.output, "results.jsonl"))).toHaveLength(2);
+
+    expect(await run(3)).toMatchObject({
+      total: 1,
+      completed: 0,
+      failed: 1,
+      skipped: 0,
+    });
+    expect(attempts).toBe(3);
+    expect(clients).toBe(2);
+    expect(
+      (await results(join(paths.output, "results.jsonl"))).at(-1),
+    ).toMatchObject({ status: "failed", attempt: 3 });
+
+    await run(3);
+    expect(attempts).toBe(3);
+    expect(clients).toBe(2);
+  });
+
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "resume");
