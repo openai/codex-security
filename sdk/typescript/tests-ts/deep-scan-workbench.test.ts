@@ -31,7 +31,7 @@ const deepScanOwnershipProbe = [
   "deep_scan.now = lambda: 'after'",
   "deep_scan.deep_scan_result = lambda database, value, *, start_disposition=None: {'startDisposition': start_disposition}",
   "try:",
-  "    result = deep_scan.begin_deep_scan_for_scan(connection, scan_id, 'requesting-thread', argparse.Namespace(claim_token=case['suppliedToken']))",
+  "    result = deep_scan.begin_deep_scan_for_scan(connection, scan_id, 'requesting-thread', argparse.Namespace(claim_token=case['suppliedToken'], model=None, reasoning_effort=None))",
   "except SystemExit as error:",
   "    accepted, message, result = False, str(error), None",
   "else:",
