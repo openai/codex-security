@@ -32,6 +32,7 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   scanAuthentication,
+  type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
@@ -46,13 +47,17 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  EXTERNAL_CODEX_PROVIDERS,
+  isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
+  type ExternalModelProvider,
   type JsonObject,
   type JsonValue,
 } from "./config.js";
-import { formatUsd } from "./cost.js";
+import { formatUsd, type ScanCost } from "./cost.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -61,6 +66,7 @@ import {
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
   redactedErrorMessage,
+  ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
@@ -86,7 +92,13 @@ import {
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
-import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
+import { ScanDashboard } from "./scan-dashboard.js";
+import type {
+  ScanPhase,
+  ScanProgress,
+  ScanWorkerPhase,
+  ScanWorkerStatus,
+} from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -166,6 +178,7 @@ const VALUE_OPTIONS = new Set([
   "--mode",
   "--model",
   "--effort",
+  "--provider",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -173,6 +186,9 @@ const VALUE_OPTIONS = new Set([
   "--fail-on-severity",
   "--max-cost",
   "--workers",
+  "--subagents",
+  "--stop-after-no-new",
+  "--max-discovery-runs",
   "--max-attempts",
   "--export-format",
   "--output",
@@ -184,6 +200,10 @@ const VALUE_OPTIONS = new Set([
   "--scan-root",
   "--reason",
 ]);
+const PROVIDER_OPTION = z
+  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .default("openai")
+  .describe("Inference provider for scans.");
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -200,8 +220,36 @@ function effortOption() {
     );
 }
 
-interface ScanArguments {
+const DEEP_SCAN_OPTION_SCHEMAS = {
+  workers: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum concurrent deep-scan discovery workers."),
+  subagents: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Subagents available to each deep-scan worker."),
+  stopAfterNoNew: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Stop after this many runs find no new issues."),
+  maxDiscoveryRuns: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum deep-scan discovery runs."),
+};
+
+interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
+  verbose?: boolean;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
@@ -212,6 +260,7 @@ interface ScanArguments {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -220,6 +269,7 @@ interface ScanArguments {
   codexOverrides?: JsonObject;
   failOnSeverity?: FailureSeverity;
   maxCostUsd?: number;
+  headless?: boolean;
   dryRun: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
@@ -845,8 +895,14 @@ export async function main(
       args: z.object({
         scanId: z.string().min(1).describe("Saved scan identifier."),
       }),
+      options: z.object({
+        verbose: z
+          .boolean()
+          .default(false)
+          .describe("Print scan diagnostics to stderr."),
+      }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError }) {
+      async run({ args, error: incurError, options }) {
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
@@ -855,6 +911,7 @@ export async function main(
             args.scanId,
           ]);
           scanArguments = scanArgumentsFromRecipe(recipe, args.scanId);
+          scanArguments.verbose = options.verbose;
         } catch (error) {
           const message = redactedErrorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
@@ -969,6 +1026,10 @@ export async function main(
             .describe(
               "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
             ),
+          verbose: z
+            .boolean()
+            .default(false)
+            .describe("Print redacted scan diagnostics to stderr."),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -998,12 +1059,14 @@ export async function main(
             .enum(["standard", "deep"])
             .default("standard")
             .describe("Scan mode; deep supports repository and path targets."),
+          ...DEEP_SCAN_OPTION_SCHEMAS,
           model: optionValue("--model")
             .optional()
             .describe(
               `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
             ),
           effort: effortOption(),
+          provider: PROVIDER_OPTION,
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -1032,6 +1095,12 @@ export async function main(
             .positive()
             .optional()
             .describe("Stop the scan if estimated USD cost exceeds AMOUNT."),
+          headless: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Use plain text progress instead of the interactive dashboard.",
+            ),
           dryRun: z
             .boolean()
             .default(false)
@@ -1062,6 +1131,15 @@ export async function main(
           (options) =>
             !options.archiveExisting || options.outputDir !== undefined,
           { message: "--archive-existing requires --output-dir." },
+        )
+        .refine(
+          (options) =>
+            options.mode === "deep" ||
+            (options.workers === undefined &&
+              options.subagents === undefined &&
+              options.stopAfterNoNew === undefined &&
+              options.maxDiscoveryRuns === undefined),
+          { message: "Deep scan settings require --mode deep." },
         ),
       examples: [
         { args: { repository: "." } },
@@ -1093,6 +1171,7 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            verbose: options.verbose,
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
@@ -1101,8 +1180,13 @@ export async function main(
             head: options.head,
             base: options.base,
             mode: options.mode,
+            workers: options.workers,
+            subagents: options.subagents,
+            stopAfterNoNew: options.stopAfterNoNew,
+            maxDiscoveryRuns: options.maxDiscoveryRuns,
             model: options.model,
             effort: options.effort,
+            provider: options.provider,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -1110,6 +1194,7 @@ export async function main(
             codex: options.codex,
             failOnSeverity: options.failOnSeverity,
             maxCostUsd: options.maxCost,
+            headless: options.headless,
             dryRun: options.dryRun,
           },
           errorOutput,
@@ -1227,6 +1312,10 @@ export async function main(
           .describe(
             "Resumable results directory; required with a repository CSV.",
           ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe("Read shared security docs for every repository."),
         workers: z
           .number()
           .int()
@@ -1245,6 +1334,7 @@ export async function main(
             `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ),
         effort: effortOption(),
+        provider: PROVIDER_OPTION,
         maxAttempts: z
           .number()
           .int()
@@ -1297,6 +1387,44 @@ export async function main(
                 "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
               );
             }
+            let optionIndex = 1;
+            while (optionIndex < argv.length) {
+              const argument = argv[optionIndex]!;
+              if (
+                argument === "--model" ||
+                argument === "--effort" ||
+                argument === "--provider" ||
+                argument === "--codex" ||
+                argument === "--knowledge-base" ||
+                argument === "--workers" ||
+                argument === "--mode" ||
+                argument === "--max-attempts" ||
+                argument === "--plugin-path" ||
+                argument === "--python"
+              ) {
+                optionIndex += 2;
+              } else if (
+                argument.startsWith("--model=") ||
+                argument.startsWith("--effort=") ||
+                argument.startsWith("--provider=") ||
+                argument.startsWith("--codex=") ||
+                argument.startsWith("--knowledge-base=") ||
+                argument.startsWith("--workers=") ||
+                argument.startsWith("--mode=") ||
+                argument.startsWith("--max-attempts=") ||
+                argument.startsWith("--plugin-path=") ||
+                argument.startsWith("--python=")
+              ) {
+                optionIndex += 1;
+              } else {
+                break;
+              }
+            }
+            if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
+              throw new Error(
+                "Run 'codex-security bulk-scan [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--workers COUNT] [--mode MODE] [--max-attempts COUNT] [--plugin-path PATH] [--python PATH] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
+              );
+            }
             const wizard = await runBulkScanWizard(
               dependencies.bulkScan ??
                 createBulkScanDiscoveryDependencies({
@@ -1326,6 +1454,7 @@ export async function main(
             workers: options.workers,
             mode: options.mode,
             maxAttempts: options.maxAttempts,
+            knowledgeBasePaths: options.knowledgeBase,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -1333,6 +1462,7 @@ export async function main(
                 options.codex,
                 options.model,
                 options.effort,
+                options.provider,
               ),
             },
             createSecurity: dependencies.createSecurity,
@@ -1816,6 +1946,24 @@ function scanArgumentsFromRecipe(
       "The saved scan recipe contains an invalid cost limit.",
     );
   }
+  const deepScan = z
+    .object(DEEP_SCAN_OPTION_SCHEMAS)
+    .optional()
+    .safeParse(recipe["deepScan"]);
+  if (!deepScan.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid deep scan settings.",
+    );
+  }
+  if (
+    mode !== "deep" &&
+    deepScan.data !== undefined &&
+    Object.keys(deepScan.data).length > 0
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains deep scan settings for a standard scan.",
+    );
+  }
   return {
     repository,
     paths,
@@ -1825,6 +1973,7 @@ function scanArgumentsFromRecipe(
     head: kind === "refs" ? head ?? "HEAD" : undefined,
     base: kind === "working_tree" ? reference : undefined,
     mode,
+    ...deepScan.data,
     archiveExisting: false,
     codex: [],
     codexOverrides: config,
@@ -2472,6 +2621,17 @@ async function runExport(
   }
 }
 
+type VerboseDiagnosticValue = string | number | boolean | null | undefined;
+
+function sanitizeDiagnosticValue(value: unknown): string {
+  return redactedErrorMessage(value)
+    .replaceAll(
+      /(\b(?:tenant(?:[_-]?id)?|org(?:anization)?(?:[_-]?id)?|project(?:[_-]?id)?|(?:x[_-]?)?(?:request|trace|correlation)[_-]?id)\b(?:\\*["'])?\s*[:=]\s*)(?!\[redacted\])(?:(\\*)(['"])(?:(?!(?<!\\)\2\3)(?:\\.|[^\\]))*(?:(?<!\\)\2\3|$)|[^\s"',;&}\]]+)/giu,
+      "$1$2$3[redacted]$2$3",
+    )
+    .replaceAll(/[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu, " ");
+}
+
 async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
@@ -2482,8 +2642,45 @@ async function runScan(
   let requestedSignal: SignalName | null = null;
   let firstSignalAt = 0;
   let progress: Progress | null = null;
+  let dashboard: ScanDashboard | null = null;
   let lastWorkerUpdate = "";
+  let lastProgressUpdate = "";
+  let workerCapacity: { planned: number; started: number } | null = null;
+  let fileProgress: ScanProgress | null = null;
+  let runningCost: Readonly<ScanCost> | null = null;
   let phase: string | null = null;
+  const targetWarnings: string[] = [];
+  const configuredLogLevel =
+    dependencies.environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
+    dependencies.environment["LOG_LEVEL"]?.trim();
+  const verbose =
+    arguments_.verbose === true ||
+    configuredLogLevel?.toLowerCase() === "debug";
+  const writeAboveProgress = (write: () => void): void => {
+    if (progress === null) {
+      write();
+      return;
+    }
+    progress.writeAboveTimer(write);
+  };
+  const diagnostic = (
+    event: string,
+    fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
+  ): void => {
+    if (!verbose) return;
+    const attributes = Object.entries(fields).flatMap(([name, value]) =>
+      value === undefined
+        ? []
+        : [
+            `${name}=${JSON.stringify(typeof value === "string" ? sanitizeDiagnosticValue(value) : value)}`,
+          ],
+    );
+    writeAboveProgress(() => {
+      errorOutput.write(
+        `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
+      );
+    });
+  };
   const preparationAbortController = new AbortController();
   const signalListener = (signal: SignalName) => () => {
     if (requestedSignal !== null) {
@@ -2496,6 +2693,7 @@ async function runScan(
         return;
       }
       requestedSignal = signal;
+      dashboard?.stop();
       progress?.stopTimer();
       if (progress?.interactive === true) {
         try {
@@ -2525,6 +2723,9 @@ async function runScan(
     null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
+  let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
+  let effectiveReasoningEffort =
+    DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let selectedAuthentication: ScanAuthentication | null = null;
   let failed = false;
   let failure: unknown;
@@ -2540,11 +2741,25 @@ async function runScan(
           arguments_.codex,
           arguments_.model,
           arguments_.effort,
+          arguments_.provider,
         ),
     };
+    const selectedProfileName = config.codexOverrides?.["profile"];
+    const effectiveConfiguration = {
+      ...DEFAULT_CODEX_CONFIG,
+      ...config.codexOverrides,
+    };
+    ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
+      scanModelConfiguration(effectiveConfiguration));
     let auth = arguments_.auth;
-    selectedAuthentication = scanAuthentication(dependencies.environment, auth);
+    const provider = scanModelProvider(effectiveConfiguration);
+    selectedAuthentication = scanAuthentication(
+      dependencies.environment,
+      auth,
+      provider,
+    );
     if (
+      !isExternalModelProvider(provider) &&
       (auth === undefined || auth === "auto") &&
       !arguments_.dryRun &&
       interactive &&
@@ -2576,26 +2791,103 @@ async function runScan(
         selectedAuthentication = scanAuthentication(
           dependencies.environment,
           auth,
+          provider,
         );
       }
     }
-    progress = new Progress(errorOutput, dependencies, interactive);
-    const scope = scanScope(arguments_);
-    const runningMessage = (): string =>
-      phase === null
-        ? scope === null
-          ? "Running scan"
-          : `Running scan: ${scope}`
-        : `Running scan: ${phase}${scope === null ? "" : ` (${scope})`}`;
-    progress.startTimer(
-      arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
+    diagnostic("scan.configuration", {
+      cli_version: VERSION,
+      bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
+      codex_version: CODEX_EXECUTABLE_VERSION,
+      codex_sdk_version: CODEX_SDK_VERSION,
+      mode: arguments_.mode,
+      max_cost_usd: arguments_.maxCostUsd,
+      target:
+        arguments_.paths.length > 0
+          ? "paths"
+          : arguments_.diff !== undefined
+            ? "diff"
+            : arguments_.workingTree
+              ? "working_tree"
+              : "repository",
+      requested_auth: auth ?? "auto",
+      dry_run: arguments_.dryRun,
+      profile:
+        typeof selectedProfileName === "string"
+          ? selectedProfileName
+          : undefined,
+      model: effectiveModel,
+      reasoning_effort: effectiveReasoningEffort,
+    });
+    progress = new Progress(
+      errorOutput,
+      dependencies,
+      interactive &&
+        !arguments_.headless &&
+        dependencies.environment["CI"] === undefined &&
+        dependencies.environment["TERM"] !== "dumb",
     );
+    if (progress.interactive && !arguments_.dryRun && !verbose) {
+      dashboard = new ScanDashboard(errorOutput, {
+        repository,
+        model: scanModelConfiguration(await mergedCodexConfig(config)),
+        ...(arguments_.maxCostUsd === undefined
+          ? {}
+          : { maxCostUsd: arguments_.maxCostUsd }),
+        clock: dependencies,
+        color: dependencies.environment["NO_COLOR"] === undefined,
+        sanitize: redactedErrorMessage,
+        input: process.stdin,
+        onInterrupt,
+      });
+    }
+    const scope = scanScope(arguments_);
+    const runningMessage = (): string => {
+      const stage =
+        phase === null
+          ? scope === null
+            ? "Running scan"
+            : `Running scan: ${scope}`
+          : `Running scan: ${phase}${scope === null ? "" : ` (${scope})`}`;
+      const details: string[] = [];
+      if (workerCapacity !== null) {
+        details.push(
+          `Workers: ${workerCapacity.started}/${workerCapacity.planned}`,
+        );
+      }
+      if (fileProgress !== null && fileProgress.filesTotal > 0) {
+        details.push(
+          `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
+        );
+      }
+      if (runningCost !== null) {
+        const tokens = formatTokenUsage({
+          input_tokens: runningCost.inputTokens,
+          cached_input_tokens: runningCost.cachedInputTokens,
+          output_tokens: runningCost.outputTokens,
+        });
+        if (tokens !== null) details.push(`Tokens: ${tokens}`);
+        details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
+      }
+      return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
+    };
+    if (dashboard === null) {
+      progress.startTimer(
+        arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
+      );
+    } else {
+      dashboard.start();
+    }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
       auth,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       mode: arguments_.mode,
+      workers: arguments_.workers,
+      subagents: arguments_.subagents,
+      stopAfterNoNew: arguments_.stopAfterNoNew,
+      maxDiscoveryRuns: arguments_.maxDiscoveryRuns,
       outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
@@ -2603,16 +2895,50 @@ async function runScan(
       failureSeverity: arguments_.failOnSeverity,
       maxCostUsd: arguments_.maxCostUsd,
       onCost: (cost) => {
-        if (arguments_.maxCostUsd === undefined) return;
+        diagnostic("cost.updated", {
+          model: cost.model,
+          estimated_usd: cost.estimatedUsd,
+          input_tokens: cost.inputTokens,
+          cached_input_tokens: cost.cachedInputTokens,
+          cache_write_input_tokens: cost.cacheWriteInputTokens,
+          output_tokens: cost.outputTokens,
+          max_cost_usd: arguments_.maxCostUsd,
+        });
+        runningCost = cost;
+        if (dashboard !== null) {
+          dashboard.setCost(cost);
+          return;
+        }
         progress?.stopTimer();
-        progress?.stage(
-          `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
-        );
-        if (cost.estimatedUsd <= arguments_.maxCostUsd) {
+        if (arguments_.maxCostUsd === undefined) {
+          const tokens = formatTokenUsage({
+            input_tokens: cost.inputTokens,
+            cached_input_tokens: cost.cachedInputTokens,
+            output_tokens: cost.outputTokens,
+          });
+          progress?.stage(
+            `${tokens === null ? "" : `Tokens: ${tokens}. `}Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+          );
+        } else {
+          progress?.stage(
+            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
+          );
+        }
+        if (
+          arguments_.maxCostUsd === undefined ||
+          cost.estimatedUsd <= arguments_.maxCostUsd
+        ) {
           progress?.startTimer(runningMessage());
         }
       },
       onOutputArchived: (archiveDir) => {
+        diagnostic("scan.output_archived", { archive_dir: archiveDir });
+        if (dashboard !== null) {
+          dashboard.note(
+            `Moved existing results to: ${redactedErrorMessage(archiveDir)}`,
+          );
+          return;
+        }
         progress?.stopTimer();
         errorOutput.write(
           `Moved existing results to: ${redactedErrorMessage(archiveDir)}\n`,
@@ -2621,9 +2947,29 @@ async function runScan(
       signal: preparationAbortController.signal,
       onOutputDirReady: (path) => {
         scanDir = path;
+        diagnostic("scan.output_ready", { scan_dir: path });
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        diagnostic("authentication.selected", {
+          requested: auth ?? "auto",
+          method: authentication.method,
+          source:
+            authentication.method !== "stored_credentials"
+              ? authentication.source
+              : undefined,
+          verified: authentication.verified,
+        });
+        if (dashboard !== null) {
+          dashboard.note(
+            authentication.method === "api_key"
+              ? `Using API key from ${authentication.source}`
+              : authentication.method === "aws_credentials"
+                ? `Using AWS credentials from ${authentication.source}`
+                : "Using stored Codex credentials",
+          );
+          return;
+        }
         progress?.stopTimer();
         if (authentication.method === "api_key") {
           progress?.stage(
@@ -2632,16 +2978,38 @@ async function runScan(
           progress?.stage(
             "To use your ChatGPT sign-in, retry with --auth chatgpt.",
           );
+        } else if (authentication.method === "aws_credentials") {
+          progress?.stage(
+            `Authentication: AWS credentials from ${authentication.source}.`,
+          );
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
         progress?.startTimer("Preparing scan");
       },
+      onTrustedAccessStatus: (status) => {
+        if (status === "granted") {
+          errorOutput.write(
+            "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
+          );
+        }
+      },
       onScanStarted: () => {
+        diagnostic("scan.started");
+        if (dashboard !== null) {
+          dashboard.setStage(phase ?? "Scanning repository");
+          return;
+        }
         progress?.stopTimer();
         progress?.startTimer(runningMessage());
       },
       onReconnect: (attempt, maxAttempts, details) => {
+        diagnostic("connection.retry", {
+          reason: details?.reason ?? "unknown",
+          attempt,
+          max_attempts: maxAttempts,
+          retry_after_seconds: details?.retryAfterSeconds,
+        });
         progress?.stopTimer();
         const message =
           details?.reason === "rate_limit"
@@ -2657,8 +3025,39 @@ async function runScan(
                 : details?.reason === "authorization"
                   ? `Model access interrupted; retrying (${attempt}/${maxAttempts}).`
                   : `Codex connection interrupted; retrying (${attempt}/${maxAttempts})`;
+        if (dashboard !== null) {
+          dashboard.note(message);
+          return;
+        }
         progress?.stage(message);
         progress?.startTimer(runningMessage());
+      },
+      onActivity: (activity) => {
+        if (dashboard === null) return;
+        dashboard.record(activity);
+        if (activity.paths.length > 0 && phase === "preflight") {
+          dashboard.setStage("inspecting repository files");
+        }
+      },
+      onProgress: (update) => {
+        const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
+        if (key === lastProgressUpdate) return;
+        lastProgressUpdate = key;
+        fileProgress = update;
+        const previousPhase = phase;
+        phase = scanPhase(update.phase);
+        if (dashboard !== null) {
+          dashboard.setFiles(update);
+          dashboard.setStage(phase);
+          if (previousPhase !== phase) dashboard.note(`Started ${phase}`);
+          return;
+        }
+        if (progress === null) return;
+        progress.stopTimer();
+        progress.stage(
+          `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
+        );
+        progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
         const update =
@@ -2667,22 +3066,56 @@ async function runScan(
             : `dispatch:${status.phase}:${status.planned}:${status.started}`;
         if (update === lastWorkerUpdate) return;
         lastWorkerUpdate = update;
-        if (status.kind === "dispatch") phase = scanPhase(status.phase);
+        if (status.kind === "preflight") {
+          diagnostic("worker.preflight", {
+            delegation: status.delegation,
+            configured_slots: status.configuredSlots,
+          });
+        } else {
+          diagnostic("worker.phase", {
+            phase: status.phase,
+            planned: status.planned,
+            started: status.started,
+          });
+          workerCapacity = { planned: status.planned, started: status.started };
+          phase = scanPhase(status.phase);
+        }
         const message = workerStatusMessage(status);
+        if (dashboard !== null) {
+          if (status.kind === "dispatch") {
+            dashboard.setStage(scanPhase(status.phase));
+          }
+          if (message !== null) dashboard.note(message);
+          return;
+        }
         if (message === null || progress === null) return;
         progress.stopTimer();
         progress.stage(message);
         progress.startTimer(runningMessage());
       },
-      onWarning: (warning) => {
-        errorOutput.write(
-          `codex-security: warning: ${redactedErrorMessage(warning)}\n`,
-        );
+      onWarning: (warning, details) => {
+        const message = sanitizeDiagnosticValue(warning);
+        if (details?.kind === "target_changed") {
+          targetWarnings.push(message);
+        }
+        writeAboveProgress(() => {
+          diagnostic("scan.warning", { message });
+          errorOutput.write(`codex-security: warning: ${message}\n`);
+        });
       },
       onObserverError: (observer, error) => {
-        errorOutput.write(
-          `codex-security: warning: ${observer} observer failed: ${redactedErrorMessage(error)}\n`,
-        );
+        diagnostic("scan.observer_failed", {
+          observer,
+          classification: classifyConnectionFailure(error),
+        });
+        const warning = `${observer} observer failed: ${sanitizeDiagnosticValue(error)}`;
+        if (dashboard === null) {
+          writeAboveProgress(() => {
+            errorOutput.write(`codex-security: warning: ${warning}\n`);
+          });
+        } else {
+          dashboard.note(`Warning: ${warning}`);
+        }
       },
     };
     if (arguments_.dryRun) {
@@ -2691,22 +3124,35 @@ async function runScan(
       result = await security.run(repository, options);
       scanDir = result.scanDir;
     }
-    progress.stopTimer();
   } catch (error) {
     failed = true;
     failure = error;
   } finally {
+    dashboard?.stop();
     progress?.stopTimer();
-    await security?.close().catch((error: unknown) => {
-      if (!failed) {
-        failed = true;
-        failure = error;
-      }
-    });
+    if (security !== null) {
+      diagnostic("runtime.cleanup.started");
+      await security.close().then(
+        () => diagnostic("runtime.cleanup.completed"),
+        (error: unknown) => {
+          diagnostic("runtime.cleanup.failed", {
+            classification: classifyConnectionFailure(error),
+          });
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        },
+      );
+    }
     removeSignalListeners();
   }
 
   if (requestedSignal !== null) {
+    diagnostic("scan.interrupted", {
+      signal: requestedSignal,
+      partial_output: scanDir !== null,
+    });
     return {
       exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
       error:
@@ -2716,10 +3162,23 @@ async function runScan(
     };
   }
   if (failed) {
+    const costLimitFailure =
+      failure instanceof ScanCostLimitExceededError ? failure : undefined;
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? redactedErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
+    diagnostic("scan.failed", {
+      classification:
+        costLimitFailure !== undefined
+          ? "cost_limit_exceeded"
+          : isLocalScanFailure(failure)
+            ? "local"
+            : classifyConnectionFailure(failure),
+      partial_output: scanDir !== null,
+      max_cost_usd: costLimitFailure?.maxCostUsd,
+      estimated_usd: costLimitFailure?.cost.estimatedUsd,
+    });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
       return { exitCode: 2, error: message };
@@ -2732,10 +3191,29 @@ async function runScan(
     return { exitCode: 2, error: message };
   }
   if (preflight !== null) {
+    const effectivePreflight: ScanPreflight = {
+      ...preflight,
+      model: effectiveModel,
+      reasoningEffort: effectiveReasoningEffort,
+    };
     progress?.stage("Preflight complete");
-    return { exitCode: 0, data: { dryRun: true, ...preflight } };
+    diagnostic("scan.preflight.completed", {
+      model: effectivePreflight.model,
+      reasoning_effort: effectivePreflight.reasoningEffort,
+      method: effectivePreflight.authentication.method,
+      source:
+        effectivePreflight.authentication.method !== "stored_credentials"
+          ? effectivePreflight.authentication.source
+          : undefined,
+      verified: effectivePreflight.authentication.verified,
+    });
+    return { exitCode: 0, data: { dryRun: true, ...effectivePreflight } };
   }
   if (result === null) {
+    diagnostic("scan.failed", {
+      classification: "unknown",
+      message: "Scan completed without a result.",
+    });
     errorOutput.write("scan completed without a result\n");
     return { exitCode: 2, error: "Scan completed without a result." };
   }
@@ -2751,8 +3229,12 @@ async function runScan(
   const blockingCount = result.findings.findings.filter(({ severity }) =>
     blockingSeverities.has(severity.level),
   ).length;
+  const scanData =
+    targetWarnings.length === 0
+      ? result.toJSON()
+      : { ...result.toJSON(), warnings: targetWarnings };
   const incomplete = result.coverage.completeness !== "complete";
-  progress?.stage("Scan complete");
+  progress?.stage(`Scan complete · ${result.manifest.scan.id.slice(0, 8)}`);
   printScanSummary(
     result,
     progress,
@@ -2761,15 +3243,29 @@ async function runScan(
       dependencies.environment["NO_COLOR"] === undefined &&
       dependencies.environment["TERM"] !== "dumb",
   );
+  diagnostic("scan.completed", {
+    coverage: result.coverage.completeness,
+    findings: result.findings.findings.length,
+    scan_id: result.manifest.scan.id,
+    estimated_usd: result.cost?.estimatedUsd,
+    exit_code:
+      targetWarnings.length > 0 || incomplete ? 2 : blockingCount > 0 ? 1 : 0,
+  });
+  if (targetWarnings.length > 0) {
+    errorOutput.write(
+      "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
+    );
+    return { exitCode: 2, data: scanData };
+  }
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
         ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
         : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
     );
-    return { exitCode: 2, data: result.toJSON() };
+    return { exitCode: 2, data: scanData };
   }
-  return { exitCode: blockingCount > 0 ? 1 : 0, data: result.toJSON() };
+  return { exitCode: blockingCount > 0 ? 1 : 0, data: scanData };
 }
 
 // Filesystem and OS syscall failures cannot originate from the model transport,
@@ -2826,9 +3322,15 @@ function scanFailureMessage(
   // appending it. That is deliberate: upstream authentication and authorization
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
-  if (isLocalScanFailure(error)) return redactedErrorMessage(error);
+  if (isLocalScanFailure(error)) return sanitizeDiagnosticValue(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `Authentication failed using AWS credentials from ${authentication.source}. ` +
+          "Check your Amazon Bedrock bearer token or AWS credential chain."
+        );
+      }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
             "Your ChatGPT sign-in was not used. " +
@@ -2836,6 +3338,12 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions."
+        );
+      }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
@@ -2846,7 +3354,7 @@ function scanFailureMessage(
     case "network_error":
     case "timeout":
     case "unknown":
-      return redactedErrorMessage(error);
+      return sanitizeDiagnosticValue(error);
   }
 }
 
@@ -2871,12 +3379,16 @@ function scanScope(arguments_: ScanArguments): string | null {
   return null;
 }
 
-function scanPhase(value: ScanWorkerPhase): string {
+function scanPhase(value: ScanWorkerPhase | ScanPhase): string {
   return {
+    preflight: "preflight",
+    threat_model: "building threat model",
+    discovery: "reviewing files",
     ranking: "ranking scan targets",
     file_review: "reviewing files",
     validation: "validating findings",
     attack_path: "analyzing attack paths",
+    reporting: "writing report",
   }[value];
 }
 
@@ -3055,10 +3567,19 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelReasoningEffort,
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
+  if (isExternalModelProvider(provider)) {
+    result["model_provider"] = provider;
+    result["model_providers"] = {
+      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+    };
+  } else if (provider === "amazon-bedrock") {
+    result["model_provider"] = provider;
+  }
   for (const value of values) {
     const separator = value.indexOf("=");
     const key = separator < 0 ? "" : value.slice(0, separator);
@@ -3114,9 +3635,25 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
+      if (
+        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+        key === "model_provider"
+      ) {
+        throw new CodexSecurityError(
+          "--provider conflicts with --codex model_provider",
+        );
+      }
       throw new CodexSecurityError("Duplicate --codex key");
     }
     cursor[final] = parsed;
+  }
+  if (
+    (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+    !("model" in result)
+  ) {
+    throw new CodexSecurityError(
+      `--model is required when using --provider ${provider}`,
+    );
   }
   return result;
 }
@@ -3152,6 +3689,7 @@ export class Progress {
   readonly #startedAt: number;
   readonly #interactive: boolean;
   #timer: NodeJS.Timeout | null = null;
+  #timerMessage: string | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
 
@@ -3196,6 +3734,7 @@ export class Progress {
       () => this.#renderTimer(message),
       PROGRESS_REFRESH_MILLISECONDS,
     );
+    this.#timerMessage = message;
   }
 
   public stopTimer(): void {
@@ -3203,6 +3742,7 @@ export class Progress {
       this.#dependencies.clearInterval(this.#timer);
       this.#timer = null;
     }
+    this.#timerMessage = null;
     if (this.#timerLineActive) {
       this.#stream.write("\n");
       this.#timerLineActive = false;
@@ -3210,6 +3750,20 @@ export class Progress {
     if (this.#cursorHidden) {
       this.#stream.write(SHOW_CURSOR);
       this.#cursorHidden = false;
+    }
+  }
+
+  public writeAboveTimer(write: () => void): void {
+    const message = this.#timerMessage;
+    if (message === null) {
+      write();
+      return;
+    }
+    this.stopTimer();
+    try {
+      write();
+    } finally {
+      this.startTimer(message);
     }
   }
 
