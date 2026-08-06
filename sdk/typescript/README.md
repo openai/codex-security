@@ -487,6 +487,9 @@ service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef0123
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.
+The output filesystem must support hard links so campaign ownership can be
+published atomically; use a local directory instead of FAT, exFAT, or a network
+filesystem without hard-link support.
 
 ### Scan history and reruns
 

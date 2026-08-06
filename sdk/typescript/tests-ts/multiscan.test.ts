@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -418,9 +419,20 @@ describe("multiscan", () => {
       await finish;
       return await completedScan(scanOptions.outputDir!);
     });
+    const lock = join(paths.output, ".lock");
     const first = runMultiscan(options(paths, security));
     await running;
     try {
+      expect((await lstat(lock)).isFile()).toBe(true);
+      expect(JSON.parse(await readFile(lock, "utf8"))).toMatchObject({
+        pid: process.pid,
+        token: expect.any(String),
+      });
+      expect(
+        (await readdir(paths.output)).some((name) =>
+          name.startsWith(".lock.pending-"),
+        ),
+      ).toBe(false);
       await expect(runMultiscan(options(paths, security))).rejects.toThrow(
         /running|locked|supervisor/iu,
       );
@@ -431,7 +443,6 @@ describe("multiscan", () => {
 
     const [receipt] = await results(join(paths.output, "results.jsonl"));
     await rm(join(receipt!["outputDir"] as string, "report.md"));
-    const lock = join(paths.output, ".lock");
     await mkdir(lock);
     await writeFile(
       join(lock, "owner.json"),
@@ -444,6 +455,123 @@ describe("multiscan", () => {
     expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
     expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
     await expect(access(lock)).rejects.toThrow();
+  });
+
+  test("recovers missing and malformed legacy lock ownership", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "lock-recovery");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlock-recovery,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output);
+    const lock = join(paths.output, ".lock");
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    for (const owner of [
+      undefined,
+      '{"pid":',
+      '{"pid":"invalid"}',
+      '{"pid":2147483648}',
+    ]) {
+      await mkdir(lock);
+      if (owner !== undefined) {
+        await writeFile(join(lock, "owner.json"), owner);
+      }
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      await expect(access(lock)).rejects.toThrow();
+    }
+
+    expect(scans).toBe(1);
+    expect(
+      (await readdir(paths.output)).some(
+        (name) =>
+          name.startsWith(".lock.pending-") ||
+          name.startsWith(".lock.stale-") ||
+          name.startsWith(".lock.recovery"),
+      ),
+    ).toBe(false);
+  });
+
+  test("serializes stale file and legacy-directory recovery", async () => {
+    for (const legacy of [false, true]) {
+      const paths = await fixture();
+      const source = await repository(paths.root, `recovery-${legacy}`);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ntarget,${source.path},${source.revision}\n`,
+      );
+      await mkdir(paths.output);
+      const lock = join(paths.output, ".lock");
+      const previous = JSON.stringify({ pid: 999_999_999, token: "stale" });
+      if (legacy) {
+        await mkdir(lock);
+        await writeFile(join(lock, "owner.json"), previous);
+      } else {
+        await writeFile(lock, previous);
+        await writeFile(
+          join(paths.output, ".lock.recovery"),
+          JSON.stringify({ pid: 999_999_998, token: "abandoned" }),
+        );
+        await writeFile(
+          join(paths.output, ".lock.recovery.takeover"),
+          JSON.stringify({ pid: 999_999_997, token: "abandoned-takeover" }),
+        );
+      }
+
+      let active = 0;
+      let maximum = 0;
+      let rejected = 0;
+      let release!: () => void;
+      let blocked!: () => void;
+      const completion = new Promise<void>((resolve) => (release = resolve));
+      const competitors = new Promise<void>((resolve) => (blocked = resolve));
+      const security = client(async (_repository, scanOptions = {}) => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await completion;
+        active -= 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+      const attempts = Array.from({ length: 12 }, () =>
+        runMultiscan(options(paths, security)).catch((error: unknown) => {
+          if (++rejected === 11) blocked();
+          throw error;
+        }),
+      );
+      const settled = Promise.allSettled(attempts);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          competitors,
+          new Promise<void>((_resolve, reject) => {
+            timeout = setTimeout(
+              () =>
+                reject(new Error("Competing supervisors were not rejected.")),
+              10_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+        release();
+      }
+      const results = await settled;
+      expect(maximum).toBe(1);
+      expect(
+        results.filter(({ status }) => status === "fulfilled"),
+      ).toHaveLength(1);
+      expect(
+        (await readdir(paths.output)).some((name) => name.startsWith(".lock")),
+      ).toBe(false);
+    }
   });
 
   test("retries a failed attempt and records both durable receipts", async () => {
