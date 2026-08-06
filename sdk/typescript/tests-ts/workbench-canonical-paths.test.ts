@@ -142,11 +142,16 @@ describe("bundled workbench canonical paths", () => {
     expect(
       runPythonProbe(
         [
-          "import json, locale, sys",
+          "import json, sys",
           "from pathlib import Path",
           "sys.path.insert(0, sys.argv[1])",
           "import workbench_target as target",
-          "locale.getencoding = lambda: 'cp1252'",
+          "original_run = target.subprocess.run",
+          "def legacy_run(*args, **kwargs):",
+          "    if kwargs.get('text') and kwargs.get('encoding') is None:",
+          "        kwargs['encoding'] = 'cp1252'",
+          "    return original_run(*args, **kwargs)",
+          "target.subprocess.run = legacy_run",
           "repository, pathspec = target.git_worktree_context(Path(sys.argv[2]))",
           "print(json.dumps({'repository': str(repository), 'pathspec': pathspec}))",
         ].join("\n"),
@@ -156,6 +161,26 @@ describe("bundled workbench canonical paths", () => {
       repository: await realpath(repository),
       pathspec: ".",
     });
+  });
+
+  testPosix("uses the native decoder for Git pathname output", () => {
+    expect(
+      runPythonProbe(
+        [
+          "import json, subprocess, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "observed = {}",
+          "def run(command, **kwargs):",
+          "    observed['encoding'] = kwargs.get('encoding')",
+          "    return subprocess.CompletedProcess(command, 1, '', '')",
+          "target.subprocess.run = run",
+          "target.git_command(Path('.'), 'rev-parse', text=True)",
+          "print(json.dumps(observed))",
+        ].join("\n"),
+      ),
+    ).toEqual({ encoding: null });
   });
 
   testPosix(
