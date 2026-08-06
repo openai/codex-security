@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
-import { scanModelConfiguration } from "../src/config.js";
+import { scanModelConfiguration, scanModelProvider } from "../src/config.js";
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
@@ -131,6 +131,41 @@ describe("Codex configuration", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "low",
     });
+  });
+
+  test("resolves the selected profile's provider before the root provider", async () => {
+    for (const [overrides, expected] of [
+      [
+        {
+          profile: "bedrock",
+          model_provider: "openai",
+          profiles: {
+            bedrock: { model_provider: "amazon-bedrock" },
+          },
+        },
+        "amazon-bedrock",
+      ],
+      [
+        {
+          profile: "bedrock",
+          model_provider: "amazon-bedrock",
+          profiles: { bedrock: { model: "openai.gpt-5.6-luna" } },
+        },
+        "amazon-bedrock",
+      ],
+      [
+        {
+          profile: "missing",
+          model_provider: "openai",
+          profiles: { bedrock: { model_provider: "amazon-bedrock" } },
+        },
+        "openai",
+      ],
+      [{}, undefined],
+    ] as const) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(scanModelProvider(config)).toBe(expected);
+    }
   });
 
   test("rejects invalid model settings from the selected Codex profile", async () => {

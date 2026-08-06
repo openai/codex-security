@@ -128,6 +128,10 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
 On Windows, set the API key in PowerShell:
@@ -428,6 +432,12 @@ Use `--provider openrouter` to send inference through OpenRouter. Set
 
 Use `--provider fireworks` to send inference through Fireworks AI. Set
 `FIREWORKS_API_KEY` and specify a supported model with `--model`.
+
+Use `--provider amazon-bedrock` to send inference through Amazon Bedrock. Set
+`AWS_REGION` and authenticate with `AWS_BEARER_TOKEN_BEDROCK`, standard AWS
+access keys, an AWS profile, web identity, container credentials, or the
+default AWS credential chain. Specify a supported Bedrock model with `--model`;
+OpenAI Bedrock models such as `openai.gpt-5.6-luna` support `--max-cost`.
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.

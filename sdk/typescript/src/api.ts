@@ -30,6 +30,7 @@ import {
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
   type JsonObject,
   writeCodexConfig,
@@ -190,6 +191,18 @@ export type ScanAuthentication =
       method: "stored_credentials";
       credentialType?: "api_key" | "chatgpt";
       verified: false;
+    }
+  | {
+      method: "aws_credentials";
+      source:
+        | "AWS_BEARER_TOKEN_BEDROCK"
+        | "AWS_ACCESS_KEY_ID"
+        | "AWS_PROFILE"
+        | "AWS_WEB_IDENTITY_TOKEN_FILE"
+        | "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"
+        | "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+        | "default_credential_chain";
+      verified: false;
     };
 
 export type ScanTrustedAccessStatus = "granted" | "not_granted" | "unknown";
@@ -322,8 +335,16 @@ export class CodexSecurity {
       await realpath(tmpdir()),
       "temporary",
     );
+    if (options.knowledgeBasePaths?.length) {
+      const knowledgeBase = await prepareKnowledgeBase(
+        options.knowledgeBasePaths,
+        options.signal,
+      );
+      await knowledgeBase.cleanup();
+    }
     const configuration = await mergedCodexConfig(this.config);
     const model = scanModelConfiguration(configuration);
+    const modelProvider = scanModelProvider(configuration);
     validateScanCostLimit(options.maxCostUsd, model.model);
     const archiveDir =
       options.archiveExisting === true
@@ -343,12 +364,10 @@ export class CodexSecurity {
       authentication: scanAuthentication(
         this.#dependencies.environment,
         options.auth,
-        configuration["model_provider"],
+        modelProvider,
       ),
       ...model,
-      ...(typeof configuration["model_provider"] === "string"
-        ? { modelProvider: configuration["model_provider"] }
-        : {}),
+      ...(typeof modelProvider === "string" ? { modelProvider } : {}),
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
@@ -421,7 +440,7 @@ export class CodexSecurity {
       checkOpen();
 
       const requestedConfig = await mergedCodexConfig(this.config);
-      const modelProvider = requestedConfig["model_provider"];
+      const modelProvider = scanModelProvider(requestedConfig);
       const externalProvider = isExternalModelProvider(modelProvider)
         ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
         : null;
@@ -532,7 +551,11 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      if (!runtime.credentialsAvailable && apiKey === null) {
+      if (
+        !runtime.credentialsAvailable &&
+        apiKey === null &&
+        authentication.method !== "aws_credentials"
+      ) {
         throw new AuthenticationRequiredError(
           "No credentials were found. Run 'codex-security login', use " +
             "'codex-security login --device-auth' on a remote or headless machine, or set " +
@@ -1476,13 +1499,15 @@ export class CodexSecurity {
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
-      const credentialsAvailable = isExternalModelProvider(modelProvider)
-        ? false
-        : await initialCredentialsAvailable(
-            processEnvironment,
-            ambientHome,
-            codexHome,
-          );
+      const credentialsAvailable =
+        isExternalModelProvider(modelProvider) ||
+        modelProvider === "amazon-bedrock"
+          ? false
+          : await initialCredentialsAvailable(
+              processEnvironment,
+              ambientHome,
+              codexHome,
+            );
       return {
         codexHome,
         persistentCredentialHome,
@@ -2114,6 +2139,22 @@ export function scanAuthentication(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
 ): ScanAuthentication {
+  if (modelProvider === "amazon-bedrock") {
+    const sources = [
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_PROFILE",
+      "AWS_WEB_IDENTITY_TOKEN_FILE",
+      "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+      "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    ] as const;
+    const source = sources.find((name) => environmentValue(environment, name));
+    return {
+      method: "aws_credentials",
+      source: source ?? "default_credential_chain",
+      verified: false,
+    };
+  }
   if (auth === "chatgpt" && !isExternalModelProvider(modelProvider)) {
     return { method: "stored_credentials", verified: false };
   }
@@ -2170,14 +2211,19 @@ function selectedScanEnvironment(
   const selectedProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
-  if (auth !== "chatgpt" && selectedProviderKey === null) return environment;
+  const bedrockProvider = modelProvider === "amazon-bedrock";
+  if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
+    return environment;
+  }
   return Object.fromEntries(
     Object.entries(environment).filter(([name]) => {
       const key = name.toUpperCase();
       if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
-      if (selectedProviderKey === null) return true;
       if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
-        return key === selectedProviderKey;
+        return (
+          !bedrockProvider &&
+          (selectedProviderKey === null || key === selectedProviderKey)
+        );
       }
       return true;
     }),
@@ -2442,12 +2488,6 @@ export function scanPreflightCodexConfig(
   };
 
   const result = executionConfig(config);
-  const modelProvider = result["model_provider"];
-  if (isExternalModelProvider(modelProvider)) {
-    result["model_providers"] = {
-      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
-    };
-  }
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]
     : undefined;
@@ -2470,6 +2510,28 @@ export function scanPreflightCodexConfig(
       if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
+  }
+  const modelProvider = scanModelProvider(result);
+  if (isExternalModelProvider(modelProvider)) {
+    result["model_providers"] = {
+      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
+    };
+  } else if (modelProvider === "amazon-bedrock") {
+    const providers = config["model_providers"];
+    const provider = isRecord(providers) ? providers[modelProvider] : undefined;
+    const aws = isRecord(provider) ? provider["aws"] : undefined;
+    if (isRecord(aws)) {
+      const sanitized: JsonObject = {};
+      for (const key of ["region", "profile"]) {
+        const value = aws[key];
+        if (safeString(value, 512)) sanitized[key] = value;
+      }
+      if (Object.keys(sanitized).length > 0) {
+        result["model_providers"] = {
+          [modelProvider]: { aws: sanitized },
+        };
+      }
+    }
   }
   const rootMarkers = config["project_root_markers"];
   if (Array.isArray(rootMarkers)) {
