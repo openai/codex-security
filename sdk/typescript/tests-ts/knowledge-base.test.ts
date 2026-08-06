@@ -123,6 +123,10 @@ describe("scan knowledge bases", () => {
       join(root, "paired-break.docx"),
       docx("Authorization", "Review permissions", "<w:br></w:br>"),
     );
+    await writeFile(
+      join(root, "carriage-return.docx"),
+      docx("Authentication", "Review sessions", "<w:cr/>"),
+    );
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.push(knowledgeBase.path);
@@ -131,6 +135,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Payment service boundary");
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
+    expect(documents).toContain("Authentication\nReview sessions\n");
   });
 
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
