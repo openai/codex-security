@@ -119,6 +119,14 @@ async function runCampaign(
         join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
       (await hasArtifacts(receipt.outputDir))
     ) {
+      // A skipped task never reaches the worker's removal below, so a checkout
+      // that survived a failed cleanup would linger for every later run. Retry
+      // the removal here, still best effort and without touching the receipt
+      // this task already earned, so resuming reclaims the clone it left.
+      await rm(join(output, "checkouts", task.id), {
+        recursive: true,
+        force: true,
+      }).catch(() => undefined);
       completed += 1;
     } else {
       pending.push(task);
@@ -158,6 +166,7 @@ async function runCampaign(
         const progress = { repository: task.id, attempt };
         options.onProgress?.({ ...progress, status: "started" });
         let failure: string | undefined;
+        let cleanup: string | undefined;
         let cost: Readonly<ScanCost> | null = null;
         try {
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
@@ -197,9 +206,27 @@ async function runCampaign(
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
           failure = redactedErrorMessage(error);
         } finally {
-          await rm(checkout, { recursive: true, force: true });
+          // Removing the checkout is best effort. `force` ignores a checkout that
+          // is already gone but not an EACCES, EPERM, or EBUSY removal, and a
+          // throw here would replace the outcome the try and catch just captured
+          // and skip the receipt below, leaving the attempt unrecorded for resume.
+          // The removal failure travels with that outcome instead, so the attempt
+          // keeps the status its scan earned and a leftover checkout is still
+          // reported. The next attempt removes the checkout again inside the try
+          // above, and a resume that skips this task removes it before counting
+          // the task as done, so a leftover that outlives this run is retried
+          // rather than kept or scanned as if it were fresh.
+          cleanup = await rm(checkout, { recursive: true, force: true }).then(
+            () => undefined,
+            (error: unknown) =>
+              `Multiscan checkout cleanup failed: ${redactedErrorMessage(error)}`,
+          );
         }
         const status = failure === undefined ? "completed" : "failed";
+        const reported = [failure, cleanup].filter(
+          (message): message is string => message !== undefined,
+        );
+        const error = reported.length === 0 ? undefined : reported.join("; ");
         await appendReceipt(
           ledger,
           `${JSON.stringify({
@@ -208,13 +235,13 @@ async function runCampaign(
             attempt,
             outputDir: scanDir,
             ...(cost === null ? {} : { cost }),
-            ...(failure === undefined ? {} : { error: failure }),
+            ...(error === undefined ? {} : { error }),
           })}\n`,
         );
         options.onProgress?.({
           ...progress,
           status,
-          ...(failure === undefined ? {} : { error: failure }),
+          ...(error === undefined ? {} : { error }),
         });
         if (failure === undefined) {
           completed += 1;
