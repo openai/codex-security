@@ -51,6 +51,7 @@ import {
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
   type ExternalModelProvider,
   type JsonObject,
@@ -200,7 +201,7 @@ const VALUE_OPTIONS = new Set([
   "--reason",
 ]);
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks"])
+  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
 
@@ -259,7 +260,7 @@ interface ScanArguments extends DeepScanOptions {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
-  provider?: "openai" | ExternalModelProvider;
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -2729,13 +2730,14 @@ async function runScan(
         ),
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
+    const effectiveConfiguration = {
+      ...DEFAULT_CODEX_CONFIG,
+      ...config.codexOverrides,
+    };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
-      scanModelConfiguration({
-        ...DEFAULT_CODEX_CONFIG,
-        ...config.codexOverrides,
-      }));
+      scanModelConfiguration(effectiveConfiguration));
     let auth = arguments_.auth;
-    const provider = config.codexOverrides?.["model_provider"];
+    const provider = scanModelProvider(effectiveConfiguration);
     selectedAuthentication = scanAuthentication(
       dependencies.environment,
       auth,
@@ -2938,7 +2940,7 @@ async function runScan(
           requested: auth ?? "auto",
           method: authentication.method,
           source:
-            authentication.method === "api_key"
+            authentication.method !== "stored_credentials"
               ? authentication.source
               : undefined,
           verified: authentication.verified,
@@ -2947,7 +2949,9 @@ async function runScan(
           dashboard.note(
             authentication.method === "api_key"
               ? `Using API key from ${authentication.source}`
-              : "Using stored Codex credentials",
+              : authentication.method === "aws_credentials"
+                ? `Using AWS credentials from ${authentication.source}`
+                : "Using stored Codex credentials",
           );
           return;
         }
@@ -2959,10 +2963,21 @@ async function runScan(
           progress?.stage(
             "To use your ChatGPT sign-in, retry with --auth chatgpt.",
           );
+        } else if (authentication.method === "aws_credentials") {
+          progress?.stage(
+            `Authentication: AWS credentials from ${authentication.source}.`,
+          );
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
         progress?.startTimer("Preparing scan");
+      },
+      onTrustedAccessStatus: (status) => {
+        if (status === "granted") {
+          errorOutput.write(
+            "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
+          );
+        }
       },
       onScanStarted: () => {
         diagnostic("scan.started");
@@ -3172,7 +3187,7 @@ async function runScan(
       reasoning_effort: effectivePreflight.reasoningEffort,
       method: effectivePreflight.authentication.method,
       source:
-        effectivePreflight.authentication.method === "api_key"
+        effectivePreflight.authentication.method !== "stored_credentials"
           ? effectivePreflight.authentication.source
           : undefined,
       verified: effectivePreflight.authentication.verified,
@@ -3295,6 +3310,12 @@ function scanFailureMessage(
   if (isLocalScanFailure(error)) return sanitizeDiagnosticValue(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `Authentication failed using AWS credentials from ${authentication.source}. ` +
+          "Check your Amazon Bedrock bearer token or AWS credential chain."
+        );
+      }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
             "Your ChatGPT sign-in was not used. " +
@@ -3302,6 +3323,12 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions."
+        );
+      }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
@@ -3525,7 +3552,7 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelReasoningEffort,
-  provider?: "openai" | ExternalModelProvider,
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
@@ -3535,6 +3562,8 @@ export function parseCodexOverrides(
     result["model_providers"] = {
       [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
     };
+  } else if (provider === "amazon-bedrock") {
+    result["model_provider"] = provider;
   }
   for (const value of values) {
     const separator = value.indexOf("=");
@@ -3591,7 +3620,10 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
-      if (isExternalModelProvider(provider) && key === "model_provider") {
+      if (
+        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+        key === "model_provider"
+      ) {
         throw new CodexSecurityError(
           "--provider conflicts with --codex model_provider",
         );
@@ -3600,7 +3632,10 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
-  if (isExternalModelProvider(provider) && !("model" in result)) {
+  if (
+    (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+    !("model" in result)
+  ) {
     throw new CodexSecurityError(
       `--model is required when using --provider ${provider}`,
     );

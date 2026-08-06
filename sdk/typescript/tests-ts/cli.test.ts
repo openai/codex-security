@@ -36,6 +36,7 @@ import {
   VERSION,
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import { scanPreflightCodexConfig } from "../src/api.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -121,7 +122,9 @@ describe("CLI", () => {
           model: { type: "string" },
           verbose: { type: "boolean" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
-          provider: { enum: ["openai", "openrouter", "fireworks"] },
+          provider: {
+            enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
+          },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           headless: { type: "boolean" },
         },
@@ -288,6 +291,18 @@ describe("CLI", () => {
     const readme = await readFile(new URL("../README.md", import.meta.url), {
       encoding: "utf8",
     });
+    const publicReadme = await readFile(
+      new URL("../../../README.md", import.meta.url),
+      { encoding: "utf8" },
+    );
+
+    for (const documentation of [readme, publicReadme]) {
+      expect(documentation).toContain(
+        "Some cybersecurity requests and protected findings require approval through\n" +
+          "Trusted Access for Cyber. To apply or check your access, visit\n" +
+          "[chatgpt.com/cyber](https://chatgpt.com/cyber).",
+      );
+    }
 
     for (const setting of [
       "OPENAI_API_KEY",
@@ -1894,7 +1909,9 @@ describe("CLI", () => {
       "Use plain text progress instead of the interactive dashboard.",
     );
     expect(help.text()).toContain("--model <string>");
-    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
+    expect(help.text()).toContain(
+      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+    );
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
@@ -1960,7 +1977,9 @@ describe("CLI", () => {
     );
     expect(help.text()).not.toContain("--outputDir");
     expect(help.text()).not.toContain("--maxAttempts");
-    expect(help.text()).toContain("--provider <openai|openrouter|fireworks>");
+    expect(help.text()).toContain(
+      "--provider <openai|openrouter|fireworks|amazon-bedrock>",
+    );
     expect(stderr.text()).toBe("");
   });
 
@@ -2048,6 +2067,31 @@ describe("CLI", () => {
       }
     },
   );
+
+  test("routes scans through the built-in Amazon Bedrock provider", async () => {
+    for (const options of [
+      ["--provider", "amazon-bedrock", "--model", "openai.gpt-5.6-luna"],
+      ["--provider=amazon-bedrock", "--codex", 'model="openai.gpt-5.6-luna"'],
+    ] as const) {
+      let config: CodexSecurityConfig | undefined;
+      expect(
+        await main(
+          ["scan", ".", ...options],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock" },
+            onConfig: (value) => (config = value),
+          }),
+        ),
+      ).toBe(0);
+      expect(config?.codexOverrides).toEqual({
+        model: "openai.gpt-5.6-luna",
+        model_provider: "amazon-bedrock",
+      });
+      expect(config?.codexOverrides).not.toHaveProperty("model_providers");
+    }
+  });
 
   test("parses repeatable options and every scan target through Incur", async () => {
     const pathOutput = capture();
@@ -2164,7 +2208,11 @@ describe("CLI", () => {
         "high",
       ),
     ).toThrow("--effort conflicts with --codex model_reasoning_effort");
-    for (const provider of ["openrouter", "fireworks"] as const) {
+    for (const provider of [
+      "openrouter",
+      "fireworks",
+      "amazon-bedrock",
+    ] as const) {
       expect(() =>
         parseCodexOverrides([], undefined, undefined, provider),
       ).toThrow(`--model is required when using --provider ${provider}`);
@@ -2743,6 +2791,67 @@ describe("CLI", () => {
     expect(configuration).toContain('model="gpt-5.6-terra"');
     expect(configuration).toContain('reasoning_effort="high"');
   });
+
+  test.each([
+    [
+      "Amazon Bedrock",
+      "amazon-bedrock",
+      "openai.gpt-5.6-luna",
+      { aws: { region: "us-east-2", profile: "security-prod" } },
+      { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
+    ],
+    [
+      "OpenRouter",
+      "openrouter",
+      "anthropic/claude-sonnet-4.5",
+      OPENROUTER_CODEX_PROVIDER,
+      { OPENROUTER_API_KEY: "synthetic-openrouter-key" },
+    ],
+    [
+      "Fireworks AI",
+      "fireworks",
+      "accounts/fireworks/models/qwen3-235b-a22b",
+      FIREWORKS_CODEX_PROVIDER,
+      { FIREWORKS_API_KEY: "synthetic-fireworks-key" },
+    ],
+  ] as const)(
+    "reruns profile-selected %s scans with their saved provider configuration",
+    async (_name, provider, model, providerConfig, environment) => {
+      const savedConfig = scanPreflightCodexConfig({
+        model_provider: "openai",
+        profile: "selected",
+        profiles: { selected: { model, model_provider: provider } },
+        model_providers: { [provider]: providerConfig },
+      });
+      let rerunConfig: CodexSecurityConfig | undefined;
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original", "--json"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            environment,
+            onConfig: (value) => (rerunConfig = value),
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: savedConfig,
+              },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      expect(rerunConfig?.codexOverrides).toMatchObject({
+        model_provider: "openai",
+        profile: "selected",
+        profiles: { selected: { model, model_provider: provider } },
+        model_providers: { [provider]: providerConfig },
+      });
+    },
+  );
 
   test("enables verbose diagnostics through CODEX_SECURITY_LOG_LEVEL", async () => {
     const stdout = capture();
@@ -3942,6 +4051,107 @@ describe("CLI", () => {
       "codex-security: warning: Repository HEAD changed during the scan: [redacted]",
     );
     expect(stderr.text()).not.toContain("SYNTHETIC_WARNING_SECRET");
+  });
+
+  test("prints granted trusted cyber access without warning or corrupting JSON scans", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onTrustedAccessStatus?.("granted");
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
+    );
+    expect(stderr.text()).not.toContain("warning:");
+  });
+
+  test("prints trusted cyber access guidance without failing or corrupting JSON scans", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber. Apply at https://chatgpt.com/cyber.",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Some cybersecurity requests or findings may be refused because your account does not have Trusted Access for Cyber.",
+    );
+    expect(stderr.text()).toContain("Apply at https://chatgpt.com/cyber.");
+  });
+
+  test("prints unverified trusted cyber access guidance without corrupting JSON scans", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(
+          "Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified. Check your access or apply at https://chatgpt.com/cyber.",
+        );
+        return fakeResult();
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain(
+      "codex-security: warning: Some cybersecurity requests or findings may be refused because your Trusted Access for Cyber status could not be verified.",
+    );
+    expect(stderr.text()).toContain(
+      "Check your access or apply at https://chatgpt.com/cyber.",
+    );
+  });
+
+  test("prints organizational trusted cyber access guidance without corrupting JSON scans", async () => {
+    for (const warning of [
+      "Some cybersecurity requests or findings may be refused because your API organization does not have Trusted Access for Cyber. Apply at https://openai.com/form/enterprise-trusted-access-for-cyber/.",
+      "Some cybersecurity requests or findings may be refused because Trusted Access for Cyber for your API organization could not be verified. Check your organization's access or apply at https://openai.com/form/enterprise-trusted-access-for-cyber/.",
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onWarning?.(warning);
+          return fakeResult();
+        },
+        close: async () => {},
+        preflight: async () => fakePreflight(),
+      });
+
+      expect(
+        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain(`codex-security: warning: ${warning}\n`);
+      expect(stderr.text()).not.toContain("chatgpt.com/cyber");
+    }
   });
 
   test("reports isolated observer failures without failing the scan", async () => {
