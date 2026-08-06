@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/discovery-candidates.schema.json",
+  "$defs": {
+    "recordDiscoveryCandidatesInput": {
+      "type": "object",
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/rawDiscoveryCandidate"
+          }
+        }
+      },
+      "required": ["candidates"],
+      "additionalProperties": false
+    },
+    "workbenchRecordDiscoveryCandidatesInput": {
+      "type": "object",
+      "properties": {
+        "scanId": { "type": "string", "pattern": "\\S" },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/rawDiscoveryCandidate"
+          }
+        }
+      },
+      "required": ["scanId", "candidates"],
+      "additionalProperties": false
+    },
+    "listCandidatesInput": {
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)$"
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "additionalProperties": false
+    },
+    "workbenchListCandidatesInput": {
+      "type": "object",
+      "properties": {
+        "scanId": { "type": "string", "pattern": "\\S" },
+        "cursor": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)$"
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "required": ["scanId"],
+      "additionalProperties": false
+    },
+    "recordDiscoveryCandidatesResult": {
+      "type": "object",
+      "properties": {
+        "operation": { "const": "replace" },
+        "candidatesRecorded": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["operation", "candidatesRecorded"],
+      "additionalProperties": false
+    },
+    "listCandidatesResult": {
+      "type": "object",
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/discoveryCandidate"
+          }
+        },
+        "nextCursor": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)$"
+        }
+      },
+      "required": ["rows"],
+      "additionalProperties": false
+    }
+  }
+}
