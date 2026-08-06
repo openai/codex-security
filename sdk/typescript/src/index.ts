@@ -10,6 +10,7 @@ export type {
   ScanOptions,
   ScanPreflight,
   ScanReconnectDetails,
+  ScanTrustedAccessStatus,
   ScanWarningDetails,
 } from "./api.js";
 export type {

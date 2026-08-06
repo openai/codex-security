@@ -12,12 +12,15 @@ export type ScanObserverName = Parameters<
 
 type ScanEventOptions = Pick<
   Parameters<typeof runScanEvents>[0],
+  | "authentication"
   | "expectedFilesTotal"
   | "onActivity"
   | "onObserverError"
   | "onProgress"
   | "onReconnect"
   | "onScanStarted"
+  | "onTrustedAccessStatus"
+  | "onWarning"
   | "onWorkerStatus"
 > & { abortController?: AbortController };
 

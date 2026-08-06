@@ -85,10 +85,10 @@ Pass scan configuration to `security.run(repository, options)` or
 | `signal`                | Cancel a scan with an `AbortSignal`.                                                  |
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
-`onOutputArchived`, `onOutputDirReady`, `onScanStarted`, `onReconnect`,
-`onWorkerStatus`, `onWarning`, and `onObserverError`. Preflight does not start
-the runtime, authenticate, resolve Python, inspect the plugin, or run those
-scan-lifecycle callbacks.
+`onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
+`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
+`onObserverError`. Preflight does not start the runtime, authenticate, resolve
+Python, inspect the plugin, or run those scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -128,6 +128,10 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
 On Windows, set the API key in PowerShell:
@@ -141,7 +145,11 @@ Check or remove the stored sign-in with `npx @openai/codex-security login status
 and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
 private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
 `$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
-configured. Login, status, logout, and scans use the same home. Codex manages
+configured. On managed Windows devices, inherited access for `SYSTEM` and local
+`Administrators` is preserved while protecting the home against future changes
+to its parents. Other users and broad groups are rejected, and PowerShell
+Constrained Language Mode is supported. Login,
+status, logout, and scans use the same home. Codex manages
 credentials using its configured file or system-keyring backend and honors
 managed-device policies. An existing file-based Codex sign-in is imported only
 when the dedicated home does not already contain stored credentials. Logging
@@ -178,6 +186,10 @@ The interactive choice applies only to the current scan and is not persisted.
 When an environment key is configured, ChatGPT login and
 `codex-security login status` identify the effective scan credential source
 without printing its value, including when no stored sign-in exists.
+
+Some cybersecurity requests and protected findings require approval through
+Trusted Access for Cyber. To apply or check your access, visit
+[chatgpt.com/cyber](https://chatgpt.com/cyber).
 
 ## CLI
 
@@ -420,6 +432,12 @@ Use `--provider openrouter` to send inference through OpenRouter. Set
 
 Use `--provider fireworks` to send inference through Fireworks AI. Set
 `FIREWORKS_API_KEY` and specify a supported model with `--model`.
+
+Use `--provider amazon-bedrock` to send inference through Amazon Bedrock. Set
+`AWS_REGION` and authenticate with `AWS_BEARER_TOKEN_BEDROCK`, standard AWS
+access keys, an AWS profile, web identity, container credentials, or the
+default AWS credential chain. Specify a supported Bedrock model with `--model`;
+OpenAI Bedrock models such as `openai.gpt-5.6-luna` support `--max-cost`.
 
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
