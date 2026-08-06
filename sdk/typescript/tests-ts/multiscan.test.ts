@@ -185,7 +185,7 @@ describe("multiscan", () => {
     const source = await repository(paths.root, "comma, quoted");
     await writeFile(
       paths.input,
-      `\uFEFF"id","repository","revision","scope","mode","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","contains ""quotes"""\r\n\r\n`,
+      `\uFEFF"id","repository","revision","scope","mode","prompt","notes"\r\n"payments","${source.path}","${source.revision}","src","deep","Focus on authentication, authorization.","contains ""quotes"""\r\n\r\n`,
     );
 
     const summary = await runMultiscan(
@@ -194,8 +194,16 @@ describe("multiscan", () => {
         client(async (_repository, scanOptions = {}) => {
           expect(scanOptions.target).toEqual(["src"]);
           expect(scanOptions.mode).toBe("deep");
+          expect(scanOptions.scanPrompt).toBe(
+            "Review boundaries.\n\nFocus on authentication, authorization.",
+          );
+          expect(scanOptions.postScanPrompt).toBe("Draft confirmed fixes.");
           return await completedScan(scanOptions.outputDir!);
         }),
+        {
+          scanPrompt: "Review boundaries.",
+          postScanPrompt: "Draft confirmed fixes.",
+        },
       ),
     );
 
@@ -203,6 +211,15 @@ describe("multiscan", () => {
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "payments", repository: source.path },
     ]);
+    expect(
+      JSON.parse(await readFile(join(paths.output, "manifest.json"), "utf8")),
+    ).toMatchObject({
+      scanPrompt: "Review boundaries.",
+      postScanPrompt: "Draft confirmed fixes.",
+      tasks: [
+        { id: "payments", prompt: "Focus on authentication, authorization." },
+      ],
+    });
   });
 
   test("records each completed scan's cost in the resumable ledger", async () => {
@@ -530,6 +547,15 @@ describe("multiscan", () => {
     await appendFile(initial.resultsPath, '{"id":"interrupted"');
     const resumed = await runMultiscan(options(paths, security));
     expect(resumed).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+    expect(calls).toBe(1);
+    for (const prompts of [
+      { scanPrompt: "Review different boundaries." },
+      { postScanPrompt: "Draft confirmed fixes." },
+    ]) {
+      await expect(
+        runMultiscan(options(paths, security, prompts)),
+      ).rejects.toThrow("manifest does not match");
+    }
     expect(calls).toBe(1);
 
     const [receipt] = await results(initial.resultsPath);

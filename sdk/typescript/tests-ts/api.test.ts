@@ -1745,6 +1745,7 @@ describe("CodexSecurity orchestration", () => {
     let codexOptions: CodexOptions | null = null;
     let threadOptions: Record<string, unknown> | null = null;
     let prompt = "";
+    let followUpPrompt = "";
     let scanStarted = false;
     const warnings: string[] = [];
     const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
@@ -1812,6 +1813,11 @@ describe("CodexSecurity orchestration", () => {
               return {
                 id: null,
                 async runStreamed(input: string) {
+                  if (prompt !== "") {
+                    expect(commands.at(-1)?.[0]).toBe("complete-scan");
+                    followUpPrompt = input;
+                    return { events: completedEvents() };
+                  }
                   expect(commands[0]?.[0]).toBe("register-cli-scan");
                   prompt = input;
                   await copyCompletedScan(root);
@@ -1830,6 +1836,8 @@ describe("CodexSecurity orchestration", () => {
 
     const scanStartedAt = Date.now();
     const result = await client.run(repository, {
+      scanPrompt: "Focus on authentication and authorization.",
+      postScanPrompt: "Draft fixes for confirmed findings.",
       onScanStarted: () => {
         scanStarted = true;
       },
@@ -1913,6 +1921,10 @@ describe("CodexSecurity orchestration", () => {
         ),
       ),
     ).toBe(false);
+    expect(prompt).toContain(
+      "Additional scan instructions:\nFocus on authentication and authorization.",
+    );
+    expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
     expect(
       JSON.parse(commands[0]![commands[0]!.indexOf("--recipe-json") + 1]!),
     ).toMatchObject({
@@ -2693,6 +2705,63 @@ describe("CodexSecurity orchestration", () => {
       expectedCost,
     );
 
+    await client.close();
+  });
+
+  test("surfaces post-scan failures without reopening a completed scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    let turns = 0;
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          return mockWorkbench(args);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: "thread-1",
+            async runStreamed() {
+              turns += 1;
+              if (turns === 1) {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              }
+              async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "turn.failed",
+                  error: { message: "Could not draft fixes." },
+                };
+              }
+              return { events: failedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, { postScanPrompt: "Draft confirmed fixes." }),
+    ).rejects.toThrow("Could not draft fixes.");
+    expect(commands.map((command) => command[0])).toEqual([
+      "register-cli-scan",
+      "get-scan-feedback",
+      "prepare-scan-completion",
+      "complete-scan",
+    ]);
     await client.close();
   });
 

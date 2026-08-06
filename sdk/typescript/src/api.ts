@@ -150,6 +150,8 @@ export interface ScanOptions extends DeepScanOptions {
   target?: ScanTarget;
   mode?: ScanMode;
   knowledgeBasePaths?: string[];
+  scanPrompt?: string;
+  postScanPrompt?: string;
   outputDir?: string;
   archiveExisting?: boolean;
   parentScanId?: string;
@@ -639,6 +641,7 @@ export class CodexSecurity {
         mode,
         runtime.configPath !== undefined,
         knowledgeBase !== null,
+        options.scanPrompt,
       );
       checkOpen();
       const expectation: ScanExpectation = {
@@ -1037,6 +1040,27 @@ export class CodexSecurity {
             );
           }
         }
+      }
+      if (
+        options.postScanPrompt?.trim() &&
+        result.coverage.completeness === "complete"
+      ) {
+        const followUp = await thread.runStreamed(options.postScanPrompt, {
+          signal,
+        });
+        await runScanEvents({
+          thread,
+          events: followUp.events,
+          signal,
+          scanDir,
+          pluginRoot: runtime.plugin.installedRoot,
+          expectation,
+          model,
+          onReconnect: options.onReconnect,
+          onWorkerStatus: options.onWorkerStatus,
+          onObserverError: options.onObserverError,
+        });
+        checkOpen();
       }
       return result;
     } catch (error) {
@@ -1955,6 +1979,7 @@ async function scanPrompt(
   mode: ScanMode,
   hasConfigPath = false,
   hasKnowledgeBase = false,
+  additionalPrompt?: string,
 ): Promise<string> {
   const skillName = skillNameFor(target, mode);
   const skillPath = join(pluginRoot, "skills", skillName, "SKILL.md");
@@ -2009,6 +2034,9 @@ async function scanPrompt(
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target),
     "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+    ...(additionalPrompt?.trim()
+      ? ["Additional scan instructions:", additionalPrompt]
+      : []),
   ].join("\n");
 }
 

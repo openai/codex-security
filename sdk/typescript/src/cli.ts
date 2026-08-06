@@ -172,6 +172,8 @@ const VALUE_OPTIONS = new Set([
   "--auth",
   "--path",
   "--knowledge-base",
+  "--scan-prompt-file",
+  "--post-scan-prompt-file",
   "--diff",
   "--head",
   "--base",
@@ -247,12 +249,33 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .describe("Maximum deep-scan discovery runs."),
 };
 
+async function readPromptFiles(
+  directory: string,
+  scanPromptFile?: string,
+  postScanPromptFile?: string,
+): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
+  const [scanPrompt, postScanPrompt] = await Promise.all([
+    scanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, scanPromptFile), "utf8"),
+    postScanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+  ]);
+  return {
+    ...(scanPrompt?.trim() ? { scanPrompt } : {}),
+    ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
+  };
+}
+
 interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
   verbose?: boolean;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
+  scanPromptFile?: string;
+  postScanPromptFile?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -1042,6 +1065,12 @@ export async function main(
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
+          scanPromptFile: optionValue("--scan-prompt-file")
+            .optional()
+            .describe("Append scan instructions from FILE."),
+          postScanPromptFile: optionValue("--post-scan-prompt-file")
+            .optional()
+            .describe("Run instructions from FILE after a validated scan."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan committed Git changes from BASE to --head."),
@@ -1175,6 +1204,8 @@ export async function main(
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
+            scanPromptFile: options.scanPromptFile,
+            postScanPromptFile: options.postScanPromptFile,
             diff: options.diff,
             workingTree: options.workingTree,
             head: options.head,
@@ -1328,6 +1359,12 @@ export async function main(
           .enum(["standard", "deep"])
           .default("standard")
           .describe("Default scan mode for repositories without a CSV mode."),
+        scanPromptFile: optionValue("--scan-prompt-file")
+          .optional()
+          .describe("Append instructions from FILE to every scan."),
+        postScanPromptFile: optionValue("--post-scan-prompt-file")
+          .optional()
+          .describe("Run FILE after each completed, validated scan."),
         model: optionValue("--model")
           .optional()
           .describe(
@@ -1378,6 +1415,11 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          const prompts = await readPromptFiles(
+            currentDirectory,
+            options.scanPromptFile,
+            options.postScanPromptFile,
+          );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
@@ -1390,7 +1432,9 @@ export async function main(
                 argument === "--effort" ||
                 argument === "--provider" ||
                 argument === "--codex" ||
-                argument === "--knowledge-base"
+                argument === "--knowledge-base" ||
+                argument === "--scan-prompt-file" ||
+                argument === "--post-scan-prompt-file"
               ) {
                 optionIndex += 2;
               } else if (
@@ -1398,7 +1442,9 @@ export async function main(
                 argument.startsWith("--effort=") ||
                 argument.startsWith("--provider=") ||
                 argument.startsWith("--codex=") ||
-                argument.startsWith("--knowledge-base=")
+                argument.startsWith("--knowledge-base=") ||
+                argument.startsWith("--scan-prompt-file=") ||
+                argument.startsWith("--post-scan-prompt-file=")
               ) {
                 optionIndex += 1;
               } else {
@@ -1440,6 +1486,7 @@ export async function main(
             mode: options.mode,
             maxAttempts: options.maxAttempts,
             knowledgeBasePaths: options.knowledgeBase,
+            ...prompts,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -2717,6 +2764,11 @@ async function runScan(
   try {
     const repository = arguments_.repository ?? dependencies.currentDirectory();
     const target = targetFromArguments(arguments_);
+    const prompts = await readPromptFiles(
+      dependencies.currentDirectory(),
+      arguments_.scanPromptFile,
+      arguments_.postScanPromptFile,
+    );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
@@ -2868,6 +2920,7 @@ async function runScan(
       auth,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
+      ...prompts,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
