@@ -85,10 +85,10 @@ Pass scan configuration to `security.run(repository, options)` or
 | `signal`                | Cancel a scan with an `AbortSignal`.                                                  |
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
-`onOutputArchived`, `onOutputDirReady`, `onScanStarted`, `onReconnect`,
-`onWorkerStatus`, `onWarning`, and `onObserverError`. Preflight does not start
-the runtime, authenticate, resolve Python, inspect the plugin, or run those
-scan-lifecycle callbacks.
+`onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
+`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
+`onObserverError`. Preflight does not start the runtime, authenticate, resolve
+Python, inspect the plugin, or run those scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -120,6 +120,20 @@ To pass a Codex access token explicitly, use
 `login --with-access-token` and provide the token on stdin. An access token
 environment variable is not automatically used as a scan API key.
 
+To use another inference provider, set its API key and select its provider:
+
+```bash
+export OPENROUTER_API_KEY="<your-openrouter-api-key>"
+npx @openai/codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
+
+export FIREWORKS_API_KEY="<your-fireworks-api-key>"
+npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+```
+
 On Windows, set the API key in PowerShell:
 
 ```powershell
@@ -131,7 +145,11 @@ Check or remove the stored sign-in with `npx @openai/codex-security login status
 and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
 private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
 `$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
-configured. Login, status, logout, and scans use the same home. Codex manages
+configured. On managed Windows devices, inherited access for `SYSTEM` and local
+`Administrators` is preserved while protecting the home against future changes
+to its parents. Other users and broad groups are rejected, and PowerShell
+Constrained Language Mode is supported. Login,
+status, logout, and scans use the same home. Codex manages
 credentials using its configured file or system-keyring backend and honors
 managed-device policies. An existing file-based Codex sign-in is imported only
 when the dedicated home does not already contain stored credentials. Logging
@@ -169,10 +187,15 @@ When an environment key is configured, ChatGPT login and
 `codex-security login status` identify the effective scan credential source
 without printing its value, including when no stored sign-in exists.
 
+Some cybersecurity requests and protected findings require approval through
+Trusted Access for Cyber. To apply or check your access, visit
+[chatgpt.com/cyber](https://chatgpt.com/cyber).
+
 ## CLI
 
 ```bash
 npx @openai/codex-security scan /path/to/repository
+npx @openai/codex-security scan /path/to/repository --headless
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -180,6 +203,7 @@ npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/th
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
+npx @openai/codex-security scan /path/to/repository --verbose
 npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
@@ -288,6 +312,8 @@ defaults:
 cli_auth_credentials_store = "file"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+show_raw_agent_reasoning = true
 
 [features]
 plugins = true
@@ -371,6 +397,8 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics.                                            |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
 | `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
@@ -399,12 +427,32 @@ Variables such as `CODEX_SECURITY_SCAN_ID`, `CODEX_SECURITY_SCAN_DIR`,
 `CODEX_SECURITY_TARGET_PATHS_FILE` are generated by an active scan. They are
 internal runtime data, not supported user configuration.
 
+Use `--provider openrouter` to send inference through OpenRouter. Set
+`OPENROUTER_API_KEY` and specify a supported model with `--model`.
+
+Use `--provider fireworks` to send inference through Fireworks AI. Set
+`FIREWORKS_API_KEY` and specify a supported model with `--model`.
+
+Use `--provider amazon-bedrock` to send inference through Amazon Bedrock. Set
+`AWS_REGION` and authenticate with `AWS_BEARER_TOKEN_BEDROCK`, standard AWS
+access keys, an AWS profile, web identity, container credentials, or the
+default AWS credential chain. Specify a supported Bedrock model with `--model`;
+OpenAI Bedrock models such as `openai.gpt-5.6-luna` support `--max-cost`.
+
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
+Interactive terminals show a full-screen view; CI, redirected output, and
+`--headless` use plain timestamped progress lines.
 Completion summarizes findings, severity, coverage, elapsed time, available
 token and worker counts, estimated cost, the results directory, and the next
 useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
+
+Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print redacted
+lifecycle, authentication, progress, and cost diagnostics to stderr.
+`LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
+Credentials and provider identifiers remain redacted, and structured JSON
+results remain on stdout.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
