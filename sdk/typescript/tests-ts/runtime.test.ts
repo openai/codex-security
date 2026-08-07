@@ -221,6 +221,38 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("does not reload completed findings in Standard or Deep handoffs", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const source =
+      /function buildScanHandoffPrompt\(results, handoffClaimToken\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(source).toBeDefined();
+
+    const buildScanHandoffPrompt = new Function(
+      "scanPreflightInstruction",
+      `${source}\nreturn buildScanHandoffPrompt;`,
+    )(() => "Run preflight.") as (
+      scan: { mode: string; scanId: string; scanDir: string },
+      token: string,
+    ) => string;
+
+    for (const mode of ["standard", "deep"]) {
+      const prompt = buildScanHandoffPrompt(
+        { mode, scanId: "scan", scanDir: "/tmp/scan" },
+        "token",
+      );
+      expect(prompt).toContain("complete_codex_security_scan");
+      expect(prompt).not.toContain("get_codex_security_completed_scan");
+    }
+    expect(runtime).toContain('name: "get_codex_security_completed_scan"');
+  });
+
   test("includes ignored tracked files in the scoped security inventory", async () => {
     if (Bun.which("rg") === null) {
       const generator = await readFile(

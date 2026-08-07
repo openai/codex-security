@@ -19,7 +19,7 @@ Treat the discovery-to-parent handoff as a hard phase boundary:
 4. Run `$codex-security:attack-path-analysis` once in compact standard-scan mode.
 5. Record complete semantic findings, coverage, and threat-model context with `record_codex_security_scan_draft`.
 6. Only then call `complete_codex_security_scan`.
-7. Read the completed scan with `get_codex_security_completed_scan`.
+7. Use the completion metadata and generated artifact paths. Read `get_codex_security_completed_scan` only when a requested structured or benchmark output requires the full sealed documents.
 8. Return a final answer or benchmark JSON only after completion succeeds and the generated `report.md` exists. Include the completion result's measured total, input, and cached input token counts in a user-facing final response, explicitly label partial coverage, and say when measurement is unavailable.
 
 Do not jump from the discovery manifest directly to completion. A returned `manifestPath` names discovery evidence, not the outer `scan-manifest.json`.
@@ -146,10 +146,10 @@ After accepting the terminal manifest, continue in the same turn. A discovery ma
    - The workbench derives the authoritative target, scope paths, finding identities, coverage mode, and repository inventory strategy. Do not include those derived fields in draft arguments.
    - An MCP `-32602` input rejection or an explicitly identified pre-write coverage-semantics rejection writes no artifact. Correct the named semantic fields and retry the same scan at most twice. Stop after the first accepted draft; do not blindly retry an ambiguous write.
    - Detailed vulnerability write-ups and hardening are optional, exactly as in the ordinary scan. Invoke `$codex-security:vulnerability-writeup` or `$codex-security:propose-security-hardening` only when the corresponding additional output is requested.
-7. After the draft succeeds, complete the scan once by calling `complete_codex_security_scan({ scanId, handoffClaimToken? })` so the workbench validates and seals the contract, generates `report.md`, and indexes findings. Read the canonical final result with `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`. Do not call completion before the draft is accepted.
+7. After the draft succeeds, complete the scan once by calling `complete_codex_security_scan({ scanId, handoffClaimToken? })` so the workbench validates and seals the contract, generates `report.md`, and indexes findings. Use its completion metadata; read `get_codex_security_completed_scan({ scanId, handoffClaimToken? })` only when a requested structured or benchmark output requires the full sealed documents. Do not call completion before the draft is accepted.
 8. Include the completion result's measured total, input, and cached input token counts in the final user-facing response. Explicitly label partial coverage; if measurement is unavailable, say so instead of reporting zero or estimating.
 
-If the parent cannot run a required tail phase, record the canonical draft after the bounded no-write correction above, or read the completed scan, stop immediately and surface the exact blocker. Do not call completion with missing artifacts, return a final report or no-findings result, satisfy a structured output schema, or emit benchmark JSON.
+If the parent cannot run a required tail phase, record the canonical draft after the bounded no-write correction above, or retrieve completed documents required for a requested structured output, stop immediately and surface the exact blocker. Do not call completion with missing artifacts, return a final report or no-findings result, satisfy a structured output schema, or emit benchmark JSON.
 
 Keep the workbench phase monotonic. Canonical threat-model synthesis happens after discovery, so leave the live phase at discovery until validation begins rather than moving it backward to `threat_model`. Continue publishing validation, attack-path, reporting, and validated-finding progress through `update_codex_security_scan_progress`.
 
