@@ -752,7 +752,7 @@ def build_report_markdown(
                 "",
                 "## Structural Hardening",
                 "",
-                "The scan also produced derived, unsealed design guidance based on the complete finding collection. These proposals describe options and tradeoffs; they do not indicate that any finding has been remediated.",
+                "The scan also produced derived design guidance based on the complete finding collection. The portfolio is covered by the scan seal, so editing it after completion breaks that seal. These proposals describe options and tradeoffs; they do not indicate that any finding has been remediated.",
                 "",
                 f"[Open the structural hardening portfolio]({hardening_portfolio_path})",
             ]

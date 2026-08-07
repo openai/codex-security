@@ -24,7 +24,7 @@ Retention is an explicit consumer decision. Producing a completed-scan bundle mu
 
 ## Manifest Semantics
 
-A sealed manifest records the completed timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
+A sealed manifest records the completed timestamp and hashes for the canonical documents, the immutable evidence receipts included in that bundle, and every derived document the manifest references through `finding.writeup.reportPath` or `scan.hardening.portfolioPath`. The generated `report.md` and downstream exports such as SARIF remain projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
 
 ## Target Snapshots
 

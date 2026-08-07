@@ -16,7 +16,7 @@ Use `report.md` as the primary readable entry point. Explain report-relevant art
 
 In the final response, link the generated markdown report path as the primary readable artifact.
 
-Every scan mode uses the same final report pipeline. For compact Standard and Deep scans, submit canonical semantics with `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`. The workbench writes the unsealed canonical draft and supplies the authoritative target, exact workbench timestamps, and derived finding identities. Other modes retain their existing canonical JSON workflow. No mode authors, repairs, or treats an existing `report.md` as input. `complete-scan` invokes finalization, which validates and enriches the canonical JSON, seals the canonical JSON and evidence artifacts, then deterministically generates and validates `report.md` as an unsealed downstream projection. Missing report prose must be supplied in the structured canonical semantics rather than recovered from a separately authored report.
+Every scan mode uses the same final report pipeline. For compact Standard and Deep scans, submit canonical semantics with `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`. The workbench writes the unsealed canonical draft and supplies the authoritative target, exact workbench timestamps, and derived finding identities. Other modes retain their existing canonical JSON workflow. No mode authors, repairs, or treats an existing `report.md` as input. `complete-scan` invokes finalization, which validates and enriches the canonical JSON, seals the canonical JSON, evidence artifacts, and any referenced write-ups and hardening portfolio, then deterministically generates and validates `report.md` as an unsealed downstream projection. Missing report prose must be supplied in the structured canonical semantics rather than recovered from a separately authored report.
 
 For each surviving compact candidate, supply the evidence-supported lowercase vulnerability-family `ruleId`; `taxonomy: { category, cwe }` using the candidate's exact `cwe_ids`; verified locations; and `provenance.source`, using `"local_plugin"` only when this plugin actually discovered the finding. Preserve the canonical candidate identity and genuine worker or source provenance in the existing finding extensions. A candidate with no known CWE retains `cwe: []`; never invent a classification. Include optional `codeEvidence` only when its actual code is nonempty and every referenced evidence ID is present.
 
@@ -38,8 +38,8 @@ Canonical report semantics live in these fields:
 
 - `scan-manifest.json`: `scan.scope` and `scan.threatModel`
 - `findings.json`: each finding's `summary`, `codeEvidence`, `rootCause`, `validation`, `attackPath.dataflow`, `attackPath.reachability`, `severity.rationale`, `severity.changeConditions`, `remediation`, `remediationTests`, and `preventiveControls`
-- `findings.json`: optional `writeup.reportPath` for a derived, unsealed detailed vulnerability report written under `findings/<slug>/<slug>.md`
-- `scan-manifest.json`: optional `scan.hardening.portfolioPath` for the derived, unsealed design portfolio at `hardening/hardening.md`
+- `findings.json`: optional `writeup.reportPath` for a derived detailed vulnerability report written under `findings/<slug>/<slug>.md`; finalization seals it
+- `scan-manifest.json`: optional `scan.hardening.portfolioPath` for the derived design portfolio at `hardening/hardening.md`; finalization seals it
 - `coverage.json`: `surfaces` including `riskArea` and `notes`, plus `openQuestions`
 
 For a whole-repository Deep scan, the workbench derives `coverage.inventoryStrategy: "repository"` in the stored coverage document; repeated discovery is workflow metadata, not a different inventory strategy. Do not include `inventoryStrategy` in `record_codex_security_scan_draft`.
@@ -95,7 +95,7 @@ After the summary table, include a compact `### Confidence Scale` table with col
 - `medium`: source evidence supports a plausible issue, but runtime behavior, deployment configuration, role reachability, type constraints, or exploit reliability still need proof.
 - `low`: weak or incomplete evidence; include only when the user explicitly wants follow-up candidates in the final report.
 
-When a finding records `writeup.reportPath`, link the detailed report from the findings summary and do not duplicate the complete finding inline. The linked write-up is a derived, unsealed readable output; the canonical finding remains the source of truth for adapters and regeneration. Findings without a write-up continue to use the inline format below for compatibility.
+When a finding records `writeup.reportPath`, link the detailed report from the findings summary and do not duplicate the complete finding inline. The linked write-up is a derived readable output that finalization seals; the canonical finding remains the source of truth for adapters and regeneration. Findings without a write-up continue to use the inline format below for compatibility.
 
 Render each inline finding as:
 

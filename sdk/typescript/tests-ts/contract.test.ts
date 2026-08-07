@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   truncate,
@@ -696,6 +697,226 @@ describe("canonical scan contract", () => {
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).resolves.toBeDefined();
+  });
+
+  async function sealDerivedDocuments(
+    scanDir: string,
+    {
+      sealWriteup = true,
+      sealPortfolio = true,
+    }: { sealWriteup?: boolean; sealPortfolio?: boolean } = {},
+  ): Promise<void> {
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const findingsPath = join(scanDir, "findings.json");
+    const manifest = await readJson(manifestPath);
+    const findings = await readJson(findingsPath);
+    manifest["scan"]["hardening"] = { portfolioPath: "hardening/hardening.md" };
+    findings["findings"][0]["writeup"] = {
+      reportPath: "findings/report/report.md",
+    };
+    await mkdir(join(scanDir, "hardening"));
+    await mkdir(join(scanDir, "findings", "report"), { recursive: true });
+    await writeFile(join(scanDir, "hardening", "hardening.md"), "hardening\n");
+    await writeFile(
+      join(scanDir, "findings", "report", "report.md"),
+      "report\n",
+    );
+    // List them the way the bundled producer now does.
+    if (sealPortfolio) {
+      manifest["scan"]["artifacts"].push({
+        path: "hardening/hardening.md",
+        sha256: "",
+        mediaType: "text/markdown",
+      });
+    }
+    if (sealWriteup) {
+      manifest["scan"]["artifacts"].push({
+        path: "findings/report/report.md",
+        sha256: "",
+        mediaType: "text/markdown",
+      });
+    }
+    await writeJson(manifestPath, manifest);
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+  }
+
+  test("rejects a write-up replaced after the seal covered it", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+
+    await writeFile(
+      join(scanDir, "findings", "report", "report.md"),
+      "replaced wholesale\n",
+    );
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed or is missing");
+  });
+
+  test("rejects a hardening portfolio replaced after the seal covered it", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir);
+
+    await writeFile(
+      join(scanDir, "hardening", "hardening.md"),
+      "replaced wholesale\n",
+    );
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("sealed artifact changed or is missing");
+  });
+
+  test("rejects a referenced write-up left out of the sealed artifacts", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, { sealWriteup: false });
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(
+      "Derived document is missing from sealed artifacts: findings/report/report.md",
+    );
+  });
+
+  // The bundled Python validator has to apply the same gate the SDK applies, or
+  // direct CLI exports and workbench comparisons would keep accepting a
+  // partially unsealed contract that loadContract rejects.
+  async function bundledValidatorScanDir(scanDir: string): Promise<string> {
+    await writeFile(join(scanDir, "report.md"), "# Security Review: example\n");
+    return await realpath(scanDir);
+  }
+
+  function runBundledScript(
+    script: string,
+    args: readonly string[],
+  ): { exitCode: number; stderr: string } {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) {
+      throw new Error(
+        "A Python interpreter is required for bundled contract validator tests.",
+      );
+    }
+    const result = Bun.spawnSync(
+      [python, "-I", "-B", join(PLUGIN_ROOT, "scripts", script), ...args],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    return {
+      exitCode: result.exitCode,
+      stderr: new TextDecoder().decode(result.stderr),
+    };
+  }
+
+  function runBundledValidator(scanDir: string): {
+    exitCode: number;
+    stderr: string;
+  } {
+    return runBundledScript("validate_scan_contract.py", [
+      "--scan-dir",
+      scanDir,
+    ]);
+  }
+
+  // `validate_scan_contract.py` and the export CLI reach the seal through
+  // different functions, so the gate has to be exercised on both.
+  function runBundledExport(
+    scanDir: string,
+    exportFormat: string,
+  ): { exitCode: number; stderr: string } {
+    return runBundledScript("finalize_scan_contract.py", [
+      "--scan-dir",
+      scanDir,
+      "--export-format",
+      exportFormat,
+    ]);
+  }
+
+  test("accepts sealed derived documents in the bundled validator", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir);
+
+    expect(
+      runBundledValidator(await bundledValidatorScanDir(scanDir)),
+    ).toMatchObject({ exitCode: 0, stderr: "" });
+  });
+
+  test("rejects a partially sealed manifest in the bundled validator", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, { sealWriteup: false });
+
+    expect(
+      runBundledValidator(await bundledValidatorScanDir(scanDir)),
+    ).toMatchObject({
+      exitCode: 2,
+      stderr: expect.stringContaining(
+        "derived document is missing from sealed artifacts: findings/report/report.md",
+      ),
+    });
+  });
+
+  test("accepts a manifest that seals no derived document on both sides", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, {
+      sealWriteup: false,
+      sealPortfolio: false,
+    });
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+    expect(
+      runBundledValidator(await bundledValidatorScanDir(scanDir)),
+    ).toMatchObject({ exitCode: 0, stderr: "" });
+  });
+
+  test.each(["json", "csv", "sarif"])(
+    "rejects a partially sealed manifest in a bundled %s export",
+    async (exportFormat) => {
+      const scanDir = await copyExample();
+      await sealDerivedDocuments(scanDir, { sealWriteup: false });
+
+      expect(
+        runBundledExport(await bundledValidatorScanDir(scanDir), exportFormat),
+      ).toMatchObject({
+        exitCode: 2,
+        stderr: expect.stringContaining(
+          "derived document is missing from sealed artifacts: findings/report/report.md",
+        ),
+      });
+    },
+  );
+
+  test.each(["json", "csv", "sarif"])(
+    "accepts sealed derived documents in a bundled %s export",
+    async (exportFormat) => {
+      const scanDir = await copyExample();
+      await sealDerivedDocuments(scanDir);
+
+      expect(
+        runBundledExport(await bundledValidatorScanDir(scanDir), exportFormat),
+      ).toMatchObject({ exitCode: 0, stderr: "" });
+    },
+  );
+
+  test("keeps the existence check for a manifest that seals no derived document", async () => {
+    const scanDir = await copyExample();
+    await sealDerivedDocuments(scanDir, {
+      sealWriteup: false,
+      sealPortfolio: false,
+    });
+    const validatorScanDir = await bundledValidatorScanDir(scanDir);
+    await rm(join(scanDir, "findings", "report", "report.md"));
+
+    expect(runBundledValidator(validatorScanDir)).toMatchObject({
+      exitCode: 2,
+      stderr: expect.stringContaining("findings[0].writeup.reportPath"),
+    });
   });
 
   test.each([

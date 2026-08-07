@@ -2003,6 +2003,27 @@ def _coverage_receipt_refs(coverage: dict[str, Any]) -> list[str]:
     return sorted(refs)
 
 
+def _derived_document_refs(scan: dict[str, Any], findings: dict[str, Any]) -> list[str]:
+    """Return the write-up and hardening portfolio paths the manifest references."""
+
+    refs: set[str] = set()
+    for finding in findings.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        writeup = finding.get("writeup")
+        if not isinstance(writeup, dict):
+            continue
+        report_path = writeup.get("reportPath")
+        if isinstance(report_path, str) and report_path:
+            refs.add(report_path)
+    hardening = scan.get("hardening")
+    if isinstance(hardening, dict):
+        portfolio_path = hardening.get("portfolioPath")
+        if isinstance(portfolio_path, str) and portfolio_path:
+            refs.add(portfolio_path)
+    return sorted(refs)
+
+
 def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str, Any]) -> None:
     artifact_paths = {
         _require_safe_relative_path(artifact["path"], "sealed artifact path")
@@ -2011,6 +2032,39 @@ def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str,
     for ref in _coverage_receipt_refs(coverage):
         if ref not in artifact_paths:
             raise ContractError(f"coverage receipt is missing from sealed artifacts: {ref}")
+
+
+def _validate_sealed_derived_documents(
+    scan_dir: Path, scan: dict[str, Any], findings: dict[str, Any]
+) -> None:
+    """Require referenced derived documents to be sealed artifacts.
+
+    A producer that seals derived documents lists them in ``scan.artifacts``,
+    where their digests are already verified. Requiring every referenced
+    document to be one of those artifacts stops a write-up from being replaced
+    after sealing while the scan still validates as intact. A manifest sealed
+    before derived documents joined the seal lists none of them, so it keeps the
+    existence check it was sealed with rather than becoming unreadable.
+
+    This is the Python side of the gate ``validateSeal`` applies in the
+    TypeScript SDK; keep the two conditions identical.
+    """
+
+    artifact_paths = {
+        _require_safe_relative_path(artifact["path"], "sealed artifact path")
+        for artifact in scan["artifacts"]
+    }
+    refs = {
+        ref: _require_safe_relative_path(ref, "derived document path")
+        for ref in _derived_document_refs(scan, findings)
+    }
+    if not any(normalized in artifact_paths for normalized in refs.values()):
+        _require_derived_writeup_files(scan_dir, findings)
+        _require_hardening_portfolio_file(scan_dir, scan)
+        return
+    for ref, normalized in refs.items():
+        if normalized not in artifact_paths:
+            raise ContractError(f"derived document is missing from sealed artifacts: {ref}")
 
 
 def _validate_existing_seal(
@@ -2077,6 +2131,7 @@ def _read_sealed_scan(
     _validate_findings(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_sealed_coverage_receipts(scan, coverage)
+    _validate_sealed_derived_documents(scan_dir, scan, findings)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
@@ -2396,6 +2451,7 @@ def _prepare_scan_finalization(
     _require_hardening_portfolio_file(scan_dir, scan)
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
+        _validate_sealed_derived_documents(scan_dir, scan, findings)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         validate_against_schema(findings, schema_dir / "findings.schema.json")
@@ -2416,7 +2472,7 @@ def _prepare_scan_finalization(
     coverage_bytes = _contract_json_bytes("coverage.json", coverage)
     report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
     _validate_report_output_paths(scan_dir)
-    scan["artifacts"] = [
+    sealed_artifacts = [
         _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
         _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
         *[
@@ -2424,7 +2480,18 @@ def _prepare_scan_finalization(
             for ref in _coverage_receipt_refs(coverage)
         ],
     ]
+    # Seal the derived Markdown a reader actually opens. These were previously
+    # referenced by the manifest but left out of the sealed set, so replacing one
+    # after sealing did not disturb the seal. A path already sealed as a coverage
+    # receipt keeps its single record, because duplicates are rejected on load.
+    sealed_paths = {artifact["path"] for artifact in sealed_artifacts}
+    for ref in _derived_document_refs(scan, findings):
+        if _require_safe_relative_path(ref, "derived document path") in sealed_paths:
+            continue
+        sealed_artifacts.append(_artifact_record(scan_dir, ref, "text/markdown"))
+    scan["artifacts"] = sealed_artifacts
     _validate_sealed_coverage_receipts(scan, coverage)
+    _validate_sealed_derived_documents(scan_dir, scan, findings)
     _validate_manifest(manifest)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cp,
   mkdir,
@@ -361,6 +362,63 @@ describe("malformed scan artifact recovery", () => {
         expect(copied.status, copied.stderr).toBe(0);
       }
     }
+  });
+
+  test("seals finding write-ups and the hardening portfolio", async () => {
+    const fixture = await startDraftScan();
+    const reportPath =
+      "findings/path-traversal.archive-extraction/path-traversal.archive-extraction.md";
+    const portfolioPath = "hardening/hardening.md";
+    const reportBody = "# Write-up\n";
+    const portfolioBody = "# Portfolio\n";
+    await mkdir(
+      join(fixture.scanDir, "findings", "path-traversal.archive-extraction"),
+      {
+        recursive: true,
+      },
+    );
+    await mkdir(join(fixture.scanDir, "hardening"), { recursive: true });
+    await writeFile(join(fixture.scanDir, reportPath), reportBody);
+    await writeFile(join(fixture.scanDir, portfolioPath), portfolioBody);
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    findings.findings[0]!.writeup = { reportPath };
+    await writeJson(findingsPath, findings);
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const draft = await readJson<{
+      scan: { hardening?: { portfolioPath: string } };
+    }>(manifestPath);
+    draft.scan.hardening = { portfolioPath };
+    await writeJson(manifestPath, draft);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+
+    const sealed = await readJson<{
+      scan: {
+        artifacts: Array<{ path: string; sha256: string; mediaType: string }>;
+      };
+    }>(manifestPath);
+    const digest = (body: string) =>
+      createHash("sha256").update(body).digest("hex");
+    expect(
+      sealed.scan.artifacts.find((artifact) => artifact.path === reportPath),
+    ).toEqual({
+      path: reportPath,
+      sha256: digest(reportBody),
+      mediaType: "text/markdown",
+    });
+    expect(
+      sealed.scan.artifacts.find((artifact) => artifact.path === portfolioPath),
+    ).toEqual({
+      path: portfolioPath,
+      sha256: digest(portfolioBody),
+      mediaType: "text/markdown",
+    });
+
+    // The generated report must not keep calling the portfolio unsealed.
+    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
+    expect(report).toContain("covered by the scan seal");
+    expect(report).not.toContain("unsealed design guidance");
   });
 
   test("seals a prepared scan without publishing it before acceptance", async () => {
