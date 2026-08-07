@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -29,6 +29,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
@@ -57,6 +58,7 @@ import {
   codexSecurityStateDirectory,
   codexPlatformPackage,
   inspectWindowsCredentialAcl,
+  inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
@@ -266,6 +268,41 @@ describe("plugin runtime preparation", () => {
     expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
   });
 
+  test("preserves remediation when the filesystem device changes", async () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const target = await temporaryDirectory("codex-security-remounted-target-");
+    const verification = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import runpy, sys",
+          "from pathlib import Path",
+          "target = Path(sys.argv[2])",
+          "metadata = target.stat()",
+          "scan = {'target_path': str(target), 'target_device': metadata.st_dev + 1, 'target_inode': metadata.st_ino}",
+          "require_identity = runpy.run_path(sys.argv[1])['require_scan_target_identity']",
+          "assert require_identity(scan) == target",
+          "scan['target_inode'] += 1",
+          "try:",
+          "    require_identity(scan)",
+          "except SystemExit:",
+          "    pass",
+          "else:",
+          "    raise AssertionError('A replaced checkout must remain unavailable')",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+        target,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(verification.status, verification.stderr).toBe(0);
+  });
+
   test("allows the workbench to derive missing deferred scan identifiers", async () => {
     const schema = JSON.parse(
       await readFile(
@@ -300,6 +337,80 @@ describe("plugin runtime preparation", () => {
     expect(schema).toContain(
       "userContext: editableUserContextSchema.max(2400).optional()",
     );
+  });
+
+  test("uses the same focused Standard handoff in the server and desktop app", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const workspace = brotliDecompressSync(
+      await readFile(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br")),
+    ).toString("utf8");
+    const version = /var version2 = "([^"]+)"/u.exec(runtime)?.[1];
+    expect(version).toBeDefined();
+    expect(workspace).toContain(`\`${version}\``);
+
+    const serverSource =
+      /function buildScanHandoffPrompt\(results, handoffClaimToken\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(serverSource).toBeDefined();
+    const marker = workspace.indexOf(
+      "Follow the self-contained security-scan workflow",
+    );
+    expect(marker).toBeGreaterThan(0);
+    const workspaceSource = workspace.slice(
+      workspace.lastIndexOf("function ", marker),
+      workspace.indexOf("function ", marker),
+    );
+    const workspaceName = /^function ([\w$]+)\(/u.exec(workspaceSource)?.[1];
+    const workspacePreflight = /\$\{([\w$]+)\([\w$]+\.mode\)\}/u.exec(
+      workspaceSource,
+    )?.[1];
+    expect(workspaceName).toBeDefined();
+    expect(workspacePreflight).toBeDefined();
+    const preflight = (mode: string) => `validated mode ${mode}`;
+    const serverHandoff = new Function(
+      "scanPreflightInstruction",
+      `${serverSource}\nreturn buildScanHandoffPrompt;`,
+    )(preflight);
+    const workspaceHandoff = new Function(
+      workspacePreflight!,
+      `${workspaceSource}\nreturn ${workspaceName};`,
+    )(preflight);
+    const scan = {
+      scanId: "12345678-1234-4234-8234-123456789abc",
+      scanDir: "/tmp/standard-scan",
+      userContext: "Review authentication boundaries.",
+    };
+
+    for (const mode of ["standard", "diff", "deep"]) {
+      const serverPrompt = serverHandoff({ ...scan, mode }, "claim-token");
+      expect(workspaceHandoff({ ...scan, mode }, "claim-token")).toBe(
+        serverPrompt,
+      );
+      expect(serverPrompt).toContain(`validated mode ${mode}`);
+      if (mode !== "standard") {
+        expect(serverPrompt).not.toContain("independent baseline audit");
+        continue;
+      }
+      expect(serverPrompt).toContain("independent baseline audit");
+      expect(serverPrompt).toContain("delegate focused investigation packets");
+      expect(serverPrompt).toContain("record_codex_security_scan_draft");
+      expect(serverPrompt).toContain(scan.userContext);
+      for (const obsolete of [
+        "prepare_codex_security_review_items",
+        "record_codex_security_discovery_candidates",
+        "record_codex_security_candidate_validations",
+        "record_codex_security_candidate_attack_paths",
+        "get_codex_security_completed_scan",
+      ]) {
+        expect(serverPrompt).not.toContain(obsolete);
+      }
+    }
   });
 
   test("claims persisted Deep Scans after a coordinator restart", async () => {
@@ -1978,6 +2089,94 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(attempts).toBe(2);
   });
 
+  test("retries Windows credential verification when a descendant disappears", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const temporary = join(home, ".auth-temporary");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    await writeFile(temporary, "temporary credential\n");
+    const originalLstat = fsPromises.lstat;
+    let removed = false;
+    let inspections = 0;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (path: Parameters<typeof lstat>[0]) => {
+        if (path === temporary && !removed) {
+          removed = true;
+          await rm(temporary);
+        }
+        return originalLstat(path);
+      },
+    }));
+
+    try {
+      await verifyStableWindowsCredentialDescendants(home, async () => {
+        inspections += 1;
+        return 1;
+      });
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+      }));
+    }
+
+    expect(removed).toBe(true);
+    expect(inspections).toBe(1);
+  });
+
+  test("rejects Windows credential descendants that repeatedly disappear", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const credential = join(home, "auth.json");
+    await mkdir(home);
+    await writeFile(credential, "credential\n");
+    const originalLstat = fsPromises.lstat;
+    let attempts = 0;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (path: Parameters<typeof lstat>[0]) => {
+        if (path === credential) {
+          attempts += 1;
+          throw Object.assign(new Error("credential disappeared"), {
+            code: "ENOENT",
+            path,
+          });
+        }
+        return originalLstat(path);
+      },
+    }));
+
+    try {
+      await expect(
+        verifyStableWindowsCredentialDescendants(home, async () => 1),
+      ).rejects.toThrow("Windows credential descendants could not be verified");
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+      }));
+    }
+
+    expect(attempts).toBe(3);
+  });
+
+  test("does not retry a missing Windows credential home", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "missing-home");
+    let inspections = 0;
+
+    await expect(
+      verifyStableWindowsCredentialDescendants(home, async () => {
+        inspections += 1;
+        return 0;
+      }),
+    ).rejects.toMatchObject({ code: "ENOENT", path: home });
+
+    expect(inspections).toBe(0);
+  });
+
   test("rejects Windows credential descendants that never stabilize", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -1992,6 +2191,132 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("Windows credential descendants could not be verified");
     expect(attempts).toBe(3);
+  });
+
+  test("inspects Windows credential ancestry, home, and descendants in one subprocess", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const inspectionCount = join(root, "inspection-count");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory, file];
+    const script = [
+      `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+      `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+    ].join("; ");
+
+    const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
+      command: process.execPath,
+      args: ["--eval", script],
+    });
+
+    expect(snapshot.home).toMatchObject({
+      owner: sid,
+      protected: true,
+      grantsCurrentUserAccess: true,
+      untrustedPrincipals: [],
+    });
+    expect(snapshot.descendantsArePrivate).toBe(true);
+    expect(await readFile(inspectionCount, "utf8")).toBe("inspection\n");
+  });
+
+  test("inspects Windows credential ancestry and the home even without descendants", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory];
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+        ],
+      }),
+    ).resolves.toMatchObject({
+      home: { owner: sid, protected: true },
+      descendantsArePrivate: true,
+    });
+  });
+
+  test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const unsafe = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;WD)`;
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${unsafe}\n`)})`,
+        ],
+      }),
+    ).rejects.toThrow(
+      "Windows credential-home ancestor allows another identity to replace the directory",
+    );
+  });
+
+  test("rejects incomplete combined Windows credential ACL inspections", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${directory}\n`)})`,
+        ],
+      }),
+    ).rejects.toThrow("Windows credential-home ancestry could not be verified");
+  });
+
+  test("detects unsafe descendants during combined Windows credential ACL inspections", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const unsafeFile = `O:${sid}G:SYD:P(A;;FA;;;${sid})(A;;FR;;;WD)`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory, unsafeFile];
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+        ],
+      }),
+    ).resolves.toMatchObject({ descendantsArePrivate: false });
   });
 
   test("streams Windows credential ACL output larger than the subprocess buffer", async () => {
@@ -2518,7 +2843,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "$unexpected = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
         "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
       ].join("; ");
-      const result = spawnSync(
+      const result = await promisify(execFile)(
         powershell,
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
         {
@@ -2529,7 +2854,6 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       );
 
-      expect(result.status).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({ unexpected: 0 });
     },
   );
