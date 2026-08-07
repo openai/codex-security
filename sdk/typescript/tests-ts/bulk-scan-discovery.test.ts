@@ -84,6 +84,7 @@ interface Repository {
 
 interface GitHubRequest {
   path: string;
+  page?: number;
   query?: string;
   variables?: { owner: string; cursor: string | null };
 }
@@ -93,6 +94,8 @@ function discoveryDependencies(
   options: {
     host?: string;
     organizations?: string[];
+    organizationPages?: string[][];
+    onOrganizationPage?(page: number): void;
     repositories?: Repository[];
     authenticated?: boolean;
   } = {},
@@ -153,16 +156,33 @@ function discoveryDependencies(
                     });
               requests.push({
                 path,
+                ...(path === "/user/orgs"
+                  ? { page: Number(url.searchParams.get("page") ?? 1) }
+                  : {}),
                 ...(body === undefined
                   ? {}
                   : { query: body.query, variables: body.variables }),
               });
 
               if (path === "/user/orgs") {
+                const page = Number(url.searchParams.get("page") ?? 1);
+                options.onOrganizationPage?.(page);
+                const organizationPages = options.organizationPages ?? [
+                  options.organizations ?? [],
+                ];
+                const nextPage =
+                  page < organizationPages.length ? page + 1 : null;
+                const headers =
+                  nextPage === null
+                    ? undefined
+                    : {
+                        Link: `<${url.origin}${url.pathname}?per_page=100&page=${nextPage}>; rel="next"`,
+                      };
                 return Response.json(
-                  (options.organizations ?? []).map((login) => ({
+                  (organizationPages[page - 1] ?? []).map((login) => ({
                     login,
                   })),
+                  { headers },
                 );
               }
               if (path === "/user") {
@@ -347,6 +367,60 @@ describe("bulk scan repository discovery", () => {
     expect(
       requests.find(({ path }) => path === "/graphql")?.variables?.owner,
     ).toBe("personal-account");
+  });
+
+  test("paginates and deduplicates organizations before account selection", async () => {
+    const root = await temporaryDirectory();
+    const firstPage = Array.from(
+      { length: 100 },
+      (_, index) => `organization-${String(index).padStart(3, "0")}`,
+    );
+    const { dependencies, prompt, requests } = discoveryDependencies(root, {
+      organizationPages: [firstPage, ["second-page", "ORGANIZATION-000"]],
+    });
+    prompt.confirms = [true];
+    prompt.choices = ["second-page"];
+
+    await runBulkScanWizard(dependencies);
+
+    expect(
+      requests
+        .filter(({ path }) => path === "/user/orgs")
+        .map(({ page }) => page),
+    ).toEqual([1, 2]);
+    expect(prompt.searchOptions[0]).toContain("personal-account");
+    expect(prompt.searchOptions[0]).toContain("second-page");
+    expect(
+      prompt.searchOptions[0]!.filter(
+        (owner) => owner.toLowerCase() === "organization-000",
+      ),
+    ).toHaveLength(1);
+    expect(
+      requests.find(({ path }) => path === "/graphql")?.variables?.owner,
+    ).toBe("second-page");
+  });
+
+  test("stops organization pagination when canceled", async () => {
+    const root = await temporaryDirectory();
+    const controller = new AbortController();
+    const { dependencies, prompt, requests } = discoveryDependencies(root, {
+      organizationPages: [["first-page"], ["second-page"]],
+      onOrganizationPage: (page) => {
+        if (page === 1) controller.abort(new Error("stop pagination"));
+      },
+    });
+
+    await expect(
+      runBulkScanWizard(dependencies, controller.signal),
+    ).rejects.toThrow("stop pagination");
+
+    expect(
+      requests
+        .filter(({ path }) => path === "/user/orgs")
+        .map(({ page }) => page),
+    ).toEqual([1]);
+    expect(requests.some(({ path }) => path === "/graphql")).toBe(false);
+    expect(prompt.questions).toEqual([]);
   });
 
   test("does not write an inventory when canceled or no repositories match", async () => {

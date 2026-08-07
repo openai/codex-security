@@ -198,11 +198,16 @@ async function selectGitHubOwner(
   signal?: AbortSignal,
 ): Promise<string> {
   const [orgs, user] = await Promise.all([
-    github.request("GET /user/orgs", { per_page: 100, request: { signal } }),
+    listGitHubOrganizations(github, signal),
     github.request("GET /user", { request: { signal } }),
   ]);
+  signal?.throwIfAborted();
   const personal = user.data.login;
-  const owners = [personal, ...orgs.data.map(({ login }) => login)].sort();
+  const owners = [
+    ...new Map(
+      [personal, ...orgs].map((owner) => [owner.toLowerCase(), owner]),
+    ).values(),
+  ].sort();
   if (owners.length > 1) {
     return await prompt.select(
       "Which account or organization should we scan?",
@@ -211,6 +216,28 @@ async function selectGitHubOwner(
   }
   prompt.write(`\nFinding repositories in ${personal}.\n`);
   return personal;
+}
+
+async function listGitHubOrganizations(
+  github: Octokit,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const organizations: string[] = [];
+  let page = 1;
+  while (true) {
+    signal?.throwIfAborted();
+    const result = await github.request("GET /user/orgs", {
+      per_page: 100,
+      page,
+      request: { signal },
+    });
+    signal?.throwIfAborted();
+    organizations.push(...result.data.map(({ login }) => login));
+    if (!result.headers.link?.match(/;\s*rel="next"(?:\s*,|$)/u)) {
+      return organizations;
+    }
+    page += 1;
+  }
 }
 
 async function selectGitHubRepositories(
