@@ -49,6 +49,7 @@
     "lint": "tsc --noEmit",
     "prepack": "node --run build",
     "test": "bun test --timeout 30000 ./tests-ts",
+    "test:windows": "node scripts/run-windows-tests.mjs",
     "test:package": "node scripts/smoke-package.mjs",
     "types": "pnpm run generate:models:check && tsc --noEmit"
   },
