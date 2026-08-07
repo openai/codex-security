@@ -71,6 +71,12 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_WORK_TREE",
 )
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# A root commit is diffed against the empty tree, whose id is a constant of the
+# repository's object format rather than of its contents.
+EMPTY_GIT_TREES = {
+    "sha1": EMPTY_GIT_TREE,
+    "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+}
 
 
 def main() -> None:

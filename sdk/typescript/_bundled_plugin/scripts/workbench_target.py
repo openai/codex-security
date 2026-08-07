@@ -10,13 +10,14 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
+from workbench_constants import EMPTY_GIT_TREE, EMPTY_GIT_TREES, GIT_REPOSITORY_ENVIRONMENT
 
 
 def git_output(
@@ -40,12 +41,55 @@ def git_bytes(
     return completed.stdout if completed.returncode == 0 else None
 
 
+def git_digest_field(
+    digest: Any,
+    label: bytes,
+    target: Path,
+    *args: str,
+    git_dir: Path | None = None,
+    work_tree: Path | None = None,
+) -> bool:
+    """Frame Git output into ``digest`` without holding the output in memory.
+
+    ``update_digest_field`` prefixes every value with its total length, so the byte
+    count has to be known before any of the content is hashed. Spooling stdout to a
+    private temporary file records that length from a single Git invocation, and the file
+    is then hashed in chunks. The framing is byte for byte what ``update_digest_field``
+    writes, so digests stay comparable with recorded ones.
+
+    Returns whether Git succeeded; the digest is left untouched when it did not.
+    """
+    # The spool lives in the process temporary directory, never in the scan directory or
+    # the repository, and is owner-only. On POSIX it is unlinked before Git writes to it,
+    # so the patch is never reachable by name and cannot outlive this process.
+    with tempfile.TemporaryFile() as spool:
+        completed = git_command(
+            target,
+            *args,
+            text=False,
+            git_dir=git_dir,
+            work_tree=work_tree,
+            stdout=spool,
+        )
+        if completed.returncode != 0:
+            return False
+        size = os.fstat(spool.fileno()).st_size
+        spool.seek(0)
+        digest.update(len(label).to_bytes(4, "big"))
+        digest.update(label)
+        digest.update(size.to_bytes(8, "big"))
+        for chunk in iter(lambda: spool.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return True
+
+
 def git_command(
     target: Path,
     *args: str,
     text: bool,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    stdout: IO[bytes] | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -62,7 +106,8 @@ def git_command(
         return subprocess.run(
             full_command,
             check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE if stdout is None else stdout,
+            stderr=subprocess.PIPE,
             env=environment,
             text=text,
         )
@@ -71,6 +116,19 @@ def git_command(
         # any other failed Git probe so the target falls back to a directory snapshot.
         empty_output = "" if text else b""
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
+
+
+def empty_git_tree(target: Path) -> str:
+    """The empty-tree object id a root commit is diffed against.
+
+    The id belongs to the repository's object format, so a SHA-256 repository
+    cannot reuse the SHA-1 constant: Git rejects it as an unknown revision and
+    the root commit becomes unselectable. Git before 2.29 cannot report a format
+    and only ever wrote SHA-1, which the fallback covers.
+    """
+
+    object_format = git_output(target, "rev-parse", "--show-object-format")
+    return EMPTY_GIT_TREES.get(object_format or "", EMPTY_GIT_TREE)
 
 
 def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
@@ -84,6 +142,40 @@ def worktree_content_digest(target: Path) -> str:
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
     return worktree_content_digest_for_context(repository, pathspec)
+
+
+def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
+    """Digest the committed changes a diff scan reviews.
+
+    Mirrors worktree_content_digest for a base..head range. The two revisions
+    already pin the content, but the contract requires git_diff targets to carry
+    a snapshotDigest, and computing it here keeps the value deterministic and
+    verifiable instead of leaving the scan agent to invent one.
+    """
+
+    repository, pathspec = git_worktree_context(target)
+    digest = hashlib.sha256()
+    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    # The patch is streamed: `git diff --binary` over a large changed binary produces
+    # a patch several times the file size, which must not be buffered in memory.
+    tracked = git_digest_field(
+        digest,
+        b"tracked-diff",
+        repository,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        base,
+        head,
+        "--",
+        pathspec,
+    )
+    if not tracked:
+        raise SystemExit("Could not snapshot the selected committed changes.")
+    return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
 def worktree_content_digest_for_context(

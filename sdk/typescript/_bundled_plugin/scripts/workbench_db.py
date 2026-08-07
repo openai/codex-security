@@ -101,10 +101,12 @@ from workbench_schema import (
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_target import (
     clean_worktree_content_digest,
+    committed_diff_content_digest,
     copy_directory_excluding,
     copy_git_worktree_files,
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    empty_git_tree,
     git_command,
     git_output,
     git_revision,
@@ -318,6 +320,29 @@ def resolve_git_commit(target: Path, revision: str, label: str) -> str:
     return resolved
 
 
+def require_committed_diff_digest(
+    target: Path,
+    base: str,
+    head: str,
+    content_digest: str | None,
+) -> str:
+    """Digest a committed range, rejecting a digest that no longer matches.
+
+    Commit ids pin the revisions but not the bytes Git reports for them: a
+    replace ref swaps the objects Git reads, and diff configuration changes the
+    generated patch. Revalidating a recorded digest the way the working-tree
+    branch does keeps a scan from reviewing a snapshot nobody selected.
+    """
+
+    current_digest = committed_diff_content_digest(target, base, head)
+    if content_digest and content_digest != current_digest:
+        raise SystemExit(
+            "The committed changes selected for review no longer produce the same "
+            "diff. Select the changes to review again."
+        )
+    return current_digest
+
+
 def require_diff_target(
     target: Path,
     kind: str | None,
@@ -358,7 +383,7 @@ def require_diff_target(
             None,
         )
         if parent_line is None:
-            parent = EMPTY_GIT_TREE
+            parent = empty_git_tree(target)
         else:
             parent = resolve_git_commit(
                 target,
@@ -373,12 +398,24 @@ def require_diff_target(
             )
             if supplied_base != parent:
                 raise SystemExit("Commit base revision must match the selected commit's parent.")
-        return {"kind": kind, "baseRevision": parent, "headRevision": head}
+        return {
+            "kind": kind,
+            "baseRevision": parent,
+            "headRevision": head,
+            "contentDigest": require_committed_diff_digest(
+                target, parent, head, content_digest
+            ),
+        }
     base = resolve_git_commit(target, base_revision or "", "Base revision")
     head = resolve_git_commit(target, head_revision or "", "Head revision")
     if base == head:
         raise SystemExit("Base and head revisions must identify different commits.")
-    return {"kind": kind, "baseRevision": base, "headRevision": head}
+    return {
+        "kind": kind,
+        "baseRevision": base,
+        "headRevision": head,
+        "contentDigest": require_committed_diff_digest(target, base, head, content_digest),
+    }
 
 
 def inspect_setup_values(
@@ -540,7 +577,9 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
+        # Every diff kind records a content digest now. Scans registered before
+        # that have none for committed ranges, and keep omitting it.
+        if scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -609,12 +648,12 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
                 "scan-manifest.json target headRevision must match the workbench diff target."
             )
         if (
-            scan["diff_target_kind"] == "working_tree"
+            scan["diff_content_digest"]
             and target.get("snapshotDigest") != scan["diff_content_digest"]
         ):
             raise SystemExit(
                 "scan-manifest.json target snapshotDigest must match the selected "
-                "working-tree contents."
+                "reviewed contents."
             )
     scope = manifest_scan.get("scope")
     if not isinstance(scope, dict):
@@ -1584,6 +1623,10 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if head != current_head:
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
+        else:
+            diff_target["contentDigest"] = committed_diff_content_digest(
+                repository, base, head
+            )
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
