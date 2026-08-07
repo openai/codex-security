@@ -27,7 +27,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from collections import Counter
@@ -36,7 +38,15 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
+from rank_preview import (
+    DEFAULT_PREVIEW_BYTES,
+    TEXT_CODE_EXTENSIONS,
+    fit_preview_lines,
+    is_binary_sample,
+    preview_for,
+    select_preview_lines,
+    structural_outline,
+)
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -112,6 +122,33 @@ EXCLUDED_FILENAMES = {
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
+}
+
+SECURITY_RELEVANT_DIFF_FILENAMES = {
+    ".dockerignore",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CODEOWNERS",
+    "Containerfile",
+    "Dockerfile",
+    "SECURITY.md",
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+}
+
+SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES = {
+    "actions",
+    "scripts",
+    "workflows",
+}
+
+SECURITY_RELEVANT_GITHUB_DIFF_FILENAMES = {
+    "CODEOWNERS",
+    "copilot-instructions.md",
+    "dependabot.yaml",
+    "dependabot.yml",
 }
 
 SHARD_INPUT_GLOB = "rank-shard-*.input.jsonl"
@@ -272,6 +309,146 @@ def path_is_excluded(path: Path) -> bool:
     if path.name in EXCLUDED_FILENAMES:
         return True
     return path.name.endswith((".min.js", ".map"))
+
+
+def diff_path_is_security_relevant(path: Path) -> bool:
+    if path.parts[0] in {".circleci", ".devcontainer"}:
+        return True
+    if path.name in SECURITY_RELEVANT_DIFF_FILENAMES:
+        return True
+    if path.name.startswith(("Dockerfile.", "Containerfile.")):
+        return True
+    if path.name.lower().endswith(".dockerfile"):
+        return True
+    return (
+        len(path.parts) >= 2
+        and path.parts[0] == ".github"
+        and (
+            path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES
+            or len(path.parts) == 2
+            and path.parts[1] in SECURITY_RELEVANT_GITHUB_DIFF_FILENAMES
+        )
+    )
+
+
+def diff_path_is_included(path: Path) -> bool:
+    if path.parts == ("docs", "CODEOWNERS"):
+        return True
+    if path.parts[:2] == (".github", "actions"):
+        return ".git" not in path.parts
+    if diff_path_is_security_relevant(path):
+        return not any(
+            part in EXCLUDED_DIRS and part not in {".github", ".circleci", ".devcontainer"}
+            for part in path.parts
+        )
+    return not path_is_excluded(path)
+
+
+def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[str, bool]:
+    try:
+        if path.is_symlink():
+            return "", False
+
+        expected = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(expected.st_mode):
+            return "", False
+
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(repo)
+        resolved_stat = resolved.stat()
+        expected_identity = (expected.st_dev, expected.st_ino)
+        if (resolved_stat.st_dev, resolved_stat.st_ino) != expected_identity:
+            return "", False
+
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+
+        with os.fdopen(os.open(path, flags), "rb") as source:
+            opened = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != expected_identity
+            ):
+                return "", False
+
+            sample = source.read(4096)
+            if is_binary_sample(sample):
+                return "", True
+
+            remaining = source.read(max(0, DIRECT_SCOPE_PREVIEW_READ_BYTES - len(sample)))
+    except (OSError, ValueError):
+        return "", False
+
+    return diff_preview_data(path, sample + remaining, preview_bytes)
+
+
+def diff_preview_data(path: Path, data: bytes, preview_bytes: int) -> tuple[str, bool]:
+    if is_binary_sample(data):
+        return "", True
+
+    text = data.decode("utf-8", errors="ignore")
+    outline = structural_outline(path, text)
+    preview_lines = select_preview_lines(outline or text.splitlines())
+    return fit_preview_lines(preview_lines, preview_bytes), False
+
+
+def revision_diff_preview(
+    repo: Path, path: Path, revision: str, preview_bytes: int
+) -> tuple[str, bool]:
+    if path.exists() or path.is_symlink():
+        current_preview, is_binary = confined_diff_preview(repo, path, preview_bytes)
+        if is_binary or not current_preview:
+            return "", is_binary
+
+    relative = path.relative_to(repo).as_posix()
+    try:
+        with subprocess.Popen(
+            ["git", "-C", str(repo), "cat-file", "blob", f"{revision}:{relative}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ) as process:
+            if process.stdout is None:
+                return "", False
+            data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
+            process.stdout.close()
+        if process.returncode and len(data) < DIRECT_SCOPE_PREVIEW_READ_BYTES:
+            return "", False
+    except (OSError, ValueError):
+        return "", False
+    return diff_preview_data(path, data, preview_bytes)
+
+
+def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, str] | None:
+    relative = path.relative_to(repo).as_posix()
+    arguments = (
+        ["ls-tree", "-z", head, "--", relative]
+        if mode == "revisions"
+        else ["ls-files", "--stage", "-z", "--", relative]
+    )
+    result = subprocess.run(
+        ["git", "-C", str(repo), *arguments], check=True, capture_output=True, text=True
+    )
+    if not result.stdout:
+        return None
+    fields = result.stdout.split("\0", 1)[0].split("\t", 1)[0].split()
+    return fields[0], fields[2] if mode == "revisions" else fields[1]
+
+
+def require_reviewable_diff_path(repo: Path, path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError
+        path.resolve(strict=True).relative_to(repo)
+    except (OSError, ValueError):
+        raise SystemExit(
+            "Changed diff paths must not contain symbolic links or non-regular files: "
+            + path.relative_to(repo).as_posix()
+        ) from None
 
 
 def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
@@ -496,7 +673,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
             "diff",
             "--name-status",
             "-z",
-            "--diff-filter=ACMRD",
+            "--diff-filter=ACMRDTU",
             *diff_args,
         ],
         check=True,
@@ -513,7 +690,10 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         status = fields[index][0]
         index += 1
         if status in {"C", "R"}:
+            source = repo / fields[index]
             index += 1
+            if status == "R" and diff_path_is_security_relevant(source.relative_to(repo)):
+                changed.append((source, "D"))
         path = repo / fields[index]
         index += 1
         changed.append((path, status))
@@ -528,6 +708,15 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         staged = run_git_changed_paths(repo, ["--cached", base])
         combined = dict(staged)
         combined.update(unstaged)
+        untracked = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for path in untracked.stdout.split("\0"):
+            if path:
+                combined.setdefault(repo / path, "A")
         return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
@@ -540,17 +729,29 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     rows: list[JsonRow] = []
     for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
         rel = path.relative_to(repo)
-        if path_is_excluded(rel) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
+        if not diff_path_is_included(rel):
             continue
 
-        if status == "D":
+        if status in {"D", "U"}:
             preview = ""
-        elif path.is_file():
-            preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary:
-                continue
         else:
-            preview = ""
+            entry = git_diff_entry(repo, path, args.mode, args.head)
+            if entry is not None and entry[0] == "160000":
+                preview = f"Git submodule commit {entry[1]}"
+            else:
+                if entry is not None and entry[0] == "120000":
+                    raise SystemExit(
+                        "Changed diff paths must not contain symbolic links: " + rel.as_posix()
+                    )
+                require_reviewable_diff_path(repo, path)
+                preview, is_binary = (
+                    revision_diff_preview(repo, path, args.head, args.preview_bytes)
+                    if args.mode == "revisions"
+                    else confined_diff_preview(repo, path, args.preview_bytes)
+                )
+                require_reviewable_diff_path(repo, path)
+                if is_binary:
+                    continue
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))
