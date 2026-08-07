@@ -18,7 +18,7 @@ Use the shared scan artifact path conventions in `../../references/scan-artifact
 
 ### Compact Standard-Scan Mode
 
-When `$security-scan` or `$deep-security-scan` explicitly invokes this skill in compact standard-scan mode, load the per-scan threat model and read the validated candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`. Analyze, in one invocation, every candidate whose validation disposition is `reportable` or `deferred`. Record exactly one nested attack-path decision per eligible candidate with `record_codex_security_candidate_attack_paths({ scanId, attackPaths: [{ candidateId, attackPath }] })`, using the compact record shape in `../../references/scan-artifacts.md` and preserving every discovery and validation field and the original candidate order.
+When `$security-scan` or `$deep-security-scan` explicitly invokes this skill in compact standard-scan mode, load the per-scan threat model and read the validated candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`. Analyze, in one invocation, every candidate whose validation disposition is `reportable` or `deferred`. Record exactly one nested attack-path decision per eligible candidate with `record_candidate_attack_paths({ scanId, attackPaths: [{ candidateId, attackPath }] })`, using the compact record shape in `../../references/scan-artifacts.md` and preserving every discovery and validation field and the original candidate order.
 
 In this mode, the tool atomically records the nested decision in place of a per-finding attack-path report or receipt. Submit all eligible attack-path decisions together; submit `attackPaths: []` when no candidate enters this phase. Keep attack-path facts, counterevidence, severity calibration, and policy adjustment as separate reasoning steps even though their output is compact. All reachability, instance-preservation, and evidence requirements still apply; only the artifact packaging changes.
 
@@ -38,7 +38,7 @@ In this mode, the tool atomically records the nested decision in place of a per-
 5. Calibrate impact and likelihood from the repository evidence.
 6. Apply a separate final policy-adjustment pass mechanically using those facts and the calibrated severity.
 7. Record final policy decision `ignore` explicitly. Outside compact standard-scan mode, drop it from the surviving finding set; in compact mode, retain the ledger row for coverage mapping.
-8. In compact standard-scan mode, call `record_codex_security_candidate_attack_paths` once with the nested attack-path decision for every eligible candidate; the tool atomically updates the stored candidates.
+8. In compact standard-scan mode, call `record_candidate_attack_paths` once with the nested attack-path decision for every eligible candidate; the tool atomically updates the stored candidates.
 9. Outside compact standard-scan mode, save that finding's visible attack-path report and append one attack-path receipt per candidate id at the default paths from `../../references/scan-artifacts.md`. The receipt must record the candidate id, attack-path reportability decision, attack-path facts or exact proof gap, and attack-path artifact/report reference for that candidate finding.
 
 ## Scope and Attack Path Checklist
@@ -82,7 +82,7 @@ Apply severity and policy calibration using `references/severity-policy.md`.
 
 ## Output Contract
 
-In compact standard-scan mode, submit the nested record defined in `../../references/scan-artifacts.md` using `record_codex_security_candidate_attack_paths`. Every candidate with validation disposition `reportable` or `deferred` must receive exactly one attack-path decision. The recorded result is the phase closure; do not also create a narrative report or receipt.
+In compact standard-scan mode, submit the nested record defined in `../../references/scan-artifacts.md` using `record_candidate_attack_paths`. Every candidate with validation disposition `reportable` or `deferred` must receive exactly one attack-path decision. The recorded result is the phase closure; do not also create a narrative report or receipt.
 
 Outside compact standard-scan mode, use the following report contract.
 

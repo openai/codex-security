@@ -189,6 +189,56 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test("keeps model-visible MCP tool names within the Codex limit", async () => {
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const state = await temporaryDirectory("codex-security-mcp-tools-");
+    const server = spawnSync(node!, [join(PLUGIN_ROOT, "mcp", "server.mjs")], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+      input: [
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+        '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
+        '{"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}',
+        "",
+      ].join("\n"),
+      timeout: 30_000,
+    });
+    expect(server.status, server.stderr).toBe(0);
+    const responses = server.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const tools = responses.find((response) => response.id === 2).result
+      .tools as {
+      name: string;
+      _meta?: { ui?: { visibility?: string[] } };
+    }[];
+
+    expect(tools.map((tool) => tool.name)).toContain(
+      "record_candidate_attack_paths",
+    );
+    for (const tool of tools) {
+      if (tool._meta?.ui?.visibility?.includes("model") === false) continue;
+      expect(`mcp__codex_security__${tool.name}`.length).toBeLessThanOrEqual(
+        64,
+      );
+    }
+
+    const workspace = responses
+      .find((response) => response.id === 3)
+      .result.resources.find((resource: { uri: string }) =>
+        /codex-security\/[^/]+\/workspace\.html/u.test(resource.uri),
+      );
+    const version = /codex-security\/([^/]+)\//u.exec(workspace.uri)?.[1];
+    const html = brotliDecompressSync(
+      await readFile(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br")),
+    ).toString("utf8");
+    expect(version).toBeDefined();
+    expect(html).toContain(version!);
+  });
+
   test("derives distinct finding identities from canonical candidate IDs", async () => {
     const parts = await Promise.all(
       ["000", "001"].map((part) =>
