@@ -765,6 +765,72 @@ describe("malformed scan artifact recovery", () => {
     ]);
   });
 
+  test("reports a drifted target in SARIF while coverage stays complete", async () => {
+    const fixture = await startDraftScan();
+    // Drift the target after registration recorded its snapshot digest. The scan still
+    // reviewed everything it set out to review, so completeness stays complete and the
+    // deferred-coverage route that used to be the only source of notifications is empty.
+    await writeFile(
+      join(fixture.repository, "src", "extract.py"),
+      "# changed while the scan was running\n",
+    );
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.warnings).toHaveLength(1);
+    expect(completed.warnings[0]).toContain("Directory contents changed");
+    const coverage = await readJson<CoverageDocument>(
+      join(fixture.scanDir, "coverage.json"),
+    );
+    expect(coverage.completeness).toBe("complete");
+    expect(coverage.deferred).toEqual([]);
+    const sarif = await readJson<SarifDocument>(
+      join(fixture.scanDir, "exports", "results.sarif"),
+    );
+    expect(
+      sarif.runs[0]?.properties.codexSecurityCoverageCompleteness,
+    ).toBeUndefined();
+    expect(sarif.runs[0]?.invocations).toEqual([
+      {
+        executionSuccessful: true,
+        toolExecutionNotifications: [
+          { level: "warning", message: { text: completed.warnings[0]! } },
+        ],
+      },
+    ]);
+  });
+
+  test("keeps run warnings in SARIF when the export is regenerated", async () => {
+    const fixture = await startDraftScan();
+    await writeFile(
+      join(fixture.repository, "src", "extract.py"),
+      "# changed while the scan was running\n",
+    );
+    const completed = await completeScan(fixture);
+    await rm(join(fixture.scanDir, "exports", "results.sarif"));
+
+    await workbench(fixture, [
+      "export-findings",
+      "--scan-id",
+      fixture.scanId,
+      "--format",
+      "sarif",
+    ]);
+
+    const sarif = await readJson<SarifDocument>(
+      join(fixture.scanDir, "exports", "results.sarif"),
+    );
+    expect(sarif.runs[0]?.invocations).toEqual([
+      {
+        executionSuccessful: true,
+        toolExecutionNotifications: [
+          { level: "warning", message: { text: completed.warnings[0]! } },
+        ],
+      },
+    ]);
+  });
+
   test("keeps findings while removing invalid or duplicate writeups", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
