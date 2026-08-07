@@ -9,14 +9,14 @@ Deep Security Scan repeats the ordinary finding-discovery workflow to reduce var
 
 ## Phase Ownership
 
-Deep MCP owns independent discovery workers and semantic reduction only. Each discovery worker invokes the existing `$codex-security:threat-model` and `$codex-security:finding-discovery` skills and follows the same repository-wide or scoped-path discovery contract as `$codex-security:security-scan`. Deep MCP does not run centralized validation, attack-path analysis, canonical JSON assembly, completion, or generated reporting. After discovery returns a terminal manifest, the parent resumes the ordinary `$codex-security:security-scan` post-discovery workflow and invokes the existing shared phase skills exactly once.
+Deep MCP owns independent discovery workers and semantic reduction only. Each discovery worker invokes `$codex-security:threat-model`, follows the Deep discovery procedure, and records candidates with its bound artifact tools. Deep MCP does not run centralized validation, attack-path analysis, canonical JSON assembly, completion, or generated reporting. After discovery returns a terminal manifest, the parent invokes the existing shared validation and attack-path skills exactly once. Do not load the self-contained Standard scan skill or start another scan.
 
 Treat the discovery-to-parent handoff as a hard phase boundary:
 
 1. Accept and read the terminal discovery manifest.
 2. Synthesize the canonical validation threat model.
-3. Run `$codex-security:validation` once in compact standard-scan mode.
-4. Run `$codex-security:attack-path-analysis` once in compact standard-scan mode.
+3. Run `$codex-security:validation` once in compact Deep candidate mode.
+4. Run `$codex-security:attack-path-analysis` once in compact Deep candidate mode.
 5. Record complete semantic findings, coverage, and threat-model context with `record_codex_security_scan_draft`.
 6. Only then call `complete_codex_security_scan`.
 7. Read the completed scan with `get_codex_security_completed_scan`.
@@ -45,13 +45,11 @@ Do not repeat this guard after it passes, on later context loads, or after the s
 
 ## Required Capabilities and Preflight
 
-Read `../../references/config-preflight.md` and dispatch and await the preflight execution described there with the `deep_security_scan` capability profile against the resolved target before goal creation or `start_codex_security_deep_scan`.
+Read `../../references/config-preflight.md` before dispatching the `deep_security_scan` capability preflight. When the host explicitly identifies itself as the desktop app, also read `../../references/desktop-config-preflight.md` before running the helper. Await a ready result before goal creation or `start_codex_security_deep_scan`.
 
 Confirm these plugin skills are available in the active runtime:
 
-- `$codex-security:security-scan`
 - `$codex-security:threat-model`
-- `$codex-security:finding-discovery`
 - `$codex-security:validation`
 - `$codex-security:attack-path-analysis`
 
@@ -84,8 +82,10 @@ Use the same discovery tool in every host:
 ```text
 Native continuation: start_codex_security_deep_scan({ scanId, handoffClaimToken? })
 New conversation, CLI, or headless scan: start_codex_security_deep_scan({ targetPath, scope: ".", userContext? })
-Later calls in any host: start_codex_security_deep_scan({ scanId })
+Later calls in any host: start_codex_security_deep_scan({ scanId, handoffClaimToken? })
 ```
+
+When the existing scan has a `handoffClaimToken`, preserve and pass that same token on every discovery start or resume, including after a paused waiter, app update, or MCP server restart. Do not drop the token merely because the scan ID and owning thread are unchanged.
 
 For a scoped-path scan, pass the resolved scoped directory as `targetPath` with `scope: "."`; never silently widen it to the repository root.
 
@@ -97,7 +97,7 @@ Handle the terminal result as follows:
 - `status: "canceled"`: stop without starting validation or finalization.
 - Tool error: report the exact stable MCP error, including its failure-manifest path when present, and stop the current response. This is a terminal failure of that logical scan: do not call `start_codex_security_deep_scan` again in this response; do not call `get_codex_security_scan_context` in this response; do not call `complete_codex_security_scan` in this response; do not call the target form again to create a replacement scan, do not cancel an already terminal failed scan, do not return a final answer, satisfy a structured output schema, do not synthesize no-findings coverage, or emit benchmark JSON.
 
-If the host represents the pending tool call as a running execution cell, keep waiting on that same cell instead of starting another tool call. Stopping the current Codex response or reaching the host's 24-hour timeout detaches only the caller; it does not cancel the scan. Only while the scan is still active may a later desktop turn rejoin with `{ scanId }`, or a CLI/headless turn repeat the identical target form to rejoin the owning thread's active scan. A terminal tool failure is not a detached waiter and must not be replaced. When the user explicitly asks to stop an active scan, call `cancel_codex_security_scan({ scanId })`.
+If the host represents the pending tool call as a running execution cell, keep waiting on that same cell instead of starting another tool call. Stopping the current Codex response or reaching the host's 24-hour timeout detaches only the caller; it does not cancel the scan. Only while the scan is still active may a later desktop turn rejoin with `{ scanId, handoffClaimToken? }`, or a CLI/headless turn repeat the identical target form to rejoin the owning thread's active scan. After an MCP process restart, the new coordinator safely adopts the expired lease and preserves completed discovery receipts. A terminal tool failure is not a detached waiter and must not be replaced. When the user explicitly asks to stop an active scan, call `cancel_codex_security_scan({ scanId })`.
 
 The native Security workbench observes durable discovery progress without another scan-start call.
 
@@ -118,19 +118,18 @@ Do not read live worker state, repair worker artifacts, or redo discovery. If a 
 
 After accepting the terminal manifest, continue in the same turn. A discovery manifest is never a final scan result and never authorizes a user-facing or benchmark response:
 
-1. Read `$codex-security:security-scan` and use its existing repository-wide or scoped-path compact artifact and final-report contracts.
-2. Read the ordinary canonical review items and candidate set with `list_codex_security_review_items({ scanId, handoffClaimToken?, cursor?, limit? })` and `list_codex_security_candidates({ scanId, cursor?, limit? })`. Follow `nextCursor` until all pages are read. If either tool fails or returns malformed records, report the tool failure and stop; do not repair coordinator-owned discovery artifacts, reopen discovery, or silently drop candidates.
-3. Synthesize one canonical validation threat model from the ordered worker threat models and write it to the ordinary per-scan `<context_dir>/threat_model.md` path. Preserve relevant attacker models, trust boundaries, privileged surfaces, contradictions, and risk framings conservatively. This threat model is downstream context, not a retroactive discovery filter.
-4. Run `$codex-security:validation` once in compact standard-scan mode over the canonical merged candidates, recording every result with `record_codex_security_candidate_validations`.
-5. Run `$codex-security:attack-path-analysis` once in compact standard-scan mode over the reportable or deferred validated candidates, recording every decision with `record_codex_security_candidate_attack_paths`.
-6. Assemble complete finding and coverage semantics using `../../references/final-report.md` and `../../references/finding-detail-fields.md`, then call `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`.
+1. Read the canonical review items and candidate set with `list_codex_security_review_items({ scanId, handoffClaimToken?, cursor?, limit? })` and `list_codex_security_candidates({ scanId, cursor?, limit? })`. Follow `nextCursor` until all pages are read. If either tool fails or returns malformed records, report the tool failure and stop; do not repair coordinator-owned discovery artifacts, reopen discovery, or silently drop candidates.
+2. Synthesize one canonical validation threat model from the ordered worker threat models and write it to the per-scan `<context_dir>/threat_model.md` path. Preserve relevant attacker models, trust boundaries, privileged surfaces, contradictions, and risk framings conservatively. This threat model is downstream context, not a retroactive discovery filter.
+3. Run `$codex-security:validation` once in compact Deep candidate mode over the canonical merged candidates, recording every result with `record_codex_security_candidate_validations`.
+4. Run `$codex-security:attack-path-analysis` once in compact Deep candidate mode over the reportable or deferred validated candidates, recording every decision with `record_codex_security_candidate_attack_paths`.
+5. Assemble complete finding and coverage semantics using `../../references/final-report.md` and `../../references/finding-detail-fields.md`, then call `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`.
    - Use the existing shared final-report contract: an evidence-supported lowercase vulnerability-family `ruleId`, the candidate's exact CWE array in `taxonomy.cwe`, its actual `provenance.source`, genuine nonempty code evidence, and coverage surfaces with canonical `label` and `disposition` fields. Preserve candidate and worker provenance.
    - Set coverage to `partial` when deferred work or a `needs_follow_up` surface remains; retain the actual evidence and reason.
    - The workbench derives the authoritative target, scope paths, finding identities, coverage mode, and repository inventory strategy. Do not include those derived fields in draft arguments.
    - An MCP `-32602` input rejection or an explicitly identified pre-write coverage-semantics rejection writes no artifact. Correct the named semantic fields and retry the same scan at most twice. Stop after the first accepted draft; do not blindly retry an ambiguous write.
    - Detailed vulnerability write-ups and hardening are optional, exactly as in the ordinary scan. Invoke `$codex-security:vulnerability-writeup` or `$codex-security:propose-security-hardening` only when the corresponding additional output is requested.
-7. After the draft succeeds, complete the scan once by calling `complete_codex_security_scan({ scanId, handoffClaimToken? })` so the workbench validates and seals the contract, generates `report.md`, and indexes findings. Read the canonical final result with `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`. Do not call completion before the draft is accepted.
-8. Include the completion result's measured total, input, and cached input token counts in the final user-facing response. Explicitly label partial coverage; if measurement is unavailable, say so instead of reporting zero or estimating.
+6. After the draft succeeds, complete the scan once by calling `complete_codex_security_scan({ scanId, handoffClaimToken? })` so the workbench validates and seals the contract, generates `report.md`, and indexes findings. Read the canonical final result with `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`. Do not call completion before the draft is accepted.
+7. Include the completion result's measured total, input, and cached input token counts in the final user-facing response. Explicitly label partial coverage; if measurement is unavailable, say so instead of reporting zero or estimating.
 
 If the parent cannot run a required tail phase, record the canonical draft after the bounded no-write correction above, or read the completed scan, stop immediately and surface the exact blocker. Do not call completion with missing artifacts, return a final report or no-findings result, satisfy a structured output schema, or emit benchmark JSON.
 
@@ -150,6 +149,6 @@ Do not bypass validation because a candidate recurred across workers. Recurrence
 - Do not edit repository files during scanning.
 - Do not widen or reinterpret the resolved target.
 - Do not call `fail_codex_security_scan` because a wait was detached, a turn ended, discovery remains active, or partial artifacts exist.
-- If the tool reports that its process ended during discovery, treat the scan as failed; this version cannot resume that run.
+- If a waiter detaches or the MCP process ends while discovery is still running, preserve the scan and its handoff claim. A later same-scan call can adopt the expired coordinator lease and resume unfinished discovery without repeating completed reviews.
 - After any terminal discovery failure, stop the current response and surface the stable MCP failure and preserved failure-manifest path instead. Do not call `start_codex_security_deep_scan` again in that response; do not call `get_codex_security_scan_context` in that response; do not call `complete_codex_security_scan` in that response; do not start a second scan, call cancel for that failed scan, return a final answer, satisfy a structured output schema, or return synthetic no-findings or benchmark output.
 - On explicit cancellation, call `cancel_codex_security_scan`; after it returns, do not accept late progress or artifacts.
