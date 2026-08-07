@@ -92,6 +92,19 @@ jobs:
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' && 'true' || 'false' }}
         run: pnpm --dir sdk/typescript run test
 
+      # Runners default to umask 0022, so no other leg exercises the
+      # permissive umask that turns private test fixtures group-writable.
+      - name: Test under a permissive umask
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        timeout-minutes: 10
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          umask 0002
+          pnpm --dir sdk/typescript run test
+
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format
 
