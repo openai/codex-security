@@ -218,6 +218,12 @@ export interface ScanWarningDetails {
   kind: "target_changed";
 }
 
+// Notifies the onWarning observer and records the warning for the scan result.
+type ScanWarningReporter = (
+  warning: string,
+  details?: ScanWarningDetails,
+) => void;
+
 type ScanObserverName =
   | "onAuthentication"
   | "onCost"
@@ -319,7 +325,26 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
-    return await this.#trackOperation(() => this.#run(repository, options));
+    // Observers see every warning as it happens, but only the result reaches a machine
+    // consumer, so the run also records its warnings for the result it returns. They are
+    // redacted here because that result is printed and stored, unlike the observer stream.
+    const warnings: string[] = [];
+    const warn = (warning: string, details?: ScanWarningDetails): void => {
+      warnings.push(redactedErrorMessage(warning));
+      notifyObserver(
+        "onWarning",
+        options.onWarning,
+        options.onObserverError,
+        warning,
+        details,
+      );
+    };
+    // Cleanup reports its warnings after the scan result exists, so they are attached
+    // once #run has returned rather than where the result is collected.
+    const result = await this.#trackOperation(() =>
+      this.#run(repository, options, warn),
+    );
+    return result.withWarnings(warnings);
   }
 
   public async preflight(
@@ -376,7 +401,11 @@ export class CodexSecurity {
     };
   }
 
-  async #run(repository: string, options: ScanOptions): Promise<ScanResult> {
+  async #run(
+    repository: string,
+    options: ScanOptions,
+    warn: ScanWarningReporter,
+  ): Promise<ScanResult> {
     this.#requireOpen();
     const costAbortController = new AbortController();
     const signal = AbortSignal.any([
@@ -967,10 +996,7 @@ export class CodexSecurity {
           const snapshot = await tracker.stop(usage);
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
-            notifyObserver(
-              "onWarning",
-              options.onWarning,
-              options.onObserverError,
+            warn(
               "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
             );
           }
@@ -1004,7 +1030,10 @@ export class CodexSecurity {
           reportProgress(progress);
         },
         onWorkerStatus: options.onWorkerStatus,
-        onWarning: options.onWarning,
+        // Routed through `warn` rather than straight to the observer so a trusted-access
+        // warning reaches the returned result too: it is a run warning like any other, and
+        // a machine consumer reading only the result would otherwise never see it.
+        onWarning: warn,
         onObserverError: options.onObserverError,
       });
       checkOpen();
@@ -1029,10 +1058,7 @@ export class CodexSecurity {
         ]);
         for (const warning of completedScan["warnings"]) {
           if (typeof warning === "string") {
-            notifyObserver(
-              "onWarning",
-              options.onWarning,
-              options.onObserverError,
+            warn(
               warning,
               targetWarnings.has(warning)
                 ? { kind: "target_changed" }
@@ -1105,11 +1131,11 @@ export class CodexSecurity {
           removeTargetPathsFile(targetPathsFile),
         ])) {
           if (cleanup.status === "rejected") {
-            warnCleanupFailed(options, cleanup.reason);
+            warnCleanupFailed(warn, cleanup.reason);
           }
         }
       } catch (error) {
-        warnCleanupFailed(options, error);
+        warnCleanupFailed(warn, error);
       } finally {
         // Releasing the credential home lock is not best effort, so it keeps its own
         // finally and runs even if reporting the failures above went wrong. The release
@@ -1123,7 +1149,7 @@ export class CodexSecurity {
           await releaseCredentialHome?.();
         } catch (error) {
           if (!scanFailure) throw error;
-          warnCleanupFailed(options, error);
+          warnCleanupFailed(warn, error);
         }
       }
     }
@@ -1658,24 +1684,16 @@ export async function initialCredentialsAvailable(
 }
 
 // Reports a cleanup failure without letting it decide the result of the scan. Only the
-// message is forwarded, and it reaches the onWarning observer alone: unlike the fail-scan
+// message is forwarded, and it reaches the scan's warnings alone: unlike the fail-scan
 // path it is never written to the workbench, so it adds no persisted, unredacted text.
-function warnCleanupFailed(
-  options: Pick<ScanOptions, "onWarning" | "onObserverError">,
-  reason: unknown,
-): void {
+function warnCleanupFailed(warn: ScanWarningReporter, reason: unknown): void {
   // This runs where a throw would replace the scan result, so every step is inside the
-  // guard: reading the reason, coercing it, and reading the observers off the options can
-  // each throw for a sufficiently hostile value, and none of them may become the outcome
-  // of the scan. Losing a warning is the correct trade against losing the result.
+  // guard: reading the reason, coercing it, and reporting it can each throw for a
+  // sufficiently hostile value, and none of them may become the outcome of the scan.
+  // Losing a warning is the correct trade against losing the result.
   try {
     const message = String(reason instanceof Error ? reason.message : reason);
-    notifyObserver(
-      "onWarning",
-      options.onWarning,
-      options.onObserverError,
-      `Could not clean up after the Codex Security scan: ${message}`,
-    );
+    warn(`Could not clean up after the Codex Security scan: ${message}`);
   } catch {}
 }
 
