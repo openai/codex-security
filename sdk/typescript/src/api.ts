@@ -633,14 +633,6 @@ export class CodexSecurity {
           `Shell-visible plugin root must be outside CODEX_HOME: ${canonicalShellPluginRoot}`,
         );
       }
-      const basePrompt = await scanPrompt(
-        shellPluginRoot,
-        normalized,
-        mode,
-        runtime.configPath !== undefined,
-        knowledgeBase !== null,
-      );
-      checkOpen();
       const expectation: ScanExpectation = {
         repository: repo,
         repositoryRevision: await (
@@ -813,6 +805,15 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      checkOpen();
+      const basePrompt = await scanPrompt(
+        shellPluginRoot,
+        normalized,
+        mode,
+        scanId,
+        runtime.configPath !== undefined,
+        knowledgeBase !== null,
+      );
       checkOpen();
       const feedback = await workbench(
         {
@@ -1953,6 +1954,7 @@ async function scanPrompt(
   pluginRoot: string,
   target: NormalizedTarget,
   mode: ScanMode,
+  scanId: string,
   hasConfigPath = false,
   hasKnowledgeBase = false,
 ): Promise<string> {
@@ -1969,7 +1971,7 @@ async function scanPrompt(
     "Run this Codex Security scan non-interactively.",
     ...(mode === "deep"
       ? [
-          'The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }; never pass targetPath or create another scan.',
+          `The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: ${JSON.stringify(scanId)} }; never pass targetPath or create another scan.`,
         ]
       : []),
     ...(skillName === "deep-security-scan"
@@ -1981,7 +1983,7 @@ async function scanPrompt(
     'Use "$PYTHON" as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.',
     'Repository root: "$CODEX_SECURITY_REPOSITORY"',
     'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
-    'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
+    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
     'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
     'Use exactly "$CODEX_SECURITY_TARGET_DISPLAY_NAME" as scan.target.displayName; do not infer a display name from the Git remote.',
     'Use exactly "$CODEX_SECURITY_TARGET_KIND" as scan.target.kind; do not infer the target kind from the checkout.',
