@@ -1,11 +1,18 @@
-import { basename, relative } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import type { JsonObject } from "./config.js";
 
-export type HistoryCommand = "list" | "show" | "compare" | "match-all";
+export type HistoryCommand =
+  | "list"
+  | "show"
+  | "compare"
+  | "match-all"
+  | "findings"
+  | "finding";
 type RendererOptions = {
   columns?: number;
   color?: boolean;
   now?: number;
+  currentDirectory?: string;
   repository?: string;
   scanRoot?: string;
   showLinkedFindings?: boolean;
@@ -50,6 +57,71 @@ function findingSeverity(finding: JsonObject): string {
   ).toUpperCase();
 }
 
+export function checkoutScans(
+  scans: readonly JsonObject[],
+  directory: string,
+): JsonObject[] {
+  const scanPath = (scan: JsonObject): string | undefined => {
+    const current = scan["currentTargetPath"];
+    const recorded = scan["targetPath"];
+    return typeof current === "string"
+      ? current
+      : typeof recorded === "string"
+        ? recorded
+        : undefined;
+  };
+  let containingPath: string | undefined;
+  const descendants = new Set<string>();
+  for (const scan of scans) {
+    const targetPath = scanPath(scan);
+    if (targetPath === undefined) continue;
+    const checkoutRelative = relative(targetPath, directory);
+    const targetRelative = relative(directory, targetPath);
+    const outsideTarget =
+      checkoutRelative === ".." ||
+      checkoutRelative.startsWith(`..${sep}`) ||
+      isAbsolute(checkoutRelative);
+    const outsideDirectory =
+      targetRelative === ".." ||
+      targetRelative.startsWith(`..${sep}`) ||
+      isAbsolute(targetRelative);
+    if (!outsideTarget) {
+      if (
+        containingPath === undefined ||
+        targetPath.length > containingPath.length
+      ) {
+        containingPath = targetPath;
+      }
+    } else if (!outsideDirectory) {
+      descendants.add(targetPath);
+    }
+  }
+  const selected = scans.filter((scan) => {
+    const targetPath = scanPath(scan);
+    return (
+      targetPath !== undefined &&
+      (containingPath === undefined
+        ? descendants.has(targetPath)
+        : targetPath === containingPath)
+    );
+  });
+  const selectedTargetIds = new Set(
+    selected
+      .map((scan) => scan["targetId"])
+      .filter((targetId): targetId is string => typeof targetId === "string"),
+  );
+  const selectedScans = new Set(selected);
+  if (selectedScans.size === 0) {
+    return scans.filter((scan) => scan["relatedCheckout"] === true);
+  }
+  return scans.filter(
+    (scan) =>
+      selectedScans.has(scan) ||
+      (typeof scan["targetId"] === "string" &&
+        selectedTargetIds.has(scan["targetId"])),
+  );
+}
+
 export function renderScanHistory(
   result: JsonObject,
   command: HistoryCommand,
@@ -67,6 +139,8 @@ export function renderScanHistory(
     show: "SCAN DETAILS",
     compare: "SCAN COMPARISON",
     "match-all": "MATCH RESULTS",
+    findings: "SAVED FINDINGS",
+    finding: "FINDING DETAILS",
   };
   const lines = [
     "",
@@ -109,15 +183,46 @@ export function renderScanHistory(
       ? ` in ${clean(knownScanIds[0]).slice(0, 8)}${knownScanIds.length > 1 ? ` … ${clean(knownScanIds[knownScanIds.length - 1]).slice(0, 8)}` : ""}`
       : "";
     const knownSince =
-      command === "show" && matches?.length && entry["knownSince"]
+      (command === "show" || command === "finding") &&
+      matches?.length &&
+      entry["knownSince"]
         ? `  ${accent("·")}  ${strong(`Known since ${KNOWN_SINCE_DATE.format(new Date(clean(entry["knownSince"])))}`)}${knownScans}`
         : "";
     const location = (entry["locations"] as JsonObject[] | undefined)?.[0];
     const path =
       entry["path"] ??
+      entry["locationPath"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
     lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
-    const showLinkedFindings = command !== "show" || options.showLinkedFindings;
+    if (command === "findings" || command === "finding") {
+      const occurrenceId = entry["occurrenceId"];
+      const triage = entry["triage"] as JsonObject | undefined;
+      const status = triage?.["status"] ?? entry["status"];
+      const scanId = entry["scanId"];
+      const occurrenceCount = entry["occurrenceCount"];
+      const details = [
+        ...(occurrenceId ? [`${strong("ID")} ${clean(occurrenceId)}`] : []),
+        ...(status ? [strong(clean(status).toUpperCase())] : []),
+        ...(command === "findings" && scanId
+          ? [`${strong("SCAN")} ${clean(scanId).slice(0, 8)}`]
+          : []),
+        ...(command === "findings" &&
+        options.repository === undefined &&
+        typeof entry["targetPath"] === "string"
+          ? [`${strong("REPOSITORY")} ${clean(entry["targetPath"])}`]
+          : []),
+        ...(typeof occurrenceCount === "number" && occurrenceCount > 1
+          ? [`${clean(occurrenceCount)} scans`]
+          : []),
+      ];
+      if (details.length > 0) {
+        lines.push(`              ${details.join(`  ${accent("·")}  `)}`);
+      }
+    }
+    const showLinkedFindings =
+      command === "compare" ||
+      command === "finding" ||
+      (command === "show" && options.showLinkedFindings);
     if (matches?.length && showLinkedFindings) {
       lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
       for (const match of matches) {
@@ -145,7 +250,330 @@ export function renderScanHistory(
     }
   };
 
-  if (command === "list") {
+  if (command === "findings") {
+    const findings = result["findings"] as JsonObject[];
+    const scanId = result["scanId"];
+    const repository = options.repository ?? result["repository"];
+    const scope =
+      typeof scanId === "string"
+        ? `scan ${clean(scanId).slice(0, 8)}`
+        : typeof repository === "string"
+          ? clean(basename(repository))
+          : "all repositories";
+    const offset = Number(result["offset"] ?? 0);
+    const total = result["total"];
+    const range =
+      typeof total === "number"
+        ? findings.length > 0
+          ? `${offset + 1}-${offset + findings.length} of ${total}`
+          : `0 of ${total}`
+        : `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+    lines.push(`  ${strong(scope)}  ${accent("·")}  ${range}`);
+    if (findings.length === 0) {
+      lines.push("", "  No saved findings match these filters.");
+    }
+    for (const entry of findings) {
+      lines.push("");
+      finding(entry, false);
+    }
+    if (typeof result["nextOffset"] === "number") {
+      lines.push(
+        "",
+        `  ${strong("NEXT PAGE")}  rerun with --offset ${clean(result["nextOffset"])}`,
+      );
+    }
+    if (findings.length > 0) {
+      lines.push(
+        "",
+        `  ${strong("DETAILS")}  codex-security findings show OCCURRENCE_ID`,
+      );
+    }
+  } else if (command === "finding") {
+    const repository = result["currentTargetPath"] ?? result["targetPath"];
+    const scanId = result["scanId"];
+    if (typeof repository === "string") {
+      lines.push(
+        `  ${strong(clean(basename(repository)))}${scanId ? `  ${accent("·")}  ${clean(scanId).slice(0, 8)}` : ""}`,
+      );
+    }
+    lines.push("");
+    finding(result);
+    if (typeof result["summary"] === "string" && result["summary"]) {
+      lines.push("", `  ${strong("SUMMARY")}`);
+      wrap(result["summary"], 4);
+    }
+    const locations = result["locations"];
+    if (Array.isArray(locations) && locations.length > 1) {
+      lines.push("", `  ${strong("AFFECTED LOCATIONS")}`);
+      for (const location of locations) {
+        if (
+          typeof location !== "object" ||
+          location === null ||
+          Array.isArray(location)
+        ) {
+          continue;
+        }
+        const path = location["path"];
+        if (typeof path !== "string") continue;
+        const startLine = location["startLine"];
+        const endLine = location["endLine"];
+        const range =
+          typeof startLine === "number"
+            ? `:${startLine}${typeof endLine === "number" && endLine !== startLine ? `-${endLine}` : ""}`
+            : "";
+        const role =
+          typeof location["role"] === "string"
+            ? `  ${accent("·")}  ${clean(location["role"])}`
+            : "";
+        lines.push(`    ${dim(clean(`${path}${range}`))}${role}`);
+      }
+    }
+    const description = (value: unknown): string | undefined => {
+      if (typeof value === "string") return value;
+      if (typeof value !== "object" || value === null) return undefined;
+      for (const key of [
+        "summary",
+        "narrative",
+        "description",
+        "detail",
+        "conclusion",
+        "rationale",
+        "explanation",
+        "why",
+      ]) {
+        const candidate = (value as JsonObject)[key];
+        if (typeof candidate === "string" && candidate) return candidate;
+      }
+      return undefined;
+    };
+    const appendDescriptions = (
+      sections: string[],
+      value: JsonObject,
+      key: string,
+      label: string,
+    ): void => {
+      const items = value[key];
+      if (!Array.isArray(items)) return;
+      for (const item of items) {
+        const detail = description(item);
+        if (detail !== undefined) sections.push(`${label}: ${detail}`);
+      }
+    };
+    for (const [label, key] of [
+      ["SEVERITY", "severity"],
+      ["CONFIDENCE", "confidence"],
+    ] as const) {
+      const value = result[key];
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        continue;
+      }
+      const level = value["level"];
+      const rationale = description(value);
+      if (
+        (key === "severity" && rationale === undefined) ||
+        (typeof level !== "string" && rationale === undefined)
+      ) {
+        continue;
+      }
+      lines.push(
+        "",
+        `  ${strong(label)}${typeof level === "string" ? `  ${strong(clean(level).toUpperCase())}` : ""}`,
+      );
+      if (rationale !== undefined) wrap(rationale, 4);
+    }
+    for (const [label, key] of [
+      ["ROOT CAUSE", "rootCause"],
+      ["VALIDATION", "validation"],
+      ["ATTACK PATH", "attackPath"],
+    ] as const) {
+      const value =
+        key === "rootCause" ? result[key] ?? result["root_cause"] : result[key];
+      const detail = description(value);
+      const sections = detail === undefined ? [] : [detail];
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        if (key === "validation") {
+          if (typeof value["method"] === "string") {
+            sections.push(`Method: ${value["method"]}`);
+          }
+          for (const [evidenceLabel, evidenceKey] of [
+            ["Verified", "assertions"],
+            ["Evidence", "evidence"],
+            ["Counterevidence", "counterEvidence"],
+          ] as const) {
+            appendDescriptions(sections, value, evidenceKey, evidenceLabel);
+          }
+        }
+        if (key === "attackPath") {
+          for (const [nestedLabel, nestedKey] of [
+            ["Dataflow", "dataflow"],
+            ["Dataflow", "dataFlow"],
+            ["Reachability", "reachability"],
+            ["Impact", "impact"],
+            ["Likelihood", "likelihood"],
+          ] as const) {
+            const nestedValue = value[nestedKey];
+            const nested = description(nestedValue);
+            if (nested !== undefined) {
+              sections.push(`${nestedLabel}: ${nested}`);
+            }
+            if (
+              typeof nestedValue !== "object" ||
+              nestedValue === null ||
+              Array.isArray(nestedValue)
+            ) {
+              continue;
+            }
+            const attributes: ReadonlyArray<readonly [string, string]> =
+              nestedKey === "dataflow" || nestedKey === "dataFlow"
+                ? [
+                    ["Source", "source"],
+                    ["Sink", "sink"],
+                    ["Outcome", "outcome"],
+                  ]
+                : nestedKey === "reachability"
+                  ? [
+                      ["Attacker", "attacker"],
+                      ["Entry point", "entrypoint"],
+                      ["Outcome", "outcome"],
+                    ]
+                  : [];
+            for (const [attributeLabel, attributeKey] of attributes) {
+              const detail = description(nestedValue[attributeKey]);
+              if (detail !== undefined) {
+                sections.push(`${attributeLabel}: ${detail}`);
+              }
+            }
+            if (nestedKey === "reachability") {
+              appendDescriptions(
+                sections,
+                nestedValue,
+                "preconditions",
+                "Precondition",
+              );
+            }
+          }
+        }
+        const caveats: ReadonlyArray<readonly [string, string]> =
+          key === "validation"
+            ? [["Limitation", "limitations"]]
+            : key === "attackPath"
+              ? [
+                  ["Precondition", "preconditions"],
+                  ["Limitation", "limitations"],
+                ]
+              : [];
+        for (const [caveatLabel, caveatKey] of caveats) {
+          appendDescriptions(sections, value, caveatKey, caveatLabel);
+        }
+      }
+      if (sections.length > 0) {
+        lines.push("", `  ${strong(label)}`);
+        for (const section of sections) wrap(section, 4);
+      }
+    }
+    const codeEvidence = result["codeEvidence"] ?? result["code_evidence"];
+    const rootCause = result["rootCause"] ?? result["root_cause"];
+    const legacyRootCode =
+      typeof rootCause === "object" &&
+      rootCause !== null &&
+      !Array.isArray(rootCause) &&
+      typeof rootCause["code"] === "string"
+        ? rootCause["code"]
+        : undefined;
+    const evidenceEntries: JsonObject[] =
+      Array.isArray(codeEvidence) && codeEvidence.length > 0
+        ? codeEvidence.filter(
+            (entry): entry is JsonObject =>
+              typeof entry === "object" &&
+              entry !== null &&
+              !Array.isArray(entry),
+          )
+        : legacyRootCode === undefined
+          ? []
+          : [{ label: "Root-cause source", code: legacyRootCode }];
+    if (evidenceEntries.length > 0) {
+      lines.push("", `  ${strong("CODE EVIDENCE")}`);
+      for (const evidence of evidenceEntries) {
+        if (typeof evidence["label"] === "string") {
+          lines.push(`    ${strong(clean(evidence["label"]))}`);
+        }
+        if (typeof evidence["path"] === "string") {
+          const line =
+            typeof evidence["startLine"] === "number"
+              ? `:${evidence["startLine"]}`
+              : "";
+          lines.push(`      ${dim(clean(`${evidence["path"]}${line}`))}`);
+        }
+        if (typeof evidence["explanation"] === "string") {
+          wrap(evidence["explanation"], 6);
+        }
+        if (typeof evidence["code"] === "string") {
+          for (const sourceLine of evidence["code"].split("\n")) {
+            lines.push(`      ${dim(clean(sourceLine))}`);
+          }
+        }
+      }
+    }
+    const sourceExcerpt = result["sourceExcerpt"];
+    if (typeof sourceExcerpt === "string" && sourceExcerpt) {
+      lines.push("", `  ${strong("SOURCE EXCERPT")}`);
+      for (const sourceLine of sourceExcerpt.split("\n")) {
+        lines.push(`    ${dim(clean(sourceLine))}`);
+      }
+    }
+    if (typeof result["remediation"] === "string" && result["remediation"]) {
+      lines.push("", `  ${strong("REMEDIATION")}`);
+      wrap(result["remediation"], 4);
+    }
+    for (const [label, key] of [
+      ["REMEDIATION TESTS", "remediationTests"],
+      ["PREVENTIVE CONTROLS", "preventiveControls"],
+    ] as const) {
+      const items = result[key];
+      if (!Array.isArray(items)) continue;
+      const guidance = items.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+      );
+      if (guidance.length === 0) continue;
+      lines.push("", `  ${strong(label)}`);
+      for (const item of guidance) wrap(item, 6, "    • ");
+    }
+    const artifactPaths = result["artifactPaths"];
+    if (Array.isArray(artifactPaths) && artifactPaths.length > 0) {
+      lines.push("", `  ${strong("EVIDENCE ARTIFACTS")}`);
+      const scanDirectory = result["scanDir"];
+      for (const path of artifactPaths) {
+        if (typeof path !== "string") continue;
+        const artifactPath =
+          typeof scanDirectory === "string" ? join(scanDirectory, path) : path;
+        lines.push(`    ${dim(clean(artifactPath))}`);
+      }
+    }
+    if (typeof result["occurrenceId"] === "string") {
+      const triage = result["triage"];
+      const details =
+        typeof triage === "object" && triage !== null && !Array.isArray(triage)
+          ? triage
+          : undefined;
+      const action =
+        details?.["status"] === "closed"
+          ? ""
+          : `  codex-security findings false-positive ${clean(result["occurrenceId"])} --reason TEXT`;
+      lines.push("", `  ${strong("TRIAGE")}${action}`);
+      for (const [label, key] of [
+        ["Reason", "closeReason"],
+        ["Note", "note"],
+      ] as const) {
+        if (typeof details?.[key] === "string" && details[key]) {
+          wrap(`${label}: ${details[key]}`, 4);
+        }
+      }
+    }
+  } else if (command === "list") {
     const scans = (result["scans"] as JsonObject[]).filter((scan) => {
       if ((scan["progress"] as JsonObject)["status"] !== "running") {
         return true;
@@ -164,9 +592,24 @@ export function renderScanHistory(
           "",
       ),
     );
-    const latest = scans.find(
-      (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
-    )?.["findingCount"];
+    const scopedScans =
+      options.repository === undefined
+        ? scans
+        : checkoutScans(scans, options.repository);
+    const completed = scopedScans
+      .filter(
+        (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
+      )
+      .sort((left, right) => {
+        const leftCompleted = String(
+          left["completedAt"] ?? left["startedAt"] ?? "",
+        );
+        const rightCompleted = String(
+          right["completedAt"] ?? right["startedAt"] ?? "",
+        );
+        return rightCompleted.localeCompare(leftCompleted);
+      });
+    const latest = completed[0]?.["findingCount"];
     const multipleRepositories =
       options.repository === undefined &&
       new Set(scans.map((scan) => scan["targetPath"])).size > 1;
@@ -199,6 +642,32 @@ export function renderScanHistory(
         lines.push(
           `  ${clean(scan["scanId"])}`,
           `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
+        );
+      }
+    }
+    if (completed.length > 0) {
+      const latest = completed[0]!;
+      const scanPrefix = clean(latest["scanId"]).slice(0, 8);
+      const scanQualifiedFindings =
+        options.scanRoot !== undefined ||
+        (options.currentDirectory !== undefined &&
+          latest["targetPath"] !== options.currentDirectory);
+      lines.push(
+        "",
+        `  ${strong("VIEW LATEST")}  codex-security scans show ${scanPrefix}`,
+        `  ${strong("FINDINGS")}     codex-security findings list${scanQualifiedFindings ? ` --scan ${scanPrefix}` : ""}`,
+      );
+      const previous = completed
+        .slice(1)
+        .find(
+          (scan) =>
+            scan["targetPath"] === latest["targetPath"] ||
+            (typeof scan["targetId"] === "string" &&
+              scan["targetId"] === latest["targetId"]),
+        );
+      if (previous !== undefined) {
+        lines.push(
+          `  ${strong("COMPARE")}      codex-security scans compare ${clean(previous["scanId"]).slice(0, 8)} ${clean(latest["scanId"]).slice(0, 8)}`,
         );
       }
     }
@@ -303,17 +772,45 @@ export function renderScanHistory(
         typeof result["findingCount"] === "number"
           ? result["findingCount"]
           : findings.length;
+      const truncated =
+        Boolean(result["findingsTruncated"]) || count > findings.length;
       lines.push(
         "",
         `  ${strong("FINDINGS")}  ${strong(
-          result["findingsTruncated"] || count > findings.length
-            ? `${findings.length} of ${count}`
-            : String(count),
+          truncated ? `${findings.length} of ${count}` : String(count),
         )}`,
       );
       for (const entry of findings) {
         lines.push("");
         finding(entry);
+      }
+      if (truncated) {
+        lines.push(
+          "",
+          `  ${strong("MORE FINDINGS")}  codex-security findings list --scan ${clean(result["scanId"]).slice(0, 8)} --offset ${findings.length}`,
+        );
+      }
+      const linked = findings.some(
+        (entry) => (entry["matches"] as JsonObject[] | undefined)?.length,
+      );
+      if (linked && !options.showLinkedFindings) {
+        lines.push(
+          "",
+          `  ${strong("FINDING HISTORY")}  codex-security scans show ${clean(result["scanId"]).slice(0, 8)} --show-linked-findings`,
+        );
+      } else if (!linked && !truncated && options.showLinkedFindings) {
+        const matchingRepository =
+          result["currentTargetPath"] ?? result["targetPath"];
+        const repositoryContext =
+          typeof matchingRepository === "string" &&
+          options.currentDirectory !== undefined &&
+          matchingRepository !== options.currentDirectory
+            ? `from ${clean(matchingRepository)}, run`
+            : "run";
+        lines.push(
+          "",
+          `  ${strong("FINDING HISTORY")}  No saved links; ${repositoryContext} codex-security scans match --all (uses Codex).`,
+        );
       }
     }
   } else if (command === "compare") {

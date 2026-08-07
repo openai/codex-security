@@ -3023,6 +3023,9 @@ def scan_result(
             "completed": independent_reviews["completed"],
             "consolidating": independent_reviews["consolidating"],
         }
+    current_target = connection.execute(
+        "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+    ).fetchone()
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
@@ -3049,6 +3052,12 @@ def scan_result(
         "scanId": scan["id"],
         "scope": scan["scope"],
         "targetPath": scan["target_path"],
+        **(
+            {"currentTargetPath": current_target["current_path"]}
+            if current_target is not None
+            and current_target["current_path"] != scan["target_path"]
+            else {}
+        ),
         "targetRevision": scan["target_revision"],
         "targetSummary": scan["target_summary"],
         "updatedAt": max(
@@ -3175,8 +3184,27 @@ def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
+    *,
+    full_details: bool = False,
 ) -> dict[str, Any]:
-    details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
+    stored_details = read_finding_details(occurrence["details_json"])
+    details = dict(stored_details if full_details else bounded_finding_details(stored_details))
+    for field in (
+        "artifactPaths",
+        "currentTargetPath",
+        "knownScanIds",
+        "knownSince",
+        "matches",
+        "occurrenceCount",
+        "scanDir",
+        "scanId",
+        "sourceExcerpt",
+        "status",
+        "targetId",
+        "targetPath",
+        "updatedAt",
+    ):
+        details.pop(field, None)
     confidence = details.get("confidence")
     confidence = confidence if isinstance(confidence, dict) else {}
     severity = details.get("severity")
@@ -3185,7 +3213,17 @@ def finding_result(
     try:
         target = require_scan_target_identity(scan)
     except SystemExit:
-        target = None
+        current_target = connection.execute(
+            "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+        ).fetchone()
+        try:
+            target = (
+                require_scan_target_identity(scan, target_path=current_target["current_path"])
+                if current_target is not None
+                else None
+            )
+        except SystemExit:
+            target = None
     for row in connection.execute(
         """
         SELECT relative_path, start_line, end_line, role
@@ -3194,24 +3232,33 @@ def finding_result(
         ORDER BY CASE WHEN role = 'root_control' THEN 0 ELSE 1 END, sort_order
         LIMIT ?
         """,
-        (occurrence["id"], FINDING_LOCATIONS_LIMIT),
+        (occurrence["id"], -1 if full_details else FINDING_LOCATIONS_LIMIT),
     ):
         absolute_path = safe_source_path(target, row["relative_path"]) if target else None
         location = {
             "endLine": row["end_line"],
-            "path": bounded_output_text(row["relative_path"], FINDING_LOCATION_PATH_BYTES),
+            "path": (
+                row["relative_path"]
+                if full_details
+                else bounded_output_text(row["relative_path"], FINDING_LOCATION_PATH_BYTES)
+            ),
             "role": (
-                bounded_output_text(row["role"], FINDING_LOCATION_ROLE_BYTES)
+                row["role"]
+                if full_details
+                else bounded_output_text(row["role"], FINDING_LOCATION_ROLE_BYTES)
                 if row["role"] is not None
                 else None
             ),
             "startLine": row["start_line"],
         }
         if absolute_path is not None:
-            location["absolutePath"] = bounded_output_text(
-                absolute_path, FINDING_ABSOLUTE_PATH_BYTES
+            location["absolutePath"] = (
+                str(absolute_path)
+                if full_details
+                else bounded_output_text(absolute_path, FINDING_ABSOLUTE_PATH_BYTES)
             )
         locations.append(location)
+    triage = finding_triage_result(connection, occurrence["id"])
     result = {
         **details,
         "confidence": {
@@ -3223,14 +3270,27 @@ def finding_result(
         "locations": locations,
         "occurrenceId": occurrence["id"],
         "remediationState": finding_remediation_result(connection, occurrence["id"]),
-        "remediation": bounded_output_text(occurrence["remediation"], FINDING_REMEDIATION_BYTES),
+        "remediation": (
+            occurrence["remediation"]
+            if full_details
+            else bounded_output_text(occurrence["remediation"], FINDING_REMEDIATION_BYTES)
+        ),
         "severity": {
             **severity,
             "level": bounded_output_text(occurrence["severity"], FINDING_LEVEL_BYTES),
         },
-        "summary": bounded_output_text(occurrence["summary"], FINDING_SUMMARY_BYTES),
-        "title": bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES),
-        "triage": finding_triage_result(connection, occurrence["id"]),
+        "status": triage["status"],
+        "summary": (
+            occurrence["summary"]
+            if full_details
+            else bounded_output_text(occurrence["summary"], FINDING_SUMMARY_BYTES)
+        ),
+        "title": (
+            occurrence["title"]
+            if full_details
+            else bounded_output_text(occurrence["title"], FINDING_TITLE_BYTES)
+        ),
+        "triage": triage,
     }
     matches, known_since, known_scan_ids = scan_history.finding_matches(
         connection, occurrence["id"], scan["id"], scan["started_at"]
@@ -3239,7 +3299,6 @@ def finding_result(
         result["matches"] = matches
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
-    result.pop("artifactPaths", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt
@@ -3631,6 +3690,30 @@ def main() -> None:
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "get-finding":
+            occurrence = require_occurrence(connection, args.occurrence_id)
+            scan = require_scan(connection, occurrence["scan_id"])
+            backfill_legacy_finding_details(connection, scan)
+            occurrence = require_occurrence(connection, occurrence["id"])
+            current_target = connection.execute(
+                "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+            ).fetchone()
+            result = {
+                "scan": {
+                    "findings": [
+                        finding_result(connection, scan, occurrence, full_details=True)
+                    ],
+                    "scanDir": scan["scan_dir"],
+                    "scanId": scan["id"],
+                    "targetPath": scan["target_path"],
+                    **(
+                        {"currentTargetPath": current_target["current_path"]}
+                        if current_target is not None
+                        and current_target["current_path"] != scan["target_path"]
+                        else {}
+                    ),
+                }
+            }
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
@@ -3665,9 +3748,13 @@ def main() -> None:
                 read_coverage=coverage_for_comparison,
             )
         elif args.command == "list-global-findings":
-            result = native_indexes.list_global_findings(connection, args)
+            result = native_indexes.list_global_findings(
+                connection, args, read_coverage=coverage_for_comparison
+            )
         elif args.command == "list-repositories":
-            result = native_indexes.list_repositories(connection, args)
+            result = native_indexes.list_repositories(
+                connection, args, read_coverage=coverage_for_comparison
+            )
         elif args.command == "list-findings":
             result = list_findings(connection, args)
         elif args.command in {"update-progress", "update-scan-context"}:

@@ -216,11 +216,16 @@ npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
+npx @openai/codex-security scans show
 npx @openai/codex-security scans show SCAN_ID
 npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings
+npx @openai/codex-security findings list --severity high --status open
+npx @openai/codex-security findings list --scan SCAN_ID --offset 20
+npx @openai/codex-security findings show OCCURRENCE_ID
 npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
@@ -497,11 +502,28 @@ Results remain under `--output-dir`; rerun the same command to resume.
 
 ### Scan history and reruns
 
-`npx @openai/codex-security scans list` lists scans for the current repository. Pass a
-repository path to inspect another checkout, `--scan-root DIR` to list scans
-whose artifacts are under a particular root. `scans show SCAN_ID` includes the
-scan configuration, results, coverage, and artifact locations. Add
-`--show-linked-findings` to include finding links from previous scans.
+`npx @openai/codex-security scans` lists previous scans for the current
+repository. Use `scans list REPOSITORY` to inspect another checkout, or
+`scans list --scan-root DIR` to list scans whose artifacts are under a particular
+root. `scans show` opens the latest completed scan;
+`scans show SCAN_ID` selects another saved scan. Both include scan configuration,
+results, coverage, and artifact locations.
+
+Run `findings` or `findings list` to browse active findings for the current
+repository across saved scans. Add `--all-repositories` to include every saved
+repository, or `--scan SCAN_ID` to inspect all findings from one previous scan.
+Filter results with `--query TEXT`, `--severity LEVEL`, or
+`--status open|closed`; use `--offset N` and `--limit N` to page through the
+complete set. Pages contain at most 20 findings.
+
+`findings show OCCURRENCE_ID` opens the selected finding, its remediation advice,
+and any saved links to previous occurrences. Finding lists include the
+occurrence IDs needed by `findings show` and `findings false-positive`.
+
+Add `--show-linked-findings` to `scans show` to include previously saved finding
+links. Links appear after running `scans compare BEFORE AFTER` or
+`scans match --all`; creating uncached matches starts a Codex comparison and
+saves the result.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.

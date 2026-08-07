@@ -3124,6 +3124,64 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result).toEqual({ ok: true });
   });
 
+  test("returns large finding details without leaking oversized workbench output", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import json",
+        "print(json.dumps({'rootCause': {'summary': 'SENSITIVE_FINDING_' + 'x' * (5 * 1024 * 1024)}}))",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const options = {
+      python: python!,
+      pluginRoot,
+      environment: { PATH: process.env["PATH"] },
+    };
+
+    const finding = await runWorkbench(options, ["get-finding"]);
+    expect((finding["rootCause"] as { summary: string }).summary).toHaveLength(
+      "SENSITIVE_FINDING_".length + 5 * 1024 * 1024,
+    );
+
+    const failure = await runWorkbench(options, ["list-findings"]).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("maximum allowed size");
+    expect((failure as Error).message).not.toContain("SENSITIVE_FINDING_");
+  });
+
+  test("accepts finding details expanded by JSON-escaped Unicode", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import json",
+        "print(json.dumps({'evidence': 'é' * (23 * 1024 * 1024)}))",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const finding = await runWorkbench(
+      {
+        python: python!,
+        pluginRoot,
+        environment: { PATH: process.env["PATH"] },
+      },
+      ["get-finding"],
+    );
+
+    expect(finding["evidence"]).toHaveLength(23 * 1024 * 1024);
+  });
+
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");
     const repository = join(root, "repository");

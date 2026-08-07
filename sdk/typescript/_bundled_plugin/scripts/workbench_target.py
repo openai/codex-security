@@ -493,8 +493,12 @@ def require_remediation_target(value: str) -> Path:
     return stored
 
 
-def require_scan_target_identity(scan: sqlite3.Row) -> Path:
-    target = require_remediation_target(scan["target_path"])
+def require_scan_target_identity(
+    scan: sqlite3.Row, *, target_path: str | None = None
+) -> Path:
+    target = require_remediation_target(
+        scan["target_path"] if target_path is None else target_path
+    )
     expected_device = scan["target_device"]
     expected_inode = scan["target_inode"]
     if expected_device is None or expected_inode is None:

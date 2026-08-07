@@ -67,6 +67,13 @@ Scan history is stored in the Codex Security workbench state directory. If that
 directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
 directory outside the repository.
 
+Use `scans` to browse previous scans, `scans show` to inspect the latest
+completed scan, and `findings` to list saved findings for the current repository.
+To review every finding from an earlier scan, including results beyond the first
+page, run `findings list --scan SCAN_ID --offset 20`. Use
+`findings show OCCURRENCE_ID` for the complete finding and any saved cross-scan
+links.
+
 `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
 root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is

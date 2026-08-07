@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
@@ -190,6 +191,549 @@ describe("scan history renderer", () => {
     }
   });
 
+  test("makes finding identifiers, history, and pagination actionable", () => {
+    const page = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding_25",
+              severity: { level: "high" },
+              title: "Historic login injection",
+              locations: [{ path: "routes/login.ts", startLine: 34 }],
+              triage: { status: "open" },
+            },
+          ],
+          offset: 20,
+          limit: 1,
+          nextOffset: 21,
+          total: 25,
+        },
+        "findings",
+      ),
+    );
+    for (const expected of [
+      "SAVED FINDINGS",
+      "scan 31107fbe",
+      "21-21 of 25",
+      "routes/login.ts:34",
+      "ID occ_saved_finding_25",
+      "OPEN",
+      "NEXT PAGE  rerun with --offset 21",
+      "codex-security findings show OCCURRENCE_ID",
+    ]) {
+      expect(page).toContain(expected);
+    }
+
+    const detail = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+          scanDir: "/private/codex-security/scan-results",
+          targetPath: "/demo/juice-shop",
+          occurrenceId: "occ_saved_finding_25",
+          severity: {
+            level: "high",
+            rationale: "Cross-account customer data is exposed.",
+          },
+          confidence: {
+            level: "medium",
+            rationale: "The vulnerable query was reproduced locally.",
+          },
+          title: "Historic login injection",
+          locations: [
+            { path: "routes/login.ts", startLine: 34, role: "root_control" },
+            {
+              path: "routes/database.ts",
+              startLine: 51,
+              endLine: 53,
+              role: "sink",
+            },
+          ],
+          summary: "User input reaches a SQL query.",
+          rootCause: {
+            summary: "Account input bypasses query parameterization.",
+          },
+          validation: {
+            summary: "Traced account input into the database sink.",
+          },
+          attackPath: {
+            summary: "An unauthenticated visitor submits a crafted account ID.",
+            impact: {
+              level: "high",
+              why: "Private customer data is returned.",
+            },
+            likelihood: {
+              level: "medium",
+              why: "The affected endpoint accepts public requests.",
+            },
+          },
+          codeEvidence: [
+            {
+              label: "Untrusted account identifier reaches query execution",
+              path: "routes/database.ts",
+              startLine: 51,
+              explanation: "The driver receives attacker-controlled SQL.",
+              code: "database.query(accountId);",
+            },
+          ],
+          sourceExcerpt:
+            "50  const accountId = request.body.accountId;\n51  database.query(accountId);",
+          remediation: "Use a parameterized query.",
+          remediationTests: ["Reject crafted account identifiers."],
+          preventiveControls: ["Require the parameterized-query wrapper."],
+          artifactPaths: ["findings/login-injection/report.md"],
+          knownSince: "2026-06-15T12:00:00Z",
+          knownScanIds: ["87654321-abcd-4567-abcd-1234567890ab"],
+          matches: [
+            {
+              scanId: "87654321-abcd-4567-abcd-1234567890ab",
+              title: "Previous login injection",
+              reason: "The same unsafe query interpolates user input.",
+            },
+          ],
+        },
+        "finding",
+      ),
+    );
+    for (const expected of [
+      "FINDING DETAILS",
+      "juice-shop",
+      "ID occ_saved_finding_25",
+      "Known since Jun 15, 2026",
+      "LINKED FINDINGS",
+      "Previous login injection",
+      "User input reaches a SQL query.",
+      "SEVERITY",
+      "Cross-account customer data is exposed.",
+      "CONFIDENCE  MEDIUM",
+      "The vulnerable query was reproduced locally.",
+      "AFFECTED LOCATIONS",
+      "routes/database.ts:51-53",
+      "ROOT CAUSE",
+      "Account input bypasses query parameterization.",
+      "VALIDATION",
+      "Traced account input into the database sink.",
+      "ATTACK PATH",
+      "An unauthenticated visitor submits a crafted account ID.",
+      "Impact: Private customer data is returned.",
+      "Likelihood: The affected endpoint accepts public requests.",
+      "CODE EVIDENCE",
+      "Untrusted account identifier reaches query execution",
+      "The driver receives attacker-controlled SQL.",
+      "SOURCE EXCERPT",
+      "database.query(accountId);",
+      "Use a parameterized query.",
+      "REMEDIATION TESTS",
+      "Reject crafted account identifiers.",
+      "PREVENTIVE CONTROLS",
+      "Require the parameterized-query wrapper.",
+      "EVIDENCE ARTIFACTS",
+      join(
+        "/private/codex-security/scan-results",
+        "findings/login-injection/report.md",
+      ),
+      "findings false-positive occ_saved_finding_25 --reason TEXT",
+    ]) {
+      expect(detail).toContain(expected);
+    }
+  });
+
+  test("prefers authoritative triage over a conflicting stored finding status", () => {
+    const output = renderScanHistory(
+      {
+        scanId: "scan",
+        targetPath: "/demo/repository",
+        occurrenceId: "occurrence",
+        severity: { level: "high" },
+        title: "Missing authorization",
+        status: "open",
+        triage: {
+          status: "closed",
+          closeReason: "false_positive",
+          note: "Existing authorization prevents access.",
+        },
+        locations: [{ path: "src/server.ts", startLine: 4 }],
+      },
+      "finding",
+      { color: false },
+    );
+
+    expect(output).toContain("CLOSED");
+    expect(output).toContain("Reason: false_positive");
+    expect(output).toContain("Note: Existing authorization prevents access.");
+    expect(output).not.toContain("findings false-positive");
+    expect(output).not.toContain("OPEN");
+  });
+
+  test("renders structured validation, nested attack paths, and legacy source proof", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "legacy-scan",
+          targetPath: "/demo/legacy-service",
+          occurrenceId: "legacy-occurrence",
+          severity: { level: "high" },
+          title: "Unsafe legacy query",
+          locations: [{ path: "src/query.py", startLine: 12 }],
+          rootCause: {
+            summary: "The query accepts untrusted input.",
+            language: "python",
+            code: "execute(untrusted_query)",
+          },
+          validation: {
+            method: "live replay",
+            assertions: ["A cross-account record was returned."],
+            evidence: ["A crafted request returned another account's record."],
+            counterEvidence: ["Production authentication was not bypassed."],
+            limitations: ["Production traffic was not replayed."],
+          },
+          attackPath: {
+            dataflow: {
+              summary: "Request input reaches the SQL executor.",
+              source: "The account identifier in the request body.",
+              sink: "The unparameterized SQL executor.",
+              outcome: "A cross-account database row is returned.",
+            },
+            reachability: {
+              summary: "An unauthenticated caller reaches the endpoint.",
+              attacker: "An unauthenticated internet user.",
+              entrypoint: "POST /api/accounts/search.",
+              preconditions: ["The account search route is enabled."],
+            },
+            preconditions: ["An administrator account is required."],
+            limitations: ["The database is reachable only internally."],
+          },
+          remediation: "Parameterize the database query.",
+        },
+        "finding",
+      ),
+    );
+
+    for (const expected of [
+      "VALIDATION",
+      "Method: live replay",
+      "Verified: A cross-account record was returned.",
+      "Evidence: A crafted request returned another account's record.",
+      "Counterevidence: Production authentication was not bypassed.",
+      "Limitation: Production traffic was not replayed.",
+      "ATTACK PATH",
+      "Dataflow: Request input reaches the SQL executor.",
+      "Source: The account identifier in the request body.",
+      "Sink: The unparameterized SQL executor.",
+      "Outcome: A cross-account database row is returned.",
+      "Reachability: An unauthenticated caller reaches the endpoint.",
+      "Attacker: An unauthenticated internet user.",
+      "Entry point: POST /api/accounts/search.",
+      "Precondition: The account search route is enabled.",
+      "Precondition: An administrator account is required.",
+      "Limitation: The database is reachable only internally.",
+      "CODE EVIDENCE",
+      "Root-cause source",
+      "execute(untrusted_query)",
+    ]) {
+      expect(output).toContain(expected);
+    }
+  });
+
+  test("renders legacy snake-case finding evidence", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "legacy-scan",
+          targetPath: "/demo/previous-checkout",
+          currentTargetPath: "/demo/current-checkout",
+          occurrenceId: "legacy-occurrence",
+          severity: { level: "high" },
+          title: "Unsafe legacy query",
+          locations: [{ path: "src/query.py", startLine: 12 }],
+          root_cause: { summary: "Legacy authorization bypass." },
+          code_evidence: [
+            {
+              label: "Legacy source proof",
+              code: "bypass_authorization()",
+            },
+          ],
+        },
+        "finding",
+      ),
+    );
+
+    expect(output).toContain("current-checkout");
+    expect(output).not.toContain("previous-checkout");
+    expect(output).toContain("ROOT CAUSE");
+    expect(output).toContain("Legacy authorization bypass.");
+    expect(output).toContain("CODE EVIDENCE");
+    expect(output).toContain("Legacy source proof");
+    expect(output).toContain("bypass_authorization()");
+  });
+
+  test("preserves every line and the complete width of saved finding evidence", () => {
+    const sink = `${"argument_".repeat(18)}dangerous_sink(user_input)`;
+    const code = [
+      ...Array.from({ length: 14 }, (_, index) => `step_${index}();`),
+      sink,
+    ].join("\n");
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "complete-evidence-scan",
+          targetPath: "/demo/repository",
+          occurrenceId: "complete-evidence-occurrence",
+          severity: { level: "high" },
+          title: "Full evidence",
+          locations: [{ path: "src/server.ts" }],
+          codeEvidence: [{ label: "Complete validation trace", code }],
+          sourceExcerpt: sink,
+        },
+        "finding",
+        { columns: 48 },
+      ),
+    );
+
+    expect(output).toContain("step_13();");
+    expect(output).toContain(sink);
+    expect(output.match(/dangerous_sink\(user_input\)/g)).toHaveLength(2);
+  });
+
+  test("connects scan history with the next useful commands", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 18,
+              startedAt: "2026-08-03T12:00:00Z",
+            },
+            {
+              scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 25,
+              startedAt: "2026-07-31T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        { repository: "/demo/juice-shop" },
+      ),
+    );
+
+    expect(output).toContain("VIEW LATEST  codex-security scans show");
+    expect(output).toContain("FINDINGS     codex-security findings list");
+    expect(output).toContain(
+      "COMPARE      codex-security scans compare 31107fbe 5b8e555e",
+    );
+  });
+
+  test("identifies every repository in cross-repository findings", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          findings: [
+            {
+              occurrenceId: "occ-first",
+              scanId: "aaaaaaaa-full",
+              severity: { level: "high" },
+              title: "Missing authorization",
+              locationPath: "src/server.ts",
+              targetPath: "/demo/checkout-one",
+            },
+            {
+              occurrenceId: "occ-second",
+              scanId: "bbbbbbbb-full",
+              severity: { level: "high" },
+              title: "Missing authorization",
+              locationPath: "src/server.ts",
+              targetPath: "/demo/checkout-two",
+            },
+          ],
+          offset: 0,
+          nextOffset: null,
+        },
+        "findings",
+      ),
+    );
+
+    expect(output).toContain("REPOSITORY /demo/checkout-one");
+    expect(output).toContain("REPOSITORY /demo/checkout-two");
+  });
+
+  test("keeps findings and matching shortcuts in the displayed checkout", () => {
+    const scan = {
+      scanId: "aaaaaaaa-abcd-4567-abcd-1234567890ab",
+      targetPath: "/demo/another-checkout",
+      mode: "standard",
+      progress: { status: "complete" },
+      findingCount: 1,
+      startedAt: "2026-08-03T12:00:00Z",
+    };
+    const list = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", {
+        currentDirectory: "/demo/current-checkout",
+        repository: "/demo/another-checkout",
+      }),
+    );
+    expect(list).toContain(
+      "FINDINGS     codex-security findings list --scan aaaaaaaa",
+    );
+
+    const ancestor = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [{ ...scan, targetPath: "/demo/current-checkout" }],
+        },
+        "list",
+        {
+          currentDirectory: "/demo/current-checkout/service",
+          repository: "/demo/current-checkout/service",
+        },
+      ),
+    );
+    expect(ancestor).toContain(
+      "FINDINGS     codex-security findings list --scan aaaaaaaa",
+    );
+
+    const sibling = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              ...scan,
+              scanId: "bbbbbbbb-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/another-checkout",
+              findingCount: 8,
+              completedAt: "2026-08-03T12:00:00Z",
+            },
+            {
+              ...scan,
+              scanId: "cccccccc-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/current-checkout",
+              findingCount: 2,
+              completedAt: "2026-08-02T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        {
+          currentDirectory: "/demo/current-checkout",
+          repository: "/demo/current-checkout",
+        },
+      ),
+    );
+    expect(sibling).toContain("latest: 2 findings");
+    expect(sibling).toContain(
+      "VIEW LATEST  codex-security scans show cccccccc",
+    );
+    expect(sibling).not.toContain(
+      "VIEW LATEST  codex-security scans show bbbbbbbb",
+    );
+
+    const details = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          ...scan,
+          findings: [
+            {
+              occurrenceId: "occ-saved",
+              severity: { level: "high" },
+              title: "Missing authorization",
+              locations: [{ path: "src/server.ts" }],
+            },
+          ],
+        },
+        "show",
+        {
+          currentDirectory: "/demo/current-checkout",
+          showLinkedFindings: true,
+        },
+      ),
+    );
+    expect(details).toContain(
+      "from /demo/another-checkout, run codex-security scans match --all",
+    );
+  });
+
+  test("orders comparison suggestions by scan completion rather than updates", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              scanId: "aaaaaaaa-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 2,
+              completedAt: "2026-08-01T12:00:00Z",
+              startedAt: "2026-08-01T11:00:00Z",
+              updatedAt: "2026-08-04T12:00:00Z",
+            },
+            {
+              scanId: "bbbbbbbb-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 3,
+              completedAt: "2026-08-03T12:00:00Z",
+              startedAt: "2026-08-03T11:00:00Z",
+              updatedAt: "2026-08-03T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        { repository: "/demo/juice-shop" },
+      ),
+    );
+
+    expect(output).toContain("VIEW LATEST  codex-security scans show bbbbbbbb");
+    expect(output).toContain("latest: 3 findings");
+    expect(output).not.toContain("latest: 2 findings");
+    expect(output).toContain(
+      "COMPARE      codex-security scans compare aaaaaaaa bbbbbbbb",
+    );
+    expect(output).not.toContain("scans compare bbbbbbbb aaaaaaaa");
+  });
+
+  test("does not suggest comparing scans from different repositories", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scans: [
+            {
+              scanId: "aaaaaaaa-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/juice-shop",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 8,
+              startedAt: "2026-08-03T12:00:00Z",
+            },
+            {
+              scanId: "bbbbbbbb-abcd-4567-abcd-1234567890ab",
+              targetPath: "/demo/payment-service",
+              mode: "standard",
+              progress: { status: "complete" },
+              findingCount: 2,
+              startedAt: "2026-08-02T12:00:00Z",
+            },
+          ],
+        },
+        "list",
+        { scanRoot: "/demo/results" },
+      ),
+    );
+
+    expect(output).toContain("scans show aaaaaaaa");
+    expect(output).toContain("findings list --scan aaaaaaaa");
+    expect(output).not.toContain("scans compare");
+  });
+
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
@@ -230,6 +774,7 @@ describe("scan history renderer", () => {
       "9 files",
       "ARTIFACTS",
       "/demo/results/report.md",
+      "findings list --scan 12345678 --offset 20",
     ]) {
       expect(output).toContain(expected);
     }
@@ -246,6 +791,123 @@ describe("scan history renderer", () => {
       ),
     );
     expect(failed).toContain("ERROR  Repository checkout became unavailable.");
+  });
+
+  test("explains when requested cross-scan links have not been generated", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "routes/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        { showLinkedFindings: true },
+      ),
+    );
+
+    expect(output).toContain("No saved links");
+    expect(output).toContain("scans match --all (uses Codex)");
+  });
+
+  test("does not claim links are missing when scan findings are truncated", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          mode: "standard",
+          progress: { status: "complete" },
+          findingCount: 25,
+          findingsTruncated: true,
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "routes/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        { showLinkedFindings: true },
+      ),
+    );
+
+    expect(output).toContain("MORE FINDINGS");
+    expect(output).not.toContain("No saved links");
+    expect(output).not.toContain("scans match --all");
+  });
+
+  test("directs nested checkout matching to the scanned target root", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/plain-directory",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "src/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        {
+          currentDirectory: "/demo/plain-directory/src/nested",
+          showLinkedFindings: true,
+        },
+      ),
+    );
+
+    expect(output).toContain(
+      "from /demo/plain-directory, run codex-security scans match --all",
+    );
+  });
+
+  test("directs historical matching to the relocated checkout", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "5b8e555e-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/previous-checkout",
+          currentTargetPath: "/demo/current-checkout",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [
+            {
+              occurrenceId: "occ_saved_finding",
+              severity: { level: "high" },
+              title: "Login injection",
+              locations: [{ path: "src/login.ts", startLine: 34 }],
+            },
+          ],
+        },
+        "show",
+        {
+          currentDirectory: "/demo/current-checkout/src",
+          showLinkedFindings: true,
+        },
+      ),
+    );
+
+    expect(output).toContain(
+      "from /demo/current-checkout, run codex-security scans match --all",
+    );
+    expect(output).not.toContain("from /demo/previous-checkout");
   });
 
   test("shows saved completion warnings without marking a scan failed", () => {
