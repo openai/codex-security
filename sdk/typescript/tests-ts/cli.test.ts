@@ -10,12 +10,13 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { delimiter, join, normalize } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -697,6 +698,35 @@ describe("CLI", () => {
     }
   });
 
+  test("expands ~ in the install-hook repository argument", async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-tilde-hook-")),
+    );
+    mock.module("node:os", () => ({ ...os, homedir: () => home }));
+    try {
+      execFileSync("git", ["init", "-q", home], { timeout: 10_000 });
+      const hook = join(home, ".git", "hooks", "pre-commit");
+      const stdout = capture();
+      expect(
+        await main(
+          ["install-hook", "~", "--fail-on-severity", "medium", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      const result = JSON.parse(stdout.text()) as {
+        hook: string;
+        failOnSeverity: string;
+      };
+      expect(normalize(result.hook)).toBe(hook);
+      expect(result.failOnSeverity).toBe("medium");
+    } finally {
+      mock.module("node:os", () => os);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
@@ -942,6 +972,46 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("--output-dir is required");
     expect(stdout.text()).toBe("");
+  });
+
+  test("expands ~ in the bulk-scan input CSV and --output-dir arguments", async () => {
+    const home = await mkdtemp(
+      join(tmpdir(), "codex-security-cli-tilde-home-"),
+    );
+    const cwd = await mkdtemp(join(tmpdir(), "codex-security-cli-tilde-cwd-"));
+    mock.module("node:os", () => ({ ...os, homedir: () => home }));
+    try {
+      await multiscanInventory(home);
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "bulk-scan",
+            "~/repositories.csv",
+            "--output-dir",
+            "~/results",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ currentDirectory: cwd }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        total: 1,
+        completed: 1,
+        failed: 0,
+        resultsPath: join(home, "results", "results.jsonl"),
+      });
+      await expect(stat(join(cwd, "~"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      mock.module("node:os", () => os);
+      await rm(home, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   test("exposes only typed, read-only SDK metadata over MCP", () => {

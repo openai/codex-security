@@ -6,10 +6,11 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Octokit } from "@octokit/core";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
@@ -280,6 +281,33 @@ describe("bulk scan repository discovery", () => {
     expect(csv).toContain("acme--owl");
     expect(csv).toContain("acme--openai");
     expect(csv).not.toContain("unrelated");
+  });
+
+  test("expands ~ in the interactive output directory prompt", async () => {
+    const root = await temporaryDirectory();
+    const home = await temporaryDirectory();
+    mock.module("node:os", () => ({ ...os, homedir: () => home }));
+    try {
+      const { dependencies, prompt } = discoveryDependencies(root, {
+        repositories: [
+          { fullName: "acme/owl" },
+          { fullName: "acme/openai" },
+          { fullName: "acme/unrelated" },
+        ],
+      });
+      prompt.confirms = [true];
+      prompt.inputs = ["~/custom-results"];
+      prompt.choices = ["acme/owl", "acme/openai", ""];
+
+      const result = await runBulkScanWizard(dependencies);
+
+      expect(result?.outputDir).toBe(join(home, "custom-results"));
+      expect(result?.inputPath).toBe(
+        join(home, "custom-results", "repositories.csv"),
+      );
+    } finally {
+      mock.module("node:os", () => os);
+    }
   });
 
   test("includes public repositories and excludes archived, forked, and empty repositories", async () => {

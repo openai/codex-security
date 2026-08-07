@@ -9,10 +9,11 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
 import { CodexSecurityError } from "../src/index.js";
 import {
@@ -417,6 +418,48 @@ describe("CLI", () => {
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("expands ~ in the export scan directory, --output, and --source-root arguments", async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-export-tilde-")),
+    );
+    mock.module("node:os", () => ({ ...os, homedir: () => home }));
+    try {
+      const scan = join(home, "scan");
+      const sourceRoot = join(home, "checkout");
+      await mkdir(scan, { recursive: true });
+      await mkdir(sourceRoot, { recursive: true });
+      const deps = dependencies();
+      let received:
+        | { scanDir: string; output: string; sourceRoot?: string }
+        | undefined;
+      deps.exportFindings = async (arguments_) => {
+        received = arguments_;
+        return new TextEncoder().encode('{"version":"2.1.0"}\n');
+      };
+      expect(
+        await main(
+          [
+            "export",
+            "~/scan",
+            "--output",
+            "~/scan/exports/results.sarif",
+            "--source-root",
+            "~/checkout",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(received?.scanDir).toBe(await realpath(scan));
+      expect(received?.output).toBe(join(scan, "exports", "results.sarif"));
+      expect(received?.sourceRoot).toBe(sourceRoot);
+    } finally {
+      mock.module("node:os", () => os);
+      await rm(home, { recursive: true, force: true });
     }
   });
 
