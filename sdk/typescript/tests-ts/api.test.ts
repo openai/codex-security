@@ -1890,18 +1890,16 @@ describe("CodexSecurity orchestration", () => {
       "Codex_Home",
     );
     expect(prompt).toContain("$codex-security:security-scan");
+    expect(prompt).toContain("The SDK has already registered this scan.");
+    expect(prompt).toContain("never call a scan-start or completion tool");
     expect(prompt).toContain(
-      "This exhaustive scan authorizes the delegated-worker phases",
+      "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
-    const delegationInstruction = prompt
-      .split("\n")
-      .find((line) => line.startsWith("Every delegated review assignment"));
-    expect(delegationInstruction).toContain(
+    expect(prompt).not.toContain("This exhaustive scan authorizes");
+    expect(prompt).toContain(
       'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
     );
-    expect(delegationInstruction).toContain(
-      "your worker-local reviewed and assigned file counts",
-    );
+    expect(prompt).toContain("the parent owns global progress updates");
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
     expect(prompt).toContain("$CODEX_SECURITY_TARGET_DISPLAY_NAME");
@@ -2339,7 +2337,10 @@ describe("CodexSecurity orchestration", () => {
         createCodex: () => ({
           startThread: () => ({
             id: null,
-            async runStreamed() {
+            async runStreamed(prompt: string) {
+              expect(prompt).toContain(
+                "The SDK's current in-scope file-count estimate is 4207",
+              );
               await copyCompletedScan(root);
               async function* scanEvents(): AsyncGenerator<ThreadEvent> {
                 for await (const event of completedEvents()) {
@@ -3841,7 +3842,7 @@ describe("CodexSecurity orchestration", () => {
       'Use "$PYTHON" as <python_command> for every plugin helper',
     );
     expect(prompt).toContain(
-      'make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
+      'make-repo-scope-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
     );
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
@@ -3886,31 +3887,31 @@ describe("CodexSecurity orchestration", () => {
     const interpreter =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(interpreter).not.toBeNull();
-    const rankInput = join(scanDir, "rank_input.jsonl");
+    const scopedSourceInput = join(scanDir, "scoped-source-input.jsonl");
     execFileSync(
       interpreter!,
       [
         "-B",
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-rank-input",
+        "make-repo-scope-input",
         "--repo",
         repository,
         "--scopes-file",
         capturedTargetPathsFile,
         "--out",
-        rankInput,
+        scopedSourceInput,
       ],
       { stdio: "pipe" },
     );
-    const rankInputContents = await readFile(rankInput, "utf8");
+    const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(
-      rankInputContents
+      scopedSourceInputContents
         .trimEnd()
         .split("\n")
         .map((row) => JSON.parse(row).path),
     ).toEqual([...paths].sort());
     for (const separator of ["\u0085", "\u2028", "\u2029"])
-      expect(rankInputContents).not.toContain(separator);
+      expect(scopedSourceInputContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
     const coverage = join(scanDir, "coverage.json");
     await writeFile(
@@ -3940,6 +3941,70 @@ describe("CodexSecurity orchestration", () => {
       paths,
     );
     await client.close();
+  });
+
+  test("keeps requested source paths without ranking or ignored directory files", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const source = join(repository, "src");
+    const ignored = join(source, "node_modules");
+    const scopes = join(root, "scopes.json");
+    const output = join(root, "scoped-source-input.jsonl");
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+
+    await mkdir(join(source, "tests"), { recursive: true });
+    await mkdir(join(source, "examples"));
+    await mkdir(ignored);
+    execFileSync("git", ["init", "-q"], { cwd: repository });
+    await Promise.all([
+      writeFile(join(repository, ".gitignore"), "node_modules/\n.env\n"),
+      writeFile(join(source, "handler.ts"), "export {};\n"),
+      writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
+      writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
+      writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
+      writeFile(join(source, ".env"), "SECRET=private\n"),
+      writeFile(join(ignored, "dependency.ts"), "export {};\n"),
+    ]);
+
+    const enumerate = async (requested: string[]) => {
+      await writeFile(scopes, JSON.stringify(requested));
+      execFileSync(
+        interpreter!,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-scope-input",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          output,
+        ],
+        { stdio: "pipe" },
+      );
+      return (await readFile(output, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((row) => (JSON.parse(row) as { path: string }).path);
+    };
+
+    expect(await enumerate(["src"])).toEqual([
+      "src/Dockerfile",
+      "src/examples/demo.ts",
+      "src/handler.ts",
+      "src/tests/handler.test.ts",
+    ]);
+    expect(await enumerate(["src", "src/.env"])).toEqual([
+      "src/.env",
+      "src/Dockerfile",
+      "src/examples/demo.ts",
+      "src/handler.ts",
+      "src/tests/handler.test.ts",
+    ]);
+    await expect(enumerate(["../scopes.json"])).rejects.toThrow();
   });
 
   test("removes scoped target files after a scan settles", async () => {
