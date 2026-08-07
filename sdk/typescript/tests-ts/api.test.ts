@@ -2887,6 +2887,103 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("enforces the cost limit on a completed turn the final refresh cannot read", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const sessionPath = join(
+      codexHome,
+      "sessions",
+      "2026",
+      "07",
+      "26",
+      "rollout-scan-thread.jsonl",
+    );
+    const commands: Array<readonly string[]> = [];
+    const costs: number[] = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                // Half the completed turn's spend, so the recorded snapshot
+                // stays below the limit while the turn itself passes it.
+                await writeUsageSession(codexHome, "scan-thread", {
+                  input_tokens: 500,
+                  cached_input_tokens: 100,
+                  output_tokens: 10,
+                });
+                for (let attempt = 0; costs.length === 0; attempt += 1) {
+                  if (attempt >= 200) throw new Error("No cost was polled.");
+                  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+                }
+                // The rollout becomes unreadable exactly as the turn completes.
+                await appendFile(
+                  sessionPath,
+                  "x".repeat(1 * 1_024 * 1_024 + 1),
+                );
+                yield {
+                  type: "turn.completed",
+                  usage: {
+                    input_tokens: 1_250,
+                    cached_input_tokens: 200,
+                    output_tokens: 30,
+                    reasoning_output_tokens: 5,
+                  },
+                };
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        maxCostUsd: 0.005,
+        onCost: (cost) => costs.push(cost.estimatedUsd),
+        signal: AbortSignal.timeout(10_000),
+      }),
+    ).rejects.toMatchObject({
+      name: ScanCostLimitExceededError.name,
+      maxCostUsd: 0.005,
+      cost: { estimatedUsd: 0.00625, inputTokens: 1_250, outputTokens: 30 },
+    });
+    expect(costs).toContain(0.00625);
+    expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
+    expect(commands.some((args) => args[0] === "fail-scan")).toBe(true);
+    await client.close();
+  });
+
   test("saves a budgeted scan with a warning when token usage is unavailable", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
