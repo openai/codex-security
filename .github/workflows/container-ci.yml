@@ -95,9 +95,9 @@ jobs:
 
       - name: Verify bundled scanner
         run: |
-          docker run --rm codex-security:ci --version
-          docker run --rm codex-security:ci bulk-scan --help
-          docker run --rm codex-security:ci info --json
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges codex-security:ci --version
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges codex-security:ci bulk-scan --help
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges codex-security:ci info --json
 
       - name: Validate hardened customer Compose configuration
         env:
@@ -144,7 +144,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if output="$(docker run --rm -t codex-security:ci bulk-scan 2>&1)"; then
+          if output="$(docker run --rm -t --cap-drop ALL --security-opt no-new-privileges codex-security:ci bulk-scan 2>&1)"; then
             echo "The customer container must require a repository CSV." >&2
             exit 1
           else
