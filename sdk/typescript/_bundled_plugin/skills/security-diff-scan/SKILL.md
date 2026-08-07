@@ -33,6 +33,8 @@ Before opening setup, use the existing terminal/chat preflight and scan workflow
 
 ## Capability Preflight
 
+When the host explicitly identifies itself as the desktop app, also read `../../references/desktop-config-preflight.md` before running the helper.
+
 Read `../../references/config-preflight.md` and dispatch and await the preflight execution described there with the `security_diff_scan` capability profile before substantive scan work, including after an app wait, desktop prompt-only start, or direct continuation has produced a `scanId` and loaded its authoritative scan context. Follow the returned block/warn/suggest results. For an app-backed scan, ask before applying actionable remediation and wait without creating a scan goal or calling `fail_codex_security_scan`. Do not fail automatically for declined or unavailable remediation, helper errors, or a non-ready rerun; preserve the running scan and retry or hand off while recovery may still be possible. Call `fail_codex_security_scan` only after documented recovery is exhausted and the blocker is confirmed unrecoverable, or when the user explicitly cancels. Do not treat a config value that differs from a suggested patch as a warning unless the capability requirement itself is unmet.
 
 ## Phase Sequence

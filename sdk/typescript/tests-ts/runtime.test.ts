@@ -302,6 +302,80 @@ describe("plugin runtime preparation", () => {
     );
   });
 
+  test("uses the same focused Standard handoff in the server and desktop app", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const workspace = brotliDecompressSync(
+      await readFile(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br")),
+    ).toString("utf8");
+    const version = /var version2 = "([^"]+)"/u.exec(runtime)?.[1];
+    expect(version).toBeDefined();
+    expect(workspace).toContain(`\`${version}\``);
+
+    const serverSource =
+      /function buildScanHandoffPrompt\(results, handoffClaimToken\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(serverSource).toBeDefined();
+    const marker = workspace.indexOf(
+      "Follow the self-contained security-scan workflow",
+    );
+    expect(marker).toBeGreaterThan(0);
+    const workspaceSource = workspace.slice(
+      workspace.lastIndexOf("function ", marker),
+      workspace.indexOf("function ", marker),
+    );
+    const workspaceName = /^function ([\w$]+)\(/u.exec(workspaceSource)?.[1];
+    const workspacePreflight = /\$\{([\w$]+)\([\w$]+\.mode\)\}/u.exec(
+      workspaceSource,
+    )?.[1];
+    expect(workspaceName).toBeDefined();
+    expect(workspacePreflight).toBeDefined();
+    const preflight = (mode: string) => `validated mode ${mode}`;
+    const serverHandoff = new Function(
+      "scanPreflightInstruction",
+      `${serverSource}\nreturn buildScanHandoffPrompt;`,
+    )(preflight);
+    const workspaceHandoff = new Function(
+      workspacePreflight!,
+      `${workspaceSource}\nreturn ${workspaceName};`,
+    )(preflight);
+    const scan = {
+      scanId: "12345678-1234-4234-8234-123456789abc",
+      scanDir: "/tmp/standard-scan",
+      userContext: "Review authentication boundaries.",
+    };
+
+    for (const mode of ["standard", "diff", "deep"]) {
+      const serverPrompt = serverHandoff({ ...scan, mode }, "claim-token");
+      expect(workspaceHandoff({ ...scan, mode }, "claim-token")).toBe(
+        serverPrompt,
+      );
+      expect(serverPrompt).toContain(`validated mode ${mode}`);
+      if (mode !== "standard") {
+        expect(serverPrompt).not.toContain("independent baseline audit");
+        continue;
+      }
+      expect(serverPrompt).toContain("independent baseline audit");
+      expect(serverPrompt).toContain("delegate focused investigation packets");
+      expect(serverPrompt).toContain("record_codex_security_scan_draft");
+      expect(serverPrompt).toContain(scan.userContext);
+      for (const obsolete of [
+        "prepare_codex_security_review_items",
+        "record_codex_security_discovery_candidates",
+        "record_codex_security_candidate_validations",
+        "record_codex_security_candidate_attack_paths",
+        "get_codex_security_completed_scan",
+      ]) {
+        expect(serverPrompt).not.toContain(obsolete);
+      }
+    }
+  });
+
   test("projects only the unchanged external payload from the source checkout", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");
