@@ -266,6 +266,41 @@ describe("plugin runtime preparation", () => {
     expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
   });
 
+  test("preserves remediation when the filesystem device changes", async () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const target = await temporaryDirectory("codex-security-remounted-target-");
+    const verification = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import runpy, sys",
+          "from pathlib import Path",
+          "target = Path(sys.argv[2])",
+          "metadata = target.stat()",
+          "scan = {'target_path': str(target), 'target_device': metadata.st_dev + 1, 'target_inode': metadata.st_ino}",
+          "require_identity = runpy.run_path(sys.argv[1])['require_scan_target_identity']",
+          "assert require_identity(scan) == target",
+          "scan['target_inode'] += 1",
+          "try:",
+          "    require_identity(scan)",
+          "except SystemExit:",
+          "    pass",
+          "else:",
+          "    raise AssertionError('A replaced checkout must remain unavailable')",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+        target,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(verification.status, verification.stderr).toBe(0);
+  });
+
   test("allows the workbench to derive missing deferred scan identifiers", async () => {
     const schema = JSON.parse(
       await readFile(
