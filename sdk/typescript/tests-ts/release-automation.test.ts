@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,9 +9,49 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
+
+/**
+ * Path to a POSIX bash for running the extracted workflow fragments.
+ *
+ * On Windows, an unqualified "bash" can resolve to C:\Windows\System32\bash.exe,
+ * the WSL launcher, whenever System32 precedes Git for Windows on PATH. The
+ * fragments then execute inside WSL, where the Windows node, gh and jq this
+ * suite relies on are not present and its Windows path assumptions do not hold,
+ * so a large cluster of release tests fails for reasons unrelated to the code
+ * under test. Skipping the two launcher locations picks Git Bash instead.
+ */
+const BASH = resolveBash();
+
+function resolveBash(): string {
+  if (process.platform !== "win32") {
+    return "bash";
+  }
+  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  const launchers = new Set(
+    [join(systemRoot, "System32"), join(systemRoot, "Sysnative")].map((entry) =>
+      entry.toLowerCase(),
+    ),
+  );
+  for (const entry of (process.env.PATH ?? "").split(delimiter)) {
+    const directory = entry.trim().replace(/^"|"$/g, "").replace(/[\\/]+$/, "");
+    if (directory.length === 0) {
+      continue;
+    }
+    const normalized = directory.toLowerCase();
+    // WindowsApps holds the Store execution alias, which is also WSL.
+    if (launchers.has(normalized) || normalized.endsWith("\\windowsapps")) {
+      continue;
+    }
+    const candidate = join(directory, "bash.exe");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "bash";
+}
 
 type ReleaseMetadata = Record<string, unknown>;
 
@@ -1454,7 +1495,7 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       "npm() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
       encoding: "utf8",
       env: {
@@ -1544,7 +1585,7 @@ describe("GitHub release workflow safeguards", () => {
 
       try {
         const outputPath = join(workspace, "outputs");
-        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
           cwd: fileURLToPath(new URL("../../../", import.meta.url)),
           encoding: "utf8",
           env: {
@@ -1640,7 +1681,7 @@ describe("GitHub release workflow safeguards", () => {
         "  return 1",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
         encoding: "utf8",
         env: {
@@ -1691,7 +1732,7 @@ describe("GitHub release workflow safeguards", () => {
       "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -1759,7 +1800,7 @@ describe("GitHub release workflow safeguards", () => {
         "  printf 'created exact release tag\\n'",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1835,7 +1876,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1934,7 +1975,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1978,7 +2019,7 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       "sfw() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
       encoding: "utf8",
       env: {
@@ -2013,7 +2054,7 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       `sfw() { printf '%s\\n' '["0.1.0","${checkedOutVersion}"]'; }`,
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
       encoding: "utf8",
       env: {
@@ -2100,7 +2141,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2165,7 +2206,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -2209,7 +2250,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -2350,7 +2391,7 @@ describe("GitHub release workflow safeguards", () => {
         "  fi",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", [], {
+      const result = spawnSync(BASH, [], {
         input: `${mocks}\n${script}`,
         encoding: "utf8",
         env: {
@@ -2516,7 +2557,7 @@ describe("GitHub release workflow safeguards", () => {
           "  esac",
           "}",
         ].join("\n");
-        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        const result = spawnSync(BASH, ["-c", `${mocks}\n${script}`], {
           cwd: workspace,
           encoding: "utf8",
           env: {
@@ -2828,7 +2869,7 @@ describe("GitHub release workflow safeguards", () => {
         '  command node "$@"',
         "}",
       ].join("\n");
-      const result = spawnSync("bash", [], {
+      const result = spawnSync(BASH, [], {
         input: `${mocks}\n${script}`,
         encoding: "utf8",
         env: {
@@ -2979,7 +3020,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -3052,7 +3093,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -3113,7 +3154,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -3190,7 +3231,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -3243,7 +3284,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(BASH, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
