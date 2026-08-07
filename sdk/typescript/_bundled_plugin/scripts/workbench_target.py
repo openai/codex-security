@@ -59,18 +59,32 @@ def git_command(
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
     try:
+        if text:
+            # Git reports paths as UTF-8; text=True alone would decode them with
+            # the process locale, which on Windows is the ANSI codepage. A
+            # multi-byte codepage raises in subprocess's reader thread and leaves
+            # stdout None, which git_output then calls .strip() on.
+            return subprocess.run(
+                full_command,
+                check=False,
+                capture_output=True,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+            )
         return subprocess.run(
             full_command,
             check=False,
             capture_output=True,
             env=environment,
-            text=text,
+            text=False,
         )
     except FileNotFoundError:
         # Git is optional for Codebase scans. Treat an unavailable executable like
         # any other failed Git probe so the target falls back to a directory snapshot.
-        empty_output = "" if text else b""
-        return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
+        if text:
+            return subprocess.CompletedProcess(full_command, 127, "", "")
+        return subprocess.CompletedProcess(full_command, 127, b"", b"")
 
 
 def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
