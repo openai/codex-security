@@ -6,6 +6,18 @@ if [ "${1:-}" != get ]; then
     exit 0
 fi
 
+# Refuse to hand out credentials when Git is operating inside a submodule.
+# Git sets GIT_DIR to a path under the parent repository's .git/modules/
+# directory during submodule operations, which distinguishes a submodule
+# fetch from a top-level clone. Without this guard a malicious .gitmodules
+# inside a scanned repository could point to another repo on the same host
+# and receive the scan credential token.
+case "${GIT_DIR:-}" in
+    */.git/modules/*|*.git/modules/*)
+        exit 0
+        ;;
+esac
+
 protocol=
 host=
 
