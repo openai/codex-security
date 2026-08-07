@@ -3797,6 +3797,56 @@ describe("CLI", () => {
       }
       expect(decoded).toEqual({ password: "[redacted]" });
     }
+    // A value ending in a backslash escapes the backslash, not the delimiter that
+    // follows it, so the delimiter must still close the value and leave the rest of
+    // the diagnostic intact. Longer runs behave the same way, because each literal
+    // backslash costs a whole escape level rather than a single character.
+    for (const run of [1, 2, 3]) {
+      let trailing: string | { password: string; address: string } = {
+        password: `secret${"\\".repeat(run)}`,
+        address: "10.0.0.5",
+      };
+      for (let depth = 1; depth <= 3; depth += 1) {
+        trailing = JSON.stringify(trailing);
+        const redacted = redactedErrorMessage(trailing);
+        expect(redacted).not.toContain("secret");
+        let decoded: unknown = redacted;
+        for (let layer = 0; layer < depth; layer += 1) {
+          decoded = JSON.parse(decoded as string);
+        }
+        expect(decoded).toEqual({
+          password: "[redacted]",
+          address: "10.0.0.5",
+        });
+      }
+    }
+    // JSON leaves an apostrophe unescaped, so a backslash run in front of one carries no
+    // escape level of its own: `\\'` reads both as a value ending in a backslash and as
+    // an apostrophe escaped one nesting level up. The credential must stay redacted
+    // through that apostrophe at every nesting depth.
+    let apostrophe =
+      "password='prefix\\'SYNTHETIC_LEAKED_SUFFIX' address=visible";
+    let apostropheRedacted = "password='[redacted]' address=visible";
+    for (let depth = 0; depth <= 3; depth += 1) {
+      const redacted = redactedErrorMessage(apostrophe);
+      expect(redacted).not.toContain("SYNTHETIC_LEAKED_SUFFIX");
+      expect(redacted).toBe(apostropheRedacted);
+      apostrophe = JSON.stringify(apostrophe);
+      apostropheRedacted = JSON.stringify(apostropheRedacted);
+    }
+    // A single-quoted value that really does end in a backslash produces the same run,
+    // and nothing in the text distinguishes the two readings. Redaction therefore keeps
+    // going past the apostrophe and takes the rest of the diagnostic with it rather than
+    // releasing the credential's tail.
+    let ambiguous = "password='SYNTHETIC_TRAILING\\' address=visible";
+    for (let depth = 0; depth <= 3; depth += 1) {
+      const redacted = redactedErrorMessage(ambiguous);
+      expect(redacted).not.toContain("SYNTHETIC_TRAILING");
+      expect(redacted).toBe(
+        `${ambiguous.slice(0, ambiguous.indexOf("password"))}password='[redacted]`,
+      );
+      ambiguous = JSON.stringify(ambiguous);
+    }
     for (const separator of ["\n", "\\n"]) {
       expect(
         redactedErrorMessage(
