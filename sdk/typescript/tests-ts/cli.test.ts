@@ -4270,6 +4270,29 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("% complete");
   });
 
+  test("preserves directory names for absolute scan paths with trailing separators", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--path",
+          "/synthetic-parent/trailing-directory/",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain("Running scan: trailing-directory");
+    expect(stderr.text()).not.toContain("synthetic-parent");
+  });
+
   test("shows live stage, files, workers, tokens, and cost without a budget", async () => {
     const stdout = capture();
     const stderr = capture();
