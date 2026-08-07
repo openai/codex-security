@@ -188,12 +188,12 @@ for (const file of files) {
 }
 
 const listing = tar(["-tvzf", archive], "utf8");
-if (/^[^d-]/mu.test(listing)) {
+const listingLines = listing.split(/\r?\n/u).filter(Boolean);
+if (listingLines.some((line) => !/^[d-]/u.test(line))) {
   throw new Error(
     "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
   );
 }
-const listingLines = listing.split(/\r?\n/u).filter(Boolean);
 if (
   listingLines.length !== entries.length ||
   listingLines.some(
