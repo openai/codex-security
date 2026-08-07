@@ -1517,6 +1517,11 @@ export async function requireSecureOutputAncestry(
 ): Promise<void> {
   if (process.platform === "win32") return;
   let current = dirname(resolve(path));
+  // Callers reach here before the output tree exists, so the loop below climbs
+  // past every missing component. Once it has climbed, `current` is an ancestor
+  // of the directory that will hold the output rather than that directory, and
+  // the exemption below must not treat it as one.
+  let isOutputParent = true;
   while (true) {
     try {
       current = await realpath(current);
@@ -1536,6 +1541,7 @@ export async function requireSecureOutputAncestry(
         );
       }
       current = parent;
+      isOutputParent = false;
     }
   }
   while (true) {
@@ -1553,10 +1559,33 @@ export async function requireSecureOutputAncestry(
         `Scan output parent must be a non-symlink directory: ${current}`,
       );
     }
-    requireTrustedOutputAncestor(metadata, current, effectiveUid);
     const parent = dirname(current);
+    // The filesystem root is the one ancestor that every absolute path must
+    // pass through and that an unprivileged user can neither avoid nor repair.
+    // A host that leaves it group- or world-writable without the sticky bit has
+    // already handed every local user the ability to rename /etc, /usr and
+    // every other top-level entry, so refusing to run cannot make that host
+    // safer, while it does make every output path unusable. Exempt only the
+    // root, and only from the writability rule: every other ancestor is still
+    // checked, including a root-owned one, because a writable root-owned
+    // directory higher up is a substitution point an administrator can repair
+    // and a caller can route around. Output placed directly in a writable root
+    // is still refused, because that placement is the caller's choice. Root
+    // keeps the full walk, since root can repair the mode.
+    const unrepairableFilesystemRoot =
+      parent === current &&
+      !isOutputParent &&
+      metadata.uid === 0 &&
+      effectiveUid !== 0;
+    requireTrustedOutputAncestor(
+      metadata,
+      current,
+      effectiveUid,
+      unrepairableFilesystemRoot,
+    );
     if (parent === current) return;
     current = parent;
+    isOutputParent = false;
   }
 }
 
@@ -1564,6 +1593,8 @@ export function requireTrustedOutputAncestor(
   metadata: Pick<Stats, "mode" | "uid">,
   path: string,
   effectiveUid = process.geteuid?.(),
+  /** Set only for an ancestor whose mode the caller cannot avoid or repair. */
+  allowWritableWithoutSticky = false,
 ): void {
   if (
     effectiveUid !== undefined &&
@@ -1574,6 +1605,7 @@ export function requireTrustedOutputAncestor(
       `Scan output parent must have a trusted owner: ${path}`,
     );
   }
+  if (allowWritableWithoutSticky) return;
   if ((metadata.mode & 0o022) === 0) return;
   if ((metadata.mode & 0o1000) === 0) {
     throw new OutputDirectoryError(

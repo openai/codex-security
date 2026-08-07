@@ -3836,6 +3836,144 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "exempts only the filesystem root from the writable parent rule",
+    async () => {
+      // A shared Linux host can leave / at mode 0777 without the sticky bit,
+      // which an unprivileged user cannot repair. The chain is simulated so the
+      // test does not depend on the mode the CI host gives /.
+      const entry = (uid: number, mode: number) =>
+        ({
+          uid,
+          mode,
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        }) as unknown as Awaited<ReturnType<typeof fsPromises.lstat>>;
+      const tree = new Map([
+        ["/", entry(0, 0o40777)],
+        ["/tmp", entry(0, 0o41777)],
+        ["/tmp/state", entry(4242, 0o40700)],
+        ["/tmp/state/scans", entry(4242, 0o40700)],
+        ["/tmp/shared", entry(4242, 0o40777)],
+        ["/rootstate", entry(0, 0o40700)],
+        ["/rootstate/scans", entry(0, 0o40700)],
+        ["/shared-root", entry(0, 0o40777)],
+        ["/shared-root/lib", entry(0, 0o40755)],
+        ["/shared-root/lib/state", entry(4242, 0o40700)],
+      ]);
+      const originalLstat = fsPromises.lstat;
+      const originalRealpath = fsPromises.realpath;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        realpath: async (path: string) => path,
+        lstat: async (path: string) => {
+          const metadata = tree.get(path);
+          if (metadata === undefined) {
+            const error = new Error(
+              `unexpected lstat: ${path}`,
+            ) as NodeJS.ErrnoException;
+            error.code = "ENOENT";
+            throw error;
+          }
+          return metadata;
+        },
+      }));
+      try {
+        // The walk accepts the whole chain instead of blaming the user for the
+        // mode of /, which no output path can avoid and no user can repair.
+        await expect(
+          requireSecureOutputAncestry("/tmp/state/scans/scan-1", 4242),
+        ).resolves.toBeUndefined();
+
+        // A world-writable root is still rejected when it is the actual parent,
+        // because placing output directly in it is the caller's choice.
+        await expect(
+          requireSecureOutputAncestry("/results", 4242),
+        ).rejects.toThrow("sticky bit");
+
+        // A world-writable parent the user does own is still rejected.
+        await expect(
+          requireSecureOutputAncestry("/tmp/shared/results", 4242),
+        ).rejects.toThrow("sticky bit");
+
+        // A world-writable root-owned parent above a root-owned ancestor is
+        // still rejected: root ownership is not a boundary, because anyone with
+        // write permission on /shared-root can rename /shared-root/lib.
+        await expect(
+          requireSecureOutputAncestry("/shared-root/lib/state/scan-1", 4242),
+        ).rejects.toThrow("sticky bit");
+
+        // Running as root keeps the full walk, because root can repair /.
+        await expect(
+          requireSecureOutputAncestry("/rootstate/scans/scan-1", 0),
+        ).rejects.toThrow("sticky bit");
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+          realpath: originalRealpath,
+        }));
+      }
+    },
+  );
+
+  testPosix(
+    "treats a missing output parent as the output parent, not the root",
+    async () => {
+      // prepareOutputDirectory calls this before the output tree exists, so the
+      // resolution loop climbs past every missing component. The ancestor it
+      // lands on is not the directory that will hold the output, and treating it
+      // as one made the same path fail before creation and pass afterwards.
+      const entry = (uid: number, mode: number) =>
+        ({
+          uid,
+          mode,
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        }) as unknown as Awaited<ReturnType<typeof fsPromises.lstat>>;
+      const tree = new Map([["/", entry(0, 0o40777)]]);
+      const missing = (path: string) => {
+        const error = new Error(`ENOENT: ${path}`) as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        return error;
+      };
+      const originalLstat = fsPromises.lstat;
+      const originalRealpath = fsPromises.realpath;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        realpath: async (path: string) => {
+          if (!tree.has(path)) throw missing(path);
+          return path;
+        },
+        lstat: async (path: string) => {
+          const metadata = tree.get(path);
+          if (metadata === undefined) throw missing(path);
+          return metadata;
+        },
+      }));
+      try {
+        // /workspace does not exist yet and will be created by this run, so the
+        // directory that holds the output is /workspace, not /. The root keeps
+        // its exemption exactly as it would once /workspace exists.
+        await expect(
+          requireSecureOutputAncestry("/workspace/scans/scan-1", 4242),
+        ).resolves.toBeUndefined();
+
+        // Output placed directly in the root is still refused, whether or not
+        // the output directory itself has been created.
+        await expect(
+          requireSecureOutputAncestry("/scan-1", 4242),
+        ).rejects.toThrow("sticky bit");
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+          realpath: originalRealpath,
+        }));
+      }
+    },
+  );
+
   testPosix("rejects sticky shared parents controlled by another user", () => {
     expect(() =>
       requireTrustedOutputAncestor(

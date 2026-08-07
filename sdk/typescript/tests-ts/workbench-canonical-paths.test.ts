@@ -164,6 +164,93 @@ describe("bundled workbench canonical paths", () => {
     },
   );
 
+  testPosix(
+    "exempts only the filesystem root from the writable parent rule",
+    async () => {
+      const root = await temporaryDirectory();
+      const scanDirectory = join(root, "scan");
+      await mkdir(scanDirectory, { mode: 0o700 });
+      // A shared Linux host can leave / at mode 0777 without the sticky bit,
+      // which an unprivileged user cannot repair. The ancestry is simulated so
+      // the test does not depend on the modes of the real chain above the
+      // temporary directory.
+      const program = [
+        "import json, os, stat, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_db as workbench",
+        "mode = sys.argv[3]",
+        "real_lstat = Path.lstat",
+        "real_resolve = Path.resolve",
+        "euid = os.geteuid()",
+        "class Simulated:",
+        "    def __init__(self, uid, permissions):",
+        "        self.st_uid = uid",
+        "        self.st_mode = stat.S_IFDIR | permissions",
+        "if mode == 'direct':",
+        "    # A temporary directory cannot sit directly in /, so the scan",
+        "    # directory itself is simulated for this case.",
+        "    scan_dir = Path('/codex-security-probe-scan')",
+        "    simulated = {",
+        "        scan_dir: Simulated(euid, 0o700),",
+        "        Path('/'): Simulated(0, 0o777),",
+        "    }",
+        "else:",
+        "    scan_dir = Path(sys.argv[2])",
+        "    parents = list(scan_dir.parents)",
+        "    simulated = {p: Simulated(euid, 0o700) for p in parents}",
+        "    simulated[parents[-1]] = Simulated(0, 0o777)",
+        "    if mode == 'root':",
+        "        simulated[parents[-2]] = Simulated(0, 0o1777)",
+        "    elif mode == 'user':",
+        "        simulated[parents[-2]] = Simulated(euid, 0o777)",
+        "    else:",
+        "        simulated[parents[-2]] = Simulated(0, 0o777)",
+        "        simulated[parents[-3]] = Simulated(0, 0o755)",
+        "def patched_lstat(self):",
+        "    if self in simulated:",
+        "        return simulated[self]",
+        "    return real_lstat(self)",
+        "def patched_resolve(self, strict=False):",
+        "    if self in simulated:",
+        "        return self",
+        "    return real_resolve(self, strict=strict)",
+        "Path.lstat = patched_lstat",
+        "Path.resolve = patched_resolve",
+        "try:",
+        "    workbench.require_canonical_scan_directory(scan_dir)",
+        "except SystemExit as error:",
+        "    print(json.dumps({'accepted': False, 'error': str(error)}))",
+        "else:",
+        "    print(json.dumps({'accepted': True}))",
+      ].join("\n");
+
+      // The chain is accepted instead of blaming the user for the mode of /,
+      // which no output path can avoid and no unprivileged user can repair.
+      expect(runPythonProbe(program, scanDirectory, "root")).toMatchObject({
+        accepted: true,
+      });
+      // The same chain is still rejected when that parent is one the user owns.
+      expect(runPythonProbe(program, scanDirectory, "user")).toMatchObject({
+        accepted: false,
+        error: expect.stringContaining("sticky bit"),
+      });
+      // A world-writable root-owned parent above a root-owned ancestor is still
+      // rejected: root ownership is not a boundary, because anyone with write
+      // permission on it can rename the root-owned directory below it.
+      expect(runPythonProbe(program, scanDirectory, "nested")).toMatchObject({
+        accepted: false,
+        error: expect.stringContaining("sticky bit"),
+      });
+      // Output placed directly in a world-writable root is still rejected,
+      // because that placement is the caller's choice.
+      expect(runPythonProbe(program, scanDirectory, "direct")).toMatchObject({
+        accepted: false,
+        error: expect.stringContaining("sticky bit"),
+      });
+    },
+  );
+
   test("preserves native Windows case-insensitive path comparison", () => {
     expect(runPythonProbe(simulatedPathProbe, "windows")).toMatchObject({
       accepted: true,
