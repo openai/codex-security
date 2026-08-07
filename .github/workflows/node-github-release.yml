@@ -1,9 +1,6 @@
 name: node-github-release
 
 on:
-  workflow_run:
-    workflows: [node-release]
-    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -26,10 +23,7 @@ jobs:
   release:
     if: >-
       github.repository == 'openai/codex-security' &&
-      ((github.event_name == 'workflow_dispatch' &&
-        github.ref == 'refs/heads/main') ||
-       (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success'))
+      github.ref == 'refs/heads/main'
     name: publish verified GitHub release
     runs-on: ubuntu-latest
     permissions:
@@ -86,13 +80,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_RUN_ID: ${{ inputs.run_id }}
-          TRIGGER_TAG: ${{ github.event.workflow_run.head_branch }}
-          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
 
-          release_tag="${INPUT_TAG:-${TRIGGER_TAG:-}}"
-          release_run="${INPUT_RUN_ID:-${TRIGGER_RUN_ID:-}}"
+          release_tag="${INPUT_TAG:-}"
+          release_run="${INPUT_RUN_ID:-}"
 
           if [[ ! "$release_tag" =~ ^npm-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "GitHub releases require an existing stable npm-vX.Y.Z tag." >&2

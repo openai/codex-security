@@ -2070,6 +2070,10 @@ describe("GitHub release workflow safeguards", () => {
     expect(protectedReleaseWorkflow).toMatch(
       /  publish:\n[\s\S]*?    permissions:\n      contents: read\n      id-token: write\n/u,
     );
+    expect(githubReleaseWorkflow).not.toContain("workflow_run:");
+    expect(githubReleaseWorkflow).not.toContain("github.event.workflow_run");
+    expect(githubReleaseWorkflow).not.toContain("TRIGGER_TAG");
+    expect(githubReleaseWorkflow).not.toContain("TRIGGER_RUN_ID");
   });
 
   test("dispatches the exact protected run and release tag from trusted main", () => {
@@ -2114,7 +2118,8 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("runs manually dispatched GitHub backfills from trusted main", () => {
+  test("runs manually dispatched GitHub releases from trusted main", () => {
+    expect(githubReleaseWorkflow).toContain("workflow_dispatch:");
     expect(githubReleaseWorkflow).toContain("github.ref == 'refs/heads/main'");
     expect(githubReleaseWorkflow).toMatch(
       /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: refs\/heads\/main/u,
@@ -2169,8 +2174,6 @@ describe("GitHub release workflow safeguards", () => {
             INPUT_RUN_ID: releaseRun,
             INPUT_TAG: "npm-v0.1.2",
             MOCK_RUN_STATE: state,
-            TRIGGER_RUN_ID: "",
-            TRIGGER_TAG: "",
           },
           timeout: 10_000,
         });
@@ -2213,8 +2216,6 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REPOSITORY: releaseRepository,
         INPUT_RUN_ID: releaseRun,
         INPUT_TAG: "npm-v0.1.2",
-        TRIGGER_RUN_ID: "",
-        TRIGGER_TAG: "",
       },
       timeout: 10_000,
     });
@@ -2254,8 +2255,6 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REPOSITORY: releaseRepository,
         INPUT_RUN_ID: releaseRun,
         INPUT_TAG: "npm-v0.1.2",
-        TRIGGER_RUN_ID: "",
-        TRIGGER_TAG: "",
       },
       timeout: 10_000,
     });
@@ -2297,8 +2296,6 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REPOSITORY: "openai/codex-security",
         INPUT_RUN_ID: releaseRun,
         INPUT_TAG: "npm-v0.1.2",
-        TRIGGER_RUN_ID: "",
-        TRIGGER_TAG: "",
       },
       timeout: 10_000,
     });
@@ -2363,8 +2360,6 @@ describe("GitHub release workflow safeguards", () => {
           INPUT_RUN_ID: releaseRun,
           INPUT_TAG: "npm-v0.1.2",
           MOCK_TAG_TYPE: tagType,
-          TRIGGER_RUN_ID: "",
-          TRIGGER_TAG: "",
         },
         timeout: 10_000,
       });
@@ -2406,8 +2401,6 @@ describe("GitHub release workflow safeguards", () => {
           GITHUB_REPOSITORY: "openai/codex-security",
           INPUT_RUN_ID: runId,
           INPUT_TAG: "npm-v0.1.2",
-          TRIGGER_RUN_ID: "",
-          TRIGGER_TAG: "",
         },
         timeout: 10_000,
       });
