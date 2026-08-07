@@ -3639,8 +3639,15 @@ def main() -> None:
             result = scan_history.list_unmatched_scan_pairs(
                 connection,
                 args,
-                backfill_finding_details=backfill_legacy_finding_details,
                 read_coverage=coverage_for_comparison,
+            )
+        elif args.command == "get-scan-matching-inputs":
+            result = scan_history.get_scan_matching_inputs(
+                connection,
+                args,
+                require_scan=require_scan,
+                read_coverage=coverage_for_comparison,
+                backfill_finding_details=backfill_legacy_finding_details,
             )
         elif args.command == "register-cli-scan":
             result = register_cli_scan(connection, args)
@@ -3654,6 +3661,9 @@ def main() -> None:
                 read_coverage=coverage_for_comparison,
                 backfill_finding_details=backfill_legacy_finding_details,
                 include_matching_inputs=args.include_matching_inputs,
+                include_matching_status=args.include_matching_status,
+                matching_status_only=args.matching_status_only,
+                findings_offset=args.findings_offset,
                 require_matches=args.require_matches,
             )
         elif args.command == "save-scan-comparison":
