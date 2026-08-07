@@ -3574,6 +3574,7 @@ def main() -> None:
             require_canonical_scan_directory=require_canonical_scan_directory,
             safe_segment=safe_segment,
             compact_timestamp=compact_timestamp,
+            scan_completion_lock=scan_completion_lock,
         )
     )
     if args.command == "inspect-target":
@@ -3619,6 +3620,8 @@ def main() -> None:
             result = deep_scan.begin_deep_scan(connection, args)
         elif args.command == "get-deep-scan":
             result = deep_scan.get_deep_scan(connection, args)
+        elif args.command == "claim-deep-scan-coordinator":
+            result = deep_scan.claim_deep_scan_coordinator(connection, args)
         elif args.command == "upsert-deep-scan-worker":
             result = deep_scan.upsert_deep_scan_worker(connection, args)
         elif args.command == "claim-deep-scan-dedup":

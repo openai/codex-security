@@ -99,10 +99,12 @@ The top-level goal completes only after:
 Use the same discovery tool in every host:
 
 ```text
-Desktop: start_codex_security_deep_scan({ scanId })
+Desktop: start_codex_security_deep_scan({ scanId, handoffClaimToken? })
 CLI/headless first call: start_codex_security_deep_scan({ targetPath, scope: ".", userContext? })
-Later calls in any host: start_codex_security_deep_scan({ scanId })
+Later calls in any host: start_codex_security_deep_scan({ scanId, handoffClaimToken? })
 ```
+
+When the existing scan has a `handoffClaimToken`, preserve and pass that same token on every discovery start or resume, including after a paused waiter, app update, or MCP server restart. Do not drop the token merely because the scan ID and owning thread are unchanged.
 
 For a scoped-path scan, pass the resolved scoped directory as `targetPath` with `scope: "."`; never silently widen it to the repository root.
 
@@ -114,7 +116,7 @@ Handle the terminal result as follows:
 - `status: "canceled"`: stop without starting validation or finalization.
 - Tool error: report the exact stable MCP error, including its failure-manifest path when present, and stop the current response. This is a terminal failure of that logical scan: do not call `start_codex_security_deep_scan` again in this response; do not call `get_codex_security_scan_context` in this response; do not call `complete_codex_security_scan` in this response; do not call the target form again to create a replacement scan, do not cancel an already terminal failed scan, do not return a final answer, satisfy a structured output schema, do not synthesize no-findings coverage, or emit benchmark JSON.
 
-If the host represents the pending tool call as a running execution cell, keep waiting on that same cell instead of starting another tool call. Stopping the current Codex response or reaching the host's 24-hour timeout detaches only the caller; it does not cancel the scan. Only while the scan is still active may a later desktop turn rejoin with `{ scanId }`, or a CLI/headless turn repeat the identical target form to rejoin the owning thread's active scan. A terminal tool failure is not a detached waiter and must not be replaced. When the user explicitly asks to stop an active scan, call `cancel_codex_security_scan({ scanId })`.
+If the host represents the pending tool call as a running execution cell, keep waiting on that same cell instead of starting another tool call. Stopping the current Codex response or reaching the host's 24-hour timeout detaches only the caller; it does not cancel the scan. Only while the scan is still active may a later desktop turn rejoin with `{ scanId, handoffClaimToken? }`, or a CLI/headless turn repeat the identical target form to rejoin the owning thread's active scan. After an MCP process restart, the new coordinator safely adopts the expired lease and preserves completed discovery receipts. A terminal tool failure is not a detached waiter and must not be replaced. When the user explicitly asks to stop an active scan, call `cancel_codex_security_scan({ scanId })`.
 
 Do not call `open_codex_security_workspace` again to refresh progress. The Security workspace continues to show discovery progress.
 
@@ -167,6 +169,6 @@ Do not bypass validation because a candidate recurred across workers. Recurrence
 - Do not edit repository files during scanning.
 - Do not widen or reinterpret the resolved target.
 - Do not call `fail_codex_security_scan` because a wait was detached, a turn ended, discovery remains active, or partial artifacts exist.
-- If the tool reports that its process ended during discovery, treat the scan as failed; this version cannot resume that run.
+- If a waiter detaches or the MCP process ends while discovery is still running, preserve the scan and its handoff claim. A later same-scan call can adopt the expired coordinator lease and resume unfinished discovery without repeating completed reviews.
 - After any terminal discovery failure, stop the current response and surface the stable MCP failure and preserved failure-manifest path instead. Do not call `start_codex_security_deep_scan` again in that response; do not call `get_codex_security_scan_context` in that response; do not call `complete_codex_security_scan` in that response; do not start a second scan, call cancel for that failed scan, return a final answer, satisfy a structured output schema, or return synthetic no-findings or benchmark output.
 - On explicit cancellation, call `cancel_codex_security_scan`; after it returns, do not accept late progress or artifacts.

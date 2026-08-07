@@ -302,6 +302,47 @@ describe("plugin runtime preparation", () => {
     );
   });
 
+  test("claims persisted Deep Scans after a coordinator restart", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const source =
+      /async function startOrJoinDeepScanCoordinator\(input\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(source).toBeDefined();
+    const startOrJoin = new Function(
+      `${source}\nreturn startOrJoinDeepScanCoordinator;`,
+    )() as (
+      input: unknown,
+    ) => Promise<{ coordinator: unknown; joined: boolean }>;
+    const scan = { scanId: "persisted-scan" };
+    const coordinator = {};
+    const claimCoordinator = mock(async () => ({ run: scan, acquired: true }));
+    const start = mock(() => coordinator);
+
+    expect(
+      await startOrJoin({
+        begin: { run: scan, shouldStart: false },
+        registry: { get: () => undefined, start },
+        options: {
+          threadId: "scan-thread",
+          handoffClaimToken: "continuation-claim",
+          store: { claimCoordinator },
+        },
+      }),
+    ).toEqual({ coordinator, joined: false });
+    expect(claimCoordinator).toHaveBeenCalledWith({
+      scanId: "persisted-scan",
+      threadId: "scan-thread",
+      handoffClaimToken: "continuation-claim",
+    });
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
   test("projects only the unchanged external payload from the source checkout", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");

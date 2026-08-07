@@ -238,6 +238,7 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
+    update_progress.add_argument("--coordinator-generation", type=positive_int)
     update_progress.add_argument("--model")
     update_progress.add_argument("--reasoning-effort")
 
