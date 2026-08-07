@@ -129,6 +129,60 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  testWindows("decodes non-ASCII Git worktree paths as UTF-8", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "репозиторий");
+    await mkdir(repository);
+    const initialized = Bun.spawnSync(["git", "init", repository], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(initialized.exitCode).toBe(0);
+
+    expect(
+      runPythonProbe(
+        [
+          "import json, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "original_run = target.subprocess.run",
+          "def legacy_run(*args, **kwargs):",
+          "    if kwargs.get('text') and kwargs.get('encoding') is None:",
+          "        kwargs['encoding'] = 'cp1252'",
+          "    return original_run(*args, **kwargs)",
+          "target.subprocess.run = legacy_run",
+          "repository, pathspec = target.git_worktree_context(Path(sys.argv[2]))",
+          "print(json.dumps({'repository': str(repository), 'pathspec': pathspec}))",
+        ].join("\n"),
+        repository,
+      ),
+    ).toEqual({
+      repository: await realpath(repository),
+      pathspec: ".",
+    });
+  });
+
+  testPosix("uses the native decoder for Git pathname output", () => {
+    expect(
+      runPythonProbe(
+        [
+          "import json, subprocess, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "observed = {}",
+          "def run(command, **kwargs):",
+          "    observed['encoding'] = kwargs.get('encoding')",
+          "    return subprocess.CompletedProcess(command, 1, '', '')",
+          "target.subprocess.run = run",
+          "target.git_command(Path('.'), 'rev-parse', text=True)",
+          "print(json.dumps(observed))",
+        ].join("\n"),
+      ),
+    ).toEqual({ encoding: null });
+  });
+
   testPosix(
     "rejects private scan directories under insecure shared parents",
     async () => {
