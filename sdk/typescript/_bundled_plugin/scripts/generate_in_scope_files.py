@@ -68,7 +68,18 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
-    command = ["rg", "--files", "--hidden", "--no-ignore", "--glob", "!.git/**", "--", scope]
+    command = [
+        "rg",
+        "--files",
+        "--hidden",
+        "--no-ignore",
+        "--path-separator",
+        "/",
+        "--glob",
+        "!.git/**",
+        "--",
+        scope,
+    ]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(

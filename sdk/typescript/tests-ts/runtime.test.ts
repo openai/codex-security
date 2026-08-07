@@ -221,24 +221,31 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("includes ignored tracked files in the scoped security inventory", async () => {
+  test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
       const generator = await readFile(
         join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
         "utf8",
       );
       expect(generator).toContain('"--no-ignore"');
+      expect(generator).toContain('"--path-separator"');
       return;
     }
 
     const root = await temporaryDirectory("codex-security-scan-inventory-");
     const repository = join(root, "repository");
-    await mkdir(repository);
-    await writeFile(join(repository, ".gitignore"), "tracked-secret.py\n");
-    await writeFile(join(repository, "tracked-secret.py"), "secret = True\n");
+    await mkdir(join(repository, "nested"), { recursive: true });
+    await writeFile(
+      join(repository, ".gitignore"),
+      "nested/tracked-secret.py\n",
+    );
+    await writeFile(
+      join(repository, "nested", "tracked-secret.py"),
+      "secret = True\n",
+    );
     for (const args of [
       ["init", "--quiet", repository],
-      ["-C", repository, "add", "--force", "--", "tracked-secret.py"],
+      ["-C", repository, "add", "--force", "--", "nested/tracked-secret.py"],
     ]) {
       const initialized = spawnSync("git", args, { encoding: "utf8" });
       expect(initialized.status, initialized.stderr).toBe(0);
@@ -247,8 +254,8 @@ describe("plugin runtime preparation", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
-    const inventory = spawnSync(
-      python!,
+    const repeatedOutput = join(root, "inventory-repeated.txt");
+    const generatorArguments = (destination: string) =>
       [
         "-I",
         "-B",
@@ -258,12 +265,68 @@ describe("plugin runtime preparation", () => {
         "--scope",
         ".",
         "--out",
-        output,
-      ],
-      { encoding: "utf8" },
+        destination,
+      ] as const;
+    for (const destination of [output, repeatedOutput]) {
+      const inventory = spawnSync(python!, generatorArguments(destination), {
+        encoding: "utf8",
+      });
+      expect(inventory.status, inventory.stderr).toBe(0);
+    }
+
+    const contents = await readFile(output);
+    expect(await readFile(repeatedOutput)).toEqual(contents);
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
     );
-    expect(inventory.status, inventory.stderr).toBe(0);
-    expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const validateSource =
+      /function validateRepositoryPath\(value, field\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    const parseSource =
+      /function parseInScopePaths\(content, path3\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(validateSource).toBeDefined();
+    expect(parseSource).toBeDefined();
+    const parseInventory = new Function(
+      "import_node_util5",
+      `${validateSource}\n${parseSource}\nreturn parseInScopePaths;`,
+    )({ TextDecoder }) as (content: Uint8Array, path: string) => Set<string>;
+    expect(() => parseInventory(contents, "in_scope_files.txt")).not.toThrow();
+
+    const rows = contents.toString("utf8").trimEnd().split(/\r?\n/u);
+    expect(rows).toContain("./nested/tracked-secret.py");
+    for (const row of rows) {
+      const normalized = row.replace(/^(?:\.\/)+/u, "");
+      expect(row).toBe(row.trim());
+      expect(isAbsolute(row)).toBe(false);
+      expect(normalized).not.toMatch(/^[A-Za-z]:/u);
+      expect(normalized.split("/")).not.toContain("..");
+      if (process.platform === "win32") {
+        expect(row).not.toContain("\\");
+      }
+    }
+    if (process.platform !== "win32") {
+      await writeFile(
+        join(repository, String.raw`literal\backslash.txt`),
+        "backslash\n",
+      );
+      await writeFile(join(repository, "literal:colon.txt"), "colon\n");
+      const posixOutput = join(root, "inventory-posix-filenames.txt");
+      const inventory = spawnSync(python!, generatorArguments(posixOutput), {
+        encoding: "utf8",
+      });
+      expect(inventory.status, inventory.stderr).toBe(0);
+      const posixRows = (await readFile(posixOutput, "utf8"))
+        .trimEnd()
+        .split(/\r?\n/u);
+      expect(posixRows).toContain(String.raw`./literal\backslash.txt`);
+      expect(posixRows).toContain("./literal:colon.txt");
+    }
   });
 
   test("allows the workbench to derive missing deferred scan identifiers", async () => {
