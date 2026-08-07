@@ -421,7 +421,7 @@ describe("plugin runtime preparation", () => {
       "start_codex_security_prompt_only_scan",
       "start_codex_security_deep_scan",
       "record_codex_security_scan_draft",
-      "record_codex_security_candidate_attack_paths",
+      "record_candidate_attack_paths",
       "complete_codex_security_scan",
     ]) {
       expect(names.has(name)).toBe(true);
