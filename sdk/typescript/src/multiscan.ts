@@ -9,8 +9,10 @@ import {
   rename,
   rm,
   truncate,
+  utimes,
   writeFile,
 } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
@@ -28,6 +30,8 @@ const REQUIRED_ARTIFACTS = [
   "coverage.json",
   "report.md",
 ];
+const LOCK_LEASE_MS = 30_000;
+const LOCK_HEARTBEAT_MS = 5_000;
 
 interface MultiscanTask {
   id: string;
@@ -276,25 +280,153 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     await mkdir(path, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const { pid } = JSON.parse(await readFile(ownerPath, "utf8")) as {
-      pid: number;
-    };
-    try {
-      process.kill(pid, 0);
+    const existing = await inspectLock(path);
+    if (!existing.stale) {
       throw new Error("A multiscan supervisor is already running.");
-    } catch (failure) {
-      if ((failure as NodeJS.ErrnoException).code !== "ESRCH") throw failure;
+    }
+    await recoverLock(output, path, existing.owner);
+    return await acquireLock(output);
+  }
+  const owner = `${JSON.stringify({
+    pid: process.pid,
+    ownerId: randomUUID(),
+    hostname: hostname(),
+    processStartedAt: performance.timeOrigin,
+  })}\n`;
+  await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
+
+  let heartbeat = Promise.resolve();
+  const timer = setInterval(() => {
+    heartbeat = heartbeat
+      .then(async () => {
+        if ((await readFile(ownerPath, "utf8")) !== owner) return;
+        const now = new Date();
+        await utimes(ownerPath, now, now);
+      })
+      .catch(() => {});
+  }, LOCK_HEARTBEAT_MS);
+  timer.unref();
+
+  return async () => {
+    clearInterval(timer);
+    await heartbeat;
+    const current = await readFile(ownerPath, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return undefined;
+      },
+    );
+    if (current === owner) await rm(path, { recursive: true });
+  };
+}
+
+async function inspectLock(
+  path: string,
+): Promise<{ owner: string | undefined; stale: boolean }> {
+  const ownerPath = join(path, "owner.json");
+  let owner: string;
+  let modifiedAt: number;
+  try {
+    owner = await readFile(ownerPath, "utf8");
+    modifiedAt = (await lstat(ownerPath)).mtimeMs;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return {
+      owner: undefined,
+      stale: Date.now() - (await lstat(path)).mtimeMs > LOCK_LEASE_MS,
+    };
+  }
+
+  let identity: {
+    pid?: number;
+    ownerId?: string;
+    hostname?: string;
+    processStartedAt?: number;
+  };
+  try {
+    identity = JSON.parse(owner) as typeof identity;
+  } catch {
+    return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
+  }
+
+  if (
+    typeof identity.ownerId === "string" &&
+    typeof identity.hostname === "string" &&
+    typeof identity.processStartedAt === "number"
+  ) {
+    const sameProcess =
+      identity.pid === process.pid &&
+      identity.hostname === hostname() &&
+      identity.processStartedAt === performance.timeOrigin;
+    return {
+      owner,
+      stale: !sameProcess && Date.now() - modifiedAt > LOCK_LEASE_MS,
+    };
+  }
+
+  if (
+    identity.pid === undefined ||
+    !Number.isSafeInteger(identity.pid) ||
+    identity.pid < 1
+  ) {
+    return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
+  }
+  try {
+    process.kill(identity.pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      return { owner, stale: true };
+    }
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      return { owner, stale: false };
+    }
+    throw error;
+  }
+  return {
+    owner,
+    stale:
+      identity.pid === process.pid &&
+      modifiedAt + 1_000 < performance.timeOrigin,
+  };
+}
+
+async function recoverLock(
+  output: string,
+  path: string,
+  expectedOwner: string | undefined,
+): Promise<void> {
+  const recoveryPath = join(path, ".recovering");
+  let claim;
+  try {
+    claim = await open(recoveryPath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      if (Date.now() - (await lstat(recoveryPath)).mtimeMs > LOCK_LEASE_MS) {
+        await rm(recoveryPath, { force: true });
+        return await recoverLock(output, path, expectedOwner);
+      }
+      throw new Error("A multiscan supervisor is already running.");
+    }
+    throw error;
+  }
+  await claim.close();
+
+  let moved = false;
+  try {
+    const current = await inspectLock(path);
+    if (
+      current.owner !== expectedOwner ||
+      (expectedOwner !== undefined && !current.stale)
+    ) {
+      throw new Error("A multiscan supervisor is already running.");
     }
     const stale = join(output, `.lock.stale-${randomUUID()}`);
     await rename(path, stale);
+    moved = true;
     await rm(stale, { recursive: true });
-    return await acquireLock(output);
+  } finally {
+    if (!moved) await rm(recoveryPath, { force: true });
   }
-  await writeFile(ownerPath, `${JSON.stringify({ pid: process.pid })}\n`, {
-    flag: "wx",
-    mode: 0o600,
-  });
-  return async () => rm(path, { recursive: true });
 }
 
 async function ensureManifest(
