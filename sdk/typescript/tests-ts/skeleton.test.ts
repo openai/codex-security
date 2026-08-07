@@ -70,7 +70,7 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("gives Windows credential integration tests a larger CI timeout", async () => {
+  test("uses the default test timeout consistently across CI platforms", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -82,9 +82,8 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
-    expect(ciWorkflow).toContain(
-      "run: pnpm --dir sdk/typescript run test ${{ runner.os == 'Windows' && '--timeout 60000' || '' }}",
-    );
+    expect(ciWorkflow).toContain("run: pnpm --dir sdk/typescript run test\n");
+    expect(ciWorkflow).not.toContain("--timeout 60000");
   });
 
   test("builds packages without a preinstalled package manager and provides a production audit", async () => {

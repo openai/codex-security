@@ -90,7 +90,7 @@ jobs:
           TMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
           TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' && 'true' || 'false' }}
-        run: pnpm --dir sdk/typescript run test ${{ runner.os == 'Windows' && '--timeout 60000' || '' }}
+        run: pnpm --dir sdk/typescript run test
 
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format

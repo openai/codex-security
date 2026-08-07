@@ -58,6 +58,7 @@ import {
   codexSecurityStateDirectory,
   codexPlatformPackage,
   inspectWindowsCredentialAcl,
+  inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
@@ -2040,6 +2041,132 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("Windows credential descendants could not be verified");
     expect(attempts).toBe(3);
+  });
+
+  test("inspects Windows credential ancestry, home, and descendants in one subprocess", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const inspectionCount = join(root, "inspection-count");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory, file];
+    const script = [
+      `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+      `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+    ].join("; ");
+
+    const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
+      command: process.execPath,
+      args: ["--eval", script],
+    });
+
+    expect(snapshot.home).toMatchObject({
+      owner: sid,
+      protected: true,
+      grantsCurrentUserAccess: true,
+      untrustedPrincipals: [],
+    });
+    expect(snapshot.descendantsArePrivate).toBe(true);
+    expect(await readFile(inspectionCount, "utf8")).toBe("inspection\n");
+  });
+
+  test("inspects Windows credential ancestry and the home even without descendants", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory];
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+        ],
+      }),
+    ).resolves.toMatchObject({
+      home: { owner: sid, protected: true },
+      descendantsArePrivate: true,
+    });
+  });
+
+  test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const unsafe = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;WD)`;
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${unsafe}\n`)})`,
+        ],
+      }),
+    ).rejects.toThrow(
+      "Windows credential-home ancestor allows another identity to replace the directory",
+    );
+  });
+
+  test("rejects incomplete combined Windows credential ACL inspections", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${directory}\n`)})`,
+        ],
+      }),
+    ).rejects.toThrow("Windows credential-home ancestry could not be verified");
+  });
+
+  test("detects unsafe descendants during combined Windows credential ACL inspections", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const unsafeFile = `O:${sid}G:SYD:P(A;;FA;;;${sid})(A;;FR;;;WD)`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory, unsafeFile];
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+        ],
+      }),
+    ).resolves.toMatchObject({ descendantsArePrivate: false });
   });
 
   test("streams Windows credential ACL output larger than the subprocess buffer", async () => {
