@@ -302,6 +302,78 @@ describe("plugin runtime preparation", () => {
     );
   });
 
+  test("keeps native scan tools without the obsolete setup widget", async () => {
+    const contract = JSON.parse(
+      await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+    ) as { shippedExact: string[] };
+    expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
+    expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
+
+    const messages = [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "codex-security-test", version: "1.0.0" },
+        },
+      },
+      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ];
+    const server = spawnSync(
+      process.execPath,
+      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+      {
+        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
+    expect(server.status, server.stderr).toBe(0);
+    const responses = server.stdout
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            id: number;
+            result: {
+              capabilities?: Record<string, unknown>;
+              tools?: Array<{ name: string }>;
+            };
+          },
+      );
+    expect(
+      responses.find((response) => response.id === 1)?.result.capabilities,
+    ).not.toHaveProperty("resources");
+    const names = new Set(
+      responses
+        .find((response) => response.id === 2)
+        ?.result.tools?.map((tool) => tool.name),
+    );
+    for (const name of [
+      "open_codex_security_workspace",
+      "start_codex_security_standard_scan",
+      "start_codex_security_prompt_only_scan",
+      "start_codex_security_deep_scan",
+      "complete_codex_security_scan",
+    ]) {
+      expect(names.has(name)).toBe(true);
+    }
+    for (const name of [
+      "await_codex_security_scan_start",
+      "get_codex_security_setup_preference",
+      "disable_codex_security_setup_ui",
+      "open_codex_security_triage_results",
+      "set_codex_security_capability_preflight",
+    ]) {
+      expect(names.has(name)).toBe(false);
+    }
+  });
+
   test("projects only the unchanged external payload from the source checkout", async () => {
     const root = await temporaryDirectory();
     const workspace = join(root, "workspace");

@@ -521,32 +521,6 @@ def terminal_deep_scan_for_target_snapshot(
     ).fetchone()
 
 
-def pending_deep_workspace_for_target(
-    connection: sqlite3.Connection, thread_id: str, target_path: str, scope: str
-) -> sqlite3.Row | None:
-    return connection.execute(
-        """
-        SELECT *
-        FROM workspaces
-        WHERE thread_id = ?
-            AND target_path = ?
-            AND default_scope = ?
-            AND default_mode = 'deep'
-            AND active_scan_id IS NULL
-        ORDER BY updated_at DESC, created_at DESC, id
-        LIMIT 1
-        """,
-        (thread_id, target_path, scope),
-    ).fetchone()
-
-
-def setup_ui_opt_out_enabled(connection: sqlite3.Connection) -> bool:
-    row = connection.execute(
-        "SELECT skip_setup_ui FROM setup_preferences WHERE singleton = 1"
-    ).fetchone()
-    return row is not None and bool(row["skip_setup_ui"])
-
-
 def begin_deep_scan_for_scan(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -669,14 +643,6 @@ def begin_deep_scan_for_target(
                 connection,
                 existing["id"],
                 start_disposition="joined" if existing_run is not None else "created",
-            )
-        pending_workspace = pending_deep_workspace_for_target(
-            connection, thread_id, target_path, scope
-        )
-        if pending_workspace is not None and not setup_ui_opt_out_enabled(connection):
-            raise SystemExit(
-                "A matching Codex Security setup workspace is waiting for Start scan. "
-                "Finish that setup and retry with its scanId."
             )
         current_target = require_remediation_target(target_path)
         current_metadata = current_target.stat()
