@@ -5,18 +5,18 @@ export function redactedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const withoutPrivateKeys = message
     .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}private[_-]?key(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)(?:\\?["'])?-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----(?:\\?["'])?|$)/giu,
+      /(\b[A-Za-z0-9_-]{0,64}private[_-]?key(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)(?:\\?["'])?-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----(?:\\?["'])?|$)/giu,
       "$1[redacted]",
     )
     .replaceAll(
-      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/giu,
+      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)/giu,
       "[redacted]",
     );
   return redactQuotedCredentialValues(
     redactCredentialCollections(withoutPrivateKeys),
   )
     .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:authorization|auth)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9.+~-]{0,63})((?:\s|%20|\+)+)[A-Za-z_*][A-Za-z0-9_.*-]{0,64}\s*=\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)(?:\s*,\s*[A-Za-z_*][A-Za-z0-9_.*-]{0,64}\s*=\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+))*/giu,
+      /(\b[A-Za-z0-9_-]{0,64}(?:authorization|auth)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z0-9][A-Za-z0-9.+~-]{0,63})((?:\s|%20|\+)+)[!#$%&'*+.^_`|~0-9A-Za-z-]{1,65}\s*=\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)(?:\s*,\s*[!#$%&'*+.^_`|~0-9A-Za-z-]{1,65}\s*=\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+))*/giu,
       "$1$2$3[redacted]",
     )
     .replaceAll(
@@ -24,7 +24,7 @@ export function redactedErrorMessage(error: unknown): string {
       "$1$2$3[redacted]",
     )
     .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?keys?|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credentials?|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\]|[A-Za-z][A-Za-z0-9._~-]{0,63}(?:\s|%20|\+)+\[redacted\])[^\s"',;}&\\\]]+/giu,
+      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?keys?|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credentials?|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\]|[A-Za-z0-9][A-Za-z0-9._~-]{0,63}(?:\s|%20|\+)+\[redacted\])(?:\\(?!["'])|[^\s"',;}&\\\]])+/giu,
       "$1[redacted]",
     )
     .replaceAll(/sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}/gu, "[redacted]")

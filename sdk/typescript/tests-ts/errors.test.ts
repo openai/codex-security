@@ -13,6 +13,11 @@ describe("security error redaction", () => {
         "provider failed: -----BEGIN RSA PRIVATE KEY-----\nSYNTHETIC_TRUNCATED_KEY",
       ),
     ).toBe("provider failed: [redacted]");
+    expect(
+      redactedErrorMessage(
+        "provider failed: -----BEGIN PGP PRIVATE KEY BLOCK-----\nSYNTHETIC_PGP_PRIVATE_KEY\n-----END PGP PRIVATE KEY BLOCK----- safe=value",
+      ),
+    ).toBe("provider failed: [redacted] safe=value");
   });
 
   test("redacts every parameter from structured authorization schemes", () => {
@@ -44,6 +49,11 @@ describe("security error redaction", () => {
         'client_authorization_value=Digest username="example", response="SYNTHETIC_DIGEST_SECRET"',
       ),
     ).toBe("client_authorization_value=Digest [redacted]");
+    expect(
+      redactedErrorMessage(
+        "Authorization: 0-custom 0nonce=visible, !response=SYNTHETIC_DIGEST_SECRET",
+      ),
+    ).toBe("Authorization: 0-custom [redacted]");
   });
 
   test("redacts encoded API-key names without consuming other parameters", () => {
@@ -86,5 +96,8 @@ describe("security error redaction", () => {
         '{"api_keys_data":[{"key":"SYNTHETIC_ONE"},{"key":"SYNTHETIC_TWO"}]}',
       ),
     ).toBe('{"api_keys_data":"[redacted]"}');
+    expect(
+      redactedErrorMessage("password=prefix\\SYNTHETIC_SECRET safe=visible"),
+    ).toBe("password=[redacted] safe=visible");
   });
 });
