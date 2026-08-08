@@ -29,6 +29,21 @@ describe("security error redaction", () => {
         "Authorization: Custom key=SYNTHETIC_AUTH_SECRET https://example.test/safe",
       ),
     ).toBe("Authorization: Custom [redacted] https://example.test/safe");
+    expect(
+      redactedErrorMessage(
+        'Authorization: Digest username="a\\"b", response="SYNTHETIC_DIGEST_SECRET"',
+      ),
+    ).toBe("Authorization: Digest [redacted]");
+    expect(
+      redactedErrorMessage(
+        "Authorization: Digest username*=UTF-8''user, response=SYNTHETIC_DIGEST_SECRET",
+      ),
+    ).toBe("Authorization: Digest [redacted]");
+    expect(
+      redactedErrorMessage(
+        'client_authorization_value=Digest username="example", response="SYNTHETIC_DIGEST_SECRET"',
+      ),
+    ).toBe("client_authorization_value=Digest [redacted]");
   });
 
   test("redacts encoded API-key names without consuming other parameters", () => {
@@ -51,5 +66,15 @@ describe("security error redaction", () => {
     expect(
       redactedErrorMessage('{"credentials":"correct horse battery staple"}'),
     ).toBe('{"credentials":"[redacted]"}');
+    expect(
+      redactedErrorMessage(
+        "credentials=[alice:SYNTHETIC_ONE,bob:SYNTHETIC_TWO] safe=visible",
+      ),
+    ).toBe("credentials=[redacted] safe=visible");
+    expect(
+      redactedErrorMessage(
+        '{"credentials":["SYNTHETIC_ONE","SYNTHETIC_TWO"],"safe":"visible"}',
+      ),
+    ).toBe('{"credentials":"[redacted]","safe":"visible"}');
   });
 });
