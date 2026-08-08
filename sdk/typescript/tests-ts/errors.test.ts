@@ -76,5 +76,15 @@ describe("security error redaction", () => {
         '{"credentials":["SYNTHETIC_ONE","SYNTHETIC_TWO"],"safe":"visible"}',
       ),
     ).toBe('{"credentials":"[redacted]","safe":"visible"}');
+    expect(
+      redactedErrorMessage(
+        'credentials_value=["SYNTHETIC_ONE","SYNTHETIC_TWO"] safe=visible',
+      ),
+    ).toBe("credentials_value=[redacted] safe=visible");
+    expect(
+      redactedErrorMessage(
+        '{"api_keys_data":[{"key":"SYNTHETIC_ONE"},{"key":"SYNTHETIC_TWO"}]}',
+      ),
+    ).toBe('{"api_keys_data":"[redacted]"}');
   });
 });

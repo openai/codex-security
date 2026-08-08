@@ -43,7 +43,7 @@ export function redactedErrorMessage(error: unknown): string {
 
 function redactCredentialCollections(message: string): string {
   const assignment =
-    /(\b[A-Za-z0-9_-]{0,64}(?:credentials|api[_-]?keys)\b(?:\\*["'])?\s*[:=]\s*)([\[{])/giu;
+    /(\b[A-Za-z0-9_-]{0,64}(?:credentials|api[_-]?keys)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\*["'])?\s*[:=]\s*)([\[{])/giu;
   let output = "";
   let consumed = 0;
   for (
