@@ -16,7 +16,7 @@ import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
-import type { CodexSecurity } from "./api.js";
+import type { CodexSecurity, ScanWarningDetails } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { redactedErrorMessage } from "./errors.js";
@@ -43,6 +43,15 @@ interface MultiscanTask {
   prompt?: string;
 }
 
+/**
+ * A warning the scan raised while still completing. `kind` is carried so a
+ * consumer can single out drift without matching on message text.
+ */
+interface MultiscanWarning {
+  message: string;
+  kind?: ScanWarningDetails["kind"];
+}
+
 interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "completed_with_incomplete_coverage" | "failed";
   attempt: number;
@@ -51,6 +60,13 @@ interface MultiscanReceipt extends MultiscanTask {
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  /**
+   * Warnings the scan itself raised, distinct from `warning` above. That one
+   * is derived locally from coverage and its presence flips `status` to
+   * `completed_with_incomplete_coverage`; these do not, because a repository
+   * whose target drifted still has complete coverage.
+   */
+  scanWarnings?: MultiscanWarning[];
 }
 
 export interface MultiscanOptions {
@@ -197,6 +213,9 @@ async function runCampaign(
         let warning: string | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        // Per attempt, so a retry does not inherit the previous attempt's
+        // warnings alongside its own.
+        const scanWarnings: MultiscanWarning[] = [];
         try {
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
           await rm(checkout, { recursive: true, force: true });
@@ -232,6 +251,18 @@ async function runCampaign(
             ...(options.postScanPrompt === undefined
               ? {}
               : { postScanPrompt: options.postScanPrompt }),
+            // Without an observer the scan's own warnings are dropped. A
+            // repository whose target drifted mid-run still completes with
+            // complete coverage, so it lands in the ledger as "completed" with
+            // nothing recording that the results describe a tree that moved.
+            // Redacted on the way in for the same reason failures are: this is
+            // written to a file.
+            onWarning: (warning, details) => {
+              scanWarnings.push({
+                message: redactedErrorMessage(warning),
+                ...(details === undefined ? {} : { kind: details.kind }),
+              });
+            },
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
@@ -267,6 +298,7 @@ async function runCampaign(
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(scanWarnings.length === 0 ? {} : { scanWarnings }),
           })}\n`,
         );
         options.onProgress?.({
