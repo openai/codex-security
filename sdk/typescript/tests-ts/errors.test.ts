@@ -24,6 +24,11 @@ describe("security error redaction", () => {
     expect(
       redactedErrorMessage("auth=Custom response=SYNTHETIC_AUTH_SECRET"),
     ).toBe("auth=Custom [redacted]");
+    expect(
+      redactedErrorMessage(
+        "Authorization: Custom key=SYNTHETIC_AUTH_SECRET https://example.test/safe",
+      ),
+    ).toBe("Authorization: Custom [redacted] https://example.test/safe");
   });
 
   test("redacts encoded API-key names without consuming other parameters", () => {
