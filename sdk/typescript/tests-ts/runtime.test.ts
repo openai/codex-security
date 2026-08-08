@@ -229,7 +229,8 @@ describe("plugin runtime preparation", () => {
         join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
         "utf8",
       );
-      expect(generator).toContain('"--no-ignore"');
+      expect(generator).not.toContain('"--no-ignore"');
+      expect(generator).toContain('"--cached"');
       return;
     }
 

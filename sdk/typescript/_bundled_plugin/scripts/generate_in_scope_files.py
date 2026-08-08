@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -67,8 +68,23 @@ def resolve_output(value: str) -> Path:
 
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
-    """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
-    command = ["rg", "--files", "--hidden", "--no-ignore", "--glob", "!.git/**", "--", scope]
+    """Atomically inventory visible files and ignored files tracked by Git."""
+    command = [
+        "rg",
+        "--no-config",
+        "--files",
+        "--hidden",
+        "--no-require-git",
+        "--no-ignore-parent",
+        "--no-ignore-global",
+        "--glob",
+        "!.git/**",
+    ]
+    for name in (".gitignore", ".ignore", ".rgignore"):
+        ignore = repository / name
+        if ignore.is_file() and not ignore.is_symlink():
+            command.extend(["--ignore-file", str(ignore)])
+    command.extend(["--", scope])
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(
@@ -89,7 +105,138 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(message)
 
         inventory.seek(0)
-        rows = sorted(inventory)
+        rows = set(inventory)
+
+    environment = os.environ.copy()
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ):
+        environment.pop(name, None)
+    environment["GIT_LITERAL_PATHSPECS"] = "1"
+    environment["LC_ALL"] = "C"
+    git = [
+        "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        f"core.excludesFile={os.devnull}",
+        "--literal-pathspecs",
+    ]
+    try:
+        worktree = subprocess.run(
+            [*git, "rev-parse", "--is-inside-work-tree"],
+            cwd=repository,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            check=False,
+        )
+    except OSError as error:
+        if (repository / ".git").exists():
+            raise InventoryError(f"could not inspect Git worktree: {error}") from error
+        worktree = None
+
+    if worktree is not None and worktree.returncode:
+        detail = worktree.stderr.decode("utf-8", errors="replace").strip()
+        if worktree.returncode == 128 and "not a git repository" in detail.lower():
+            worktree = None
+        else:
+            message = f"git rev-parse exited with status {worktree.returncode}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise InventoryError(message)
+
+    if worktree is not None and worktree.stdout.strip() == b"true":
+        prefix = b"./" if scope == "." or scope.startswith("./") else b""
+        listed: list[bytes] = []
+        for arguments in (["--cached"], ["--others", "--exclude-standard"]):
+            try:
+                result = subprocess.run(
+                    [*git, "ls-files", *arguments, "-z", "--", scope],
+                    cwd=repository,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    check=False,
+                )
+            except OSError as error:
+                raise InventoryError(f"could not list repository files: {error}") from error
+            if result.returncode:
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                message = f"git ls-files exited with status {result.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise InventoryError(message)
+            listed.append(result.stdout)
+
+        def normalized(path: bytes) -> bytes:
+            return path.replace(b"\\", b"/") if os.name == "nt" else path
+
+        allowed = {
+            normalized(prefix + relative)
+            for collection in listed
+            for relative in collection.split(b"\0")
+            if relative
+        }
+        nested_worktrees = tuple(path for path in allowed if path.endswith(b"/"))
+        explicitly_ignored = False
+        if scope not in (".", "./"):
+            ignored_environment = environment.copy()
+            ignored_environment.pop("GIT_LITERAL_PATHSPECS", None)
+            explicit_path = scope if scope.startswith("./") else f"./{scope}"
+            try:
+                ignored = subprocess.run(
+                    [*git[:-1], "check-ignore", "--quiet", "--no-index", "--", explicit_path],
+                    cwd=repository,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=ignored_environment,
+                    check=False,
+                )
+            except OSError as error:
+                raise InventoryError(f"could not inspect scoped Git ignores: {error}") from error
+            if ignored.returncode not in (0, 1):
+                detail = ignored.stderr.decode("utf-8", errors="replace").strip()
+                message = f"git check-ignore exited with status {ignored.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise InventoryError(message)
+            explicitly_ignored = ignored.returncode == 0
+
+        if not explicitly_ignored:
+            rows = {
+                row
+                for row in rows
+                if (path := normalized(row.rstrip(b"\r\n"))) in allowed
+                or any(path.startswith(worktree) for worktree in nested_worktrees)
+            }
+        recorded = {normalized(row.rstrip(b"\r\n")) for row in rows}
+
+        for relative in listed[0].split(b"\0"):
+            if not relative:
+                continue
+            candidate = repository / os.fsdecode(relative)
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            try:
+                candidate.resolve(strict=True).relative_to(repository)
+            except (OSError, ValueError):
+                continue
+            relative_path = prefix + relative
+            key = normalized(relative_path)
+            if key not in recorded:
+                rows.add(relative_path + b"\n")
+                recorded.add(key)
+
+    rows = sorted(rows)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
