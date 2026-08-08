@@ -268,6 +268,41 @@ describe("plugin runtime preparation", () => {
     expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
   });
 
+  test("preserves remediation when the filesystem device changes", async () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const target = await temporaryDirectory("codex-security-remounted-target-");
+    const verification = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import runpy, sys",
+          "from pathlib import Path",
+          "target = Path(sys.argv[2])",
+          "metadata = target.stat()",
+          "scan = {'target_path': str(target), 'target_device': metadata.st_dev + 1, 'target_inode': metadata.st_ino}",
+          "require_identity = runpy.run_path(sys.argv[1])['require_scan_target_identity']",
+          "assert require_identity(scan) == target",
+          "scan['target_inode'] += 1",
+          "try:",
+          "    require_identity(scan)",
+          "except SystemExit:",
+          "    pass",
+          "else:",
+          "    raise AssertionError('A replaced checkout must remain unavailable')",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+        target,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(verification.status, verification.stderr).toBe(0);
+  });
+
   test("allows the workbench to derive missing deferred scan identifiers", async () => {
     const schema = JSON.parse(
       await readFile(
@@ -302,6 +337,145 @@ describe("plugin runtime preparation", () => {
     expect(schema).toContain(
       "userContext: editableUserContextSchema.max(2400).optional()",
     );
+  });
+
+  test("keeps focused Standard scans on native direct-start tools", async () => {
+    const skill = await readFile(
+      join(PLUGIN_ROOT, "skills", "security-scan", "SKILL.md"),
+      "utf8",
+    );
+    const desktop = await readFile(
+      join(
+        PLUGIN_ROOT,
+        "skills",
+        "security-scan",
+        "references",
+        "desktop-scan.md",
+      ),
+      "utf8",
+    );
+
+    expect(skill).toContain("Immediately launch one baseline subagent");
+    expect(skill).toContain("Launch focused investigator subagents");
+    expect(skill).toContain("record_codex_security_scan_draft");
+    expect(desktop).toContain("start_codex_security_prompt_only_scan");
+    expect(desktop).toContain("record_codex_security_scan_draft");
+    expect(desktop).not.toContain("await_codex_security_scan_start");
+  });
+
+  test("keeps native scan tools without the obsolete setup widget", async () => {
+    const contract = JSON.parse(
+      await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+    ) as { shippedExact: string[] };
+    expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
+    expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
+
+    const messages = [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "codex-security-test", version: "1.0.0" },
+        },
+      },
+      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ];
+    const server = spawnSync(
+      process.execPath,
+      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+      {
+        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
+    expect(server.status, server.stderr).toBe(0);
+    const responses = server.stdout
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            id: number;
+            result: {
+              capabilities?: Record<string, unknown>;
+              tools?: Array<{ name: string }>;
+            };
+          },
+      );
+    expect(
+      responses.find((response) => response.id === 1)?.result.capabilities,
+    ).not.toHaveProperty("resources");
+    const names = new Set(
+      responses
+        .find((response) => response.id === 2)
+        ?.result.tools?.map((tool) => tool.name),
+    );
+    for (const name of [
+      "open_codex_security_workspace",
+      "start_codex_security_standard_scan",
+      "start_codex_security_prompt_only_scan",
+      "start_codex_security_deep_scan",
+      "record_codex_security_scan_draft",
+      "record_candidate_attack_paths",
+      "complete_codex_security_scan",
+    ]) {
+      expect(names.has(name)).toBe(true);
+    }
+    for (const name of [
+      "await_codex_security_scan_start",
+      "get_codex_security_setup_preference",
+      "disable_codex_security_setup_ui",
+      "open_codex_security_triage_results",
+      "set_codex_security_capability_preflight",
+    ]) {
+      expect(names.has(name)).toBe(false);
+    }
+  });
+
+  test("claims persisted Deep Scans after a coordinator restart", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const source =
+      /async function startOrJoinDeepScanCoordinator\(input\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(source).toBeDefined();
+    const startOrJoin = new Function(
+      `${source}\nreturn startOrJoinDeepScanCoordinator;`,
+    )() as (
+      input: unknown,
+    ) => Promise<{ coordinator: unknown; joined: boolean }>;
+    const scan = { scanId: "persisted-scan" };
+    const coordinator = {};
+    const claimCoordinator = mock(async () => ({ run: scan, acquired: true }));
+    const start = mock(() => coordinator);
+
+    expect(
+      await startOrJoin({
+        begin: { run: scan, shouldStart: false },
+        registry: { get: () => undefined, start },
+        options: {
+          threadId: "scan-thread",
+          handoffClaimToken: "continuation-claim",
+          store: { claimCoordinator },
+        },
+      }),
+    ).toEqual({ coordinator, joined: false });
+    expect(claimCoordinator).toHaveBeenCalledWith({
+      scanId: "persisted-scan",
+      threadId: "scan-thread",
+      handoffClaimToken: "continuation-claim",
+    });
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   test("projects only the unchanged external payload from the source checkout", async () => {
