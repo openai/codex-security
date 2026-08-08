@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: node-release-cut
-  queue: max
+  cancel-in-progress: false
 
 jobs:
   cut:

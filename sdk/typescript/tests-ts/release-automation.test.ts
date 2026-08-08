@@ -2046,13 +2046,15 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("durably queues every release-cut and protected publishing run", () => {
+  test("serializes release-cut and protected publishing without canceling active runs", () => {
     expect(releaseCutWorkflow).toMatch(
-      /concurrency:\s*\n\s+group: node-release-cut\s*\n\s+queue: max/u,
+      /concurrency:\s*\n\s+group: node-release-cut\s*\n\s+cancel-in-progress: false/u,
     );
     expect(protectedReleaseWorkflow).toMatch(
-      /concurrency:\s*\n\s+group: \$\{\{ github\.workflow \}\}\s*\n\s+queue: max/u,
+      /concurrency:\s*\n\s+group: \$\{\{ github\.workflow \}\}\s*\n\s+cancel-in-progress: false/u,
     );
+    expect(releaseCutWorkflow).not.toMatch(/^\s+queue:/mu);
+    expect(protectedReleaseWorkflow).not.toMatch(/^\s+queue:/mu);
   });
 
   test("dispatches GitHub releases after publishing with isolated permissions", () => {
@@ -2111,8 +2113,9 @@ describe("GitHub release workflow safeguards", () => {
 
   test("serializes every GitHub release and historical backfill", () => {
     expect(githubReleaseWorkflow).toMatch(
-      /concurrency:\s*\n\s+group: node-github-release\s*\n\s+queue: max/u,
+      /concurrency:\s*\n\s+group: node-github-release\s*\n\s+cancel-in-progress: false/u,
     );
+    expect(githubReleaseWorkflow).not.toMatch(/^\s+queue:/mu);
     expect(githubReleaseWorkflow).not.toContain(
       "group: node-github-release-${{",
     );
