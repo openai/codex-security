@@ -38,13 +38,10 @@ import {
   classifyConnectionFailure,
   environmentValue,
   initialCredentialsAvailable,
-  scanPreflightCodexConfig,
-  scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
-  writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
@@ -79,6 +76,50 @@ const EXTERNAL_PROVIDER_CASES = [
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
   ],
+] as const;
+const BEDROCK_AUTHENTICATION_CASES = [
+  [
+    "Bedrock bearer token",
+    {
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-west-2",
+    },
+    "AWS_BEARER_TOKEN_BEDROCK",
+  ],
+  [
+    "AWS environment credentials",
+    {
+      AWS_ACCESS_KEY_ID: "synthetic-aws-access-key",
+      AWS_SECRET_ACCESS_KEY: "synthetic-aws-secret-key",
+      AWS_SESSION_TOKEN: "synthetic-aws-session-token",
+    },
+    "AWS_ACCESS_KEY_ID",
+  ],
+  [
+    "AWS profile",
+    {
+      AWS_PROFILE: "synthetic-bedrock-profile",
+      AWS_DEFAULT_REGION: "us-east-1",
+    },
+    "AWS_PROFILE",
+  ],
+  [
+    "AWS web identity",
+    {
+      AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/synthetic-bedrock",
+      AWS_WEB_IDENTITY_TOKEN_FILE: "/synthetic/web-identity-token",
+    },
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+  ],
+  [
+    "AWS container credentials",
+    {
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:
+        "/synthetic/container-credentials",
+    },
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  ],
+  ["default AWS credential chain", {}, "default_credential_chain"],
 ] as const;
 const TestClientBase = CodexSecurity as unknown as new (
   config: Record<string, unknown>,
@@ -259,353 +300,6 @@ describe("CodexSecurity orchestration", () => {
     expect(environmentValue({ Home: "/shell-home" }, "HOME")).toBe(
       "/shell-home",
     );
-  });
-
-  test("uses a root-read filesystem profile with writable workspace and workbench state", () => {
-    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
-    const original = {
-      sandbox_mode: "workspace-write",
-      allow_login_shell: true,
-      default_permissions: "unsafe",
-      permissions: {
-        existing: { filesystem: { ":root": "read" } },
-        codex_security_scan: {
-          extends: ":workspace",
-          filesystem: { ":tmpdir": "write" },
-        },
-      },
-    };
-
-    expect(scanRuntimeCodexConfig(original, stateDirectory)).toEqual({
-      allow_login_shell: false,
-      default_permissions: "codex_security_scan",
-      permissions: {
-        existing: { filesystem: { ":root": "read" } },
-        codex_security_scan: {
-          filesystem: {
-            ":root": "read",
-            ":workspace_roots": "write",
-            [stateDirectory]: "write",
-          },
-        },
-      },
-    });
-    expect(original).toMatchObject({
-      sandbox_mode: "workspace-write",
-      allow_login_shell: true,
-      default_permissions: "unsafe",
-    });
-  });
-
-  test("keeps persistent credentials read-only within writable scan state", () => {
-    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
-    const credentialHome = join(stateDirectory, "codex-home");
-    const config = scanRuntimeCodexConfig({}, stateDirectory, credentialHome);
-
-    expect(config).toMatchObject({
-      permissions: {
-        codex_security_scan: {
-          filesystem: {
-            ":root": "read",
-            ":workspace_roots": "write",
-            [stateDirectory]: "write",
-            [credentialHome]: "read",
-          },
-        },
-      },
-    });
-  });
-
-  test("projects only capability and trust metadata into the readable preflight config", async () => {
-    const root = await temporaryDirectory();
-    const configPath = join(root, "config-preflight.toml");
-    const repository = join(root, "repository");
-    const ordinaryProject = join(
-      root,
-      "settings-service-development-monkey-dataset",
-    );
-    await mkdir(repository);
-    const sanitized = scanPreflightCodexConfig({
-      model: "gpt-5.6-sol",
-      model_reasoning_effort: "high",
-      features: {
-        plugins: true,
-        goals: true,
-        multi_agent_v2: { enabled: false, secret: "FEATURE_SECRET" },
-        api_key: "FEATURE_KEY",
-      },
-      agents: { max_threads: 12, max_depth: 2, token: "AGENT_TOKEN" },
-      profile: "review",
-      profiles: {
-        review: {
-          model: "profile-model",
-          features: { goals: true, secret: "PROFILE_SECRET" },
-          agents: { max_threads: 4, token: "PROFILE_AGENT_TOKEN" },
-          shell_environment_policy: { set: { SECRET: "PROFILE_ENV_SECRET" } },
-        },
-        secret_profile: { features: { goals: false } },
-        "credential-prod": { features: { goals: false } },
-        development: { features: { goals: true } },
-        ["a".repeat(129)]: { features: { goals: false } },
-      },
-      project_root_markers: [
-        ".git",
-        ".workspace",
-        ".env",
-        "PASSWORD_VALUE",
-        "settings.gradle",
-        "a".repeat(257),
-      ],
-      projects: {
-        [repository]: { trust_level: "trusted", token: "PROJECT_TOKEN" },
-        [join(root, "secret-project")]: { trust_level: "trusted" },
-        [join(root, "bearer-PRIVATE")]: { trust_level: "trusted" },
-        [ordinaryProject]: { trust_level: "untrusted" },
-        relative: { trust_level: "trusted" },
-        [join(root, "bad-trust")]: { trust_level: "PROJECT_SECRET" },
-      },
-      mcp_servers: { private: { bearer_token: "MCP_TOKEN" } },
-      shell_environment_policy: { set: { SECRET: "SHELL_SECRET" } },
-    });
-    expect(sanitized).toEqual({
-      model: "gpt-5.6-sol",
-      model_reasoning_effort: "high",
-      features: { goals: true, multi_agent_v2: { enabled: false } },
-      agents: { max_threads: 12, max_depth: 2 },
-      profile: "review",
-      profiles: {
-        review: {
-          model: "profile-model",
-          features: { goals: true },
-          agents: { max_threads: 4 },
-        },
-        development: { features: { goals: true } },
-      },
-      project_root_markers: [".git", ".workspace", "settings.gradle"],
-      projects: {
-        [repository]: { trust_level: "trusted" },
-        [ordinaryProject]: { trust_level: "untrusted" },
-      },
-    });
-    await writeCodexConfig(configPath, sanitized);
-    const serialized = await readFile(configPath, "utf8");
-    for (const secret of [
-      "FEATURE_SECRET",
-      "FEATURE_KEY",
-      "AGENT_TOKEN",
-      "PROFILE_SECRET",
-      "PROFILE_AGENT_TOKEN",
-      "PROFILE_ENV_SECRET",
-      "PROJECT_TOKEN",
-      "MCP_TOKEN",
-      "SHELL_SECRET",
-    ]) {
-      expect(serialized).not.toContain(secret);
-    }
-    const interpreter =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(interpreter).not.toBeNull();
-    const output = execFileSync(
-      interpreter!,
-      [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-        "--skill",
-        "security-scan",
-        "--config",
-        configPath,
-        "--cwd",
-        repository,
-        "--multi-agent-runtime-owner",
-        "native",
-        "--multi-agent-runtime-version",
-        "v1",
-        "--multi-agent-runtime-provenance",
-        "tool-surface",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
-        "--effective-config",
-        "features.goals=true",
-      ],
-      {
-        env: { PATH: process.env["PATH"], CODEX_HOME: join(root, "denied") },
-        encoding: "utf8",
-      },
-    );
-    const preflight = JSON.parse(output) as Record<string, unknown>;
-    expect(preflight["status"]).toBe("ready");
-    expect(preflight["config_resolution"]).toBe("manual-layers");
-    expect(preflight["config_paths"]).toEqual([configPath]);
-    expect(preflight["config_profile"]).toBe("review");
-    expect(JSON.stringify(preflight)).toContain("max_threads");
-    expect(JSON.stringify(preflight)).toContain("12");
-
-    const bridgeConfigPath = join(root, "bridge-preflight.toml");
-    const bridge = scanPreflightCodexConfig({
-      features: { goals: true },
-      multiagent_config: {
-        max_concurrency: 12,
-        token: "BRIDGE_TOKEN",
-      },
-      mcp_servers: { private: { bearer_token: "BRIDGE_MCP_TOKEN" } },
-    });
-    expect(bridge).toEqual({
-      features: { goals: true },
-      multiagent_config: { max_concurrency: 12 },
-    });
-    await writeCodexConfig(bridgeConfigPath, bridge);
-    const bridgeSerialized = await readFile(bridgeConfigPath, "utf8");
-    expect(bridgeSerialized).not.toContain("BRIDGE_TOKEN");
-    expect(bridgeSerialized).not.toContain("BRIDGE_MCP_TOKEN");
-    const bridgeOutput = execFileSync(
-      interpreter!,
-      [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-        "--skill",
-        "security-scan",
-        "--config",
-        bridgeConfigPath,
-        "--cwd",
-        repository,
-        "--multi-agent-runtime-owner",
-        "codex-bridge",
-        "--multi-agent-runtime-version",
-        "v2",
-        "--multi-agent-runtime-provenance",
-        "verified-bridge",
-        "--runtime-check",
-        "delegation_available=true",
-        "--runtime-check",
-        "goal_tools_available=true",
-        "--effective-config",
-        "features.goals=true",
-      ],
-      {
-        env: { PATH: process.env["PATH"], CODEX_HOME: join(root, "denied") },
-        encoding: "utf8",
-      },
-    );
-    const bridgePreflight = JSON.parse(bridgeOutput) as Record<string, unknown>;
-    expect(bridgePreflight["status"]).toBe("ready");
-    expect(bridgePreflight["config_resolution"]).toBe("manual-layers");
-    expect(bridgePreflight["config_paths"]).toEqual([bridgeConfigPath]);
-    expect(bridgePreflight["multi_agent_mode"]).toBe("bridge-v2");
-    expect(JSON.stringify(bridgePreflight)).toContain(
-      "multiagent_config.max_concurrency",
-    );
-    expect(JSON.stringify(bridgePreflight)).toContain("12");
-    expect(() =>
-      scanPreflightCodexConfig({
-        projects: Object.fromEntries(
-          Array.from({ length: 256 }, (_, index) => [
-            `/workspace/${index}/${"界".repeat(1300)}`,
-            { trust_level: "trusted" },
-          ]),
-        ),
-      }),
-    ).toThrow(
-      "sanitized Codex Security preflight config exceeds the size limit",
-    );
-    const emptyV2 = scanPreflightCodexConfig({
-      features: {
-        multi_agent_v2: {
-          unknown: true,
-          max_concurrent_threads_per_session: 1_000_001,
-        },
-      },
-    });
-    expect(emptyV2).toEqual({});
-    await expect(
-      writeCodexConfig(join(root, "empty-v2.toml"), emptyV2),
-    ).resolves.toBeUndefined();
-  });
-
-  test("prioritizes the selected profile and active project before projection limits", () => {
-    const activeProject = "/workspace/active";
-    const profiles = Object.fromEntries([
-      ...Array.from({ length: 256 }, (_, index) => [
-        `profile_${index}`,
-        { features: { goals: index % 2 === 0 } },
-      ]),
-      ["selected", { agents: { max_threads: 17 } }],
-    ]);
-    const projects = Object.fromEntries([
-      ...Array.from({ length: 256 }, (_, index) => [
-        `/workspace/project-${index}`,
-        { trust_level: "untrusted" },
-      ]),
-      [activeProject, { trust_level: "trusted" }],
-    ]);
-
-    const prioritized = scanPreflightCodexConfig(
-      {
-        profile: "selected",
-        profiles,
-        projects,
-      },
-      join(activeProject, "packages", "service"),
-    );
-
-    expect(prioritized["profile"]).toBe("selected");
-    expect(Object.keys(prioritized["profiles"] as JsonObject)).toHaveLength(
-      256,
-    );
-    expect(prioritized["profiles"]).toMatchObject({
-      selected: { agents: { max_threads: 17 } },
-    });
-    expect(Object.keys(prioritized["projects"] as JsonObject)).toHaveLength(
-      256,
-    );
-    expect(prioritized["projects"]).toMatchObject({
-      [activeProject]: { trust_level: "trusted" },
-    });
-
-    const validProfiles = Object.fromEntries(
-      Array.from({ length: 256 }, (_, index) => [
-        `valid_${index}`,
-        { features: { goals: true } },
-      ]),
-    );
-    const validProjects = Object.fromEntries(
-      Array.from({ length: 256 }, (_, index) => [
-        `/valid/project-${index}`,
-        { trust_level: "trusted" },
-      ]),
-    );
-    const afterInvalid = scanPreflightCodexConfig({
-      profiles: {
-        ...Object.fromEntries(
-          Array.from({ length: 256 }, (_, index) => [
-            `invalid.profile.${index}`,
-            { features: { goals: false } },
-          ]),
-        ),
-        ...validProfiles,
-      },
-      projects: {
-        ...Object.fromEntries(
-          Array.from({ length: 256 }, (_, index) => [
-            `relative-${index}`,
-            { trust_level: "trusted" },
-          ]),
-        ),
-        ...validProjects,
-      },
-    });
-
-    expect(Object.keys(afterInvalid["profiles"] as JsonObject)).toHaveLength(
-      256,
-    );
-    expect(afterInvalid["profiles"]).toMatchObject({
-      valid_255: { features: { goals: true } },
-    });
-    expect(Object.keys(afterInvalid["projects"] as JsonObject)).toHaveLength(
-      256,
-    );
-    expect(afterInvalid["projects"]).toMatchObject({
-      "/valid/project-255": { trust_level: "trusted" },
-    });
   });
 
   test("selects a real-scan target in the active repository layout", async () => {
@@ -847,9 +541,13 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const knowledgeBase = join(root, "threat-model.md");
     const invalidDocument = join(root, "broken.pdf");
+    const unsupportedDocument = join(root, "unsupported.exe");
+    const emptyDirectory = join(root, "empty");
     await mkdir(repository);
+    await mkdir(emptyDirectory);
     await writeFile(knowledgeBase, "# Threat model\nPublic API is in scope.\n");
     await writeFile(invalidDocument, "not a PDF");
+    await writeFile(unsupportedDocument, "not a supported document");
     let runtimeStarted = false;
     const client = new TestClient(
       {},
@@ -865,6 +563,28 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.preflight(repository, { knowledgeBasePaths: [knowledgeBase] }),
     ).resolves.toMatchObject({ knowledgeBasePaths: [knowledgeBase] });
+    const invalidDocuments: Array<[string, string]> = [
+      [join(root, "missing.md"), "ENOENT"],
+      [unsupportedDocument, "Unsupported knowledge base document"],
+      [invalidDocument, "Cannot extract text from knowledge base PDF"],
+      [
+        emptyDirectory,
+        "Knowledge base directory contains no supported documents",
+      ],
+    ];
+    if (process.platform !== "win32") {
+      const linkedDocument = join(root, "linked.md");
+      await symlink(knowledgeBase, linkedDocument);
+      invalidDocuments.push([
+        linkedDocument,
+        "Knowledge base paths cannot be symbolic links",
+      ]);
+    }
+    for (const [path, message] of invalidDocuments) {
+      await expect(
+        client.preflight(repository, { knowledgeBasePaths: [path] }),
+      ).rejects.toThrow(message);
+    }
     await expect(
       client.run(repository, {
         knowledgeBasePaths: [join(root, "missing.md")],
@@ -1074,26 +794,6 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each(EXTERNAL_PROVIDER_CASES)(
-    "keeps the %s provider in sanitized scan configuration",
-    (_name, provider, _apiKey, model, providerConfig) => {
-      expect(
-        scanPreflightCodexConfig({
-          model,
-          model_provider: provider,
-          model_providers: {
-            [provider]: providerConfig,
-            private: { api_key: "synthetic-secret" },
-          },
-        }),
-      ).toEqual({
-        model,
-        model_provider: provider,
-        model_providers: { [provider]: providerConfig },
-      });
-    },
-  );
-
-  test.each(EXTERNAL_PROVIDER_CASES)(
     "requires the %s API key instead of accepting another provider's credentials",
     async (name, provider, apiKey, model, providerConfig) => {
       const root = await temporaryDirectory();
@@ -1221,6 +921,251 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     },
   );
+
+  test.each(BEDROCK_AUTHENTICATION_CASES)(
+    "runs Amazon Bedrock scans through %s without signing in to OpenAI",
+    async (_name, credentials, source) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      let codexOptions: CodexOptions | null = null;
+      let authentication: ScanAuthentication | undefined;
+      const environment = {
+        OPENAI_API_KEY: "synthetic-openai-key",
+        CODEX_API_KEY: "synthetic-codex-key",
+        OPENROUTER_API_KEY: "synthetic-openrouter-key",
+        FIREWORKS_API_KEY: "synthetic-fireworks-key",
+        ...credentials,
+      };
+      const client = new TestClient(
+        {
+          codexOverrides: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+          },
+        },
+        {
+          environment,
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment,
+            credentialsAvailable: false,
+          }),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          resolveCodexCommand: () => {
+            throw new Error("Amazon Bedrock must not sign in to OpenAI");
+          },
+          createCodex: (options: CodexOptions) => {
+            codexOptions = options;
+            return {
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  await copyCompletedScan(root);
+                  return { events: completedEvents() };
+                },
+              }),
+            };
+          },
+        },
+      );
+
+      const preflight = await client.preflight(repository, { maxCostUsd: 1 });
+      expect(preflight).toMatchObject({
+        model: "openai.gpt-5.6-luna",
+        modelProvider: "amazon-bedrock",
+        authentication: { method: "aws_credentials", source, verified: false },
+        maxCostUsd: 1,
+      });
+      expect(JSON.stringify(preflight)).not.toContain("synthetic-");
+      const result = await client.run(repository, {
+        maxCostUsd: 1,
+        onAuthentication: (selected) => {
+          authentication = selected;
+        },
+      });
+      expect(result).toMatchObject({ threadId: "thread-1" });
+      expect(authentication).toEqual({
+        method: "aws_credentials",
+        source,
+        verified: false,
+      });
+      expect((codexOptions as CodexOptions | null)?.env).toMatchObject(
+        credentials,
+      );
+      const configuration = JSON.parse(
+        await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+      ) as { mcpServers: Record<string, { env_vars: string[] }> };
+      const mcpEnvironment = Object.fromEntries(
+        Object.entries((codexOptions as CodexOptions | null)?.env ?? {}).filter(
+          ([name]) =>
+            configuration.mcpServers["codex-security"]!.env_vars.includes(name),
+        ),
+      );
+      expect(mcpEnvironment).toMatchObject(credentials);
+      expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
+      for (const key of [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "OPENROUTER_API_KEY",
+        "FIREWORKS_API_KEY",
+      ]) {
+        expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+          key,
+        );
+      }
+      expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
+      await client.close();
+    },
+  );
+
+  test("uses the selected Bedrock profile for authentication and cost limits", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let codexOptions: CodexOptions | null = null;
+    let authentication: ScanAuthentication | undefined;
+    let savedRecipe: Record<string, unknown> | undefined;
+    const environment = {
+      OPENAI_API_KEY: "synthetic-openai-key-must-not-be-used",
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-east-2",
+    };
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          profile: "bedrock",
+          model_provider: "openai",
+          profiles: {
+            bedrock: {
+              model: "openai.gpt-5.6-luna",
+              model_provider: "amazon-bedrock",
+            },
+          },
+          model_providers: {
+            "amazon-bedrock": {
+              aws: { region: "us-east-2", profile: "security-prod" },
+            },
+          },
+        },
+      },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+          credentialsAvailable: false,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          if (args[0] === "register-cli-scan") {
+            savedRecipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+          }
+          return mockWorkbench(args);
+        },
+        resolveCodexCommand: () => {
+          throw new Error("The Bedrock profile must not sign in to OpenAI");
+        },
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          };
+        },
+      },
+    );
+
+    await expect(
+      client.preflight(repository, { maxCostUsd: 1 }),
+    ).resolves.toMatchObject({
+      model: "openai.gpt-5.6-luna",
+      modelProvider: "amazon-bedrock",
+      maxCostUsd: 1,
+      authentication: {
+        method: "aws_credentials",
+        source: "AWS_BEARER_TOKEN_BEDROCK",
+        verified: false,
+      },
+    });
+    const result = await client.run(repository, {
+      maxCostUsd: 1,
+      onAuthentication: (selected) => {
+        authentication = selected;
+      },
+    });
+
+    expect(authentication).toEqual({
+      method: "aws_credentials",
+      source: "AWS_BEARER_TOKEN_BEDROCK",
+      verified: false,
+    });
+    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-east-2",
+    });
+    expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
+      "OPENAI_API_KEY",
+    );
+    expect(result.cost).toMatchObject({ model: "openai.gpt-5.6-luna" });
+    expect(savedRecipe).toMatchObject({
+      config: {
+        model_provider: "openai",
+        profile: "bedrock",
+        profiles: {
+          bedrock: {
+            model: "openai.gpt-5.6-luna",
+            model_provider: "amazon-bedrock",
+          },
+        },
+        model_providers: {
+          "amazon-bedrock": {
+            aws: { region: "us-east-2", profile: "security-prod" },
+          },
+        },
+      },
+    });
+    await client.close();
+  });
+
+  test("does not accept Bedrock credentials for an OpenAI scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+          AWS_ACCESS_KEY_ID: "synthetic-aws-access-key",
+          AWS_SECRET_ACCESS_KEY: "synthetic-aws-secret-key",
+        },
+      },
+    );
+
+    expect((await client.preflight(repository)).authentication).toEqual({
+      method: "stored_credentials",
+      verified: false,
+    });
+    await client.close();
+  });
 
   test("isolates authentication observer failures from scan startup", async () => {
     const root = await temporaryDirectory();
@@ -1800,6 +1745,7 @@ describe("CodexSecurity orchestration", () => {
     let codexOptions: CodexOptions | null = null;
     let threadOptions: Record<string, unknown> | null = null;
     let prompt = "";
+    let followUpPrompt = "";
     let scanStarted = false;
     const warnings: string[] = [];
     const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
@@ -1867,6 +1813,11 @@ describe("CodexSecurity orchestration", () => {
               return {
                 id: null,
                 async runStreamed(input: string) {
+                  if (prompt !== "") {
+                    expect(commands.at(-1)?.[0]).toBe("complete-scan");
+                    followUpPrompt = input;
+                    return { events: completedEvents() };
+                  }
                   expect(commands[0]?.[0]).toBe("register-cli-scan");
                   prompt = input;
                   await copyCompletedScan(root);
@@ -1885,6 +1836,8 @@ describe("CodexSecurity orchestration", () => {
 
     const scanStartedAt = Date.now();
     const result = await client.run(repository, {
+      scanPrompt: "Focus on authentication and authorization.",
+      postScanPrompt: "Draft fixes for confirmed findings.",
       onScanStarted: () => {
         scanStarted = true;
       },
@@ -1937,18 +1890,16 @@ describe("CodexSecurity orchestration", () => {
       "Codex_Home",
     );
     expect(prompt).toContain("$codex-security:security-scan");
+    expect(prompt).toContain("The SDK has already registered this scan.");
+    expect(prompt).toContain("never call a scan-start or completion tool");
     expect(prompt).toContain(
-      "This exhaustive scan authorizes the delegated-worker phases",
+      "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
-    const delegationInstruction = prompt
-      .split("\n")
-      .find((line) => line.startsWith("Every delegated review assignment"));
-    expect(delegationInstruction).toContain(
+    expect(prompt).not.toContain("This exhaustive scan authorizes");
+    expect(prompt).toContain(
       'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
     );
-    expect(delegationInstruction).toContain(
-      "your worker-local reviewed and assigned file counts",
-    );
+    expect(prompt).toContain("the parent owns global progress updates");
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
     expect(prompt).toContain("$CODEX_SECURITY_TARGET_DISPLAY_NAME");
@@ -1968,6 +1919,10 @@ describe("CodexSecurity orchestration", () => {
         ),
       ),
     ).toBe(false);
+    expect(prompt).toContain(
+      "Additional scan instructions:\nFocus on authentication and authorization.",
+    );
+    expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
     expect(
       JSON.parse(commands[0]![commands[0]!.indexOf("--recipe-json") + 1]!),
     ).toMatchObject({
@@ -2382,7 +2337,10 @@ describe("CodexSecurity orchestration", () => {
         createCodex: () => ({
           startThread: () => ({
             id: null,
-            async runStreamed() {
+            async runStreamed(prompt: string) {
+              expect(prompt).toContain(
+                "The SDK's current in-scope file-count estimate is 4207",
+              );
               await copyCompletedScan(root);
               async function* scanEvents(): AsyncGenerator<ThreadEvent> {
                 for await (const event of completedEvents()) {
@@ -2748,6 +2706,63 @@ describe("CodexSecurity orchestration", () => {
       expectedCost,
     );
 
+    await client.close();
+  });
+
+  test("surfaces post-scan failures without reopening a completed scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    let turns = 0;
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          return mockWorkbench(args);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: "thread-1",
+            async runStreamed() {
+              turns += 1;
+              if (turns === 1) {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              }
+              async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "turn.failed",
+                  error: { message: "Could not draft fixes." },
+                };
+              }
+              return { events: failedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, { postScanPrompt: "Draft confirmed fixes." }),
+    ).rejects.toThrow("Could not draft fixes.");
+    expect(commands.map((command) => command[0])).toEqual([
+      "register-cli-scan",
+      "get-scan-feedback",
+      "prepare-scan-completion",
+      "complete-scan",
+    ]);
     await client.close();
   });
 
@@ -3827,7 +3842,7 @@ describe("CodexSecurity orchestration", () => {
       'Use "$PYTHON" as <python_command> for every plugin helper',
     );
     expect(prompt).toContain(
-      'make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
+      'make-repo-scope-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
     );
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
@@ -3872,31 +3887,31 @@ describe("CodexSecurity orchestration", () => {
     const interpreter =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(interpreter).not.toBeNull();
-    const rankInput = join(scanDir, "rank_input.jsonl");
+    const scopedSourceInput = join(scanDir, "scoped-source-input.jsonl");
     execFileSync(
       interpreter!,
       [
         "-B",
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-rank-input",
+        "make-repo-scope-input",
         "--repo",
         repository,
         "--scopes-file",
         capturedTargetPathsFile,
         "--out",
-        rankInput,
+        scopedSourceInput,
       ],
       { stdio: "pipe" },
     );
-    const rankInputContents = await readFile(rankInput, "utf8");
+    const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(
-      rankInputContents
+      scopedSourceInputContents
         .trimEnd()
         .split("\n")
         .map((row) => JSON.parse(row).path),
     ).toEqual([...paths].sort());
     for (const separator of ["\u0085", "\u2028", "\u2029"])
-      expect(rankInputContents).not.toContain(separator);
+      expect(scopedSourceInputContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
     const coverage = join(scanDir, "coverage.json");
     await writeFile(
@@ -3926,6 +3941,70 @@ describe("CodexSecurity orchestration", () => {
       paths,
     );
     await client.close();
+  });
+
+  test("keeps requested source paths without ranking or ignored directory files", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const source = join(repository, "src");
+    const ignored = join(source, "node_modules");
+    const scopes = join(root, "scopes.json");
+    const output = join(root, "scoped-source-input.jsonl");
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+
+    await mkdir(join(source, "tests"), { recursive: true });
+    await mkdir(join(source, "examples"));
+    await mkdir(ignored);
+    execFileSync("git", ["init", "-q"], { cwd: repository });
+    await Promise.all([
+      writeFile(join(repository, ".gitignore"), "node_modules/\n.env\n"),
+      writeFile(join(source, "handler.ts"), "export {};\n"),
+      writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
+      writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
+      writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
+      writeFile(join(source, ".env"), "SECRET=private\n"),
+      writeFile(join(ignored, "dependency.ts"), "export {};\n"),
+    ]);
+
+    const enumerate = async (requested: string[]) => {
+      await writeFile(scopes, JSON.stringify(requested));
+      execFileSync(
+        interpreter!,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-scope-input",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          output,
+        ],
+        { stdio: "pipe" },
+      );
+      return (await readFile(output, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((row) => (JSON.parse(row) as { path: string }).path);
+    };
+
+    expect(await enumerate(["src"])).toEqual([
+      "src/Dockerfile",
+      "src/examples/demo.ts",
+      "src/handler.ts",
+      "src/tests/handler.test.ts",
+    ]);
+    expect(await enumerate(["src", "src/.env"])).toEqual([
+      "src/.env",
+      "src/Dockerfile",
+      "src/examples/demo.ts",
+      "src/handler.ts",
+      "src/tests/handler.test.ts",
+    ]);
+    await expect(enumerate(["../scopes.json"])).rejects.toThrow();
   });
 
   test("removes scoped target files after a scan settles", async () => {
