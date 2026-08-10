@@ -323,7 +323,6 @@
         "signalfd4",
         "sigprocmask",
         "sigreturn",
-        "socketcall",
         "socketpair",
         "splice",
         "stat",
@@ -378,24 +377,29 @@
       "action": "SCMP_ACT_ALLOW"
     },
     {
-      "names": ["process_vm_readv", "process_vm_writev", "ptrace"],
+      "names": ["socket"],
       "action": "SCMP_ACT_ALLOW",
-      "includes": { "minKernel": "4.8" }
+      "comment": "AF_UNIX(1)/AF_INET(2)/AF_INET6(10) only: local IPC + HTTPS for git clone and the OpenAI API. Everything else (notably AF_NETLINK=16, AF_PACKET=17) is denied by defaultAction; the previous 3-rule form here only blocked AF_ALG=38/AF_VSOCK=40 and left NETLINK/PACKET/everything-else allowed.",
+      "args": [{ "index": 0, "value": 1, "op": "SCMP_CMP_EQ" }]
     },
     {
       "names": ["socket"],
       "action": "SCMP_ACT_ALLOW",
-      "args": [{ "index": 0, "value": 38, "op": "SCMP_CMP_LT" }]
+      "args": [{ "index": 0, "value": 2, "op": "SCMP_CMP_EQ" }]
     },
     {
       "names": ["socket"],
       "action": "SCMP_ACT_ALLOW",
-      "args": [{ "index": 0, "value": 39, "op": "SCMP_CMP_EQ" }]
+      "args": [{ "index": 0, "value": 10, "op": "SCMP_CMP_EQ" }]
     },
     {
       "names": ["socket"],
       "action": "SCMP_ACT_ALLOW",
-      "args": [{ "index": 0, "value": 40, "op": "SCMP_CMP_GT" }]
+      "comment": "AF_NETLINK(16) restricted to NETLINK_ROUTE(0): Bubblewrap's Linux sandbox needs a NETLINK_ROUTE socket to run RTM_NEWLINK/RTM_NEWADDR when it configures the loopback interface inside its own (already-isolated) network namespace during codex sandbox startup.",
+      "args": [
+        { "index": 0, "value": 16, "op": "SCMP_CMP_EQ" },
+        { "index": 2, "value": 0, "op": "SCMP_CMP_EQ" }
+      ]
     },
     {
       "names": ["personality"],
