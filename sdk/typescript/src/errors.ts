@@ -5,13 +5,22 @@ export function redactedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const sensitiveRanges: Array<[number, number]> = [];
   const privateKeys = new Map<string, number[]>();
+  const lineStart = /(?:$|[\r\n]|\\+[nr])/uy;
   const lineEnd =
-    /(?:$|[\r\n]|\\+[nr]|\\*["']|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
+    /(?:$|[\r\n]|\\+[nr]|\\*["'](?=$|[,}\]\r\n])|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
   for (const match of message.matchAll(
     /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/giu,
   )) {
     const label = match[2]!;
     if (match[1]!.toUpperCase() === "BEGIN") {
+      lineStart.lastIndex = match.index + match[0].length;
+      if (!lineStart.test(message)) {
+        let previous = match.index - 1;
+        while (message[previous] === " " || message[previous] === "\t") {
+          previous -= 1;
+        }
+        if (message[previous] !== "=" && message[previous] !== ":") continue;
+      }
       const starts = privateKeys.get(label) ?? [];
       starts.push(match.index);
       privateKeys.set(label, starts);

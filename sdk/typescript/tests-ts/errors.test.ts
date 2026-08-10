@@ -96,6 +96,25 @@ describe("credential redaction", () => {
     expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
   });
 
+  test("does not end a private key at an unrelated quote", () => {
+    const message = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      '-----END RSA PRIVATE KEY-----"NOT_A_BOUNDARY',
+      "SYNTHETIC_SECOND_KEY_MATERIAL",
+      "-----END RSA PRIVATE KEY-----",
+      "retrying",
+    ].join("\n");
+
+    expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+  });
+
+  test("preserves text containing an invalid opening delimiter", () => {
+    const message =
+      "parser rejected abc-----BEGIN RSA PRIVATE KEY-----NOT_A_PEM; retry=visible";
+
+    expect(redactedErrorMessage(message)).toBe(message);
+  });
+
   test("preserves diagnostics after repeatedly serialized private keys", () => {
     let message: string | { pem: string; safe: string } = {
       pem: [
