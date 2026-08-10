@@ -554,7 +554,7 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("preserves external Markdown link targets and rejects unsafe links", () => {
+  test("redacts external Markdown link targets and rejects unsafe links", () => {
     const stderr = capture(true);
     const dashboard = new ScanDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
@@ -562,6 +562,7 @@ describe("live scan dashboard", () => {
         repository: "/code/juice-shop",
         color: false,
         clock: fakeClock(),
+        sanitize: (value) => value.replaceAll("secret-token", "[redacted]"),
       },
     );
 
@@ -578,8 +579,9 @@ describe("live scan dashboard", () => {
     const frame = lastFrame(stderr);
     expect(frame).toContain("See report, unsafe, and control.");
     expect(stderr.text()).toContain(
-      "\u001B]8;;https://example.com/report?token=secret-token\u0007report\u001B]8;;\u0007",
+      "\u001B]8;;https://example.com/report?token=[redacted]\u0007report\u001B]8;;\u0007",
     );
+    expect(stderr.text()).not.toContain("secret-token");
     expect(stderr.text()).not.toContain("javascript:");
     expect(stderr.text()).not.toContain("spoof");
     expect(stderr.text()).not.toContain("\u001B]8;;javascript:");

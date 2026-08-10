@@ -51,7 +51,7 @@ import {
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
-import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
+import { REDACTED_CREDENTIALS, SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 
 type ScanObserverName = Parameters<
@@ -2851,7 +2851,11 @@ describe("CodexSecurity orchestration", () => {
       expect(prompts.at(-1)).toBe("Record the scan cost.");
       expect(prompts).toHaveLength(2);
       expect(warnings).toEqual(
-        followUpFails ? ["Could not run post-scan instructions."] : [],
+        followUpFails
+          ? [
+              "Could not run post-scan instructions: The post-scan instructions failed.",
+            ]
+          : [],
       );
       await client.close();
     },
@@ -3240,7 +3244,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("preserves the original stored scan failure message", async () => {
+  test("redacts credentials from the stored scan failure message", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3259,7 +3263,7 @@ describe("CodexSecurity orchestration", () => {
     const quotedCredential = JSON.stringify({
       client_secret_value: "SYNTHETIC correct horse battery staple",
     });
-    const failureMessage = `${SYNTHETIC_CREDENTIALS} ${quotedCredential}`;
+    const redactedFailure = `${REDACTED_CREDENTIALS} {"client_secret_value":"[redacted]"}`;
     const client = new TestClient(
       {},
       {
@@ -3295,12 +3299,14 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
+    // The in-memory error keeps its original text; only what leaves the process
+    // is redacted, so the CLI can still classify the upstream failure.
     await expect(client.run(repository)).rejects.toThrow(SYNTHETIC_CREDENTIALS);
     const failure = commands.find((args) => args[0] === "fail-scan");
     const scanId = failure?.[2] ?? "";
     expect(scanId).toMatch(/^[0-9a-f-]{36}$/);
     expect(failure?.[3]).toBe("--message");
-    expect(failure?.[4]).toBe(failureMessage);
+    expect(failure?.[4]).toBe(redactedFailure);
 
     // `scans show` reads the stored message back through get-scan.
     const context = await runWorkbench(
@@ -3309,11 +3315,13 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(context["scan"]).toMatchObject({
       progress: { status: "failed" },
-      failureMessage,
+      failureMessage: redactedFailure,
     });
 
+    // Every synthetic credential is tagged SYNTHETIC, so the database file
+    // itself proves nothing was persisted anywhere on the failure path.
     const database = await readFile(join(stateDirectory, "workbench.sqlite3"));
-    expect(database.toString("latin1")).toContain(failureMessage);
+    expect(database.toString("latin1")).not.toContain("SYNTHETIC");
     await client.close();
   });
 

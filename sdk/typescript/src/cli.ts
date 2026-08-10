@@ -65,7 +65,7 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
-  errorMessage,
+  redactedErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -730,7 +730,7 @@ export async function main(
     try {
       return await select(await dependencies.runWorkbench(args));
     } catch (error) {
-      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
       exitCode = 2;
       return undefined;
     }
@@ -936,7 +936,7 @@ export async function main(
           scanArguments = scanArgumentsFromRecipe(recipe, args.scanId);
           scanArguments.verbose = options.verbose;
         } catch (error) {
-          const message = errorMessage(error);
+          const message = redactedErrorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
           return incurError({
@@ -999,7 +999,7 @@ export async function main(
             format,
           );
         } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -1052,7 +1052,7 @@ export async function main(
           verbose: z
             .boolean()
             .default(false)
-            .describe("Print scan diagnostics to stderr."),
+            .describe("Print redacted scan diagnostics to stderr."),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -1313,7 +1313,7 @@ export async function main(
             failOnSeverity: options.failOnSeverity,
           };
         } catch (error) {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -1502,7 +1502,7 @@ export async function main(
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${errorMessage(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${redactedErrorMessage(detail)}`}\n`,
               );
             },
           });
@@ -1516,7 +1516,7 @@ export async function main(
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
         } finally {
           dependencies.removeSignalListener("SIGINT", onInterrupt);
           dependencies.removeSignalListener("SIGTERM", onTerminate);
@@ -1620,7 +1620,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
         }
       },
     })
@@ -1656,7 +1656,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
         }
       },
     })
@@ -1845,7 +1845,7 @@ export async function main(
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
-      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      `codex-security: ${redactedErrorMessage(incurErrorMessage(frameworkOutput))}\n`,
     );
     return 2;
   }
@@ -1854,7 +1854,7 @@ export async function main(
     await writeCliOutput(output, renderedHistory ?? frameworkOutput);
     return exitCode;
   } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
     return 2;
   }
 }
@@ -2651,7 +2651,7 @@ async function runExport(
     }
     return 0;
   } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
     return 2;
   }
 }
@@ -2659,7 +2659,7 @@ async function runExport(
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function sanitizeDiagnosticValue(value: unknown): string {
-  return errorMessage(value)
+  return redactedErrorMessage(value)
     .replaceAll(
       /(\b(?:tenant(?:[_-]?id)?|org(?:anization)?(?:[_-]?id)?|project(?:[_-]?id)?|(?:x[_-]?)?(?:request|trace|correlation)[_-]?id)\b(?:\\*["'])?\s*[:=]\s*)(?!\[redacted\])(?:(\\*)(['"])(?:(?!(?<!\\)\2\3)(?:\\.|[^\\]))*(?:(?<!\\)\2\3|$)|[^\s"',;&}\]]+)/giu,
       "$1$2$3[redacted]$2$3",
@@ -2876,6 +2876,7 @@ async function runScan(
           : { maxCostUsd: arguments_.maxCostUsd }),
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
+        sanitize: redactedErrorMessage,
         input: process.stdin,
         onInterrupt,
       });
@@ -2975,13 +2976,13 @@ async function runScan(
         diagnostic("scan.output_archived", { archive_dir: archiveDir });
         if (dashboard !== null) {
           dashboard.note(
-            `Moved existing results to: ${errorMessage(archiveDir)}`,
+            `Moved existing results to: ${redactedErrorMessage(archiveDir)}`,
           );
           return;
         }
         progress?.stopTimer();
         errorOutput.write(
-          `Moved existing results to: ${errorMessage(archiveDir)}\n`,
+          `Moved existing results to: ${redactedErrorMessage(archiveDir)}\n`,
         );
       },
       signal: preparationAbortController.signal,
@@ -3206,7 +3207,7 @@ async function runScan(
       failure instanceof ScanCostLimitExceededError ? failure : undefined;
     const message =
       failure instanceof OutputInsideProtectedRootError
-        ? errorMessage(protectedRootErrorMessage(failure))
+        ? redactedErrorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
     diagnostic("scan.failed", {
       classification:
@@ -3225,7 +3226,7 @@ async function runScan(
     }
     if (scanDir !== null) {
       errorOutput.write(
-        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
+        `Partial output was kept at ${redactedErrorMessage(scanDir)}.\n`,
       );
     }
     return { exitCode: 2, error: message };
@@ -3408,7 +3409,9 @@ function scanScope(arguments_: ScanArguments): string | null {
         portable.startsWith("//")
           ? portable.split("/").at(-1) ?? portable
           : portable;
-      return errorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
+      return redactedErrorMessage(
+        scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "),
+      );
     });
     return `${displayed.join(", ")}${arguments_.paths.length > displayed.length ? `, +${arguments_.paths.length - displayed.length} more` : ""}`;
   }
@@ -3474,7 +3477,7 @@ function printScanSummary(
           ? 33
           : 36;
   errorOutput.write(
-    `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
+    `\n  ${paint("REPORT", "1;36")}    ${paint(redactedErrorMessage(result.reportPath), 4)}\n\n` +
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${severitySummary === "" ? "" : ` (${severitySummary})`}`, findingColor)}\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
       `  ${paint("ELAPSED", 1)}   ${duration}\n`,
@@ -3490,7 +3493,7 @@ function printScanSummary(
     );
   }
   errorOutput.write(
-    `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
+    `  ${paint("RESULTS", 1)}   ${redactedErrorMessage(result.scanDir)}\n`,
   );
 }
 
@@ -3832,7 +3835,7 @@ function interruptedExit(
   errorOutput.write(
     scanDir === null
       ? "codex-security: No partial output was kept.\n"
-      : `codex-security: Partial output was kept at ${errorMessage(scanDir)}.\n`,
+      : `codex-security: Partial output was kept at ${redactedErrorMessage(scanDir)}.\n`,
   );
   return ctrlC ? 130 : 143;
 }
@@ -3858,7 +3861,7 @@ if (invokedAsMain()) {
       process.exitCode = exitCode;
     },
     (error: unknown) => {
-      process.stderr.write(`codex-security: ${errorMessage(error)}\n`);
+      process.stderr.write(`codex-security: ${redactedErrorMessage(error)}\n`);
       process.exitCode = 2;
     },
   );

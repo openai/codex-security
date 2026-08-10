@@ -22,6 +22,7 @@ import type {
   ScanOptions,
   ScanPreflight,
 } from "../src/index.js";
+import { redactedErrorMessage } from "../src/errors.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
@@ -44,6 +45,7 @@ import {
 } from "../src/config.js";
 import {
   FakeSignals,
+  REDACTED_CREDENTIALS,
   SYNTHETIC_CREDENTIALS,
   capture,
   dependencies,
@@ -497,7 +499,7 @@ describe("CLI", () => {
     expect(workbenchCalled).toBe(false);
   });
 
-  test("reports false-positive workbench failures", async () => {
+  test("redacts false-positive workbench failures", async () => {
     const stdout = capture();
     const stderr = capture();
     let started = false;
@@ -527,7 +529,8 @@ describe("CLI", () => {
       ),
     ).toBe(2);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain(SYNTHETIC_CREDENTIALS);
+    expect(stderr.text()).toContain(REDACTED_CREDENTIALS);
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(started).toBe(false);
   });
 
@@ -834,7 +837,7 @@ describe("CLI", () => {
     },
   );
 
-  test("preserves the bulk-scan failure summary and progress errors", async () => {
+  test("preserves the bulk-scan failure summary and redacts progress errors", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
       await multiscanInventory(root);
@@ -868,7 +871,8 @@ describe("CLI", () => {
         skipped: 0,
       });
       expect(stderr.text()).toContain("sample failed (attempt 1)");
-      expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
+      expect(stderr.text()).toContain("[redacted]");
+      expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1684,9 +1688,8 @@ describe("CLI", () => {
     );
     expect(text).not.toContain("thinking ·");
     expect(text).not.toContain("said ·");
-    expect(text).toContain(
-      'curl -H "Authorization: Bearer sk-proj-SYNTHETIC_OPENAI_VALUE_123"',
-    );
+    expect(text).toContain('curl -H "Authorization: Bearer [redacted]"');
+    expect(text).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
     expect(text).not.toContain("Building the file inventory");
     expect(text).not.toContain("Running a scan command");
     expect(text).toContain("3 / 1,258 reviewed");
@@ -3331,7 +3334,7 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves verbose output paths and observer diagnostics", async () => {
+  test("redacts verbose output paths and observer diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
@@ -3363,15 +3366,16 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.output_archived archive_dir="/tmp/archive_sk-proj-SYNTHETIC_ARCHIVE_SECRET_123"',
+      'codex-security: debug: scan.output_archived archive_dir="/tmp/archive_[redacted]"',
     );
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.output_ready scan_dir="/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_SECRET_123"',
+      'codex-security: debug: scan.output_ready scan_dir="/tmp/scan_[redacted]"',
     );
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.observer_failed observer="onWorkerStatus"',
     );
-    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).toContain("[redacted]");
+    expect(stderr.text()).not.toContain("SYNTHETIC");
   });
 
   test("excludes observer failure context from verbose diagnostics", async () => {
@@ -3688,7 +3692,7 @@ describe("CLI", () => {
     }
   });
 
-  test("preserves underlying network errors", async () => {
+  test("redacts credentials in underlying network errors", async () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
@@ -3707,10 +3711,104 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
-      `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
+      `network failure ECONNRESET ${REDACTED_CREDENTIALS}`,
     );
-    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(stderr.text()).not.toContain("model service could not be reached");
+  });
+
+  test("redacts quoted multiword credentials and private-key assignments", () => {
+    expect(
+      redactedErrorMessage(
+        'password="correct horse battery staple" private_key=SYNTHETIC_PRIVATE_KEY_123',
+      ),
+    ).toBe('password="[redacted]" private_key=[redacted]');
+    expect(
+      redactedErrorMessage(
+        '{"client_secret_value":"correct horse battery staple","safe":"visible"}',
+      ),
+    ).toBe('{"client_secret_value":"[redacted]","safe":"visible"}');
+    expect(
+      redactedErrorMessage(
+        '{"clientSecretValue":"camel case secret","accessTokenValue":"camel case token"}',
+      ),
+    ).toBe(
+      '{"clientSecretValue":"[redacted]","accessTokenValue":"[redacted]"}',
+    );
+    expect(
+      redactedErrorMessage(
+        "clientSecretValue=SYNTHETIC_CAMEL_SECRET accessTokenValue=SYNTHETIC_CAMEL_TOKEN https://example.test/?clientSecretValue=SYNTHETIC_CAMEL_QUERY",
+      ),
+    ).toBe(
+      "clientSecretValue=[redacted] accessTokenValue=[redacted] https://example.test/?clientSecretValue=[redacted]",
+    );
+    expect(
+      redactedErrorMessage(
+        '{\\"access_token_value\\":\\"another horse battery staple\\"}',
+      ),
+    ).toBe('{\\"access_token_value\\":\\"[redacted]\\"}');
+    expect(
+      redactedErrorMessage(
+        'authorization="opaque secret value" _auth=Zm9vOmJhcg== https://example.test/?authorization=opaque%20query%20secret',
+      ),
+    ).toBe(
+      'authorization="[redacted]" _auth=[redacted] https://example.test/?authorization=[redacted]',
+    );
+    for (const [authorization, redacted] of [
+      [
+        "Authorization: ApiKey SYNTHETIC_APIKEY_SECRET",
+        "Authorization: ApiKey [redacted]",
+      ],
+      ["auth=Custom%20SYNTHETIC_CUSTOM_SECRET", "auth=Custom%20[redacted]"],
+      [
+        "Authorization: Digest+SYNTHETIC_DIGEST_SECRET",
+        "Authorization: Digest+[redacted]",
+      ],
+      [
+        "client_authorization_value=ApiKey SYNTHETIC_SUFFIXED_SECRET",
+        "client_authorization_value=ApiKey [redacted]",
+      ],
+      ["Authorization: ApiKey dGVzdA==", "Authorization: ApiKey [redacted]"],
+      ["Authorization: ApiKey dGVzdA=", "Authorization: ApiKey [redacted]"],
+      ["Authorization: ApiKey key=SECRET", "Authorization: ApiKey [redacted]"],
+      ["auth=Custom key=SECRET", "auth=Custom [redacted]"],
+      [
+        "client_auth_token=Custom dGVzdA==",
+        "client_auth_token=Custom [redacted]",
+      ],
+    ] as const) {
+      expect(redactedErrorMessage(authorization)).toBe(redacted);
+    }
+    expect(redactedErrorMessage('password="correct horse battery staple')).toBe(
+      'password="[redacted]',
+    );
+    let encoded: string | { password: string } = {
+      password: 'foo "bar" baz',
+    };
+    for (let depth = 1; depth <= 3; depth += 1) {
+      encoded = JSON.stringify(encoded);
+      const redacted = redactedErrorMessage(encoded);
+      expect(redacted).not.toContain("foo");
+      expect(redacted).not.toContain("bar");
+      expect(redacted).not.toContain("baz");
+      let decoded: unknown = redacted;
+      for (let layer = 0; layer < depth; layer += 1) {
+        decoded = JSON.parse(decoded as string);
+      }
+      expect(decoded).toEqual({ password: "[redacted]" });
+    }
+    for (const separator of ["\n", "\\n"]) {
+      expect(
+        redactedErrorMessage(
+          `private_key=-----BEGIN PRIVATE KEY-----${separator}MII_SYNTHETIC_PRIVATE_KEY${separator}-----END PRIVATE KEY----- safe=value`,
+        ),
+      ).toBe("private_key=[redacted] safe=value");
+      expect(
+        redactedErrorMessage(
+          `private_key=-----BEGIN PRIVATE KEY-----${separator}MII_SYNTHETIC_TRUNCATED_PRIVATE_KEY`,
+        ),
+      ).toBe("private_key=[redacted]");
+    }
   });
 
   test("reports database connection failures without claiming the model network failed", async () => {
@@ -3737,7 +3835,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("unable to open database file");
     expect(stderr.text()).not.toContain("model service could not be reached");
     expect(stderr.text()).not.toContain("Check your network connection");
-    expect(stderr.text()).toContain("SYNTHETIC_DATABASE_SECRET");
+    expect(stderr.text()).not.toContain("SYNTHETIC_DATABASE_SECRET");
   });
 
   test("prints only the completion summary for default scans", async () => {
@@ -3922,7 +4020,7 @@ describe("CLI", () => {
     }
   });
 
-  test("emits scan warnings in verbose diagnostics", async () => {
+  test("emits redacted scan warnings in verbose diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
@@ -3947,11 +4045,12 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.warning message="Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123"',
+      'codex-security: debug: scan.warning message="Repository HEAD changed during the scan: [redacted]"',
     );
     expect(stderr.text()).toContain(
-      "codex-security: warning: Repository HEAD changed during the scan: sk-proj-SYNTHETIC_WARNING_SECRET_123",
+      "codex-security: warning: Repository HEAD changed during the scan: [redacted]",
     );
+    expect(stderr.text()).not.toContain("SYNTHETIC_WARNING_SECRET");
   });
 
   test("prints granted trusted cyber access without warning or corrupting JSON scans", async () => {
@@ -4076,8 +4175,9 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
-      `codex-security: warning: onWorkerStatus observer failed: status observer failed ${SYNTHETIC_CREDENTIALS}`,
+      `codex-security: warning: onWorkerStatus observer failed: status observer failed ${REDACTED_CREDENTIALS}`,
     );
+    expect(stderr.text()).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
   });
 
   test("maps failed scan stdout writes to the runtime-error exit code", async () => {
@@ -4381,7 +4481,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   });
 
-  test("preserves scan progress scope and completion paths", async () => {
+  test("keeps scan progress scope and completion paths redacted", async () => {
     const stdout = capture();
     const stderr = capture();
     const result = fakeResult();
@@ -4403,12 +4503,10 @@ describe("CLI", () => {
         dependencies({ result }),
       ),
     ).toBe(0);
-    expect(stderr.text()).toContain("SYNTHETIC_SCOPE_KEY_123");
-    expect(stderr.text()).toContain("SYNTHETIC_OUTPUT_KEY_123");
-    expect(stderr.text()).toContain("src/sk-proj-SYNTHETIC_SCOPE_KEY_123");
-    expect(stderr.text()).toContain(
-      "/tmp/scan_sk-proj-SYNTHETIC_OUTPUT_KEY_123",
-    );
+    expect(stderr.text()).not.toContain("SYNTHETIC_SCOPE_KEY_123");
+    expect(stderr.text()).not.toContain("SYNTHETIC_OUTPUT_KEY_123");
+    expect(stderr.text()).toContain("src/[redacted]");
+    expect(stderr.text()).toContain("/tmp/scan_[redacted]");
   });
 
   test("reports parent fallback when delegated workers cannot start", async () => {
@@ -4551,7 +4649,7 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("Running scan");
   });
 
-  test("keeps archive notices on stderr for JSON scans", async () => {
+  test("keeps redacted archive notices on stderr for JSON scans", async () => {
     const stdout = capture();
     const stderr = capture();
     expect(
@@ -4584,9 +4682,9 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
       "[00:00] Preparing scan\n" +
-        "Moved existing results to: /tmp/sk-proj-SYNTHETIC_ARCHIVE_KEY_123/results.previous-20260721T031422-1234abcd\n",
+        "Moved existing results to: /tmp/[redacted]/results.previous-20260721T031422-1234abcd\n",
     );
-    expect(stderr.text()).toContain("SYNTHETIC_ARCHIVE_KEY_123");
+    expect(stderr.text()).not.toContain("SYNTHETIC_ARCHIVE_KEY_123");
   });
 
   test("reports findings by severity and applies the requested policy", async () => {
@@ -4855,7 +4953,7 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("codex-security:");
   });
 
-  test("preserves protected-root diagnostics", async () => {
+  test("redacts credentials embedded in protected-root diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();
     const protectedRoot =
@@ -4880,16 +4978,16 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
-      "Resolved path:  /private/tmp/worktree_sk-proj-SYNTHETIC_ROOT_KEY_123/results_sk-proj-SYNTHETIC_OUTPUT_KEY_123",
+      "Resolved path:  /private/tmp/worktree_[redacted]/results_[redacted]",
     );
     expect(stderr.text()).toContain(
-      "Protected root: /private/tmp/worktree_sk-proj-SYNTHETIC_ROOT_KEY_123",
+      "Protected root: /private/tmp/worktree_[redacted]",
     );
-    expect(stderr.text()).toContain("SYNTHETIC_ROOT_KEY");
-    expect(stderr.text()).toContain("SYNTHETIC_OUTPUT_KEY");
+    expect(stderr.text()).not.toContain("SYNTHETIC_ROOT_KEY");
+    expect(stderr.text()).not.toContain("SYNTHETIC_OUTPUT_KEY");
   });
 
-  test("preserves caught scan and interruption failures", async () => {
+  test("redacts credentials from caught scan and interruption failures", async () => {
     for (const failure of [
       new CodexSecurityError(`scan failed ${SYNTHETIC_CREDENTIALS}`),
       new ScanInterruptedError(
@@ -4913,12 +5011,12 @@ describe("CLI", () => {
       ).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe(
-        "[00:00] Preparing scan\n" + `scan failed ${SYNTHETIC_CREDENTIALS}\n`,
+        "[00:00] Preparing scan\n" + `scan failed ${REDACTED_CREDENTIALS}\n`,
       );
     }
   });
 
-  test("preserves retained partial-output paths", async () => {
+  test("redacts embedded credentials from retained partial-output paths", async () => {
     const path = "/private/tmp/scan_sk-proj-SYNTHETIC_PATH_KEY_123/results";
     for (const [signal, expectedExit] of [
       [null, 2],
@@ -4946,9 +5044,9 @@ describe("CLI", () => {
       ).toBe(expectedExit);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
-        "Partial output was kept at /private/tmp/scan_sk-proj-SYNTHETIC_PATH_KEY_123/results.",
+        "Partial output was kept at /private/tmp/scan_[redacted]/results.",
       );
-      expect(stderr.text()).toContain("SYNTHETIC_PATH_KEY");
+      expect(stderr.text()).not.toContain("SYNTHETIC_PATH_KEY");
     }
   }, 30_000);
 

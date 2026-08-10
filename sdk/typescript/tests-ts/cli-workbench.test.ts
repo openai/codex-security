@@ -3,7 +3,12 @@ import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { capture, dependencies, SYNTHETIC_CREDENTIALS } from "./support/cli.js";
+import {
+  capture,
+  dependencies,
+  REDACTED_CREDENTIALS,
+  SYNTHETIC_CREDENTIALS,
+} from "./support/cli.js";
 
 describe("CLI workbench", () => {
   test("lists repository and scan-root history without starting Codex", async () => {
@@ -614,7 +619,7 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("reports workbench failures and does not initialize Codex", async () => {
+  test("redacts workbench failures and does not initialize Codex", async () => {
     const stderr = capture();
     let started = false;
     expect(
@@ -632,7 +637,8 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(2);
-    expect(stderr.text()).toContain(SYNTHETIC_CREDENTIALS);
+    expect(stderr.text()).toContain(REDACTED_CREDENTIALS);
+    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(started).toBe(false);
   });
 });

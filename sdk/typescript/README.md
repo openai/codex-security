@@ -399,7 +399,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for scan diagnostics.                                                |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics.                                            |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
@@ -450,11 +450,11 @@ token and worker counts, estimated cost, the results directory, and the next
 useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
 
-Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print lifecycle,
-authentication, progress, and cost diagnostics to stderr.
+Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print redacted
+lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Structured JSON results remain on stdout. Diagnostics, scan output, and scan
-history can contain credentials; keep them private.
+Credentials and provider identifiers remain redacted, and structured JSON
+results remain on stdout.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use

@@ -45,6 +45,7 @@ interface ScanDashboardOptions {
   maxCostUsd?: number;
   clock: DashboardClock;
   color?: boolean;
+  sanitize?: (value: string) => string;
   input?: DashboardInput;
   onInterrupt?: () => void;
 }
@@ -309,7 +310,10 @@ export class ScanDashboard {
         lines
           .map((line, index) => {
             const text = typeof line === "string" ? line : line.text;
-            const clean = fitLine(text, width);
+            const clean = fitLine(
+              this.#options.sanitize?.(text) ?? text,
+              width,
+            );
             const colored =
               this.#options.color === true
                 ? styleLine(
@@ -329,6 +333,7 @@ export class ScanDashboard {
                       ? styleInlineCode(colored, line.code, line.kind)
                       : colored,
                     line.links,
+                    this.#options.sanitize,
                   );
             return `${ERASE_LINE}${formatted}`;
           })
@@ -444,9 +449,10 @@ function styleInlineCode(
 function linkActivity(
   value: string,
   links: readonly DashboardActivityLink[] | undefined,
+  sanitize: ((value: string) => string) | undefined,
 ): string {
   for (const { label, target } of links ?? []) {
-    const safe = safeHyperlinkTarget(target);
+    const safe = safeHyperlinkTarget(sanitize?.(target) ?? target);
     if (safe !== undefined) {
       value = value.replace(
         label,
