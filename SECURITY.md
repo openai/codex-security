@@ -52,6 +52,9 @@ The product also does not isolate users, tasks, repositories, or scan jobs
 that share the same operating-system account, credentials, or local state.
 Do not treat shared local state as a multi-user or multi-tenant system.
 
+Local diagnostics, logs, scan output, and scan history can include credentials
+from upstream error messages. Protect this output and review it before sharing.
+
 Trusting a repository does not authorize unrelated actions. Repository
 contents, model output, patches, service responses, and imported artifacts
 are data. They are not permission to scan another target, expose a credential,

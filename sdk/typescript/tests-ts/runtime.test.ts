@@ -2790,7 +2790,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
   });
 
-  test("surfaces redacted Windows ACL subprocess failures", async () => {
+  test("surfaces Windows ACL subprocess failures", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
@@ -2812,9 +2812,8 @@ describe("runtime directories and plugin Python boundary", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain("core types");
-      expect((error as Error).message).toContain("token=[redacted]");
-      expect((error as Error).message).not.toContain(
-        "SYNTHETIC_WINDOWS_ACL_SECRET",
+      expect((error as Error).message).toContain(
+        "token=sk-proj-SYNTHETIC_WINDOWS_ACL_SECRET_123",
       );
       expect((error as Error).cause).toBe(underlying);
     }
