@@ -4114,9 +4114,7 @@ describe("CodexSecurity orchestration", () => {
       "src/examples/demo.ts",
       "src/examples/vendor",
       "src/handler.ts",
-      "src/logo.png",
       "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
     ]);
     expect(await enumerate(["src", "src/.env"])).toEqual([
       "src/.env",
@@ -4124,9 +4122,7 @@ describe("CodexSecurity orchestration", () => {
       "src/examples/demo.ts",
       "src/examples/vendor",
       "src/handler.ts",
-      "src/logo.png",
       "src/tests/handler.test.ts",
-      "src/vendor/dependency.ts",
     ]);
     expect(await enumerate(["src/vendor", "src/logo.png"])).toEqual([
       "src/logo.png",

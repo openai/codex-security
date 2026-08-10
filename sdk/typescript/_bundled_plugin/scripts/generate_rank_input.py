@@ -38,7 +38,7 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
+from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, is_binary_sample, preview_for
 from workbench_target import git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
@@ -512,7 +512,8 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
         scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
-        if scope_path.is_file():
+        directly_requested = scope_path.is_file()
+        if directly_requested:
             candidates = (scope_path,)
         else:
             git_candidates = git_directory_snapshot_paths(scope_path)
@@ -570,6 +571,21 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                 continue
             if ".git" in relative.parts:
                 continue
+            if not directly_requested:
+                scoped_parts = path.relative_to(scope_path).parts[:-1]
+                if any(part in {"node_modules", ".venv", "vendor"} for part in scoped_parts):
+                    continue
+                try:
+                    with path.open("rb") as source:
+                        sample = source.read(4096)
+                    if is_binary_sample(sample):
+                        continue
+                    encoding = (
+                        "utf-16" if sample.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8"
+                    )
+                    sample.decode(encoding)
+                except (OSError, UnicodeDecodeError):
+                    continue
             rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
 
     rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
