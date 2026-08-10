@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from pathlib import Path
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
+from workbench_target import git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -152,6 +154,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_PREVIEW_BYTES,
         help=f"Maximum UTF-8 bytes in each preview. Defaults to {DEFAULT_PREVIEW_BYTES}.",
     )
+
+    scoped = subparsers.add_parser(
+        "make-repo-scope-input",
+        help="List every explicitly scoped file without ranking or reading its contents.",
+    )
+    scoped.add_argument("--repo", required=True, help="Repository root.")
+    scoped.add_argument(
+        "--scopes-file",
+        required=True,
+        help="JSON array of repository-relative files and directories to scan together.",
+    )
+    scoped.add_argument("--out", required=True, help="Output scoped-source-input.jsonl path.")
 
     bind = subparsers.add_parser(
         "bind-repo-scopes",
@@ -457,6 +471,81 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     output = Path(args.out).expanduser()
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} rows to {output}")
+
+
+def make_repo_scope_input(args: argparse.Namespace) -> None:
+    repo = Path(args.repo).expanduser().resolve()
+    if not repo.is_dir():
+        raise SystemExit(f"Repo path not found: {repo}")
+
+    scopes = load_scopes_file(Path(args.scopes_file).expanduser())
+    rows_by_path: dict[str, JsonRow] = {}
+    for scope in scopes:
+        scope_path = resolve_scope(repo, scope, expand_user=False)
+        if scope_path.is_file():
+            candidates = (scope_path,)
+        else:
+            git_candidates = git_directory_snapshot_paths(scope_path)
+            if git_candidates is not None:
+                candidates = git_candidates
+            else:
+                command = [
+                    "rg",
+                    "--files",
+                    "--hidden",
+                    "--no-require-git",
+                    "--null",
+                    "--glob",
+                    "!.git/**",
+                    "--",
+                    str(scope_path.relative_to(repo)),
+                ]
+                try:
+                    result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
+                except OSError as exc:
+                    ignore_names = (".gitignore", ".ignore", ".rgignore")
+                    ancestors = (scope_path, *scope_path.parents)
+                    has_ignore_rules = (
+                        any((ancestor / ".git").exists() for ancestor in (repo, *repo.parents))
+                        or any(
+                            (ancestor / name).is_file()
+                            for ancestor in ancestors
+                            if ancestor == repo or repo in ancestor.parents
+                            for name in ignore_names
+                        )
+                        or any(
+                            path.name in ignore_names
+                            for path in scope_path.rglob("*")
+                            if path.is_file()
+                        )
+                    )
+                    if has_ignore_rules:
+                        raise SystemExit(
+                            "Could not safely enumerate ignored scoped files without Git or ripgrep."
+                        ) from exc
+                    candidates = scope_path.rglob("*")
+                else:
+                    if result.returncode not in (0, 1):
+                        detail = result.stderr.decode("utf-8", errors="replace").strip()
+                        raise SystemExit(f"Could not enumerate scoped repository files: {detail}")
+                    candidates = (
+                        repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path
+                    )
+        for path in candidates:
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                relative = path.resolve(strict=True).relative_to(repo)
+            except (OSError, ValueError):
+                continue
+            if ".git" in relative.parts:
+                continue
+            rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
+
+    rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
+    output = Path(args.out).expanduser()
+    write_jsonl(output, rows)
+    print(f"Wrote {len(rows)} scoped paths to {output}")
 
 
 def bind_repo_scopes(args: argparse.Namespace) -> None:
@@ -985,6 +1074,8 @@ def main() -> None:
     args = parse_args()
     if args.command == "make-repo-rank-input":
         make_repo_rank_input(args)
+    elif args.command == "make-repo-scope-input":
+        make_repo_scope_input(args)
     elif args.command == "bind-repo-scopes":
         bind_repo_scopes(args)
     elif args.command == "make-diff-rank-input":

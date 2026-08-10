@@ -22,7 +22,8 @@ import {
   win32,
 } from "node:path";
 import { cwd } from "node:process";
-import { Writable as NodeWritable } from "node:stream";
+import { createInterface } from "node:readline";
+import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
@@ -112,15 +113,6 @@ import {
 } from "./version.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
-const MAX_CODEX_OVERRIDE_KEY_LENGTH = 1_024;
-const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
-const MAX_CODEX_OVERRIDE_DEPTH = 64;
-const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
-const MAX_SKILL_INPUT_COUNT = 64;
-const MAX_SKILL_EVENT_BYTES = 1_024 * 1_024;
-const MAX_SKILL_RESPONSE_BYTES = 256 * 1_024;
-const SKILL_OUTPUT_LIMIT_MESSAGE =
-  "Codex skill output exceeded the 1 MiB event or 256 KiB response safety limit.";
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
@@ -172,6 +164,8 @@ const VALUE_OPTIONS = new Set([
   "--auth",
   "--path",
   "--knowledge-base",
+  "--scan-prompt-file",
+  "--post-scan-prompt-file",
   "--diff",
   "--head",
   "--base",
@@ -247,12 +241,33 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .describe("Maximum deep-scan discovery runs."),
 };
 
+async function readPromptFiles(
+  directory: string,
+  scanPromptFile?: string,
+  postScanPromptFile?: string,
+): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
+  const [scanPrompt, postScanPrompt] = await Promise.all([
+    scanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, scanPromptFile), "utf8"),
+    postScanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+  ]);
+  return {
+    ...(scanPrompt?.trim() ? { scanPrompt } : {}),
+    ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
+  };
+}
+
 interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
   verbose?: boolean;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
+  scanPromptFile?: string;
+  postScanPromptFile?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -492,7 +507,6 @@ export async function runCodexSkillCommand(
     windowsHide: true,
   });
   let requestedSignal: SignalName | null = null;
-  let skillOutputLimitExceeded = false;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
   let forceCaptureCompletion: (() => void) | null = null;
@@ -529,10 +543,7 @@ export async function runCodexSkillCommand(
       output === undefined || invocation.stdout === null
         ? Promise.resolve(undefined)
         : Promise.race([
-            readSkillCommandOutput(invocation.stdout, () => {
-              skillOutputLimitExceeded = true;
-              requestTermination("SIGTERM");
-            }),
+            readSkillCommandOutput(invocation.stdout),
             new Promise<undefined>((resolve) => {
               forceCaptureCompletion = () => resolve(undefined);
             }),
@@ -564,9 +575,6 @@ export async function runCodexSkillCommand(
       invocation.once(output === undefined ? "exit" : "close", complete);
     });
     const [status, events] = await Promise.all([invocationStatus, captured]);
-    if (skillOutputLimitExceeded) {
-      throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
-    }
     if (output === undefined || status === 130 || status === 143) return status;
     if (status !== 0) {
       await writeCliOutput(
@@ -1042,6 +1050,12 @@ export async function main(
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
+          scanPromptFile: optionValue("--scan-prompt-file")
+            .optional()
+            .describe("Append scan instructions from FILE."),
+          postScanPromptFile: optionValue("--post-scan-prompt-file")
+            .optional()
+            .describe("Run FILE after each scan, including failures."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan committed Git changes from BASE to --head."),
@@ -1175,6 +1189,8 @@ export async function main(
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
+            scanPromptFile: options.scanPromptFile,
+            postScanPromptFile: options.postScanPromptFile,
             diff: options.diff,
             workingTree: options.workingTree,
             head: options.head,
@@ -1328,6 +1344,12 @@ export async function main(
           .enum(["standard", "deep"])
           .default("standard")
           .describe("Default scan mode for repositories without a CSV mode."),
+        scanPromptFile: optionValue("--scan-prompt-file")
+          .optional()
+          .describe("Append instructions from FILE to every scan."),
+        postScanPromptFile: optionValue("--post-scan-prompt-file")
+          .optional()
+          .describe("Run FILE after each scan, including failures."),
         model: optionValue("--model")
           .optional()
           .describe(
@@ -1378,36 +1400,18 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          const prompts = await readPromptFiles(
+            currentDirectory,
+            options.scanPromptFile,
+            options.postScanPromptFile,
+          );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            let optionIndex = 1;
-            while (optionIndex < argv.length) {
-              const argument = argv[optionIndex]!;
-              if (
-                argument === "--model" ||
-                argument === "--effort" ||
-                argument === "--provider" ||
-                argument === "--codex" ||
-                argument === "--knowledge-base"
-              ) {
-                optionIndex += 2;
-              } else if (
-                argument.startsWith("--model=") ||
-                argument.startsWith("--effort=") ||
-                argument.startsWith("--provider=") ||
-                argument.startsWith("--codex=") ||
-                argument.startsWith("--knowledge-base=")
-              ) {
-                optionIndex += 1;
-              } else {
-                break;
-              }
-            }
-            if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
+            if (options.outputDir !== undefined) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
+                "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1440,6 +1444,7 @@ export async function main(
             mode: options.mode,
             maxAttempts: options.maxAttempts,
             knowledgeBasePaths: options.knowledgeBase,
+            ...prompts,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -1452,13 +1457,16 @@ export async function main(
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error }) => {
+            onProgress: ({ repository, status, attempt, error, warning }) => {
+              const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${error === undefined ? "" : `: ${redactedErrorMessage(error)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${redactedErrorMessage(detail)}`}\n`,
               );
             },
           });
-          exitCode = interruptedExitCode() ?? (result.failed > 0 ? 2 : 0);
+          exitCode =
+            interruptedExitCode() ??
+            (result.failed > 0 || result.incomplete > 0 ? 2 : 0);
           return { ...result };
         } catch (error) {
           exitCode =
@@ -2230,9 +2238,6 @@ async function runSkill(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<number> {
-  if (inputs.length > MAX_SKILL_INPUT_COUNT) {
-    throw new CodexSecurityError("Skill inputs exceed the 64-item limit.");
-  }
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
     Object.keys(overrides).some(
@@ -2247,16 +2252,12 @@ async function runSkill(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
   const directory = dependencies.currentDirectory();
-  let totalBytes = 0;
   const contents: string[] = [];
   for (const input of inputs) {
     if (input.trim().length === 0) {
       throw new CodexSecurityError(
         "Finding or issue inputs must not be empty.",
       );
-    }
-    if (Buffer.byteLength(input, "utf8") > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     let contentsOrLiteral = input;
     const windowsNamespace =
@@ -2299,9 +2300,6 @@ async function runSkill(
             "Finding and issue inputs must be files or literal text.",
           );
         }
-        if (metadata.size > MAX_SKILL_INPUT_BYTES) {
-          throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
-        }
         try {
           contentsOrLiteral = await readFile(path, "utf8");
         } catch {
@@ -2315,10 +2313,6 @@ async function runSkill(
           );
         }
       }
-    }
-    totalBytes += Buffer.byteLength(contentsOrLiteral, "utf8");
-    if (totalBytes > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     contents.push(contentsOrLiteral);
   }
@@ -2361,33 +2355,23 @@ async function runSkill(
 
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
-  onLimitExceeded?: () => void,
 ): Promise<{ message?: string; error?: string; malformed: boolean }> {
   let message: string | undefined;
   let error: string | undefined;
   let malformed = false;
-  let exceeded = false;
-  const markExceeded = (): void => {
-    if (exceeded) return;
-    exceeded = true;
-    onLimitExceeded?.();
-  };
 
-  const readLine = (bytes: Buffer): void => {
-    const content =
-      bytes.at(-1) === 0x0d ? bytes.subarray(0, bytes.length - 1) : bytes;
-    const line = content.toString("utf8");
-    if (line.trim().length === 0) return;
+  for await (const line of createInterface({ input: Readable.from(stream) })) {
+    if (line.trim().length === 0) continue;
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
       malformed = true;
-      return;
+      continue;
     }
     if (typeof event !== "object" || event === null) {
       malformed = true;
-      return;
+      continue;
     }
     const value = event as Record<string, unknown>;
     if (value["type"] === "item.completed") {
@@ -2400,11 +2384,7 @@ export async function readSkillCommandOutput(
         "text" in item &&
         typeof item.text === "string"
       ) {
-        if (Buffer.byteLength(item.text, "utf8") > MAX_SKILL_RESPONSE_BYTES) {
-          markExceeded();
-        } else {
-          message = item.text;
-        }
+        message = item.text;
       }
     } else if (value["type"] === "turn.failed") {
       const detail = value["error"];
@@ -2414,63 +2394,15 @@ export async function readSkillCommandOutput(
         "message" in detail &&
         typeof detail.message === "string"
       ) {
-        if (
-          Buffer.byteLength(detail.message, "utf8") > MAX_SKILL_RESPONSE_BYTES
-        ) {
-          markExceeded();
-        } else {
-          error = detail.message;
-        }
+        error = detail.message;
       }
     } else if (
       value["type"] === "error" &&
       typeof value["message"] === "string"
     ) {
-      if (
-        Buffer.byteLength(value["message"], "utf8") > MAX_SKILL_RESPONSE_BYTES
-      ) {
-        markExceeded();
-      } else {
-        error = value["message"];
-      }
-    }
-  };
-
-  const pending = Buffer.alloc(MAX_SKILL_EVENT_BYTES);
-  let pendingBytes = 0;
-  let discardingOversizedLine = false;
-  for await (const rawChunk of stream) {
-    const chunk = Buffer.isBuffer(rawChunk)
-      ? rawChunk
-      : Buffer.from(rawChunk, "utf8");
-    let start = 0;
-    while (start < chunk.length) {
-      const newline = chunk.indexOf(0x0a, start);
-      const end = newline === -1 ? chunk.length : newline;
-      const segment = chunk.subarray(start, end);
-      if (!discardingOversizedLine) {
-        if (pendingBytes + segment.length > MAX_SKILL_EVENT_BYTES) {
-          markExceeded();
-          discardingOversizedLine = true;
-          pendingBytes = 0;
-        } else if (segment.length > 0) {
-          segment.copy(pending, pendingBytes);
-          pendingBytes += segment.length;
-        }
-      }
-      if (newline === -1) break;
-      if (!discardingOversizedLine) {
-        readLine(pending.subarray(0, pendingBytes));
-      }
-      pendingBytes = 0;
-      discardingOversizedLine = false;
-      start = newline + 1;
+      error = value["message"];
     }
   }
-  if (!discardingOversizedLine && pendingBytes > 0) {
-    readLine(pending.subarray(0, pendingBytes));
-  }
-  if (exceeded) throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
@@ -2717,6 +2649,11 @@ async function runScan(
   try {
     const repository = arguments_.repository ?? dependencies.currentDirectory();
     const target = targetFromArguments(arguments_);
+    const prompts = await readPromptFiles(
+      dependencies.currentDirectory(),
+      arguments_.scanPromptFile,
+      arguments_.postScanPromptFile,
+    );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
@@ -2868,6 +2805,7 @@ async function runScan(
       auth,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
+      ...prompts,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
@@ -3572,15 +3510,8 @@ export function parseCodexOverrides(
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE");
     }
-    if (
-      Buffer.byteLength(key, "utf8") > MAX_CODEX_OVERRIDE_KEY_LENGTH ||
-      Buffer.byteLength(literal, "utf8") > MAX_CODEX_OVERRIDE_VALUE_LENGTH
-    ) {
-      throw new CodexSecurityError("--codex key or value exceeds the limit");
-    }
     const parts = key.split(".");
     if (
-      parts.length > MAX_CODEX_OVERRIDE_DEPTH ||
       parts.some(
         (part) =>
           part.length === 0 ||

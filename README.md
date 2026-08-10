@@ -18,6 +18,7 @@ npm install @openai/codex-security
 npx @openai/codex-security login
 npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
+npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
 ```
 
@@ -112,6 +113,11 @@ hardening.
 
 Pass `--knowledge-base PATH` to share security documents with every repository;
 repeat the option for multiple files or directories.
+
+Use `--scan-prompt-file PATH` to add shared scan instructions, and add a `prompt`
+CSV column for repository-specific instructions. Use
+`--post-scan-prompt-file PATH` to run a follow-up after each scan, including
+incomplete or failed scans.
 
 For complete command help, runtime defaults, native multi-agent worker limits,
 environment variables, deep-scan configuration, and SDK options, see the

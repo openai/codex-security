@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants, existsSync, type Stats } from "node:fs";
 import {
   chmod,
@@ -57,10 +57,6 @@ const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRY_SIZE = 128 * 1024 * 1024;
 const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
-const MAX_PLUGIN_MANIFEST_SIZE = 1024 * 1024;
-const MAX_PLUGIN_COPY_ENTRIES = 4_096;
-const MAX_PLUGIN_COPY_FILE_SIZE = 128 * 1024 * 1024;
-const MAX_PLUGIN_COPY_SIZE = 512 * 1024 * 1024;
 const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
@@ -371,6 +367,12 @@ class RepairableWindowsCredentialAclError extends Error {
   }
 }
 
+class RepairableWindowsCredentialOwnerError extends Error {
+  public constructor(cause: UntrustedWindowsCredentialOwnerError) {
+    super(cause.message, { cause });
+  }
+}
+
 /** Inspect a Windows DACL without translating locale-specific account names. */
 export function inspectWindowsCredentialAcl(
   descriptor: string,
@@ -573,29 +575,38 @@ function windowsAceAllowsAncestorReplacement(
 export async function verifyStableWindowsCredentialDescendants(
   path: string,
   inspectDescriptors: () => Promise<number>,
+  options: { inspectEmpty?: boolean } = {},
 ): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let descendants = 0;
     const pending = [path];
-    while (pending.length !== 0) {
-      const current = pending.pop()!;
-      const directory = await opendir(current);
-      for await (const entry of directory) {
-        const child = join(current, entry.name);
-        const metadata = await lstat(child);
-        if (metadata.isSymbolicLink()) {
-          throw new Error(
-            "Windows credential home contains a symbolic link or junction",
-          );
+    try {
+      while (pending.length !== 0) {
+        const current = pending.pop()!;
+        const directory = await opendir(current);
+        for await (const entry of directory) {
+          const child = join(current, entry.name);
+          const metadata = await lstat(child);
+          if (metadata.isSymbolicLink()) {
+            throw new Error(
+              "Windows credential home contains a symbolic link or junction",
+            );
+          }
+          if (!metadata.isDirectory() && !metadata.isFile()) {
+            throw new Error("Windows credential home contains an unsafe entry");
+          }
+          descendants += 1;
+          if (metadata.isDirectory()) pending.push(child);
         }
-        if (!metadata.isDirectory() && !metadata.isFile()) {
-          throw new Error("Windows credential home contains an unsafe entry");
-        }
-        descendants += 1;
-        if (metadata.isDirectory()) pending.push(child);
       }
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException;
+      if (failure.code === "ENOENT" && failure.path !== path) {
+        continue;
+      }
+      throw error;
     }
-    if (descendants === 0) return;
+    if (descendants === 0 && options.inspectEmpty !== true) return;
 
     if ((await inspectDescriptors()) === descendants) return;
   }
@@ -662,6 +673,106 @@ export async function streamWindowsCredentialAclDescriptors(
   return descriptors;
 }
 
+export async function inspectWindowsCredentialAclSnapshot(
+  path: string,
+  currentUserSid: string,
+  options: {
+    command: string;
+    args: readonly string[];
+    environment?: NodeJS.ProcessEnv;
+    resolvedAliases?: Readonly<Record<string, string>>;
+    resolveDescriptorAliases?: (descriptor: string) => Promise<void>;
+  },
+): Promise<{
+  home: WindowsCredentialAcl;
+  descendantsArePrivate: boolean;
+}> {
+  let ancestors = 0;
+  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+    ancestors += 1;
+    if (ancestor === dirname(ancestor)) break;
+  }
+
+  let home: WindowsCredentialAcl | undefined;
+  let descendantsArePrivate = true;
+  await verifyStableWindowsCredentialDescendants(
+    path,
+    async () => {
+      home = undefined;
+      descendantsArePrivate = true;
+      let inspected = 0;
+      const descriptors = await streamWindowsCredentialAclDescriptors(
+        options.command,
+        options.args,
+        async (descriptor) => {
+          const index = inspected;
+          inspected += 1;
+          await options.resolveDescriptorAliases?.(descriptor);
+
+          if (index < ancestors) {
+            const ancestor = inspectWindowsCredentialAcl(
+              descriptor,
+              currentUserSid,
+              {
+                resolvedAliases: options.resolvedAliases,
+                scope: "ancestor",
+              },
+            );
+            if (ancestor.untrustedPrincipals.length !== 0) {
+              throw new Error(
+                "Windows credential-home ancestor allows another identity to replace the directory",
+              );
+            }
+            return;
+          }
+
+          if (index === ancestors) {
+            try {
+              home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
+                resolvedAliases: options.resolvedAliases,
+              });
+            } catch (error) {
+              if (error instanceof UntrustedWindowsCredentialOwnerError) {
+                throw new RepairableWindowsCredentialOwnerError(error);
+              }
+              throw new RepairableWindowsCredentialAclError(error);
+            }
+            return;
+          }
+
+          const descendant = inspectWindowsCredentialAcl(
+            descriptor,
+            currentUserSid,
+            {
+              resolvedAliases: options.resolvedAliases,
+              scope: "file",
+            },
+          );
+          if (
+            !descendant.grantsCurrentUserAccess ||
+            descendant.untrustedPrincipals.length !== 0
+          ) {
+            descendantsArePrivate = false;
+          }
+        },
+        { environment: options.environment },
+      );
+      if (descriptors <= ancestors) {
+        throw new Error(
+          "Windows credential-home ancestry could not be verified",
+        );
+      }
+      return descriptors - ancestors - 1;
+    },
+    { inspectEmpty: true },
+  );
+
+  if (home === undefined) {
+    throw new Error("Windows credential ACL could not be verified");
+  }
+  return { home, descendantsArePrivate };
+}
+
 async function secureWindowsCredentialHome(path: string): Promise<void> {
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
@@ -707,7 +818,10 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   // arbitrary .NET constructors, static methods, and SID translation do not.
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
     "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Security\\Get-Acl | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
   ].join("; ");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
@@ -762,21 +876,17 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       remaining = rest;
     }
   };
+  let descendantsArePrivate = true;
   const readAcl = async (): Promise<WindowsCredentialAcl> => {
-    const descriptor = await execFile(
-      powershell,
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-      processOptions,
-    );
-    try {
-      await resolveDescriptorAliases(descriptor.stdout);
-      return inspectWindowsCredentialAcl(descriptor.stdout, sid, {
-        resolvedAliases,
-      });
-    } catch (error) {
-      if (error instanceof UntrustedWindowsCredentialOwnerError) throw error;
-      throw new RepairableWindowsCredentialAclError(error);
-    }
+    const snapshot = await inspectWindowsCredentialAclSnapshot(path, sid, {
+      command: powershell,
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      environment: processOptions.env,
+      resolvedAliases,
+      resolveDescriptorAliases,
+    });
+    descendantsArePrivate = snapshot.descendantsArePrivate;
+    return snapshot.home;
   };
 
   const icacls = join(systemDirectory, "icacls.exe");
@@ -794,81 +904,12 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       processOptions,
     );
   };
-  const ancestorScript = [
-    "$ErrorActionPreference = 'Stop'",
-    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
-  ].join("; ");
-  const ancestorPaths: string[] = [];
-  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-    ancestorPaths.push(ancestor);
-    if (ancestor === dirname(ancestor)) break;
-  }
-  const ancestry = await execFile(
-    powershell,
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ancestorScript],
-    processOptions,
-  );
-  const ancestorDescriptors = ancestry.stdout
-    .split(/\r?\n/u)
-    .filter((descriptor) => descriptor !== "");
-  if (ancestorDescriptors.length !== ancestorPaths.length) {
-    throw new Error("Windows credential-home ancestry could not be verified");
-  }
-  for (const descriptor of ancestorDescriptors) {
-    await resolveDescriptorAliases(descriptor);
-    const ancestor = inspectWindowsCredentialAcl(descriptor, sid, {
-      resolvedAliases,
-      scope: "ancestor",
-    });
-    if (ancestor.untrustedPrincipals.length === 0) continue;
-    throw new Error(
-      "Windows credential-home ancestor allows another identity to replace the directory",
-    );
-  }
-
-  const descendantsArePrivate = async (): Promise<boolean> => {
-    const descendantScript = [
-      "$ErrorActionPreference = 'Stop'",
-      "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Security\\Get-Acl | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-    ].join("; ");
-    let privateDescendants = true;
-    await verifyStableWindowsCredentialDescendants(path, async () => {
-      privateDescendants = true;
-      return streamWindowsCredentialAclDescriptors(
-        powershell,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          descendantScript,
-        ],
-        async (descriptor) => {
-          await resolveDescriptorAliases(descriptor);
-          const descendant = inspectWindowsCredentialAcl(descriptor, sid, {
-            resolvedAliases,
-            scope: "file",
-          });
-          if (
-            !descendant.grantsCurrentUserAccess ||
-            descendant.untrustedPrincipals.length !== 0
-          ) {
-            privateDescendants = false;
-          }
-        },
-        { environment: processOptions.env },
-      );
-    });
-    return privateDescendants;
-  };
-
   let existing: WindowsCredentialAcl | undefined;
   for (let attempt = 0; existing === undefined && attempt < 3; attempt += 1) {
     try {
       existing = await readAcl();
     } catch (error) {
-      if (error instanceof UntrustedWindowsCredentialOwnerError) {
+      if (error instanceof RepairableWindowsCredentialOwnerError) {
         await execFile(icacls, [path, "/setowner", `*${sid}`], processOptions);
       } else if (error instanceof RepairableWindowsCredentialAclError) {
         await installTrustedAcl();
@@ -939,13 +980,14 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   if (verified.untrustedPrincipals.length !== 0) {
     throw new Error("Windows credential ACL grants access to another identity");
   }
-  if (!(await descendantsArePrivate())) {
+  if (!descendantsArePrivate) {
     await execFile(
       icacls,
       [join(path, "*"), "/reset", "/t", "/q"],
       processOptions,
     );
-    if (!(await descendantsArePrivate())) {
+    await readAcl();
+    if (!descendantsArePrivate) {
       throw new Error("Windows credential descendants remain accessible");
     }
   }
@@ -1257,7 +1299,7 @@ export async function runWorkbench(
           ),
         ),
         encoding: "utf8",
-        maxBuffer: 4 * 1024 * 1024,
+        maxBuffer: Infinity,
         windowsHide: true,
         signal: options.signal,
       },
@@ -1933,137 +1975,6 @@ export async function createMarketplace(
   return marketplace;
 }
 
-async function pluginProjectionFingerprint(
-  root: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  throwIfSignalAborted(signal);
-  const canonical = await realpath(root);
-  const contractPath = join(
-    canonical,
-    ".internal",
-    "external-promotion",
-    "external-projection-contract.json",
-  );
-  let paths: string[];
-
-  if (
-    canonical === (await bundledPluginRoot()) &&
-    (await isRegularFile(contractPath))
-  ) {
-    let contract: unknown;
-    try {
-      contract = JSON.parse(await readFile(contractPath, "utf8"));
-    } catch (error) {
-      throw new PluginBootstrapError(
-        `Invalid plugin projection contract: ${contractPath}`,
-        { cause: error },
-      );
-    }
-    const shipped = isRecord(contract) ? contract["shippedExact"] : undefined;
-    if (
-      !Array.isArray(shipped) ||
-      !shipped.every((path) => typeof path === "string")
-    ) {
-      throw new PluginBootstrapError(
-        "Plugin projection contract must contain shippedExact paths.",
-      );
-    }
-    paths = [
-      ...new Set(
-        [".codex-plugin/plugin.json", ...shipped]
-          .filter((path) => !path.startsWith("sdk/"))
-          .map((path) => safeArchivePath(path)),
-      ),
-    ];
-  } else {
-    paths = [];
-    const pending = [canonical];
-    let entries = 1;
-    while (pending.length > 0) {
-      throwIfSignalAborted(signal);
-      const path = pending.pop()!;
-      const metadata = await lstat(path);
-      if (metadata.isSymbolicLink()) {
-        throw new PluginBootstrapError(
-          `Plugin contains an unsafe source path: ${path}`,
-        );
-      }
-      if (metadata.isDirectory()) {
-        for await (const entry of pluginDirectoryEntries(path, signal)) {
-          const child = join(path, entry);
-          if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
-            throw new PluginBootstrapError(
-              `Plugin source exceeds the copy entry limit: ${child}`,
-            );
-          }
-          pending.push(child);
-        }
-      } else if (metadata.isFile()) {
-        paths.push(relative(canonical, path).split(sep).join("/"));
-      } else {
-        throw new PluginBootstrapError(
-          `Plugin contains a non-regular file: ${path}`,
-        );
-      }
-    }
-  }
-
-  paths.sort();
-  const fingerprint = createHash("sha256");
-  let totalSize = 0;
-  for (const relativePath of paths) {
-    throwIfSignalAborted(signal);
-    const path = join(canonical, ...relativePath.split("/"));
-    const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new PluginBootstrapError(
-        `Plugin projection contains an unsafe source path: ${path}`,
-      );
-    }
-    if (metadata.size > MAX_PLUGIN_COPY_FILE_SIZE) {
-      throw new PluginBootstrapError(
-        `Plugin source exceeds the per-file safety limit: ${path}`,
-      );
-    }
-    totalSize += metadata.size;
-    if (totalSize > MAX_PLUGIN_COPY_SIZE) {
-      throw new PluginBootstrapError(
-        "Plugin source exceeds the copy safety limit.",
-      );
-    }
-    const handle = await open(
-      path,
-      constants.O_RDONLY |
-        (process.platform === "win32"
-          ? 0
-          : constants.O_NOFOLLOW | constants.O_NONBLOCK),
-    );
-    try {
-      if (!samePluginFile(metadata, await handle.stat())) {
-        throw new PluginBootstrapError(
-          `Plugin source changed before its integrity could be verified: ${path}`,
-        );
-      }
-      const contents = await readExactly(handle, metadata.size, 0, signal);
-      if (!samePluginFile(metadata, await handle.stat())) {
-        throw new PluginBootstrapError(
-          `Plugin source changed while its integrity was being verified: ${path}`,
-        );
-      }
-      fingerprint.update(relativePath);
-      fingerprint.update("\0");
-      fingerprint.update(String(metadata.size));
-      fingerprint.update("\0");
-      fingerprint.update(contents);
-      fingerprint.update("\0");
-    } finally {
-      await handle.close();
-    }
-  }
-  return fingerprint.digest("hex");
-}
-
 async function codexSecurityPluginRegistration(
   codexHome: string,
 ): Promise<{ marketplace: boolean; plugin: boolean }> {
@@ -2200,23 +2111,14 @@ export async function bootstrapPlugin(
   if (installedRoot !== null) {
     const installed = await pluginMetadata(installedRoot);
     if (installed.name === name && installed.version === version) {
-      const [selectedFingerprint, marketplaceFingerprint] = await Promise.all([
-        pluginProjectionFingerprint(root, options.signal),
-        pluginProjectionFingerprint(
-          join(existingMarketplace, "plugins", PLUGIN_NAME),
-          options.signal,
-        ),
-      ]);
-      if (selectedFingerprint === marketplaceFingerprint) {
-        return {
-          pluginRoot: root,
-          marketplaceRoot: existingMarketplace,
-          installedRoot,
-          marketplaceName: MARKETPLACE_NAME,
-          name,
-          version,
-        };
-      }
+      return {
+        pluginRoot: root,
+        marketplaceRoot: existingMarketplace,
+        installedRoot,
+        marketplaceName: MARKETPLACE_NAME,
+        name,
+        version,
+      };
     }
     upgradeExistingPlugin = true;
   }
@@ -2290,36 +2192,11 @@ export async function pluginMetadata(
   const manifestPath = join(root, ".codex-plugin", "plugin.json");
   let manifest: unknown;
   try {
-    const expected = await lstat(manifestPath);
-    if (
-      !expected.isFile() ||
-      expected.isSymbolicLink() ||
-      expected.size > MAX_PLUGIN_MANIFEST_SIZE
-    ) {
-      throw new Error("plugin manifest is not a bounded regular file");
+    const metadata = await lstat(manifestPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error("plugin manifest is not a regular file");
     }
-    const input = await open(
-      manifestPath,
-      constants.O_RDONLY |
-        (process.platform === "win32"
-          ? 0
-          : constants.O_NOFOLLOW | constants.O_NONBLOCK),
-    );
-    try {
-      const opened = await input.stat();
-      if (!samePluginFile(expected, opened)) {
-        throw new Error("plugin manifest changed before reading");
-      }
-      const bytes = await readExactly(input, expected.size, 0);
-      if (!samePluginFile(expected, await input.stat())) {
-        throw new Error("plugin manifest changed while reading");
-      }
-      manifest = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-      );
-    } finally {
-      await input.close();
-    }
+    manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
     throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
       cause: error,
@@ -2546,8 +2423,6 @@ async function copyPluginTree(
     { source, destination },
   ];
   const directories = new Map<string, Stats>();
-  let entries = 1;
-  let size = 0;
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   try {
     while (pending.length > 0) {
@@ -2566,11 +2441,6 @@ async function copyPluginTree(
           signal,
         )) {
           const childSource = join(current.source, entry);
-          if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
-            throw new PluginBootstrapError(
-              `Plugin source exceeds the copy entry limit: ${childSource}`,
-            );
-          }
           pending.push({
             source: childSource,
             destination: join(current.destination, entry),
@@ -2589,17 +2459,6 @@ async function copyPluginTree(
       if (!metadata.isFile()) {
         throw new PluginBootstrapError(
           `Plugin contains a non-regular file: ${current.source}`,
-        );
-      }
-      if (metadata.size > MAX_PLUGIN_COPY_FILE_SIZE) {
-        throw new PluginBootstrapError(
-          `Plugin source exceeds the per-file safety limit: ${current.source}`,
-        );
-      }
-      size += metadata.size;
-      if (size > MAX_PLUGIN_COPY_SIZE) {
-        throw new PluginBootstrapError(
-          "Plugin source exceeds the copy safety limit.",
         );
       }
       const input = await open(
