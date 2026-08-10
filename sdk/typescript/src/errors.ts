@@ -9,7 +9,7 @@ export function redactedErrorMessage(error: unknown): string {
       "$1[redacted]",
     )
     .replaceAll(
-      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/giu,
+      /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/giu,
       "[redacted]",
     );
   return redactQuotedCredentialValues(withoutPrivateKeys)
