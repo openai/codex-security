@@ -794,7 +794,10 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const pricing = MODEL_PRICING_NANODOLLARS[model];
+  const pricingModel = model.startsWith("openai.")
+    ? model.slice("openai.".length)
+    : model;
+  const pricing = MODEL_PRICING_NANODOLLARS[pricingModel];
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;

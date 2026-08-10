@@ -1,6 +1,6 @@
 # Scan Artifacts And Ledger
 
-Use this reference whenever the scan needs auditable candidate coverage or a scoped file-review worklist.
+Use this reference only for diff scans that need auditable candidate coverage or a changed-file review worklist. Standard and Deep scans do not use this reference.
 
 ## Artifact Requirements
 
@@ -11,9 +11,9 @@ Use this reference whenever the scan needs auditable candidate coverage or a sco
 
 - First capture user-provided scope hints such as CVE/GHSA/advisory identifiers, package versions, named vulnerability families, or release/security-test references.
 - When the user request or scan context includes CVE, GHSA, advisory, issue, release, package-version, or explicit vulnerability-family identifiers, run an advisory seed pass before deep frontier scanning and save it to the advisory seed research path from `../../../references/scan-artifacts.md`.
-- Use authoritative advisory text, project security notes, release notes, fix commits, pull requests, issue trackers, and security tests when network access or local history is available. Record the sources searched, candidate files/functions/classes/hunks, expected vulnerable behavior, and any failed lookup attempts.
+- Use relevant security guidance, user-supplied advisory text, and checked-out security tests within the authorized source state. Access external sources only when the user explicitly authorizes it; do not inspect unrelated Git history or later fixes. Record the sources searched, candidate files/functions/classes/hunks, expected vulnerable behavior, and any failed lookup attempts.
 - Treat those candidates as seed rows only: validate the vulnerable behavior against the checked-out repository before reporting. Do not let the seed lane replace the scan's primary scope.
-- When CVE/advisory context has a generic or unhelpful category, prioritize advisory, fix-commit, release-note, and security-test lookup before broad sink hotspot scanning. If external lookup is unavailable or inconclusive, run a local regression-seed pass over project-specific protocol, parser, validator, and utility names plus the CVE/advisory terms; do not assume obvious REST/upload/XML hotspots are the intended security regression.
+- When advisory context has a generic or unhelpful category, first inspect supplied advisory text and in-scope security tests. If that evidence is inconclusive, run a local regression-seed pass over project-specific protocol, parser, validator, and utility names plus the advisory terms; do not assume obvious hotspots are the intended security regression.
 - When the seed pass or local search opens a candidate file, class, package, or hunk, create an exact seed-target row for that area before opportunistic same-family scanning. Run a short seed-first triage over that file/package and its immediate shared helper or caller chain, then close the row as `reportable`, `suppressed`, `not_applicable`, or `deferred`. A more obvious neighboring issue can be reported too, but it does not replace the seed-target row.
 - Keep every user/advisory/tag-seeded boundary package or class family open until that exact area is closed as `reportable`, `suppressed`, `not_applicable`, or `deferred`. A broader same-family finding in a neighboring parser, auth flow, deserializer, or template engine does not implicitly close the seeded row.
 - In advisory-led scans, treat the advisory, fix hunk, release note, or security test as evidence for the intended root cause, not as an exclusivity filter and not as a bare finding. Keep the exact seed row open until checked-out repository evidence independently supports or disproves the same source, broken control, and impact tuple.
@@ -21,7 +21,7 @@ Use this reference whenever the scan needs auditable candidate coverage or a sco
 ## Subagent Requirements
 
 - When a scan uses subagent-dispatch phases and subagents are available in the current tool set, use subagents for those phases.
-- For exhaustive repository-wide, scoped-path, and diff scans, explicit invocation of the applicable top-level exhaustive scan workflow is the required user authorization for these subagent-dispatch phases. For other scan modes, use subagents only when the applicable top-level workflow or the user has authorized them.
+- Explicit invocation of the top-level diff scan authorizes the subagent-dispatch phases described by that workflow.
 - For JSONL worklist phases, spawn no more workers than the runtime's usable slots, wait for their concrete worker ids, validate each result, and then refill available slots. If a spawn is rejected, have the parent complete the unstarted work without narrowing coverage. On native v2, spawn self-contained workers with `fork_turns=none`; use `interrupt_agent` only to stop a still-running worker before a retry.
 - Immediately after each delegated file-review, validation, or attack-path dispatch, emit `CODEX_SECURITY_WORKER_STATUS {"phase":"file_review","planned":6,"started":3}` with the actual phase and worker counts, including when no worker starts. Do not include worker ids, paths, prompts, errors, or other fields.
 - File-review-subagent ownership: one file-review subagent owns one `deep_review_input.jsonl` row or one very small tightly coupled shard, max 5 files, and returns full-file receipts plus pre-dedupe finding objects for that assignment.
@@ -55,11 +55,10 @@ The parent agent must reconcile validation and attack-path subagent outputs befo
 
 ## Scoped Deep Review
 
-- Use `deep_review_input.jsonl` as the canonical scoped deep-review worklist for every diff-scoped, repository-wide, and scoped-path scan.
+- Use `deep_review_input.jsonl` as the canonical changed-file review worklist for diff scans.
 - For diff-scoped scans, generate `rank_input.jsonl` deterministically from changed source-like files with `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode revisions --head <head> --out <discovery_dir>/rank_input.jsonl` for PR, commit, and branch diffs, or `<python_command> <plugin_dir>/scripts/generate_rank_input.py make-diff-rank-input --repo <repo_root> --base <base> --mode local-patch --out <discovery_dir>/rank_input.jsonl` for a local patch, then copy every row into `deep_review_input.jsonl` with `<python_command> <plugin_dir>/scripts/generate_rank_input.py copy-deep-review-input --rank-input <discovery_dir>/rank_input.jsonl --out <discovery_dir>/deep_review_input.jsonl`.
 - Diff-scoped scans do not rank or drop changed files before deep review. Every row in diff `rank_input.jsonl` must be copied into `deep_review_input.jsonl` and receive a full-file review receipt.
 - Add directly supporting files required to understand the changed security behavior only when repository evidence shows they are needed; record the add-back reason in the work ledger or per-file result.
-- For repository-wide and scoped-path scans, `deep_review_input.jsonl` is selected from the ranked in-scope inventory.
 - Deep-review every file selected into `deep_review_input.jsonl`.
   - Use `<discovery_dir>/work_ledger.jsonl` as the append-only record of claims and completions, and reconcile it against `deep_review_input.jsonl` so rows are not skipped or double-counted.
   - Use subagents when available under the resolved scan authorization.

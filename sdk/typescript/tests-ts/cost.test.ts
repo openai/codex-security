@@ -163,6 +163,24 @@ describe("scan cost", () => {
     expect(estimateScanCost("gpt-5.6-luna", usage)?.estimatedUsd).toBe(1.4);
   });
 
+  test("uses canonical OpenAI pricing for Amazon Bedrock model identifiers", () => {
+    const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
+
+    for (const [model, expectedUsd] of [
+      ["openai.gpt-5.6", 35],
+      ["openai.gpt-5.6-sol", 35],
+      ["openai.gpt-5.6-terra", 14],
+      ["openai.gpt-5.6-luna", 1.4],
+    ] as const) {
+      expect(estimateScanCost(model, usage)).toMatchObject({
+        model,
+        estimatedUsd: expectedUsd,
+      });
+    }
+
+    expect(estimateScanCost("openai.unknown-model", usage)).toBeNull();
+  });
+
   test("uses current Terra and Luna input, cache, and output rates", () => {
     for (const [model, input, cached, write, output] of [
       ["gpt-5.6-terra", 2, 0.2, 2.5, 12],

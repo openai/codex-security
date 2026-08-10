@@ -128,6 +128,10 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
+
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
 On Windows, set the API key in PowerShell:
@@ -196,6 +200,7 @@ npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
 npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @openai/codex-security scan /path/to/repository --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
@@ -208,6 +213,7 @@ npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
@@ -429,6 +435,12 @@ Use `--provider openrouter` to send inference through OpenRouter. Set
 Use `--provider fireworks` to send inference through Fireworks AI. Set
 `FIREWORKS_API_KEY` and specify a supported model with `--model`.
 
+Use `--provider amazon-bedrock` to send inference through Amazon Bedrock. Set
+`AWS_REGION` and authenticate with `AWS_BEARER_TOKEN_BEDROCK`, standard AWS
+access keys, an AWS profile, web identity, container credentials, or the
+default AWS credential chain. Specify a supported Bedrock model with `--model`;
+OpenAI Bedrock models such as `openai.gpt-5.6-luna` support `--max-cost`.
+
 Scan progress identifies the requested paths and reports actual ranking,
 file-review, validation, and attack-path phases as they become available.
 Interactive terminals show a full-screen view; CI, redirected output, and
@@ -468,18 +480,21 @@ configuration. The selected repositories are saved to
 
 To use an existing repository list or run in CI, pass a CSV with required `id`,
 `repository`, and `revision` columns. Revisions must be full commit hashes;
-optional `scope` and `mode` columns narrow individual scans:
+optional `scope`, `mode`, and `prompt` columns customize individual scans:
 
 ```csv
-id,repository,revision,scope,mode
-service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef01234567,src,standard
+id,repository,revision,scope,mode,prompt
+service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef01234567,src,standard,Focus on authentication and authorization.
 ```
+
+Use `--scan-prompt-file PATH` to add instructions to a scan or every bulk scan.
+Bulk scans append each repository's CSV `prompt` after the shared instructions.
+Use `--post-scan-prompt-file PATH` to run a follow-up in the same authenticated
+session after each scan, including incomplete or failed scans. Canceled scans
+and scans stopped at their configured cost limit do not start another turn.
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.
-The output filesystem must support hard links so campaign ownership can be
-published atomically; use a local directory instead of FAT, exFAT, or a network
-filesystem without hard-link support.
 
 ### Scan history and reruns
 
