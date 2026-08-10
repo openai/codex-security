@@ -3,11 +3,13 @@ import { formatUsd, type ScanCost } from "./cost.js";
 /** Returns an error message with credential-shaped substrings redacted. */
 export function redactedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return redactQuotedCredentialValues(message)
-    .replaceAll(
-      /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gu,
-      "[redacted]",
-    )
+  const sensitiveRanges: Array<[number, number]> = [];
+  for (const match of message.matchAll(
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gu,
+  )) {
+    sensitiveRanges.push([match.index, match.index + match[0].length]);
+  }
+  return redactQuotedCredentialValues(message, sensitiveRanges)
     .replaceAll(
       /(\b[A-Za-z0-9_-]{0,64}(?:authorization|auth)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9._~-]{0,63})((?:\s|%20|\+)+)(?!\[redacted\]|(?!key\s*=)[A-Za-z_][A-Za-z0-9_-]{0,64}\s*[:=]\s*(?=[^=\s"',;}&\\\]]))[^\s"',;}&\\\]]+/giu,
       "$1$2$3[redacted]",
@@ -30,11 +32,12 @@ export function redactedErrorMessage(error: unknown): string {
     );
 }
 
-function redactQuotedCredentialValues(message: string): string {
+function redactQuotedCredentialValues(
+  message: string,
+  ranges: Array<[number, number]>,
+): string {
   const assignment =
     /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\*["'])?\s*[:=]\s*)(\\*)(["'])/giu;
-  let output = "";
-  let consumed = 0;
   for (
     let match = assignment.exec(message);
     match !== null;
@@ -52,19 +55,36 @@ function redactQuotedCredentialValues(message: string): string {
         preceding -= 1;
       }
       if (delimiter - preceding === openingSlashes) {
-        output += `${message.slice(consumed, assignment.lastIndex)}[redacted]${message.slice(preceding, delimiter + 1)}`;
-        consumed = delimiter + 1;
-        assignment.lastIndex = consumed;
+        ranges.push([assignment.lastIndex, preceding]);
+        assignment.lastIndex = delimiter + 1;
         closed = true;
         break;
       }
       position = delimiter + 1;
     }
     if (!closed) {
-      output += `${message.slice(consumed, assignment.lastIndex)}[redacted]`;
-      consumed = message.length;
+      ranges.push([assignment.lastIndex, message.length]);
       break;
     }
+  }
+
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of ranges.sort(
+    ([leftStart], [rightStart]) => leftStart - rightStart,
+  )) {
+    const previous = merged.at(-1);
+    if (previous !== undefined && start <= previous[1]) {
+      previous[1] = Math.max(previous[1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
+
+  let output = "";
+  let consumed = 0;
+  for (const [start, end] of merged) {
+    output += `${message.slice(consumed, start)}[redacted]`;
+    consumed = end;
   }
   return output + message.slice(consumed);
 }

@@ -46,14 +46,32 @@ describe("credential redaction", () => {
     }
   });
 
-  test("redacts quoted credentials whose markers overlap a private key", () => {
-    const message = [
-      "-----BEGIN PRIVATE KEY-----",
-      'password="',
-      "-----END PRIVATE KEY-----",
-      'SYNTHETIC_PASSWORD_123"',
-    ].join("\n");
-
-    expect(redactedErrorMessage(message)).toBe("[redacted]");
+  test("redacts quoted credentials and private keys that overlap in either direction", () => {
+    for (const [lines, credential] of [
+      [
+        [
+          "-----BEGIN PRIVATE KEY-----",
+          'password="',
+          "-----END PRIVATE KEY-----",
+          'SYNTHETIC_PASSWORD_123"',
+        ],
+        "SYNTHETIC_PASSWORD_123",
+      ],
+      [
+        [
+          'password="prefix',
+          "-----BEGIN PRIVATE KEY-----",
+          'synthetic-before"',
+          "SYNTHETIC_KEY_MATERIAL_123",
+          "-----END PRIVATE KEY-----",
+        ],
+        "SYNTHETIC_KEY_MATERIAL_123",
+      ],
+    ] as const) {
+      const redacted = redactedErrorMessage(lines.join("\n"));
+      expect(redacted).toContain("[redacted]");
+      expect(redacted).not.toContain(credential);
+      expect(redacted).not.toContain("PRIVATE KEY");
+    }
   });
 });
