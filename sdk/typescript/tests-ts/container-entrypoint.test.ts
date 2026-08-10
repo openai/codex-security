@@ -169,6 +169,7 @@ describe("customer container entrypoint", () => {
   testPosix("accepts CSVs after global and bulk-scan options", async () => {
     for (const arguments_ of [
       ["bulk-scan", "--workers", "2", "/input/repositories.csv"],
+      ["bulk-scan", "bulk-scan", "--output-dir", "/output"],
       [
         "--format",
         "toon",

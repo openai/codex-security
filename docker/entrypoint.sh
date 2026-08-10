@@ -30,7 +30,11 @@ for argument do
             break
             ;;
         bulk-scan)
-            bulk_scan_command=yes
+            if [ "$bulk_scan_command" = yes ]; then
+                bulk_scan_input=$argument
+            else
+                bulk_scan_command=yes
+            fi
             ;;
         --output-dir|--workers|--mode|--model|--effort|--provider|\
             --knowledge-base|--max-attempts|--plugin-path|--python|\
