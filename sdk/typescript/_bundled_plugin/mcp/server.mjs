@@ -9,7 +9,7 @@ const runtimeChunkNames = (await readdir(new URL("./", import.meta.url)))
   .filter((name) => name.startsWith("server.mjs.br.part-"))
   .sort();
 if (!runtimeChunkNames.length) {
-  throw new Error("Missing compressed Codex Security MCP workspace runtime chunks.");
+  throw new Error("Missing compressed Codex Security MCP server runtime chunks.");
 }
 const compressedRuntime = Buffer.concat(
   await Promise.all(runtimeChunkNames.map((name) => readFile(new URL(`./${name}`, import.meta.url))))
