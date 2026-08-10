@@ -490,7 +490,8 @@ service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef0123
 Use `--scan-prompt-file PATH` to add instructions to a scan or every bulk scan.
 Bulk scans append each repository's CSV `prompt` after the shared instructions.
 Use `--post-scan-prompt-file PATH` to run a follow-up in the same authenticated
-session after each completed scan has been validated.
+session after each scan, including incomplete or failed scans. Canceled scans
+and scans stopped at their configured cost limit do not start another turn.
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.

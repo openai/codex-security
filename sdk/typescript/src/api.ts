@@ -393,6 +393,8 @@ export class CodexSecurity {
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
     let preparedTargetWarnings: string[] = [];
+    let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
+      null;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -950,6 +952,10 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       checkOpen();
+      const postScanPrompt = options.postScanPrompt;
+      if (postScanPrompt?.trim()) {
+        runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
+      }
       const { events } = await thread.runStreamed(prompt, {
         signal,
       });
@@ -1044,16 +1050,12 @@ export class CodexSecurity {
           }
         }
       }
-      if (
-        options.postScanPrompt?.trim() &&
-        result.coverage.completeness === "complete"
-      ) {
-        const followUp = await thread.runStreamed(options.postScanPrompt, {
-          signal,
-        });
+      if (runPostScan !== null) {
+        const followUp = runPostScan;
+        runPostScan = null;
         await runScanEvents({
           thread,
-          events: followUp.events,
+          events: (await followUp()).events,
           signal,
           scanDir,
           pluginRoot: runtime.plugin.installedRoot,
@@ -1088,6 +1090,22 @@ export class CodexSecurity {
               : []),
           ]);
         } catch {}
+      }
+      if (runPostScan !== null && !signal.aborted) {
+        try {
+          for await (const event of (await runPostScan()).events) {
+            if (event.type === "turn.failed") {
+              throw new CodexSecurityError(turnFailureMessage(event["error"]));
+            }
+          }
+        } catch {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            "Could not run post-scan instructions.",
+          );
+        }
       }
       if (this.#closed) this.#requireOpen();
       if (signal.aborted && !(failure instanceof ScanInterruptedError)) {

@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -2766,6 +2767,96 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([
+    ["partial coverage", "partial", false],
+    ["unknown coverage", "unknown", false],
+    ["a failed scan", "failed", false],
+    ["a failed scan and follow-up", "failed", true],
+  ] as const)(
+    "runs post-scan instructions after %s",
+    async (_scenario, outcome, followUpFails) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const prompts: string[] = [];
+      const warnings: string[] = [];
+      const scanFails = outcome === "failed";
+
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: "thread-1",
+              async runStreamed(prompt: string) {
+                prompts.push(prompt);
+                if (prompts.length === 1 && !scanFails) {
+                  await copyCompletedScan(root);
+                  const coveragePath = join(scanDir, "coverage.json");
+                  const original = await readFile(coveragePath, "utf8");
+                  const coverage = original.replace(
+                    '"completeness": "complete"',
+                    `"completeness": "${outcome}"`,
+                  );
+                  const manifestPath = join(scanDir, "scan-manifest.json");
+                  await writeFile(coveragePath, coverage);
+                  await writeFile(
+                    manifestPath,
+                    (await readFile(manifestPath, "utf8")).replace(
+                      createHash("sha256").update(original).digest("hex"),
+                      createHash("sha256").update(coverage).digest("hex"),
+                    ),
+                  );
+                  return { events: completedEvents() };
+                }
+                if (prompts.length === 2 && !followUpFails) {
+                  return { events: completedEvents() };
+                }
+                async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                  yield {
+                    type: "turn.failed",
+                    error: {
+                      message:
+                        prompts.length === 1
+                          ? "The scan failed."
+                          : "The post-scan instructions failed.",
+                    },
+                  };
+                }
+                return { events: failedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+
+      const result = client.run(repository, {
+        postScanPrompt: "Record the scan cost.",
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (scanFails) {
+        await expect(result).rejects.toThrow("The scan failed.");
+      } else {
+        expect((await result).coverage.completeness).toBe(outcome);
+      }
+      expect(prompts.at(-1)).toBe("Record the scan cost.");
+      expect(prompts).toHaveLength(2);
+      expect(warnings).toEqual(
+        followUpFails ? ["Could not run post-scan instructions."] : [],
+      );
+      await client.close();
+    },
+  );
+
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -2776,6 +2867,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     const commands: Array<readonly string[]> = [];
     const costs: number[] = [];
+    let turns = 0;
     const cost = {
       model: "gpt-5.6-sol",
       inputTokens: 1_250,
@@ -2813,6 +2905,7 @@ describe("CodexSecurity orchestration", () => {
               _input: string,
               options: { signal: AbortSignal },
             ) {
+              turns += 1;
               async function* events(): AsyncGenerator<ThreadEvent> {
                 yield { type: "thread.started", thread_id: "scan-thread" };
                 await Promise.all([
@@ -2856,6 +2949,7 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, {
           maxCostUsd: 0.005,
+          postScanPrompt: "Record the scan cost.",
           onCost: (cost) => costs.push(cost.estimatedUsd),
           signal: AbortSignal.timeout(5_000),
         }),
@@ -2868,6 +2962,7 @@ describe("CodexSecurity orchestration", () => {
     } finally {
       clearTimeout(keepEventLoopAlive);
     }
+    expect(turns).toBe(1);
     expect(costs.at(-1)).toBe(0.00625);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
