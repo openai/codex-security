@@ -259,6 +259,8 @@ describe("customer container entrypoint", () => {
       for (const arguments_ of [
         ["bulk-scan"],
         ["bulk-scan", "--workers", "8"],
+        ["bulk-scan", "--scan-prompt-file", "prompt.md"],
+        ["bulk-scan", "--post-scan-prompt-file", "post-prompt.md"],
         ["--format", "json", "bulk-scan", "--mode", "deep"],
       ] as const) {
         const result = await runEntrypoint(arguments_);

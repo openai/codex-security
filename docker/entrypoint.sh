@@ -38,6 +38,7 @@ for argument do
         --output-dir|--workers|--mode|--model|--effort|--provider|\
             --knowledge-base|--max-attempts|--plugin-path|--python|\
             --codex|--filter-output|--format|\
+            --scan-prompt-file|--post-scan-prompt-file|\
             --token-limit|--token-offset)
             expects_option_value=yes
             ;;
