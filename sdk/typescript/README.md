@@ -463,9 +463,7 @@ including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit. Cost tracking accepts Codex
-session events up to 1 MiB; an oversized event stops the scan because its
-running cost can no longer be verified safely.
+already in progress can finish above the limit.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -581,11 +579,7 @@ text. Both commands operate on the current directory, use the scan model
 and reasoning defaults, ignore unrelated user configuration and plugins, and
 print the final response without the underlying Codex event stream. Override
 the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
-`--effort high` or `--codex 'model_reasoning_effort="high"'`. Inputs are
-limited to 64 items and 1 MiB total.
-
-Canonical scan documents are limited to 16 MiB for the manifest, 128 MiB for
-findings, and 32 MiB for coverage. Oversized scans are rejected before sealing.
+`--effort high` or `--codex 'model_reasoning_effort="high"'`.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
