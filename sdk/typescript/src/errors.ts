@@ -10,7 +10,7 @@ export function redactedErrorMessage(error: unknown): string {
   >();
   const lineStart = /(?:$|[\r\n]|(\\+)[nr])/uy;
   const lineEnd =
-    /(?:$|[\r\n]|(\\+)[nr]|\\*["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,(?:\s|\\+[nr])*\\*["'])|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
+    /(?:$|[\r\n]|(\\+)[nr]|\\*["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,(?:\s|\\+[nr])*(?:\\*["']|[\[{0-9-]|true\b|false\b|null\b))|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
   for (const match of message.matchAll(
     /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/giu,
   )) {
@@ -26,7 +26,7 @@ export function redactedErrorMessage(error: unknown): string {
           (preceding === "n" || preceding === "r") &&
           message[frame - 1] === "\\"
         ) &&
-        !/[:=]/u.test(
+        !/\b[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|authorization|auth|token|secret|credential|password|passwd)[A-Za-z0-9_-]*\s*[:=]\s*[^\s;]+[ \t]*$/iu.test(
           message.slice(
             message.lastIndexOf("\n", match.index) + 1,
             match.index,
@@ -56,10 +56,12 @@ export function redactedErrorMessage(error: unknown): string {
     const starts = privateKeys.get(label);
     const opening = starts?.at(-1);
     if (opening === undefined) continue;
-    const previous = message[match.index - 1];
+    let frame = match.index - 1;
+    while (message[frame] === " " || message[frame] === "\t") frame -= 1;
+    const previous = message[frame];
     let escapedNewline = 0;
     if (previous === "n" || previous === "r") {
-      while (message[match.index - escapedNewline - 2] === "\\") {
+      while (message[frame - escapedNewline - 1] === "\\") {
         escapedNewline += 1;
       }
     } else if (previous !== "\n" && previous !== "\r") {
@@ -73,6 +75,8 @@ export function redactedErrorMessage(error: unknown): string {
     const closingBoundary = lineEnd.exec(message);
     if (
       closingBoundary === null ||
+      ((closingBoundary[0] === "\n" || closingBoundary[0] === "\r") &&
+        opening.escapedNewline !== 0) ||
       (closingBoundary[1] !== undefined &&
         closingBoundary[1].length !== opening.escapedNewline)
     ) {
@@ -94,10 +98,15 @@ export function redactedErrorMessage(error: unknown): string {
       /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\])[^\s"',;}&\\\]]+/giu,
       (match: string, prefix: string, offset: number, source: string) => {
         if (/(?:authorization|auth)/iu.test(prefix)) {
+          const value = match.slice(prefix.length);
+          const schemeName = value.split(/(?:%20|\+|\s)/u, 1)[0];
           if (
-            /^[A-Za-z][A-Za-z0-9._~-]{0,63}(?:%20|\+)+\[redacted$/iu.test(
-              match.slice(prefix.length),
-            )
+            !/^(?:ApiKey|Basic|Bearer|Custom|Digest|Token)$/iu.test(schemeName!)
+          ) {
+            return `${prefix}[redacted]`;
+          }
+          if (
+            /^[A-Za-z][A-Za-z0-9._~-]{0,63}(?:%20|\+)+\[redacted$/iu.test(value)
           ) {
             return match;
           }
