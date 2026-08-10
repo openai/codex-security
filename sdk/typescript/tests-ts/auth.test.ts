@@ -140,8 +140,52 @@ describe("Codex authentication process boundary", () => {
       process.env,
     );
     expect(result.success).toBe(true);
-    expect(result.stdout).toContain("completed");
+    expect(result.stdout).toContain("authentication output was truncated");
     expect(JSON.stringify(result)).not.toContain(secretFragment);
+  });
+
+  test("does not expose a multiline private key cut by the output boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pem-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "private-key.mjs");
+    await writeFile(
+      script,
+      'process.stdout.write("private_key=-----BEGIN PRIVATE KEY-----\\n" + "SENSITIVE_PRIVATE_KEY_BODY\\n".repeat(4_000) + "-----END PRIVATE KEY-----\\n", () => process.exit(0));\n',
+    );
+
+    const result = await runCodex(
+      { command: process.execPath, prefixArgs: [script] },
+      [],
+      process.env,
+    );
+    expect(result.success).toBe(true);
+    expect(result.stdout).toContain("authentication output was truncated");
+    expect(result.stdout).not.toContain("SENSITIVE_PRIVATE_KEY_BODY");
+    expect(result.stdout).not.toContain("END PRIVATE KEY");
+  });
+
+  test("bounds diagnostics after credential redaction expands their size", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-auth-expansion-"),
+    );
+    temporaryDirectories.push(root);
+    const script = join(root, "redaction.mjs");
+    await writeFile(
+      script,
+      'process.stdout.write("token=x\\n".repeat(6_000), () => process.exit(0));\n',
+    );
+
+    const result = await runCodex(
+      { command: process.execPath, prefixArgs: [script] },
+      [],
+      process.env,
+    );
+    expect(result.success).toBe(true);
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    expect(result.stdout).toContain("[redacted]");
+    expect(result.stdout).not.toContain("token=x");
   });
 
   test("does not terminate a verbose authentication command", async () => {
@@ -208,7 +252,7 @@ process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit
     const script = join(root, "unicode.mjs");
     await writeFile(
       script,
-      'process.stdout.write("discard\\n" + "🔒".repeat(20_000) + "\\n" + "界".repeat(15_000), () => process.exit(0));\n',
+      'process.stdout.write("🔒".repeat(10_000) + "\\n" + "token=x\\n".repeat(3_000), () => process.exit(0));\n',
     );
 
     const result = await runCodex(
@@ -221,7 +265,7 @@ process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit
       64 * 1024,
     );
     expect(result.stdout).not.toContain("�");
-    expect(result.stdout).toEndWith("界");
+    expect(result.stdout).toEndWith("[redacted]\n");
   });
 
   test("captures quoted interactive login metadata and completion", async () => {

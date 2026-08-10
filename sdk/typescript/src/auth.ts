@@ -548,23 +548,18 @@ function capturedAuthenticationOutput(
   truncated: boolean,
   markers?: AuthenticationStatusMarkers,
 ): string {
-  if (!truncated) return redactedErrorMessage(value);
-  const delimiter = /[\r\n]/u.exec(value)?.index;
-  const safeTail =
-    delimiter === undefined
-      ? ""
-      : redactedErrorMessage(value.slice(delimiter + 1));
-  const preserved = [
+  if (!truncated) {
+    return appendUtf8Tail(
+      "",
+      redactedErrorMessage(value),
+      MAX_CODEX_AUTH_OUTPUT_BYTES,
+    );
+  }
+  return [
     ...(markers?.signedOut === true ? ["Not logged in"] : []),
     ...(markers?.chatgpt === true ? ["Logged in using ChatGPT"] : []),
+    AUTH_OUTPUT_TRUNCATED_MESSAGE,
   ].join("\n");
-  const diagnostic = safeTail || AUTH_OUTPUT_TRUNCATED_MESSAGE;
-  if (preserved.length === 0) return diagnostic;
-  return `${preserved}\n${appendUtf8Tail(
-    "",
-    diagnostic,
-    MAX_CODEX_AUTH_OUTPUT_BYTES - Buffer.byteLength(preserved, "utf8") - 1,
-  )}`;
 }
 
 function plainTerminalText(value: string): string {
