@@ -6,7 +6,10 @@ import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 const MAX_CODEX_AUTH_OUTPUT_BYTES = 64 * 1024;
 const INSTRUCTION_TAIL_BYTES = 4 * 1024;
+const AUTH_OUTPUT_TRUNCATED_MESSAGE =
+  "Codex authentication output was truncated.";
 type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
+type AuthenticationStatusMarkers = { signedOut: boolean; chatgpt: boolean };
 
 export interface LoginResult {
   success: boolean;
@@ -36,6 +39,8 @@ export class CodexLoginHandle {
   #forceCompletion: (() => void) | null = null;
   #stdout = "";
   #stderr = "";
+  #stdoutTruncated = false;
+  #stderrTruncated = false;
   #stdoutInstructionTail = "";
   #stderrInstructionTail = "";
   #stdoutTerminalState: TerminalEscapeState = "text";
@@ -91,8 +96,14 @@ export class CodexLoginHandle {
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
-          stdout: redactedErrorMessage(this.#stdout),
-          stderr: redactedErrorMessage(this.#stderr),
+          stdout: capturedAuthenticationOutput(
+            this.#stdout,
+            this.#stdoutTruncated,
+          ),
+          stderr: capturedAuthenticationOutput(
+            this.#stderr,
+            this.#stderrTruncated,
+          ),
         };
         this.#settleInstructionWaiters(result);
         if (result.success) onSuccess();
@@ -191,6 +202,9 @@ export class CodexLoginHandle {
 
   #recordOutput(stream: "stdout" | "stderr", chunk: string): void {
     const current = stream === "stdout" ? this.#stdout : this.#stderr;
+    const truncated =
+      Buffer.byteLength(current, "utf8") + Buffer.byteLength(chunk, "utf8") >
+      MAX_CODEX_AUTH_OUTPUT_BYTES;
     const appended = appendUtf8Tail(
       current,
       chunk,
@@ -198,8 +212,10 @@ export class CodexLoginHandle {
     );
     if (stream === "stdout") {
       this.#stdout = appended;
+      this.#stdoutTruncated ||= truncated;
     } else {
       this.#stderr = appended;
+      this.#stderrTruncated ||= truncated;
     }
 
     const tail =
@@ -364,6 +380,16 @@ export async function runCodex(
   });
   let stdout = "";
   let stderr = "";
+  let stdoutTruncated = false;
+  let stderrTruncated = false;
+  const stdoutMarkers: AuthenticationStatusMarkers = {
+    signedOut: false,
+    chatgpt: false,
+  };
+  const stderrMarkers: AuthenticationStatusMarkers = {
+    signedOut: false,
+    chatgpt: false,
+  };
   let processError: Error | null = null;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   const terminate = (): void => {
@@ -387,13 +413,26 @@ export async function runCodex(
   };
   const recordOutput = (stream: "stdout" | "stderr", chunk: string): void => {
     if (processError !== null) return;
+    const current = stream === "stdout" ? stdout : stderr;
+    const markers = stream === "stdout" ? stdoutMarkers : stderrMarkers;
+    const observed = `${current}${chunk}`;
+    markers.signedOut ||= /not logged in|unauthenticated/iu.test(observed);
+    markers.chatgpt ||= /\bchatgpt\b/iu.test(observed);
+    const truncated =
+      Buffer.byteLength(current, "utf8") + Buffer.byteLength(chunk, "utf8") >
+      MAX_CODEX_AUTH_OUTPUT_BYTES;
     const appended = appendUtf8Tail(
-      stream === "stdout" ? stdout : stderr,
+      current,
       chunk,
       MAX_CODEX_AUTH_OUTPUT_BYTES,
     );
-    if (stream === "stdout") stdout = appended;
-    else stderr = appended;
+    if (stream === "stdout") {
+      stdout = appended;
+      stdoutTruncated ||= truncated;
+    } else {
+      stderr = appended;
+      stderrTruncated ||= truncated;
+    }
   };
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -429,8 +468,16 @@ export async function runCodex(
         resolve({
           success: exitCode === 0,
           exitCode,
-          stdout: redactedErrorMessage(stdout),
-          stderr: redactedErrorMessage(stderr),
+          stdout: capturedAuthenticationOutput(
+            stdout,
+            stdoutTruncated,
+            stdoutMarkers,
+          ),
+          stderr: capturedAuthenticationOutput(
+            stderr,
+            stderrTruncated,
+            stderrMarkers,
+          ),
         });
       }
     });
@@ -485,13 +532,39 @@ function appendUtf8Tail(
   if (currentBytes.length + chunkBytes.length <= maximumBytes) {
     return `${current}${chunk}`;
   }
-  if (chunkBytes.length >= maximumBytes) {
-    return chunkBytes.subarray(chunkBytes.length - maximumBytes).toString();
+  const bytes = Buffer.concat([currentBytes, chunkBytes]);
+  let start = bytes.length - maximumBytes;
+  while (
+    start < bytes.length &&
+    (bytes[start]! & 0b1100_0000) === 0b1000_0000
+  ) {
+    start += 1;
   }
-  const retained = currentBytes.subarray(
-    Math.max(0, currentBytes.length - (maximumBytes - chunkBytes.length)),
-  );
-  return Buffer.concat([retained, chunkBytes]).toString();
+  return bytes.subarray(start).toString();
+}
+
+function capturedAuthenticationOutput(
+  value: string,
+  truncated: boolean,
+  markers?: AuthenticationStatusMarkers,
+): string {
+  if (!truncated) return redactedErrorMessage(value);
+  const delimiter = /[\r\n]/u.exec(value)?.index;
+  const safeTail =
+    delimiter === undefined
+      ? ""
+      : redactedErrorMessage(value.slice(delimiter + 1));
+  const preserved = [
+    ...(markers?.signedOut === true ? ["Not logged in"] : []),
+    ...(markers?.chatgpt === true ? ["Logged in using ChatGPT"] : []),
+  ].join("\n");
+  const diagnostic = safeTail || AUTH_OUTPUT_TRUNCATED_MESSAGE;
+  if (preserved.length === 0) return diagnostic;
+  return `${preserved}\n${appendUtf8Tail(
+    "",
+    diagnostic,
+    MAX_CODEX_AUTH_OUTPUT_BYTES - Buffer.byteLength(preserved, "utf8") - 1,
+  )}`;
 }
 
 function plainTerminalText(value: string): string {

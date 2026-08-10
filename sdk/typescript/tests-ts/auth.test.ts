@@ -119,9 +119,29 @@ describe("Codex authentication process boundary", () => {
       expect(Buffer.byteLength(result[stream], "utf8")).toBeLessThanOrEqual(
         64 * 1024,
       );
-      expect(result[stream]).toContain("[redacted]");
+      expect(result[stream]).toContain("authentication output was truncated");
       expect(JSON.stringify(result)).not.toContain(secret);
     }
+  });
+
+  test("never exposes a credential value cut by the retained-output boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-secret-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "credential.mjs");
+    const secretFragment = "s".repeat(256);
+    await writeFile(
+      script,
+      'process.stdout.write("token=" + "s".repeat(128 * 1024) + "\\ncompleted\\n", () => process.exit(0));\n',
+    );
+
+    const result = await runCodex(
+      { command: process.execPath, prefixArgs: [script] },
+      [],
+      process.env,
+    );
+    expect(result.success).toBe(true);
+    expect(result.stdout).toContain("completed");
+    expect(JSON.stringify(result)).not.toContain(secretFragment);
   });
 
   test("does not terminate a verbose authentication command", async () => {
@@ -154,6 +174,54 @@ process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit
       details: "Logged in using ChatGPT",
     });
     await expect(logout(command, process.env)).resolves.toBeUndefined();
+  });
+
+  test.each([
+    ["Logged in using ChatGPT", true],
+    ["not logged in", false],
+    ["unauthenticated", false],
+  ] as const)(
+    "preserves the %s account-status marker after output truncation",
+    async (marker, authenticated) => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-status-"));
+      temporaryDirectories.push(root);
+      const script = join(root, "status.mjs");
+      await writeFile(
+        script,
+        `process.stdout.write(${JSON.stringify(`${marker}\n`)} + "x".repeat(128 * 1024), () => process.exit(0));\n`,
+      );
+
+      const status = await accountStatus(
+        { command: process.execPath, prefixArgs: [script] },
+        process.env,
+      );
+      expect(status.authenticated).toBe(authenticated);
+      expect(status.details).toContain(
+        authenticated ? "ChatGPT" : "Not logged in",
+      );
+    },
+  );
+
+  test("keeps truncated multilingual diagnostics on UTF-8 boundaries", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-unicode-"));
+    temporaryDirectories.push(root);
+    const script = join(root, "unicode.mjs");
+    await writeFile(
+      script,
+      'process.stdout.write("discard\\n" + "🔒".repeat(20_000) + "\\n" + "界".repeat(15_000), () => process.exit(0));\n',
+    );
+
+    const result = await runCodex(
+      { command: process.execPath, prefixArgs: [script] },
+      [],
+      process.env,
+    );
+    expect(result.success).toBe(true);
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    expect(result.stdout).not.toContain("�");
+    expect(result.stdout).toEndWith("界");
   });
 
   test("captures quoted interactive login metadata and completion", async () => {
@@ -207,7 +275,7 @@ setTimeout(() => {
     expect(Buffer.byteLength(result.stderr, "utf8")).toBeLessThanOrEqual(
       64 * 1024,
     );
-    expect(result.stderr).toContain("[redacted]");
+    expect(result.stderr).toContain("authentication output was truncated");
     expect(JSON.stringify(result)).not.toContain(secret);
     expect(succeeded).toBe(true);
   });
