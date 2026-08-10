@@ -14,12 +14,14 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
 
 DEFAULT_SUBAGENTS = 3
 DEFAULT_STOP_AFTER_NO_NEW = 6
+DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = 3
 DEFAULT_MAX_DISCOVERY_RUNS = 60
 MAX_AUTOMATIC_WORKERS = 6
 CONFIG_KEYS = {
     "workers",
     "subagents",
     "stop_after_no_new",
+    "stop_after_consecutive_errors",
     "max_discovery_runs",
 }
 
@@ -62,6 +64,11 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int]:
         resolved_workers = min(max(available_parallelism // 2, 1), MAX_AUTOMATIC_WORKERS)
     else:
         resolved_workers = require_integer(workers, "deep_scan.workers", minimum=1)
+    stop_after_no_new = require_integer(
+        configured.get("stop_after_no_new", DEFAULT_STOP_AFTER_NO_NEW),
+        "deep_scan.stop_after_no_new",
+        minimum=1,
+    )
     return {
         "workers": resolved_workers,
         "subagents": require_integer(
@@ -69,9 +76,10 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int]:
             "deep_scan.subagents",
             minimum=0,
         ),
-        "stopAfterNoNew": require_integer(
-            configured.get("stop_after_no_new", DEFAULT_STOP_AFTER_NO_NEW),
-            "deep_scan.stop_after_no_new",
+        "stopAfterNoNew": stop_after_no_new,
+        "stopAfterConsecutiveErrors": require_integer(
+            configured.get("stop_after_consecutive_errors", DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS),
+            "deep_scan.stop_after_consecutive_errors",
             minimum=1,
         ),
         "maxDiscoveryRuns": require_integer(

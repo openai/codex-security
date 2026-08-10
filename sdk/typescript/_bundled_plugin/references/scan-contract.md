@@ -31,7 +31,9 @@ A sealed manifest records the completed timestamp and hashes for the canonical d
 Choose the target kind based on the reviewed content, not the scan invocation:
 `git_worktree` for a checked-out Git workspace, `directory_snapshot` for a non-Git directory, `git_diff` for a Git-backed change set, and `git_revision` for an exact immutable Git tree.
 
-For a workbench-backed scan, use the recorded target contract instead of inferring the kind from the checkout. A clean Git checkout has `allowedKinds: ["git_revision"]`: use its recorded revision and omit `snapshotDigest`. A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDigest` exactly.
+For a workbench-backed scan, use the recorded target contract instead of inferring the kind from the checkout.
+A clean Git checkout has `allowedKinds: ["git_revision"]`: use its recorded revision and omit `snapshotDigest`.
+A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDigest` exactly.
 
 | Kind | Required snapshot fields |
 | --- | --- |
