@@ -204,15 +204,17 @@ export class CodexLoginHandle {
         ? this.#stdoutTerminalState
         : this.#stderrTerminalState,
     );
-    const candidate = `${tail}${visible.text}`;
-    const lastDelimiter = Math.max(
-      candidate.lastIndexOf("\n"),
-      candidate.lastIndexOf("\r"),
-    );
-    const completed = candidate.slice(0, lastDelimiter + 1);
+    const lastDelimiter = visible.text.lastIndexOf("\n");
+    const completed =
+      lastDelimiter === -1
+        ? ""
+        : `${tail}${visible.text.slice(0, lastDelimiter + 1)}`;
     const url = preferredAuthUrl(completed);
     const userCode = userCodeFromOutput(completed);
-    const nextTail = candidate.slice(lastDelimiter + 1);
+    const nextTail =
+      lastDelimiter === -1
+        ? `${tail}${visible.text}`
+        : visible.text.slice(lastDelimiter + 1);
     if (stream === "stdout") {
       this.#stdoutAuthUrl ??= url;
       this.#stdoutUserCode ??= userCode;
