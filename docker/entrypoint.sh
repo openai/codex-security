@@ -8,6 +8,11 @@ bulk_scan_metadata=
 expects_option_value=
 
 for argument do
+    if [ "$argument" = -- ] && [ "$bulk_scan_command" = yes ]; then
+        printf '%s\n' 'codex-security: bulk-scan does not support the -- option terminator.' >&2
+        exit 2
+    fi
+
     case "$argument" in
         --help|-h|--llms|--llms-full|--schema|--version)
             bulk_scan_metadata=yes
@@ -16,20 +21,12 @@ for argument do
     esac
 
     if [ "$expects_option_value" = yes ]; then
-        if [ "$argument" = -- ] && [ "$bulk_scan_command" = yes ]; then
-            printf '%s\n' 'codex-security: bulk-scan does not support the -- option terminator.' >&2
-            exit 2
-        fi
         expects_option_value=
         continue
     fi
 
     case "$argument" in
         --)
-            if [ "$bulk_scan_command" = yes ]; then
-                printf '%s\n' 'codex-security: bulk-scan does not support the -- option terminator.' >&2
-                exit 2
-            fi
             break
             ;;
         bulk-scan)
