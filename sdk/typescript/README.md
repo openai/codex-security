@@ -200,6 +200,7 @@ npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
 npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @openai/codex-security scan /path/to/repository --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results
 npx @openai/codex-security scan /path/to/repository --output-dir /path/outside/repository/results --archive-existing
@@ -211,7 +212,9 @@ npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --su
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
+npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
+npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
@@ -461,9 +464,7 @@ including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit. Cost tracking accepts Codex
-session events up to 1 MiB; an oversized event stops the scan because its
-running cost can no longer be verified safely.
+already in progress can finish above the limit.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -476,14 +477,25 @@ Private checkouts reuse your GitHub CLI sign-in without changing your global Git
 configuration. The selected repositories are saved to
 `<output-dir>/repositories.csv` for review or resumption.
 
+Interactive discovery accepts the same `--workers`, `--mode`, `--max-attempts`,
+`--model`, `--effort`, `--plugin-path`, `--python`, and `--codex` settings as
+CSV-driven scans. It prompts for the output directory; `--output-dir` is only
+valid when a repository CSV is supplied.
+
 To use an existing repository list or run in CI, pass a CSV with required `id`,
 `repository`, and `revision` columns. Revisions must be full commit hashes;
-optional `scope` and `mode` columns narrow individual scans:
+optional `scope`, `mode`, and `prompt` columns customize individual scans:
 
 ```csv
-id,repository,revision,scope,mode
-service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef01234567,src,standard
+id,repository,revision,scope,mode,prompt
+service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef01234567,src,standard,Focus on authentication and authorization.
 ```
+
+Use `--scan-prompt-file PATH` to add instructions to a scan or every bulk scan.
+Bulk scans append each repository's CSV `prompt` after the shared instructions.
+Use `--post-scan-prompt-file PATH` to run a follow-up in the same authenticated
+session after each scan, including incomplete or failed scans. Canceled scans
+and scans stopped at their configured cost limit do not start another turn.
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.
@@ -573,11 +585,7 @@ text. Both commands operate on the current directory, use the scan model
 and reasoning defaults, ignore unrelated user configuration and plugins, and
 print the final response without the underlying Codex event stream. Override
 the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
-`--effort high` or `--codex 'model_reasoning_effort="high"'`. Inputs are
-limited to 64 items and 1 MiB total.
-
-Canonical scan documents are limited to 16 MiB for the manifest, 128 MiB for
-findings, and 32 MiB for coverage. Oversized scans are rejected before sealing.
+`--effort high` or `--codex 'model_reasoning_effort="high"'`.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
@@ -624,6 +632,10 @@ Reports and resumable scan results are written to `results/`; the reusable
 device login remains in `state/`. For unattended scans, set `OPENAI_API_KEY`
 or `CODEX_API_KEY` instead. Set `GH_TOKEN` or `GITHUB_TOKEN` for private
 GitHub repositories.
+
+The container accepts the repository CSV before or after bulk-scan options.
+Interactive repository discovery remains disabled, including when global CLI
+options appear before `bulk-scan`.
 
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
 can install the optional, narrowly scoped AppArmor profile once:

@@ -135,6 +135,8 @@ describe("CodexSecurity preflight configuration", () => {
         },
         secret_profile: { features: { goals: false } },
         "credential-prod": { features: { goals: false } },
+        "mcp-server": { features: { goals: true } },
+        "token-review": { features: { goals: false } },
         development: { features: { goals: true } },
         ["a".repeat(129)]: { features: { goals: false } },
       },
@@ -150,6 +152,8 @@ describe("CodexSecurity preflight configuration", () => {
         [repository]: { trust_level: "trusted", token: "PROJECT_TOKEN" },
         [join(root, "secret-project")]: { trust_level: "trusted" },
         [join(root, "bearer-PRIVATE")]: { trust_level: "trusted" },
+        [join(root, "mcp-server")]: { trust_level: "trusted" },
+        [join(root, "token-review")]: { trust_level: "untrusted" },
         [ordinaryProject]: { trust_level: "untrusted" },
         relative: { trust_level: "trusted" },
         [join(root, "bad-trust")]: { trust_level: "PROJECT_SECRET" },
@@ -169,11 +173,27 @@ describe("CodexSecurity preflight configuration", () => {
           features: { goals: true },
           agents: { max_threads: 4 },
         },
+        secret_profile: { features: { goals: false } },
+        "credential-prod": { features: { goals: false } },
+        "mcp-server": { features: { goals: true } },
+        "token-review": { features: { goals: false } },
         development: { features: { goals: true } },
+        ["a".repeat(129)]: { features: { goals: false } },
       },
-      project_root_markers: [".git", ".workspace", "settings.gradle"],
+      project_root_markers: [
+        ".git",
+        ".workspace",
+        ".env",
+        "PASSWORD_VALUE",
+        "settings.gradle",
+        "a".repeat(257),
+      ],
       projects: {
         [repository]: { trust_level: "trusted" },
+        [join(root, "secret-project")]: { trust_level: "trusted" },
+        [join(root, "bearer-PRIVATE")]: { trust_level: "trusted" },
+        [join(root, "mcp-server")]: { trust_level: "trusted" },
+        [join(root, "token-review")]: { trust_level: "untrusted" },
         [ordinaryProject]: { trust_level: "untrusted" },
       },
     });
@@ -285,19 +305,18 @@ describe("CodexSecurity preflight configuration", () => {
       "multiagent_config.max_concurrency",
     );
     expect(JSON.stringify(bridgePreflight)).toContain("12");
-    expect(() =>
-      scanPreflightCodexConfig({
-        projects: Object.fromEntries(
-          Array.from({ length: 256 }, (_, index) => [
-            `/workspace/${index}/${"界".repeat(1300)}`,
-            { trust_level: "trusted" },
-          ]),
-        ),
-      }),
-    ).toThrow(
-      "sanitized Codex Security preflight config exceeds the size limit",
+    const largeConfig = scanPreflightCodexConfig({
+      projects: Object.fromEntries(
+        Array.from({ length: 256 }, (_, index) => [
+          `/workspace/${index}/${"界".repeat(1300)}`,
+          { trust_level: "trusted" },
+        ]),
+      ),
+    });
+    expect(Object.keys(largeConfig["projects"] as JsonObject)).toHaveLength(
+      256,
     );
-    const emptyV2 = scanPreflightCodexConfig({
+    const largeCapacity = scanPreflightCodexConfig({
       features: {
         multi_agent_v2: {
           unknown: true,
@@ -305,13 +324,17 @@ describe("CodexSecurity preflight configuration", () => {
         },
       },
     });
-    expect(emptyV2).toEqual({});
+    expect(largeCapacity).toEqual({
+      features: {
+        multi_agent_v2: { max_concurrent_threads_per_session: 1_000_001 },
+      },
+    });
     await expect(
-      writeCodexConfig(join(root, "empty-v2.toml"), emptyV2),
+      writeCodexConfig(join(root, "large-capacity.toml"), largeCapacity),
     ).resolves.toBeUndefined();
   });
 
-  test("prioritizes the selected profile and active project before projection limits", () => {
+  test("keeps every valid profile, project, and root marker", () => {
     const activeProject = "/workspace/active";
     const profiles = Object.fromEntries([
       ...Array.from({ length: 256 }, (_, index) => [
@@ -328,28 +351,30 @@ describe("CodexSecurity preflight configuration", () => {
       [activeProject, { trust_level: "trusted" }],
     ]);
 
-    const prioritized = scanPreflightCodexConfig(
-      {
-        profile: "selected",
-        profiles,
-        projects,
-      },
-      join(activeProject, "packages", "service"),
-    );
+    const prioritized = scanPreflightCodexConfig({
+      profile: "selected",
+      profiles,
+      projects,
+      project_root_markers: Array.from(
+        { length: 65 },
+        (_, index) => `.marker-${index}`,
+      ),
+    });
 
     expect(prioritized["profile"]).toBe("selected");
     expect(Object.keys(prioritized["profiles"] as JsonObject)).toHaveLength(
-      256,
+      257,
     );
     expect(prioritized["profiles"]).toMatchObject({
       selected: { agents: { max_threads: 17 } },
     });
     expect(Object.keys(prioritized["projects"] as JsonObject)).toHaveLength(
-      256,
+      257,
     );
     expect(prioritized["projects"]).toMatchObject({
       [activeProject]: { trust_level: "trusted" },
     });
+    expect(prioritized["project_root_markers"]).toHaveLength(65);
 
     const validProfiles = Object.fromEntries(
       Array.from({ length: 256 }, (_, index) => [

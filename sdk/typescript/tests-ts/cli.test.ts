@@ -888,12 +888,10 @@ describe("CLI", () => {
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
-      ["bulk-scan", "--workers", "8"],
-      ["bulk-scan", "--workers=8"],
-      ["bulk-scan", "--mode", "deep"],
-      ["bulk-scan", "--max-attempts=3"],
-      ["bulk-scan", "--plugin-path", "./plugin"],
+      ["bulk-scan", "--workers", "8", "--mode", "deep"],
+      ["bulk-scan", "--max-attempts=3", "--plugin-path", "./plugin"],
       ["bulk-scan", "--python=python3"],
+      ["--format", "toon", "bulk-scan", "--workers", "8"],
       ["bulk-scan", "--knowledge-base", "/shared/threat-models"],
       [
         "bulk-scan",
@@ -934,22 +932,6 @@ describe("CLI", () => {
     }
   });
 
-  test("rejects prefixed interactive bulk scans before discovery", async () => {
-    const stdout = capture();
-    const stderr = capture();
-
-    expect(
-      await main(
-        ["--format", "toon", "bulk-scan", "--workers", "8"],
-        stdout.stream,
-        stderr.stream,
-        dependencies(),
-      ),
-    ).toBe(2);
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Run 'codex-security bulk-scan");
-  });
-
   test("requires an output directory for a supplied bulk scan CSV", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -966,14 +948,12 @@ describe("CLI", () => {
     expect(stdout.text()).toBe("");
   });
 
-  test("lets the discovery wizard choose its output directory", async () => {
-    const stdout = capture();
+  test("rejects an output directory without a repository CSV", async () => {
     const stderr = capture();
-
     expect(
       await main(
         ["bulk-scan", "--output-dir", "results"],
-        stdout.stream,
+        capture().stream,
         stderr.stream,
         dependencies(),
       ),
@@ -981,7 +961,6 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "--output-dir can only be used with a repository CSV",
     );
-    expect(stdout.text()).toBe("");
   });
 
   test("exposes only typed, read-only SDK metadata over MCP", () => {
@@ -2267,7 +2246,7 @@ describe("CLI", () => {
     }
   });
 
-  test("redacts malformed and bounded --codex overrides", () => {
+  test("redacts malformed --codex overrides and accepts large values", () => {
     const secret = "SYNTHETIC_TOML_SECRET_MUST_NOT_ECHO";
     let malformed: unknown;
     try {
@@ -2281,19 +2260,18 @@ describe("CLI", () => {
     expect((malformed as Error).cause).toBeUndefined();
 
     const deep = `${Array.from({ length: 3_072 }, () => "a").join(".")}=1`;
-    expect(() => parseCodexOverrides([deep])).toThrow("--codex key");
-    expect(() => parseCodexOverrides([`${"a".repeat(1_025)}=1`])).toThrow(
-      "--codex key",
-    );
-    expect(() =>
-      parseCodexOverrides([`model=\"${"x".repeat(64 * 1_024)}\"`]),
-    ).toThrow("--codex key or value exceeds the limit");
-    expect(() => parseCodexOverrides([`${"ࠀ".repeat(342)}=1`])).toThrow(
-      "--codex key or value exceeds the limit",
-    );
-    expect(() =>
-      parseCodexOverrides([`model=\"${"ࠀ".repeat(65_534)}\"`]),
-    ).toThrow("--codex key or value exceeds the limit");
+    let nested: unknown = parseCodexOverrides([deep]);
+    for (let index = 0; index < 3_072; index++) {
+      nested = (nested as Record<string, unknown>)["a"];
+    }
+    expect(nested).toBe(1);
+
+    for (const key of ["a".repeat(1_025), "ࠀ".repeat(342)]) {
+      expect(parseCodexOverrides([`${key}=1`])[key]).toBe(1);
+    }
+    for (const value of ["x".repeat(64 * 1_024), "ࠀ".repeat(65_534)]) {
+      expect(parseCodexOverrides([`model=\"${value}\"`])["model"]).toBe(value);
+    }
   });
 
   test("rejects prototype-bearing override paths", () => {
@@ -2336,6 +2314,10 @@ describe("CLI", () => {
       [
         ["bulk-scan", "--knowledge-base="],
         "--knowledge-base must not be empty",
+      ],
+      [
+        ["bulk-scan", "--output-dir", "results", "--", "repositories.csv"],
+        "Unknown flag: --",
       ],
       [["scan", ".", "--model="], "--model must not be empty"],
       [

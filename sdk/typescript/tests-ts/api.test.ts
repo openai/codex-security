@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -1745,6 +1746,7 @@ describe("CodexSecurity orchestration", () => {
     let codexOptions: CodexOptions | null = null;
     let threadOptions: Record<string, unknown> | null = null;
     let prompt = "";
+    let followUpPrompt = "";
     let scanStarted = false;
     const warnings: string[] = [];
     const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
@@ -1812,6 +1814,11 @@ describe("CodexSecurity orchestration", () => {
               return {
                 id: null,
                 async runStreamed(input: string) {
+                  if (prompt !== "") {
+                    expect(commands.at(-1)?.[0]).toBe("complete-scan");
+                    followUpPrompt = input;
+                    return { events: completedEvents() };
+                  }
                   expect(commands[0]?.[0]).toBe("register-cli-scan");
                   prompt = input;
                   await copyCompletedScan(root);
@@ -1830,6 +1837,8 @@ describe("CodexSecurity orchestration", () => {
 
     const scanStartedAt = Date.now();
     const result = await client.run(repository, {
+      scanPrompt: "Focus on authentication and authorization.",
+      postScanPrompt: "Draft fixes for confirmed findings.",
       onScanStarted: () => {
         scanStarted = true;
       },
@@ -1882,18 +1891,16 @@ describe("CodexSecurity orchestration", () => {
       "Codex_Home",
     );
     expect(prompt).toContain("$codex-security:security-scan");
+    expect(prompt).toContain("The SDK has already registered this scan.");
+    expect(prompt).toContain("never call a scan-start or completion tool");
     expect(prompt).toContain(
-      "This exhaustive scan authorizes the delegated-worker phases",
+      "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
-    const delegationInstruction = prompt
-      .split("\n")
-      .find((line) => line.startsWith("Every delegated review assignment"));
-    expect(delegationInstruction).toContain(
+    expect(prompt).not.toContain("This exhaustive scan authorizes");
+    expect(prompt).toContain(
       'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
     );
-    expect(delegationInstruction).toContain(
-      "your worker-local reviewed and assigned file counts",
-    );
+    expect(prompt).toContain("the parent owns global progress updates");
     expect(prompt).toContain('Repository root: "$CODEX_SECURITY_REPOSITORY"');
     expect(prompt).toContain('Use "$PYTHON" as <python_command>');
     expect(prompt).toContain("$CODEX_SECURITY_TARGET_DISPLAY_NAME");
@@ -1913,6 +1920,10 @@ describe("CodexSecurity orchestration", () => {
         ),
       ),
     ).toBe(false);
+    expect(prompt).toContain(
+      "Additional scan instructions:\nFocus on authentication and authorization.",
+    );
+    expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
     expect(
       JSON.parse(commands[0]![commands[0]!.indexOf("--recipe-json") + 1]!),
     ).toMatchObject({
@@ -2303,6 +2314,65 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([
+    ["without", false],
+    ["with", true],
+  ] as const)(
+    "handles a session-tracking failure %s an explicit cost limit",
+    async (_description, enforceCostLimit) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(join(codexHome, "sessions"), "not a directory");
+      const commands: string[] = [];
+      const warnings: string[] = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            commands.push(args[0]!);
+            return mockWorkbench(args);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+
+      const scan = client.run(repository, {
+        ...(enforceCostLimit ? { maxCostUsd: 1 } : {}),
+        onActivity: () => {},
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (enforceCostLimit) {
+        await expect(scan).rejects.toThrow("interrupted");
+        expect(commands).toContain("fail-scan");
+      } else {
+        await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
+        expect(warnings).toContainEqual(
+          expect.stringContaining("Could not track scan activity:"),
+        );
+        expect(commands).toContain("complete-scan");
+      }
+      await client.close();
+    },
+  );
+
   test("uses the actual scanner inventory instead of a stale workbench estimate", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -2327,7 +2397,10 @@ describe("CodexSecurity orchestration", () => {
         createCodex: () => ({
           startThread: () => ({
             id: null,
-            async runStreamed() {
+            async runStreamed(prompt: string) {
+              expect(prompt).toContain(
+                "The SDK's current in-scope file-count estimate is 4207",
+              );
               await copyCompletedScan(root);
               async function* scanEvents(): AsyncGenerator<ThreadEvent> {
                 for await (const event of completedEvents()) {
@@ -2696,6 +2769,157 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("surfaces post-scan failures without reopening a completed scan", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    let turns = 0;
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options: unknown, args: readonly string[]) => {
+          commands.push(args);
+          return mockWorkbench(args);
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: "thread-1",
+            async runStreamed() {
+              turns += 1;
+              if (turns === 1) {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              }
+              async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "turn.failed",
+                  error: { message: "Could not draft fixes." },
+                };
+              }
+              return { events: failedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, { postScanPrompt: "Draft confirmed fixes." }),
+    ).rejects.toThrow("Could not draft fixes.");
+    expect(commands.map((command) => command[0])).toEqual([
+      "register-cli-scan",
+      "get-scan-feedback",
+      "prepare-scan-completion",
+      "complete-scan",
+    ]);
+    await client.close();
+  });
+
+  test.each([
+    ["partial coverage", "partial", false],
+    ["unknown coverage", "unknown", false],
+    ["a failed scan", "failed", false],
+    ["a failed scan and follow-up", "failed", true],
+  ] as const)(
+    "runs post-scan instructions after %s",
+    async (_scenario, outcome, followUpFails) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const prompts: string[] = [];
+      const warnings: string[] = [];
+      const scanFails = outcome === "failed";
+
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: "thread-1",
+              async runStreamed(prompt: string) {
+                prompts.push(prompt);
+                if (prompts.length === 1 && !scanFails) {
+                  await copyCompletedScan(root);
+                  const coveragePath = join(scanDir, "coverage.json");
+                  const original = await readFile(coveragePath, "utf8");
+                  const coverage = original.replace(
+                    '"completeness": "complete"',
+                    `"completeness": "${outcome}"`,
+                  );
+                  const manifestPath = join(scanDir, "scan-manifest.json");
+                  await writeFile(coveragePath, coverage);
+                  await writeFile(
+                    manifestPath,
+                    (await readFile(manifestPath, "utf8")).replace(
+                      createHash("sha256").update(original).digest("hex"),
+                      createHash("sha256").update(coverage).digest("hex"),
+                    ),
+                  );
+                  return { events: completedEvents() };
+                }
+                if (prompts.length === 2 && !followUpFails) {
+                  return { events: completedEvents() };
+                }
+                async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                  yield {
+                    type: "turn.failed",
+                    error: {
+                      message:
+                        prompts.length === 1
+                          ? "The scan failed."
+                          : "The post-scan instructions failed.",
+                    },
+                  };
+                }
+                return { events: failedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+
+      const result = client.run(repository, {
+        postScanPrompt: "Record the scan cost.",
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (scanFails) {
+        await expect(result).rejects.toThrow("The scan failed.");
+      } else {
+        expect((await result).coverage.completeness).toBe(outcome);
+      }
+      expect(prompts.at(-1)).toBe("Record the scan cost.");
+      expect(prompts).toHaveLength(2);
+      expect(warnings).toEqual(
+        followUpFails
+          ? [
+              "Could not run post-scan instructions: The post-scan instructions failed.",
+            ]
+          : [],
+      );
+      await client.close();
+    },
+  );
+
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -2706,6 +2930,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     const commands: Array<readonly string[]> = [];
     const costs: number[] = [];
+    let turns = 0;
     const cost = {
       model: "gpt-5.6-sol",
       inputTokens: 1_250,
@@ -2743,6 +2968,7 @@ describe("CodexSecurity orchestration", () => {
               _input: string,
               options: { signal: AbortSignal },
             ) {
+              turns += 1;
               async function* events(): AsyncGenerator<ThreadEvent> {
                 yield { type: "thread.started", thread_id: "scan-thread" };
                 await Promise.all([
@@ -2786,6 +3012,7 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, {
           maxCostUsd: 0.005,
+          postScanPrompt: "Record the scan cost.",
           onCost: (cost) => costs.push(cost.estimatedUsd),
           signal: AbortSignal.timeout(5_000),
         }),
@@ -2798,6 +3025,7 @@ describe("CodexSecurity orchestration", () => {
     } finally {
       clearTimeout(keepEventLoopAlive);
     }
+    expect(turns).toBe(1);
     expect(costs.at(-1)).toBe(0.00625);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
@@ -3772,7 +4000,7 @@ describe("CodexSecurity orchestration", () => {
       'Use "$PYTHON" as <python_command> for every plugin helper',
     );
     expect(prompt).toContain(
-      'make-repo-rank-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
+      'make-repo-scope-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE"',
     );
     expect(prompt).toContain(
       "Do not print, evaluate, or modify the target-paths file.",
@@ -3817,31 +4045,31 @@ describe("CodexSecurity orchestration", () => {
     const interpreter =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(interpreter).not.toBeNull();
-    const rankInput = join(scanDir, "rank_input.jsonl");
+    const scopedSourceInput = join(scanDir, "scoped-source-input.jsonl");
     execFileSync(
       interpreter!,
       [
         "-B",
         join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-rank-input",
+        "make-repo-scope-input",
         "--repo",
         repository,
         "--scopes-file",
         capturedTargetPathsFile,
         "--out",
-        rankInput,
+        scopedSourceInput,
       ],
       { stdio: "pipe" },
     );
-    const rankInputContents = await readFile(rankInput, "utf8");
+    const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(
-      rankInputContents
+      scopedSourceInputContents
         .trimEnd()
         .split("\n")
         .map((row) => JSON.parse(row).path),
     ).toEqual([...paths].sort());
     for (const separator of ["\u0085", "\u2028", "\u2029"])
-      expect(rankInputContents).not.toContain(separator);
+      expect(scopedSourceInputContents).not.toContain(separator);
     const manifest = join(scanDir, "scan-manifest.json");
     const coverage = join(scanDir, "coverage.json");
     await writeFile(
@@ -3871,6 +4099,70 @@ describe("CodexSecurity orchestration", () => {
       paths,
     );
     await client.close();
+  });
+
+  test("keeps requested source paths without ranking or ignored directory files", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const source = join(repository, "src");
+    const ignored = join(source, "node_modules");
+    const scopes = join(root, "scopes.json");
+    const output = join(root, "scoped-source-input.jsonl");
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+
+    await mkdir(join(source, "tests"), { recursive: true });
+    await mkdir(join(source, "examples"));
+    await mkdir(ignored);
+    execFileSync("git", ["init", "-q"], { cwd: repository });
+    await Promise.all([
+      writeFile(join(repository, ".gitignore"), "node_modules/\n.env\n"),
+      writeFile(join(source, "handler.ts"), "export {};\n"),
+      writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
+      writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
+      writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
+      writeFile(join(source, ".env"), "SECRET=private\n"),
+      writeFile(join(ignored, "dependency.ts"), "export {};\n"),
+    ]);
+
+    const enumerate = async (requested: string[]) => {
+      await writeFile(scopes, JSON.stringify(requested));
+      execFileSync(
+        interpreter!,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-scope-input",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          output,
+        ],
+        { stdio: "pipe" },
+      );
+      return (await readFile(output, "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((row) => (JSON.parse(row) as { path: string }).path);
+    };
+
+    expect(await enumerate(["src"])).toEqual([
+      "src/Dockerfile",
+      "src/examples/demo.ts",
+      "src/handler.ts",
+      "src/tests/handler.test.ts",
+    ]);
+    expect(await enumerate(["src", "src/.env"])).toEqual([
+      "src/.env",
+      "src/Dockerfile",
+      "src/examples/demo.ts",
+      "src/handler.ts",
+      "src/tests/handler.test.ts",
+    ]);
+    await expect(enumerate(["../scopes.json"])).rejects.toThrow();
   });
 
   test("removes scoped target files after a scan settles", async () => {
