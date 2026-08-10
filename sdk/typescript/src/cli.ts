@@ -1070,7 +1070,7 @@ export async function main(
             .describe("Append scan instructions from FILE."),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
-            .describe("Run instructions from FILE after a validated scan."),
+            .describe("Run FILE after each scan, including failures."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan committed Git changes from BASE to --head."),
@@ -1364,7 +1364,7 @@ export async function main(
           .describe("Append instructions from FILE to every scan."),
         postScanPromptFile: optionValue("--post-scan-prompt-file")
           .optional()
-          .describe("Run FILE after each completed, validated scan."),
+          .describe("Run FILE after each scan, including failures."),
         model: optionValue("--model")
           .optional()
           .describe(
