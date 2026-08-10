@@ -26,18 +26,34 @@ describe("credential redaction", () => {
 
   test("does not end a private key at a different key-type delimiter", () => {
     for (const assignment of ["", "private_key="]) {
-      const message = [
-        `${assignment}-----BEGIN RSA PRIVATE KEY-----`,
-        "synthetic-before",
+      for (const terminator of [
         "-----END EC PRIVATE KEY-----",
-        "synthetic-after",
-        "-----END RSA PRIVATE KEY-----",
-        "retrying",
-      ].join("\n");
+        "-----END rsa private key-----",
+      ]) {
+        const message = [
+          `${assignment}-----BEGIN RSA PRIVATE KEY-----`,
+          "synthetic-before",
+          terminator,
+          "synthetic-after",
+          "-----END RSA PRIVATE KEY-----",
+          "retrying",
+        ].join("\n");
 
-      expect(redactedErrorMessage(message)).toBe(
-        `${assignment}[redacted]\nretrying`,
-      );
+        expect(redactedErrorMessage(message)).toBe(
+          `${assignment}[redacted]\nretrying`,
+        );
+      }
     }
+  });
+
+  test("redacts quoted credentials whose markers overlap a private key", () => {
+    const message = [
+      "-----BEGIN PRIVATE KEY-----",
+      'password="',
+      "-----END PRIVATE KEY-----",
+      'SYNTHETIC_PASSWORD_123"',
+    ].join("\n");
+
+    expect(redactedErrorMessage(message)).toBe("[redacted]");
   });
 });
