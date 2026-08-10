@@ -258,13 +258,13 @@ setTimeout(() => {
     await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
-  test("finds login instructions after large authentication output", async () => {
+  test("preserves login instructions on long output lines", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tail-"));
     temporaryDirectories.push(root);
     const script = join(root, "login.mjs");
     await writeFile(
       script,
-      'process.stderr.write(("x".repeat(1024) + "\\n").repeat(128), () => process.stderr.write("Open https://auth.example.test/device\\nUser code: ABCD-EFGH\\n", () => process.exit(0)));\n',
+      'process.stderr.write("Open https://auth.example.test/device " + "x".repeat(128 * 1024), () => process.stderr.write("\\nUser code: ABCD-EFGH\\n", () => process.exit(0)));\n',
     );
     const handle = new CodexLoginHandle(
       { command: process.execPath, prefixArgs: [script] },

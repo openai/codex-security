@@ -4,7 +4,6 @@ import { PluginBootstrapError } from "./errors.js";
 import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
-const INSTRUCTION_TAIL_BYTES = 4 * 1024;
 type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
 
 export interface LoginResult {
@@ -213,9 +212,7 @@ export class CodexLoginHandle {
     const completed = candidate.slice(0, lastDelimiter + 1);
     const url = preferredAuthUrl(completed);
     const userCode = userCodeFromOutput(completed);
-    const nextTail = Buffer.from(candidate.slice(lastDelimiter + 1))
-      .subarray(-INSTRUCTION_TAIL_BYTES)
-      .toString();
+    const nextTail = candidate.slice(lastDelimiter + 1);
     if (stream === "stdout") {
       this.#stdoutAuthUrl ??= url;
       this.#stdoutUserCode ??= userCode;
