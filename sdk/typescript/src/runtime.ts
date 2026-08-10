@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, type Stats } from "node:fs";
 import {
@@ -31,6 +31,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { crc32 } from "node:zlib";
@@ -42,6 +43,7 @@ import {
   OutputDirectoryError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  redactedErrorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -64,6 +66,7 @@ const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
+const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -261,52 +264,737 @@ export async function requirePrivateCredentialHome(
   try {
     await (options.secureWindowsHome ?? secureWindowsCredentialHome)(path);
   } catch (error) {
+    const detail = windowsCredentialAclFailure(error);
     throw new OutputDirectoryError(
-      `Unable to create a private Windows credential home: ${path}`,
+      `Unable to create a private Windows credential home: ${path}${detail}`,
       { cause: error },
     );
   }
 }
 
+function windowsCredentialAclFailure(error: unknown): string {
+  const stderr =
+    typeof error === "object" && error !== null && "stderr" in error
+      ? error.stderr
+      : undefined;
+  const detail =
+    typeof stderr === "string" && stderr.trim() !== ""
+      ? stderr
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  const sanitized = redactedErrorMessage(detail)
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 512);
+  return sanitized === "" ? "" : `. ${sanitized}`;
+}
+
+const WINDOWS_SYSTEM_SID = "S-1-5-18";
+const WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544";
+const WINDOWS_TRUSTED_INSTALLER_SID =
+  "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+const WINDOWS_LOCAL_SERVICE_SID = "S-1-5-19";
+const WINDOWS_NETWORK_SERVICE_SID = "S-1-5-20";
+const WINDOWS_EVERYONE_SID = "S-1-1-0";
+const WINDOWS_AUTHENTICATED_USERS_SID = "S-1-5-11";
+const WINDOWS_USERS_SID = "S-1-5-32-545";
+const WINDOWS_CREATOR_OWNER_SID = "S-1-3-0";
+const WINDOWS_CREATOR_GROUP_SID = "S-1-3-1";
+const WINDOWS_OWNER_RIGHTS_SID = "S-1-3-4";
+const WINDOWS_ALL_APPLICATION_PACKAGES_SID = "S-1-15-2-1";
+const WINDOWS_PRINCIPAL_ALIASES: Readonly<Record<string, string>> = {
+  SY: WINDOWS_SYSTEM_SID,
+  BA: WINDOWS_ADMINISTRATORS_SID,
+  LS: WINDOWS_LOCAL_SERVICE_SID,
+  NS: WINDOWS_NETWORK_SERVICE_SID,
+  WD: WINDOWS_EVERYONE_SID,
+  AU: WINDOWS_AUTHENTICATED_USERS_SID,
+  BU: WINDOWS_USERS_SID,
+  CO: WINDOWS_CREATOR_OWNER_SID,
+  CG: WINDOWS_CREATOR_GROUP_SID,
+  OW: WINDOWS_OWNER_RIGHTS_SID,
+  AC: WINDOWS_ALL_APPLICATION_PACKAGES_SID,
+  AN: "S-1-5-7",
+  IU: "S-1-5-4",
+  NU: "S-1-5-2",
+  SU: "S-1-5-6",
+  RC: "S-1-5-12",
+  ED: "S-1-5-9",
+  BG: "S-1-5-32-546",
+  PU: "S-1-5-32-547",
+  AO: "S-1-5-32-548",
+  SO: "S-1-5-32-549",
+  PO: "S-1-5-32-550",
+  BO: "S-1-5-32-551",
+  RE: "S-1-5-32-552",
+  RU: "S-1-5-32-554",
+  RD: "S-1-5-32-555",
+  NO: "S-1-5-32-556",
+  MU: "S-1-5-32-558",
+  LU: "S-1-5-32-559",
+  IS: "S-1-5-32-568",
+  CY: "S-1-5-32-569",
+  ER: "S-1-5-32-573",
+  CD: "S-1-5-32-574",
+  RA: "S-1-5-32-575",
+  ES: "S-1-5-32-576",
+  HA: "S-1-5-32-578",
+  AA: "S-1-5-32-579",
+};
+const WINDOWS_SID = /^S-1-(?:\d+-)*\d+$/u;
+const WINDOWS_GUID =
+  /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu;
+const WINDOWS_SDDL_SID = "(?:S-1-(?:\\d+-)*\\d+|[A-Z]{2})";
+const WINDOWS_SECURITY_DESCRIPTOR = new RegExp(
+  `^O:(${WINDOWS_SDDL_SID})(?:G:${WINDOWS_SDDL_SID})?D:([A-Z_]*)(.*)$`,
+  "u",
+);
+
+export interface WindowsCredentialAcl {
+  owner: string;
+  protected: boolean;
+  grantsCurrentUserAccess: boolean;
+  untrustedPrincipals: string[];
+  deniedPrincipals: string[];
+}
+
+class UntrustedWindowsCredentialOwnerError extends Error {
+  public constructor(owner: string) {
+    super(`Windows credential ACL owner is not a trusted principal: ${owner}`);
+  }
+}
+
+class RepairableWindowsCredentialAclError extends Error {
+  public constructor(cause: unknown) {
+    super("Windows credential ACL requires repair", { cause });
+  }
+}
+
+class RepairableWindowsCredentialOwnerError extends Error {
+  public constructor(cause: UntrustedWindowsCredentialOwnerError) {
+    super(cause.message, { cause });
+  }
+}
+
+/** Inspect a Windows DACL without translating locale-specific account names. */
+export function inspectWindowsCredentialAcl(
+  descriptor: string,
+  currentUserSid: string,
+  options: {
+    resolvedAliases?: Readonly<Record<string, string>>;
+    scope?: "directory" | "file" | "ancestor";
+  } = {},
+): WindowsCredentialAcl {
+  if (!WINDOWS_SID.test(currentUserSid)) {
+    throw new Error("Unable to identify the current Windows user SID");
+  }
+  const match = WINDOWS_SECURITY_DESCRIPTOR.exec(descriptor.trim());
+  if (match === null) {
+    throw new Error("Windows credential ACL has no owner or DACL");
+  }
+
+  const principalAliases: Readonly<Record<string, string>> = {
+    ...WINDOWS_PRINCIPAL_ALIASES,
+    ...options.resolvedAliases,
+  };
+  const trustedPrincipals = new Set([
+    currentUserSid,
+    WINDOWS_SYSTEM_SID,
+    WINDOWS_ADMINISTRATORS_SID,
+    principalAliases["LA"] ?? "LA",
+  ]);
+  if (options.scope === "ancestor") {
+    trustedPrincipals.add(WINDOWS_TRUSTED_INSTALLER_SID);
+  }
+  const normalizePrincipal = (principal: string): string =>
+    principalAliases[principal] ?? principal;
+  const trustedPrincipal = (principal: string): boolean =>
+    trustedPrincipals.has(principal);
+  const owner = normalizePrincipal(match[1]!);
+  if (!trustedPrincipal(owner)) {
+    throw new UntrustedWindowsCredentialOwnerError(owner);
+  }
+  const flags = match[2]!;
+  if (flags.includes("NO_ACCESS_CONTROL")) {
+    throw new Error("Windows credential ACL grants unrestricted access");
+  }
+
+  let remaining = match[3]!;
+  let grantsCurrentDirectoryAccess = false;
+  let grantsCurrentFileAccess = false;
+  let grantsCurrentContainerAccess = false;
+  let hasAccessRules = false;
+  const untrustedPrincipals = new Set<string>();
+  const deniedPrincipals = new Set<string>();
+  while (remaining.startsWith("(")) {
+    const { rule, rest } = windowsSecurityDescriptorRule(remaining);
+    const fields = rule.split(";");
+    const callback = ["XA", "XD", "ZA"].includes(fields[0]!);
+    if ((callback && fields.length < 7) || (!callback && fields.length !== 6)) {
+      throw new Error("Windows credential ACL has a malformed access rule");
+    }
+    const [
+      type,
+      inheritance,
+      rights,
+      objectGuid,
+      inheritObjectGuid,
+      rawPrincipal,
+    ] = fields;
+    if (!["A", "OA", "D", "OD", "XA", "XD", "ZA"].includes(type!)) {
+      throw new Error("Windows credential ACL has an unsupported access rule");
+    }
+    if (rawPrincipal === "" || rights === "") {
+      throw new Error("Windows credential ACL has an incomplete access rule");
+    }
+    const objectRule = type === "OA" || type === "OD" || type === "ZA";
+    for (const guid of [objectGuid!, inheritObjectGuid!]) {
+      if (guid !== "" && (!objectRule || !WINDOWS_GUID.test(guid))) {
+        throw new Error("Windows credential ACL has a malformed object rule");
+      }
+    }
+    const inheritanceFlags = windowsAceFlags(inheritance!);
+    hasAccessRules = true;
+    const principal = normalizePrincipal(rawPrincipal!);
+    if (type === "A" || type === "OA" || type === "XA" || type === "ZA") {
+      if (!trustedPrincipal(principal)) {
+        if (
+          options.scope !== "ancestor" ||
+          windowsAceAllowsAncestorReplacement(rights!, inheritanceFlags)
+        ) {
+          untrustedPrincipals.add(principal);
+        }
+      } else if (
+        !callback &&
+        objectGuid === "" &&
+        inheritObjectGuid === "" &&
+        principal === currentUserSid &&
+        windowsAceGrantsFullControl(rights!)
+      ) {
+        if (!inheritanceFlags.has("IO")) {
+          grantsCurrentDirectoryAccess = true;
+        }
+        if (inheritanceFlags.has("OI") && !inheritanceFlags.has("NP")) {
+          grantsCurrentFileAccess = true;
+        }
+        if (inheritanceFlags.has("CI") && !inheritanceFlags.has("NP")) {
+          grantsCurrentContainerAccess = true;
+        }
+      }
+    } else {
+      deniedPrincipals.add(principal);
+    }
+    remaining = rest;
+  }
+  if (!hasAccessRules || (remaining !== "" && !remaining.startsWith("S:"))) {
+    throw new Error("Windows credential ACL has an invalid access-rule list");
+  }
+
+  return {
+    owner,
+    protected: flags.includes("P"),
+    grantsCurrentUserAccess:
+      grantsCurrentDirectoryAccess &&
+      (options.scope === "file" ||
+        (grantsCurrentFileAccess && grantsCurrentContainerAccess)) &&
+      deniedPrincipals.size === 0,
+    untrustedPrincipals: [...untrustedPrincipals],
+    deniedPrincipals: [...deniedPrincipals],
+  };
+}
+
+function windowsSecurityDescriptorRule(value: string): {
+  rule: string;
+  rest: string;
+} {
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (quoted) {
+      if (!escaped && character === '"') quoted = false;
+      escaped = character === "\\" && !escaped;
+      continue;
+    }
+    if (character === '"') {
+      quoted = true;
+    } else if (character === "(") {
+      depth += 1;
+    } else if (character === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return { rule: value.slice(1, index), rest: value.slice(index + 1) };
+      }
+    }
+  }
+  throw new Error("Windows credential ACL has a malformed rule");
+}
+
+function windowsAceFlags(value: string): ReadonlySet<string> {
+  if (value.length % 2 !== 0) {
+    throw new Error("Windows credential ACL has malformed inheritance flags");
+  }
+  const flags = new Set<string>();
+  for (let offset = 0; offset < value.length; offset += 2) {
+    const flag = value.slice(offset, offset + 2);
+    if (!["OI", "CI", "NP", "IO", "ID"].includes(flag)) {
+      throw new Error(
+        "Windows credential ACL has unsupported inheritance flags",
+      );
+    }
+    flags.add(flag);
+  }
+  return flags;
+}
+
+function windowsAceGrantsFullControl(rights: string): boolean {
+  if (rights === "FA" || rights === "GA") return true;
+  if (!/^0x[\da-f]+$/iu.test(rights)) return false;
+  const mask = BigInt(rights);
+  return (mask & 0x1f01ffn) === 0x1f01ffn || (mask & 0x10000000n) !== 0n;
+}
+
+function windowsAceAllowsAncestorReplacement(
+  rights: string,
+  inheritanceFlags: ReadonlySet<string>,
+): boolean {
+  if (inheritanceFlags.has("IO")) return false;
+  if (/^0x[\da-f]+$/iu.test(rights)) {
+    return (BigInt(rights) & 0x100d0040n) !== 0n;
+  }
+  for (let index = 0; index < rights.length; index += 2) {
+    if (
+      ["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(
+        rights.slice(index, index + 2),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function verifyStableWindowsCredentialDescendants(
+  path: string,
+  inspectDescriptors: () => Promise<number>,
+  options: { inspectEmpty?: boolean } = {},
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let descendants = 0;
+    const pending = [path];
+    try {
+      while (pending.length !== 0) {
+        const current = pending.pop()!;
+        const directory = await opendir(current);
+        for await (const entry of directory) {
+          const child = join(current, entry.name);
+          const metadata = await lstat(child);
+          if (metadata.isSymbolicLink()) {
+            throw new Error(
+              "Windows credential home contains a symbolic link or junction",
+            );
+          }
+          if (!metadata.isDirectory() && !metadata.isFile()) {
+            throw new Error("Windows credential home contains an unsafe entry");
+          }
+          descendants += 1;
+          if (metadata.isDirectory()) pending.push(child);
+        }
+      }
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException;
+      if (failure.code === "ENOENT" && failure.path !== path) {
+        continue;
+      }
+      throw error;
+    }
+    if (descendants === 0 && options.inspectEmpty !== true) return;
+
+    if ((await inspectDescriptors()) === descendants) return;
+  }
+
+  throw new Error("Windows credential descendants could not be verified");
+}
+
+export async function streamWindowsCredentialAclDescriptors(
+  command: string,
+  args: readonly string[],
+  inspectDescriptor: (descriptor: string) => Promise<void>,
+  options: { environment?: NodeJS.ProcessEnv } = {},
+): Promise<number> {
+  const child = spawn(command, [...args], {
+    env: options.environment,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    const remaining = MAX_WINDOWS_CREDENTIAL_ACL_STDERR - stderr.length;
+    if (remaining > 0) stderr += chunk.slice(0, remaining);
+  });
+
+  const completion = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const reason = signal === null ? `exit code ${code}` : `signal ${signal}`;
+      reject(
+        Object.assign(
+          new Error(`Windows credential ACL inspection failed with ${reason}`),
+          { code, signal, stderr },
+        ),
+      );
+    });
+  });
+
+  let descriptors = 0;
+  try {
+    await Promise.all([
+      completion,
+      (async () => {
+        const lines = createInterface({
+          input: child.stdout,
+          crlfDelay: Infinity,
+        });
+        for await (const descriptor of lines) {
+          if (descriptor === "") continue;
+          await inspectDescriptor(descriptor);
+          descriptors += 1;
+        }
+      })(),
+    ]);
+  } catch (error) {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    throw error;
+  }
+
+  return descriptors;
+}
+
+export async function inspectWindowsCredentialAclSnapshot(
+  path: string,
+  currentUserSid: string,
+  options: {
+    command: string;
+    args: readonly string[];
+    environment?: NodeJS.ProcessEnv;
+    resolvedAliases?: Readonly<Record<string, string>>;
+    resolveDescriptorAliases?: (descriptor: string) => Promise<void>;
+  },
+): Promise<{
+  home: WindowsCredentialAcl;
+  descendantsArePrivate: boolean;
+}> {
+  let ancestors = 0;
+  for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+    ancestors += 1;
+    if (ancestor === dirname(ancestor)) break;
+  }
+
+  let home: WindowsCredentialAcl | undefined;
+  let descendantsArePrivate = true;
+  await verifyStableWindowsCredentialDescendants(
+    path,
+    async () => {
+      home = undefined;
+      descendantsArePrivate = true;
+      let inspected = 0;
+      const descriptors = await streamWindowsCredentialAclDescriptors(
+        options.command,
+        options.args,
+        async (descriptor) => {
+          const index = inspected;
+          inspected += 1;
+          await options.resolveDescriptorAliases?.(descriptor);
+
+          if (index < ancestors) {
+            const ancestor = inspectWindowsCredentialAcl(
+              descriptor,
+              currentUserSid,
+              {
+                resolvedAliases: options.resolvedAliases,
+                scope: "ancestor",
+              },
+            );
+            if (ancestor.untrustedPrincipals.length !== 0) {
+              throw new Error(
+                "Windows credential-home ancestor allows another identity to replace the directory",
+              );
+            }
+            return;
+          }
+
+          if (index === ancestors) {
+            try {
+              home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
+                resolvedAliases: options.resolvedAliases,
+              });
+            } catch (error) {
+              if (error instanceof UntrustedWindowsCredentialOwnerError) {
+                throw new RepairableWindowsCredentialOwnerError(error);
+              }
+              throw new RepairableWindowsCredentialAclError(error);
+            }
+            return;
+          }
+
+          const descendant = inspectWindowsCredentialAcl(
+            descriptor,
+            currentUserSid,
+            {
+              resolvedAliases: options.resolvedAliases,
+              scope: "file",
+            },
+          );
+          if (
+            !descendant.grantsCurrentUserAccess ||
+            descendant.untrustedPrincipals.length !== 0
+          ) {
+            descendantsArePrivate = false;
+          }
+        },
+        { environment: options.environment },
+      );
+      if (descriptors <= ancestors) {
+        throw new Error(
+          "Windows credential-home ancestry could not be verified",
+        );
+      }
+      return descriptors - ancestors - 1;
+    },
+    { inspectEmpty: true },
+  );
+
+  if (home === undefined) {
+    throw new Error("Windows credential ACL could not be verified");
+  }
+  return { home, descendantsArePrivate };
+}
+
 async function secureWindowsCredentialHome(path: string): Promise<void> {
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
+  const systemDirectory = join(systemRoot, "System32");
   const powershell = join(
-    systemRoot,
-    "System32",
+    systemDirectory,
     "WindowsPowerShell",
     "v1.0",
     "powershell.exe",
   );
+  const inheritedEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+    ),
+  );
+  const processOptions = {
+    env: {
+      ...inheritedEnvironment,
+      CODEX_SECURITY_CREDENTIAL_ACL_PATH: path,
+      PSModulePath: join(
+        systemDirectory,
+        "WindowsPowerShell",
+        "v1.0",
+        "Modules",
+      ),
+    },
+    encoding: "utf8" as const,
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+  };
+  const identity = await execFile(
+    join(systemDirectory, "whoami.exe"),
+    ["/user", "/fo", "csv", "/nh"],
+    processOptions,
+  );
+  const sid = /^"(?:[^"]|"")*","(S-1-(?:\d+-)*\d+)"$/u.exec(
+    identity.stdout.trim(),
+  )?.[1];
+  if (sid === undefined) {
+    throw new Error("Unable to identify the current Windows user SID");
+  }
+
+  // Signed built-in cmdlets remain available under ConstrainedLanguage;
+  // arbitrary .NET constructors, static methods, and SID translation do not.
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    "$path = [Environment]::GetEnvironmentVariable('CODEX_SECURITY_CREDENTIAL_ACL_PATH', 'Process')",
-    "$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
-    "if ($null -eq $identity.User) { throw 'Unable to identify the current Windows user' }",
-    "$acl = New-Object System.Security.AccessControl.DirectorySecurity",
-    "$acl.SetAccessRuleProtection($true, $false)",
-    "$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit",
-    "$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity.User, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)",
-    "$acl.SetOwner($identity.User)",
-    "$acl.SetAccessRule($rule)",
-    "[System.IO.Directory]::SetAccessControl($path, $acl)",
-    "$verified = [System.IO.Directory]::GetAccessControl($path)",
-    "if (-not $verified.AreAccessRulesProtected) { throw 'Credential ACL still inherits access rules' }",
-    "$unexpected = @($verified.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.User.Value })",
-    "if ($unexpected.Count -ne 0) { throw 'Credential ACL grants access to another identity' }",
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
+    "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Security\\Get-Acl | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
   ].join("; ");
-  await execFile(
-    powershell,
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-    {
-      env: {
-        ...process.env,
-        CODEX_SECURITY_CREDENTIAL_ACL_PATH: path,
+  const resolvePrincipalScript = [
+    "$ErrorActionPreference = 'Stop'",
+    "$descriptor = 'O:' + $env:CODEX_SECURITY_CREDENTIAL_PRINCIPAL + 'G:SYD:(A;;GA;;;SY)'",
+    "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl $descriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+  ].join("; ");
+  const resolvedAliases: Record<string, string> = {};
+  const resolvePrincipal = async (principal: string): Promise<void> => {
+    if (
+      !/^[A-Z]{2}$/u.test(principal) ||
+      WINDOWS_PRINCIPAL_ALIASES[principal] !== undefined ||
+      resolvedAliases[principal] !== undefined
+    ) {
+      return;
+    }
+    const resolved = await execFile(
+      powershell,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        resolvePrincipalScript,
+      ],
+      {
+        ...processOptions,
+        env: {
+          ...processOptions.env,
+          CODEX_SECURITY_CREDENTIAL_PRINCIPAL: principal,
+        },
       },
-      encoding: "utf8",
-      windowsHide: true,
-      maxBuffer: 1024 * 1024,
-    },
-  );
+    );
+    const numeric = resolved.stdout.trim();
+    if (!WINDOWS_SID.test(numeric)) {
+      throw new Error(
+        "Windows credential ACL contains an unresolvable identity",
+      );
+    }
+    resolvedAliases[principal] = numeric;
+  };
+  const resolveDescriptorAliases = async (
+    descriptor: string,
+  ): Promise<void> => {
+    const header = WINDOWS_SECURITY_DESCRIPTOR.exec(descriptor.trim());
+    if (header === null) return;
+    await resolvePrincipal(header[1]!);
+    let remaining = header[3]!;
+    while (remaining.startsWith("(")) {
+      const { rule, rest } = windowsSecurityDescriptorRule(remaining);
+      const principal = rule.split(";")[5];
+      if (principal !== undefined) await resolvePrincipal(principal);
+      remaining = rest;
+    }
+  };
+  let descendantsArePrivate = true;
+  const readAcl = async (): Promise<WindowsCredentialAcl> => {
+    const snapshot = await inspectWindowsCredentialAclSnapshot(path, sid, {
+      command: powershell,
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+      environment: processOptions.env,
+      resolvedAliases,
+      resolveDescriptorAliases,
+    });
+    descendantsArePrivate = snapshot.descendantsArePrivate;
+    return snapshot.home;
+  };
+
+  const icacls = join(systemDirectory, "icacls.exe");
+  const installTrustedAcl = async (target = path): Promise<void> => {
+    await execFile(
+      icacls,
+      [
+        target,
+        "/inheritance:r",
+        "/grant:r",
+        `*${sid}:(OI)(CI)F`,
+        `*${WINDOWS_SYSTEM_SID}:(OI)(CI)F`,
+        `*${WINDOWS_ADMINISTRATORS_SID}:(OI)(CI)F`,
+      ],
+      processOptions,
+    );
+  };
+  let existing: WindowsCredentialAcl | undefined;
+  for (let attempt = 0; existing === undefined && attempt < 3; attempt += 1) {
+    try {
+      existing = await readAcl();
+    } catch (error) {
+      if (error instanceof RepairableWindowsCredentialOwnerError) {
+        await execFile(icacls, [path, "/setowner", `*${sid}`], processOptions);
+      } else if (error instanceof RepairableWindowsCredentialAclError) {
+        await installTrustedAcl();
+      } else {
+        throw error;
+      }
+    }
+  }
+  if (existing === undefined) {
+    throw new Error("Windows credential ACL could not be repaired");
+  }
+  if (
+    existing.grantsCurrentUserAccess &&
+    existing.untrustedPrincipals.length === 0 &&
+    !existing.protected
+  ) {
+    await execFile(icacls, [path, "/inheritance:d"], processOptions);
+    existing = await readAcl();
+  }
+
+  let verified = existing;
+  if (
+    !verified.protected ||
+    !verified.grantsCurrentUserAccess ||
+    verified.untrustedPrincipals.length !== 0
+  ) {
+    await installTrustedAcl();
+    verified = await readAcl();
+    for (const principal of verified.untrustedPrincipals) {
+      if (!WINDOWS_SID.test(principal)) {
+        throw new Error(
+          "Windows credential ACL contains an unresolvable identity",
+        );
+      }
+      await execFile(
+        icacls,
+        [path, "/remove:g", `*${principal}`],
+        processOptions,
+      );
+    }
+    for (const principal of verified.deniedPrincipals) {
+      if (!WINDOWS_SID.test(principal)) {
+        throw new Error(
+          "Windows credential ACL contains an unresolvable identity",
+        );
+      }
+      await execFile(
+        icacls,
+        [path, "/remove:d", `*${principal}`],
+        processOptions,
+      );
+    }
+    if (
+      verified.untrustedPrincipals.length !== 0 ||
+      verified.deniedPrincipals.length !== 0
+    ) {
+      verified = await readAcl();
+    }
+  }
+  if (!verified.protected) {
+    throw new Error("Windows credential ACL still inherits access rules");
+  }
+  if (!verified.grantsCurrentUserAccess) {
+    throw new Error(
+      "Windows credential ACL does not grant the current user access",
+    );
+  }
+  if (verified.untrustedPrincipals.length !== 0) {
+    throw new Error("Windows credential ACL grants access to another identity");
+  }
+  if (!descendantsArePrivate) {
+    await execFile(
+      icacls,
+      [join(path, "*"), "/reset", "/t", "/q"],
+      processOptions,
+    );
+    await readAcl();
+    if (!descendantsArePrivate) {
+      throw new Error("Windows credential descendants remain accessible");
+    }
+  }
 }
 
 export async function acquireCodexSecurityCredentialHomeLock(
@@ -609,7 +1297,9 @@ export async function runWorkbench(
           Object.entries(options.environment).filter(
             ([name]) =>
               name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY",
+              name.toUpperCase() !== "CODEX_API_KEY" &&
+              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+              name.toUpperCase() !== "FIREWORKS_API_KEY",
           ),
         ),
         encoding: "utf8",
@@ -1448,11 +2138,19 @@ async function codexSecurityPluginRegistration(
 
 export function resolveCodexCommand(): CodexCommand {
   const { packageName, targetTriple } = codexPlatformPackage();
-  const require = createRequire(import.meta.url);
-  const codexPackageJson = require.resolve("@openai/codex/package.json");
-  const packageJson = createRequire(codexPackageJson).resolve(
-    `${packageName}/package.json`,
-  );
+  let packageJson: string;
+  try {
+    const require = createRequire(import.meta.url);
+    const codexPackageJson = require.resolve("@openai/codex/package.json");
+    packageJson = createRequire(codexPackageJson).resolve(
+      `${packageName}/package.json`,
+    );
+  } catch (error) {
+    throw new PluginBootstrapError(
+      `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
+      { cause: error },
+    );
+  }
   const command = join(
     dirname(packageJson),
     "vendor",
@@ -1462,7 +2160,7 @@ export function resolveCodexCommand(): CodexCommand {
   );
   if (!existsSync(command)) {
     throw new PluginBootstrapError(
-      `The ${packageName} package does not contain the Codex executable for ${targetTriple}.`,
+      `The ${packageName} package does not contain the Codex executable for ${targetTriple}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
     );
   }
   return { command, prefixArgs: [] };
@@ -1761,7 +2459,12 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  return { ...environment, PYTHON: python };
+  return {
+    ...environment,
+    PYTHON: python,
+    CODEX_CLI_PATH:
+      environment["CODEX_CLI_PATH"]?.trim() || resolveCodexCommand().command,
+  };
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {
