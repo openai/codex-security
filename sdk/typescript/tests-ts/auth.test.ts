@@ -100,15 +100,15 @@ describe("Codex authentication process boundary", () => {
     ).resolves.toMatchObject({ success: false, exitCode: 1 });
   });
 
-  test("keeps verbose authentication output bounded and redacted", async () => {
+  test("retains large noninteractive authentication output", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
     temporaryDirectories.push(root);
-    const secret = "sk-proj-SYNTHETIC_OVERSIZED_OUTPUT_SECRET";
+    const output = "verbose authentication output ".repeat(3_000);
     for (const stream of ["stdout", "stderr"] as const) {
       const script = join(root, `${stream}.mjs`);
       await writeFile(
         script,
-        `process.${stream}.write(${JSON.stringify(secret)}.repeat(3_000), () => process.exit(0));\n`,
+        `process.${stream}.write(${JSON.stringify(output)}, () => process.exit(0));\n`,
       );
       const result = await runCodex(
         { command: process.execPath, prefixArgs: [script] },
@@ -116,99 +116,8 @@ describe("Codex authentication process boundary", () => {
         process.env,
       );
       expect(result.success).toBe(true);
-      expect(Buffer.byteLength(result[stream], "utf8")).toBeLessThanOrEqual(
-        64 * 1024,
-      );
-      expect(result[stream]).toContain("authentication output was truncated");
-      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(result[stream]).toBe(output);
     }
-  });
-
-  test("never exposes a credential value cut by the retained-output boundary", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-secret-"));
-    temporaryDirectories.push(root);
-    const script = join(root, "credential.mjs");
-    const secretFragment = "s".repeat(256);
-    await writeFile(
-      script,
-      'process.stdout.write("token=" + "s".repeat(128 * 1024) + "\\ncompleted\\n", () => process.exit(0));\n',
-    );
-
-    const result = await runCodex(
-      { command: process.execPath, prefixArgs: [script] },
-      [],
-      process.env,
-    );
-    expect(result.success).toBe(true);
-    expect(result.stdout).toContain("authentication output was truncated");
-    expect(JSON.stringify(result)).not.toContain(secretFragment);
-  });
-
-  test("does not expose a multiline private key cut by the output boundary", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-pem-"));
-    temporaryDirectories.push(root);
-    const script = join(root, "private-key.mjs");
-    await writeFile(
-      script,
-      'process.stdout.write("private_key=-----BEGIN PRIVATE KEY-----\\n" + "SENSITIVE_PRIVATE_KEY_BODY\\n".repeat(4_000) + "-----END PRIVATE KEY-----\\n", () => process.exit(0));\n',
-    );
-
-    const result = await runCodex(
-      { command: process.execPath, prefixArgs: [script] },
-      [],
-      process.env,
-    );
-    expect(result.success).toBe(true);
-    expect(result.stdout).toContain("authentication output was truncated");
-    expect(result.stdout).not.toContain("SENSITIVE_PRIVATE_KEY_BODY");
-    expect(result.stdout).not.toContain("END PRIVATE KEY");
-  });
-
-  test("bounds diagnostics after credential redaction expands their size", async () => {
-    const root = await mkdtemp(
-      join(tmpdir(), "codex-security-auth-expansion-"),
-    );
-    temporaryDirectories.push(root);
-    const script = join(root, "redaction.mjs");
-    await writeFile(
-      script,
-      'process.stdout.write("token=x\\n".repeat(6_000), () => process.exit(0));\n',
-    );
-
-    const result = await runCodex(
-      { command: process.execPath, prefixArgs: [script] },
-      [],
-      process.env,
-    );
-    expect(result.success).toBe(true);
-    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(
-      64 * 1024,
-    );
-    expect(result.stdout).toContain("[redacted]");
-    expect(result.stdout).not.toContain("token=x");
-  });
-
-  test("does not terminate a verbose authentication command", async () => {
-    const root = await mkdtemp(
-      join(tmpdir(), "codex-security-auth-command-kill-"),
-    );
-    temporaryDirectories.push(root);
-    const script = join(root, "command.mjs");
-    await writeFile(
-      script,
-      `
-process.on("SIGTERM", () => process.exit(9));
-process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit(0), 20));
-`,
-    );
-
-    await expect(
-      runCodex(
-        { command: process.execPath, prefixArgs: [script] },
-        [],
-        process.env,
-      ),
-    ).resolves.toMatchObject({ success: true, exitCode: 0 });
   });
 
   test("reports account state and performs logout", async () => {
@@ -218,54 +127,6 @@ process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit
       details: "Logged in using ChatGPT",
     });
     await expect(logout(command, process.env)).resolves.toBeUndefined();
-  });
-
-  test.each([
-    ["Logged in using ChatGPT", true],
-    ["not logged in", false],
-    ["unauthenticated", false],
-  ] as const)(
-    "preserves the %s account-status marker after output truncation",
-    async (marker, authenticated) => {
-      const root = await mkdtemp(join(tmpdir(), "codex-security-auth-status-"));
-      temporaryDirectories.push(root);
-      const script = join(root, "status.mjs");
-      await writeFile(
-        script,
-        `process.stdout.write(${JSON.stringify(`${marker}\n`)} + "x".repeat(128 * 1024), () => process.exit(0));\n`,
-      );
-
-      const status = await accountStatus(
-        { command: process.execPath, prefixArgs: [script] },
-        process.env,
-      );
-      expect(status.authenticated).toBe(authenticated);
-      expect(status.details).toContain(
-        authenticated ? "ChatGPT" : "Not logged in",
-      );
-    },
-  );
-
-  test("keeps truncated multilingual diagnostics on UTF-8 boundaries", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-unicode-"));
-    temporaryDirectories.push(root);
-    const script = join(root, "unicode.mjs");
-    await writeFile(
-      script,
-      'process.stdout.write("🔒".repeat(10_000) + "\\n" + "token=x\\n".repeat(3_000), () => process.exit(0));\n',
-    );
-
-    const result = await runCodex(
-      { command: process.execPath, prefixArgs: [script] },
-      [],
-      process.env,
-    );
-    expect(result.success).toBe(true);
-    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(
-      64 * 1024,
-    );
-    expect(result.stdout).not.toContain("�");
-    expect(result.stdout).toEndWith("[redacted]\n");
   });
 
   test("captures quoted interactive login metadata and completion", async () => {
@@ -286,18 +147,18 @@ process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit
     expect(succeeded).toBe(true);
   });
 
-  test("bounds interactive output while retaining discovered instructions", async () => {
+  test("retains large interactive output and login instructions", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
     temporaryDirectories.push(root);
     const script = join(root, "login.mjs");
-    const secret = "sk-proj-SYNTHETIC_INTERACTIVE_OUTPUT_SECRET";
+    const output = "verbose authentication output ".repeat(3_000);
     await writeFile(
       script,
       `
 console.error("Open https://auth.example.test/device");
 console.error("User code: ABCD-EFGH");
 setTimeout(() => {
-  process.stderr.write(${JSON.stringify(secret)}.repeat(3_000), () => process.exit(0));
+  process.stderr.write(${JSON.stringify(output)}, () => process.exit(0));
 }, 10);
 `,
     );
@@ -316,11 +177,7 @@ setTimeout(() => {
     expect(handle.userCode).toBe("ABCD-EFGH");
     const result = await handle.wait();
     expect(result).toMatchObject({ success: true, exitCode: 0, stdout: "" });
-    expect(Buffer.byteLength(result.stderr, "utf8")).toBeLessThanOrEqual(
-      64 * 1024,
-    );
-    expect(result.stderr).toContain("authentication output was truncated");
-    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.stderr).toContain(output);
     expect(succeeded).toBe(true);
   });
 
@@ -401,43 +258,13 @@ setTimeout(() => {
     await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
-  test("finds login instructions after verbose output", async () => {
+  test("finds login instructions after large authentication output", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tail-"));
     temporaryDirectories.push(root);
     const script = join(root, "login.mjs");
     await writeFile(
       script,
-      'process.stderr.write("x".repeat(128 * 1024), () => process.stderr.write("\\nOpen https://auth.example.test/device\\nUser code: ABCD-EFGH\\n", () => process.exit(0)));\n',
-    );
-    const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login"],
-      process.env,
-      () => {},
-    );
-
-    await handle.waitForInstructions({ deviceCode: true });
-    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
-    expect(handle.userCode).toBe("ABCD-EFGH");
-    await expect(handle.wait()).resolves.toMatchObject({ success: true });
-  });
-
-  test("does not terminate a verbose interactive login", async () => {
-    const root = await mkdtemp(
-      join(tmpdir(), "codex-security-auth-output-kill-"),
-    );
-    temporaryDirectories.push(root);
-    const script = join(root, "login.mjs");
-    await writeFile(
-      script,
-      `
-console.error("Open https://auth.example.test/device");
-console.error("User code: ABCD-EFGH");
-process.on("SIGTERM", () => process.exit(9));
-setTimeout(() => {
-  process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit(0), 20));
-}, 10);
-`,
+      'process.stderr.write(("x".repeat(1024) + "\\n").repeat(128), () => process.stderr.write("Open https://auth.example.test/device\\nUser code: ABCD-EFGH\\n", () => process.exit(0)));\n',
     );
     const handle = new CodexLoginHandle(
       { command: process.execPath, prefixArgs: [script] },
@@ -446,17 +273,10 @@ setTimeout(() => {
       () => {},
     );
 
-    try {
-      await handle.waitForInstructions({ deviceCode: true });
-      const result = await handle.wait();
-      expect(result).toMatchObject({ success: true, exitCode: 0 });
-      expect(Buffer.byteLength(result.stderr, "utf8")).toBeLessThanOrEqual(
-        64 * 1024,
-      );
-    } finally {
-      handle.cancel();
-      await handle.wait();
-    }
+    await handle.waitForInstructions({ deviceCode: true });
+    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
+    expect(handle.userCode).toBe("ABCD-EFGH");
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
   test("drains native login stderr before resolving authentication", async () => {
