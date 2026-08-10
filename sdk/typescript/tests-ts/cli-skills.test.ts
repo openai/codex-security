@@ -469,7 +469,7 @@ describe("CLI skill commands", () => {
     });
   });
 
-  test("drains and rejects oversized skill events and responses", async () => {
+  test("accepts skill events and responses larger than 16 MiB", async () => {
     let drained = false;
     async function* oversizedLine(): AsyncGenerator<Buffer> {
       for (let remaining = 1_024 * 1_024 + 1; remaining > 0; ) {
@@ -482,25 +482,28 @@ describe("CLI skill commands", () => {
       );
       drained = true;
     }
-    await expect(readSkillCommandOutput(oversizedLine())).rejects.toThrow(
-      "Codex skill output exceeded the 1 MiB event",
-    );
+    await expect(readSkillCommandOutput(oversizedLine())).resolves.toEqual({
+      message: "must still drain",
+      malformed: true,
+    });
     expect(drained).toBe(true);
 
+    const largeResponse = "x".repeat(16 * 1_024 * 1_024 + 1);
     async function* oversizedResponse(): AsyncGenerator<Buffer> {
       yield Buffer.from(
         `${JSON.stringify({
           type: "item.completed",
           item: {
             type: "agent_message",
-            text: "x".repeat(256 * 1_024 + 1),
+            text: largeResponse,
           },
         })}\n`,
       );
     }
-    await expect(readSkillCommandOutput(oversizedResponse())).rejects.toThrow(
-      "Codex skill output exceeded the 1 MiB event",
-    );
+    await expect(readSkillCommandOutput(oversizedResponse())).resolves.toEqual({
+      message: largeResponse,
+      malformed: false,
+    });
 
     const stdout = capture();
     const stderr = capture();
@@ -512,76 +515,12 @@ describe("CLI skill commands", () => {
           command: process.execPath,
           prefixArgs: [
             "-e",
-            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n")',
+            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(1024*1024+1)}})+"\\n")',
           ],
         },
       ),
-    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe("");
-  });
-
-  test("terminates an oversized skill child that keeps its output open", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const timeout = AbortSignal.timeout(2_500);
-    const invocation = runCodexSkillCommand(
-      [],
-      { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-      {
-        command: process.execPath,
-        prefixArgs: [
-          "-e",
-          'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n");setInterval(()=>{},1000)',
-        ],
-      },
-    );
-
-    await expect(
-      Promise.race([
-        invocation,
-        new Promise<never>((_, reject) => {
-          timeout.addEventListener(
-            "abort",
-            () => reject(new Error("Oversized skill process did not settle.")),
-            { once: true },
-          );
-        }),
-      ]),
-    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe("");
-  });
-
-  test("terminates an oversized skill child after it closes its stdout", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const timeout = AbortSignal.timeout(2_500);
-    const invocation = runCodexSkillCommand(
-      [],
-      { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-      {
-        command: process.execPath,
-        prefixArgs: [
-          "-e",
-          'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n");process.stdout.end();setInterval(()=>{},1000)',
-        ],
-      },
-    );
-
-    await expect(
-      Promise.race([
-        invocation,
-        new Promise<never>((_, reject) => {
-          timeout.addEventListener(
-            "abort",
-            () => reject(new Error("Oversized skill process did not settle.")),
-            { once: true },
-          );
-        }),
-      ]),
-    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
-    expect(stdout.text()).toBe("");
+    ).resolves.toBe(0);
+    expect(stdout.text()).toBe(`${"x".repeat(1024 * 1024 + 1)}\n`);
     expect(stderr.text()).toBe("");
   });
 
