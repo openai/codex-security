@@ -345,6 +345,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     await recoverLock(output, path, existing.owner);
     return await acquireLock(output);
   }
+  const createdLock = await lstat(path);
   const owner = `${JSON.stringify({
     pid: process.pid,
     ownerId: randomUUID(),
@@ -354,15 +355,26 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   try {
     await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
   } catch (error) {
-    await rmdir(path).catch((cleanup: NodeJS.ErrnoException) => {
-      if (
-        cleanup.code !== "ENOENT" &&
-        cleanup.code !== "ENOTEMPTY" &&
-        cleanup.code !== "EEXIST"
-      ) {
-        throw cleanup;
-      }
-    });
+    const currentLock = await lstat(path).catch(
+      (cleanup: NodeJS.ErrnoException) => {
+        if (cleanup.code !== "ENOENT") throw cleanup;
+        return undefined;
+      },
+    );
+    if (
+      currentLock?.dev === createdLock.dev &&
+      currentLock.ino === createdLock.ino
+    ) {
+      await rmdir(path).catch((cleanup: NodeJS.ErrnoException) => {
+        if (
+          cleanup.code !== "ENOENT" &&
+          cleanup.code !== "ENOTEMPTY" &&
+          cleanup.code !== "EEXIST"
+        ) {
+          throw cleanup;
+        }
+      });
+    }
     throw error;
   }
 

@@ -1208,53 +1208,61 @@ describe("multiscan", () => {
     }
   });
 
-  test("never removes a replacement owner's lock when owner creation fails", async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "owner-creation-race");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrace,${source.path},${source.revision}\n`,
-    );
-    const lock = join(paths.output, ".lock");
-    const ownerPath = join(lock, "owner.json");
-    const replacement = JSON.stringify({
-      pid: process.pid,
-      ownerId: "replacement-supervisor",
-      hostname: hostname(),
-      processStartedAt: performance.timeOrigin,
-    });
-    const originalWriteFile = filesystem.writeFile;
-    const writeOwner = spyOn(filesystem, "writeFile").mockImplementation(
-      async (path, data, options) => {
-        if (String(path) !== ownerPath) {
-          return await originalWriteFile(path, data, options);
-        }
-        writeOwner.mockRestore();
-        await rename(lock, join(paths.output, ".lock.stale-owner-creation"));
-        await mkdir(lock, { mode: 0o700 });
-        await originalWriteFile(ownerPath, replacement, { mode: 0o600 });
-        throw Object.assign(new Error("replacement already owns the lock"), {
-          code: "EEXIST",
-        });
-      },
-    );
+  test.each([false, true])(
+    "never removes a replacement lock when owner creation fails (owner published: %s)",
+    async (ownerPublished) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "owner-creation-race");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrace,${source.path},${source.revision}\n`,
+      );
+      const lock = join(paths.output, ".lock");
+      const ownerPath = join(lock, "owner.json");
+      const replacement = JSON.stringify({
+        pid: process.pid,
+        ownerId: "replacement-supervisor",
+        hostname: hostname(),
+        processStartedAt: performance.timeOrigin,
+      });
+      const originalWriteFile = filesystem.writeFile;
+      const writeOwner = spyOn(filesystem, "writeFile").mockImplementation(
+        async (path, data, options) => {
+          if (String(path) !== ownerPath) {
+            return await originalWriteFile(path, data, options);
+          }
+          writeOwner.mockRestore();
+          await rename(lock, join(paths.output, ".lock.stale-owner-creation"));
+          await mkdir(lock, { mode: 0o700 });
+          if (ownerPublished) {
+            await originalWriteFile(ownerPath, replacement, { mode: 0o600 });
+          }
+          throw Object.assign(new Error("replacement already owns the lock"), {
+            code: "EEXIST",
+          });
+        },
+      );
 
-    try {
-      await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
+      try {
+        await expect(
+          runMultiscan(
+            options(
+              paths,
+              client(async (_repository, scanOptions = {}) =>
+                completedScan(scanOptions.outputDir!),
+              ),
             ),
           ),
-        ),
-      ).rejects.toThrow("replacement already owns the lock");
-      expect(await readFile(ownerPath, "utf8")).toBe(replacement);
-    } finally {
-      writeOwner.mockRestore();
-    }
-  });
+        ).rejects.toThrow("replacement already owns the lock");
+        await access(lock);
+        if (ownerPublished) {
+          expect(await readFile(ownerPath, "utf8")).toBe(replacement);
+        }
+      } finally {
+        writeOwner.mockRestore();
+      }
+    },
+  );
 
   test("retries a failed attempt and records both durable receipts", async () => {
     const paths = await fixture();
