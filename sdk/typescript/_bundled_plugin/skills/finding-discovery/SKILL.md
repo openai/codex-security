@@ -9,6 +9,8 @@ description: Use when Codex is already in the finding-discovery phase of a secur
 
 Investigate the proposed code or code changes for technically plausible security vulnerabilities using the threat model as context.
 
+Standard and Deep discovery workers follow their self-contained coordinator prompts; they do not invoke this skill. For an explicit standalone repository-discovery request, apply the relevant checklist below directly to the authorized current source without running the diff-only workflow or starting another scan.
+
 ## Artifact Resolution
 
 The path references in this skill are the default locations for this phase.
@@ -30,10 +32,6 @@ If the scan target is for a targeted code-diff:
 - Deep-review every file in `deep_review_input.jsonl` using the shared scoped file-review rules.
 - Stay anchored to the changed code and directly supporting files. Unchanged siblings are context or negative controls unless the diff newly reaches them, weakens their shared control, or changes a shared sink/helper they depend on.
 - When the diff is too large to review credibly as one parent-agent pass, use file-review subagents when they are available under the resolved scan authorization and follow the shared scoped deep-review rules in `../security-scan/references/scan-artifacts-and-ledger.md#scoped-deep-review`.
-
-### Exhaustive Repository Or Scoped-Path Workflow
-
-If the scan target is repository-wide or a scoped path, use only the concise detection-first procedure in `../security-scan/references/repository-wide-scan.md`. Obtain assigned repository source paths with `list_codex_security_review_items`, and record all discovered candidates once with `record_codex_security_discovery_candidates`. A Standard parent includes `scanId`; an independent Deep discovery worker uses its bound worker context. This replaces the checklist, phase-specific output, and receipt requirements below for Standard scans and independent Deep discovery workers; do not load additional repository-wide ranking, ledger, validation, or attack-path references. The remaining guidance in this skill continues to apply to diff-scoped discovery.
 
 ## Discovery Checklist
 

@@ -82,60 +82,6 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
-def list_workspace_scans(
-    connection: sqlite3.Connection,
-    args: argparse.Namespace,
-    *,
-    require_workspace: Callable[[sqlite3.Connection, str], sqlite3.Row],
-) -> dict[str, Any]:
-    workspace = require_workspace(connection, args.workspace_id)
-    total = connection.execute(
-        "SELECT COUNT(*) FROM scans WHERE workspace_id = ?", (workspace["id"],)
-    ).fetchone()[0]
-    rows = connection.execute(
-        """
-        SELECT id, mode, status, phase, scope, target_revision,
-            seal_manifest_digest, started_at, completed_at, canceled_at,
-            updated_at, failure_message, completion_warnings_json
-        FROM scans
-        WHERE workspace_id = ?
-        ORDER BY created_at DESC, id DESC
-        LIMIT ? OFFSET ?
-        """,
-        (workspace["id"], args.limit, args.offset),
-    ).fetchall()
-    next_offset = args.offset + len(rows)
-    return {
-        "limit": args.limit,
-        "nextOffset": next_offset if next_offset < total else None,
-        "offset": args.offset,
-        "scans": [
-            {
-                "canceledAt": row["canceled_at"],
-                "completedAt": row["completed_at"],
-                "failureMessage": row["failure_message"],
-                "mode": row["mode"],
-                "phase": row["phase"],
-                "scanId": row["id"],
-                "scope": row["scope"],
-                "sealed": row["seal_manifest_digest"] is not None,
-                "startedAt": row["started_at"],
-                "status": "canceled" if row["canceled_at"] else row["status"],
-                "targetRevision": row["target_revision"],
-                "updatedAt": row["updated_at"],
-                **(
-                    {"warnings": json.loads(row["completion_warnings_json"])}
-                    if row["completion_warnings_json"] != "[]"
-                    else {}
-                ),
-            }
-            for row in rows
-        ],
-        "total": total,
-        "workspaceId": workspace["id"],
-    }
-
-
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
@@ -460,6 +406,7 @@ def compare_scans(
     include_matching_status: bool = False,
     matching_status_only: bool = False,
     findings_offset: int | None = None,
+    findings_file: str | None = None,
     require_matches: bool = False,
 ) -> dict[str, Any]:
     before = require_scan(connection, args.before_scan_id)
@@ -631,6 +578,11 @@ def compare_scans(
             "before": [_matching_input(row) for row in before_findings.values()],
             "after": [_matching_input(row) for row in after_findings.values()],
         }
+    if findings_file is not None:
+        descriptor = os.open(findings_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+            json.dump(result, destination, allow_nan=False, ensure_ascii=False)
+        return {"comparisonFile": findings_file}
     return result
 
 

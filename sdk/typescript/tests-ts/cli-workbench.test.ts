@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
@@ -266,11 +266,24 @@ describe("CLI workbench", () => {
         stdout.stream,
         capture().stream,
         dependencies({
-          onWorkbench: (args): JsonObject => {
+          onWorkbench: async (args): Promise<JsonObject> => {
             calls.push(args);
             if (args[0] === "compare-scans") {
               if (!args.includes("--require-matches")) {
                 return { matchingCached: false };
+              }
+              if (args.includes("--findings-file")) {
+                await writeFile(
+                  args.at(-1)!,
+                  JSON.stringify({
+                    summary: { persisting: 2 },
+                    findings: [
+                      { findingId: "finding-0" },
+                      { findingId: "finding-1" },
+                    ],
+                  }),
+                );
+                return { comparisonFile: args.at(-1)! };
               }
               const offset = Number(args.at(-1));
               return {
@@ -718,7 +731,7 @@ describe("CLI workbench", () => {
         "-B",
         "-c",
         [
-          "import argparse, json, sqlite3, sys",
+          "import argparse, json, os, sqlite3, sys, tempfile",
           "sys.path.insert(0, sys.argv[1])",
           "import workbench_scan_history as history",
           "connection = sqlite3.connect(':memory:')",
@@ -741,6 +754,13 @@ describe("CLI workbench", () => {
           "history._finding_groups = lambda *_: [([], [{'id': 'large', 'finding_id': 'large', 'relative_path': 'source.py', 'severity': 'high', 'title': 'x' * 600000, 'close_reason': None, 'triage_status': 'open'}], None)]",
           "large = compare(0)",
           "assert len(large['findings']) == 1 and large['nextOffset'] is None, large.keys()",
+          "with tempfile.TemporaryDirectory() as directory:",
+          "    output = os.path.join(directory, 'comparison.json')",
+          "    written = history.compare_scans(connection, args, require_scan=lambda _, identity: scans[identity], read_coverage=lambda _: {'completeness': 'complete'}, findings_file=output)",
+          "    assert written == {'comparisonFile': output}, written",
+          "    with open(output, encoding='utf-8') as source: persisted = json.load(source)",
+          "    assert len(persisted['findings']) == 1, persisted.keys()",
+          "    assert os.name == 'nt' or os.stat(output).st_mode & 0o777 == 0o600",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
       ],
