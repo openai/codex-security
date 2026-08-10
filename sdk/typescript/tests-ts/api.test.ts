@@ -4048,7 +4048,6 @@ describe("CodexSecurity orchestration", () => {
     const source = join(repository, "src");
     const ignored = join(source, "node_modules");
     const vendored = join(source, "vendor");
-    const environment = join(source, ".venv");
     const scopes = join(root, "scopes.json");
     const output = join(root, "scoped-source-input.jsonl");
     const interpreter =
@@ -4059,18 +4058,16 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(join(source, "examples"));
     await mkdir(ignored);
     await mkdir(vendored);
-    await mkdir(environment);
     execFileSync("git", ["init", "-q"], { cwd: repository });
     await Promise.all([
       writeFile(
         join(repository, ".gitignore"),
-        "node_modules/\n.env\n.venv/\n",
+        "node_modules/\n.env\nvendor/\n",
       ),
       writeFile(join(source, "handler.ts"), "export {};\n"),
       writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
       writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
       writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
-      writeFile(join(source, "examples", "vendor"), "first-party source\n"),
       writeFile(join(source, ".env"), "SECRET=private\n"),
       writeFile(
         join(source, "logo.png"),
@@ -4078,7 +4075,6 @@ describe("CodexSecurity orchestration", () => {
       ),
       writeFile(join(ignored, "dependency.ts"), "export {};\n"),
       writeFile(join(vendored, "dependency.ts"), "export {};\n"),
-      writeFile(join(environment, "installed.py"), "print('installed')\n"),
     ]);
     execFileSync(
       "git",
@@ -4112,17 +4108,19 @@ describe("CodexSecurity orchestration", () => {
     expect(await enumerate(["src"])).toEqual([
       "src/Dockerfile",
       "src/examples/demo.ts",
-      "src/examples/vendor",
       "src/handler.ts",
+      "src/logo.png",
       "src/tests/handler.test.ts",
+      "src/vendor/dependency.ts",
     ]);
     expect(await enumerate(["src", "src/.env"])).toEqual([
       "src/.env",
       "src/Dockerfile",
       "src/examples/demo.ts",
-      "src/examples/vendor",
       "src/handler.ts",
+      "src/logo.png",
       "src/tests/handler.test.ts",
+      "src/vendor/dependency.ts",
     ]);
     expect(await enumerate(["src/vendor", "src/logo.png"])).toEqual([
       "src/logo.png",
