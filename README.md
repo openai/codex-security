@@ -116,8 +116,8 @@ repeat the option for multiple files or directories.
 
 Use `--scan-prompt-file PATH` to add shared scan instructions, and add a `prompt`
 CSV column for repository-specific instructions. Use
-`--post-scan-prompt-file PATH` to run a follow-up after each completed,
-validated scan.
+`--post-scan-prompt-file PATH` to run a follow-up after each scan, including
+incomplete or failed scans.
 
 For complete command help, runtime defaults, native multi-agent worker limits,
 environment variables, deep-scan configuration, and SDK options, see the
