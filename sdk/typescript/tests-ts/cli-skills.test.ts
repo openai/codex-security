@@ -347,23 +347,17 @@ describe("CLI skill commands", () => {
     }
   });
 
-  test("rejects empty, non-file, and oversized skill inputs before launching Codex", async () => {
+  test("rejects empty and non-file skill inputs before launching Codex", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "codex-security-skill-inputs-"),
     );
     try {
       await mkdir(join(directory, "nested"));
-      await writeFile(
-        join(directory, "oversized.txt"),
-        Buffer.alloc(1024 * 1024 + 1),
-      );
       await writeFile(join(directory, "empty.txt"), " \n\t");
       const invalidInputs = [
         ["   ", "must not be empty"],
         ["nested", "must be files or literal text"],
         ["empty.txt", "must not be empty"],
-        ["oversized.txt", "exceeds the 1 MiB limit"],
-        ["x".repeat(1024 * 1024 + 1), "exceeds the 1 MiB limit"],
       ];
       for (const [input, expected] of invalidInputs) {
         let started = false;
@@ -385,25 +379,43 @@ describe("CLI skill commands", () => {
         expect(stderr.text()).toContain(expected!);
         expect(started).toBe(false);
       }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
-      let started = false;
-      const tooMany = capture();
-      expect(
-        await main(
-          ["patch", ...Array.from({ length: 65 }, () => "issue")],
-          capture().stream,
-          tooMany.stream,
-          dependencies({
-            currentDirectory: directory,
-            onCodex: () => {
-              started = true;
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(2);
-      expect(tooMany.text()).toContain("64-item limit");
-      expect(started).toBe(false);
+  test("accepts large skill inputs and more than 64 findings", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-skill-large-inputs-"),
+    );
+    try {
+      const largeInput = "x".repeat(1024 * 1024 + 1);
+      await writeFile(join(directory, "large.txt"), largeInput);
+
+      for (const inputs of [
+        ["large.txt"],
+        [largeInput],
+        Array.from({ length: 65 }, () => "issue"),
+      ]) {
+        let received: string[] = [];
+        expect(
+          await main(
+            ["validate", ...inputs],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              currentDirectory: directory,
+              onCodex: (args) => {
+                received = JSON.parse(args.at(-1)!.split("\n").at(-1)!);
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(received).toEqual(
+          inputs[0] === "large.txt" ? [largeInput] : inputs,
+        );
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

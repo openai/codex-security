@@ -112,11 +112,6 @@ import {
 } from "./version.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
-const MAX_CODEX_OVERRIDE_KEY_LENGTH = 1_024;
-const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
-const MAX_CODEX_OVERRIDE_DEPTH = 64;
-const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
-const MAX_SKILL_INPUT_COUNT = 64;
 const MAX_SKILL_EVENT_BYTES = 1_024 * 1_024;
 const MAX_SKILL_RESPONSE_BYTES = 256 * 1_024;
 const SKILL_OUTPUT_LIMIT_MESSAGE =
@@ -2280,9 +2275,6 @@ async function runSkill(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<number> {
-  if (inputs.length > MAX_SKILL_INPUT_COUNT) {
-    throw new CodexSecurityError("Skill inputs exceed the 64-item limit.");
-  }
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
     Object.keys(overrides).some(
@@ -2297,16 +2289,12 @@ async function runSkill(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
   const directory = dependencies.currentDirectory();
-  let totalBytes = 0;
   const contents: string[] = [];
   for (const input of inputs) {
     if (input.trim().length === 0) {
       throw new CodexSecurityError(
         "Finding or issue inputs must not be empty.",
       );
-    }
-    if (Buffer.byteLength(input, "utf8") > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     let contentsOrLiteral = input;
     const windowsNamespace =
@@ -2349,9 +2337,6 @@ async function runSkill(
             "Finding and issue inputs must be files or literal text.",
           );
         }
-        if (metadata.size > MAX_SKILL_INPUT_BYTES) {
-          throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
-        }
         try {
           contentsOrLiteral = await readFile(path, "utf8");
         } catch {
@@ -2365,10 +2350,6 @@ async function runSkill(
           );
         }
       }
-    }
-    totalBytes += Buffer.byteLength(contentsOrLiteral, "utf8");
-    if (totalBytes > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     contents.push(contentsOrLiteral);
   }
@@ -3628,15 +3609,8 @@ export function parseCodexOverrides(
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE");
     }
-    if (
-      Buffer.byteLength(key, "utf8") > MAX_CODEX_OVERRIDE_KEY_LENGTH ||
-      Buffer.byteLength(literal, "utf8") > MAX_CODEX_OVERRIDE_VALUE_LENGTH
-    ) {
-      throw new CodexSecurityError("--codex key or value exceeds the limit");
-    }
     const parts = key.split(".");
     if (
-      parts.length > MAX_CODEX_OVERRIDE_DEPTH ||
       parts.some(
         (part) =>
           part.length === 0 ||
