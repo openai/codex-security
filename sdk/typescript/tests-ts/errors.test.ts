@@ -120,6 +120,11 @@ describe("credential redaction", () => {
     const unrelated =
       "status=failed; parser saw -----BEGIN RSA PRIVATE KEY-----\nretry=visible";
     expect(redactedErrorMessage(unrelated)).toBe(unrelated);
+    const serialized = JSON.stringify({
+      message: "prefix\\n-----BEGIN RSA PRIVATE KEY-----\nretry=visible",
+      safe: "kept",
+    });
+    expect(redactedErrorMessage(serialized)).toBe(serialized);
   });
 
   test("does not confuse literal escapes with serialized line boundaries", () => {
@@ -178,6 +183,9 @@ describe("credential redaction", () => {
         null,
         indentation,
       );
+      if (indentation === "\t") {
+        message = message.replaceAll('",', '" \t,');
+      }
 
       for (let depth = 1; depth <= 2; depth += 1) {
         if (depth > 1) message = JSON.stringify(message);
@@ -261,17 +269,21 @@ describe("credential redaction", () => {
   });
 
   test("redacts lowercase private-key assignments", () => {
-    expect(
-      redactedErrorMessage(
-        "private_key=-----begin rsa private key-----\nSYNTHETIC_KEY\n-----end rsa private key----- safe=value",
-      ),
-    ).toBe("private_key=[redacted] safe=value");
+    for (const whitespace of ["", "\u00a0"]) {
+      expect(
+        redactedErrorMessage(
+          `private_key=${whitespace}-----begin rsa private key-----\nSYNTHETIC_KEY\n-----end rsa private key----- safe=value`,
+        ),
+      ).toBe(`private_key=${whitespace}[redacted] safe=value`);
+    }
   });
 
-  test("preserves already-redacted encoded authorization schemes", () => {
+  test("preserves already-redacted authorization schemes", () => {
     for (const scheme of ["Negotiate", "AWS4-HMAC-SHA256", "DPoP"]) {
-      const message = `authorization=${scheme}%20[redacted]`;
-      expect(redactedErrorMessage(message)).toBe(message);
+      for (const separator of ["%20", "+", " "]) {
+        const message = `authorization=${scheme}${separator}[redacted]`;
+        expect(redactedErrorMessage(message)).toBe(message);
+      }
     }
   });
 

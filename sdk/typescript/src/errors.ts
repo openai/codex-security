@@ -11,7 +11,7 @@ export function redactedErrorMessage(error: unknown): string {
   const indentationStart = (index: number, escapedNewline: number): number => {
     let cursor = index - 1;
     while (cursor >= 0) {
-      if (message[cursor] === " " || message[cursor] === "\t") {
+      if (/[^\S\r\n]/u.test(message[cursor]!)) {
         cursor -= 1;
         continue;
       }
@@ -25,7 +25,7 @@ export function redactedErrorMessage(error: unknown): string {
   };
   const lineStart = /(?:$|[\r\n]|(\\+)[nr])/uy;
   const lineEnd =
-    /(?:$|[\r\n]|(\\+)[nr]|(\\*)["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,(?:\s|\\+[nrt])*(?:\\*["']|[\[{0-9-]|true\b|false\b|null\b))|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
+    /(?:$|[\r\n]|(\\+)[nr]|(\\*)["'](?=$|[\r\n]|(?:\s|\\+[nrt])*(?:[}\]](?:$|[\r\n,}\]]|\\*["'])|,(?:\s|\\+[nrt])*(?:\\*["']|[\[{0-9-]|true\b|false\b|null\b)))|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
   for (const match of message.matchAll(
     /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/giu,
   )) {
@@ -35,12 +35,19 @@ export function redactedErrorMessage(error: unknown): string {
       const boundary = lineStart.exec(message);
       const frame = indentationStart(match.index, boundary?.[1]?.length ?? 0);
       const preceding = message[frame];
+      let precedingEscapes = 0;
+      if (preceding === "n" || preceding === "r") {
+        while (message[frame - precedingEscapes - 1] === "\\") {
+          precedingEscapes += 1;
+        }
+      }
       if (
         frame >= 0 &&
         !/[\r\n"'=:]/u.test(preceding!) &&
         !(
           (preceding === "n" || preceding === "r") &&
-          message[frame - 1] === "\\"
+          precedingEscapes > 0 &&
+          precedingEscapes === (boundary?.[1]?.length ?? 0)
         ) &&
         !/\b[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|authorization|auth|token|secret|credential|password|passwd)[A-Za-z0-9_-]*\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9._~-]{0,63}[ \t]+)?[^\s;]+[ \t]*$/iu.test(
           message.slice(
@@ -115,12 +122,15 @@ export function redactedErrorMessage(error: unknown): string {
           ) {
             return match;
           }
-          if (!/^(?:ApiKey|Basic|Bearer|Custom|Digest|Token)$/iu.test(value)) {
-            return `${prefix}[redacted]`;
-          }
           const scheme = /(?:\s|%20|\+)+\[redacted\]/uy;
           scheme.lastIndex = offset + match.length;
-          if (scheme.test(source)) return match;
+          if (
+            scheme.test(source) &&
+            (/^(?:ApiKey|Basic|Bearer|Custom|Digest|Token)$/iu.test(value) ||
+              message.includes(source.slice(offset, scheme.lastIndex)))
+          ) {
+            return match;
+          }
         }
         return `${prefix}[redacted]`;
       },
