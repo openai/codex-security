@@ -1,14 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
-import { PluginBootstrapError } from "./errors.js";
+import { PluginBootstrapError, redactedErrorMessage } from "./errors.js";
 import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 const MAX_CODEX_AUTH_OUTPUT_BYTES = 64 * 1024;
-const LOGIN_OUTPUT_LIMIT_MESSAGE =
-  "Codex login output exceeded the 64 KiB safety limit.";
-const COMMAND_OUTPUT_LIMIT_MESSAGE =
-  "Codex authentication command output exceeded the 64 KiB safety limit.";
 const INSTRUCTION_TAIL_BYTES = 4 * 1024;
 type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
 
@@ -48,7 +44,6 @@ export class CodexLoginHandle {
   #stderrAuthUrl: string | null = null;
   #stdoutUserCode: string | null = null;
   #stderrUserCode: string | null = null;
-  #outputLimitExceeded = false;
 
   public constructor(
     command: CodexCommand,
@@ -90,22 +85,15 @@ export class CodexLoginHandle {
         this.#clearForcedTermination();
         this.#forceCompletion = null;
         this.#destroyPipes();
-        if (!this.#outputLimitExceeded && !this.#canceled) {
+        if (!this.#canceled) {
           this.#flushInstructionTails();
         }
-        const result = this.#outputLimitExceeded
-          ? {
-              success: false,
-              exitCode,
-              stdout: "",
-              stderr: LOGIN_OUTPUT_LIMIT_MESSAGE,
-            }
-          : {
-              success: exitCode === 0 && !this.#canceled,
-              exitCode,
-              stdout: this.#stdout,
-              stderr: this.#stderr,
-            };
+        const result = {
+          success: exitCode === 0 && !this.#canceled,
+          exitCode,
+          stdout: redactedErrorMessage(this.#stdout),
+          stderr: redactedErrorMessage(this.#stderr),
+        };
         this.#settleInstructionWaiters(result);
         if (result.success) onSuccess();
         resolve(result);
@@ -202,7 +190,6 @@ export class CodexLoginHandle {
   }
 
   #recordOutput(stream: "stdout" | "stderr", chunk: string): void {
-    if (this.#outputLimitExceeded) return;
     const current = stream === "stdout" ? this.#stdout : this.#stderr;
     const appended = appendUtf8Tail(
       current,
@@ -210,16 +197,9 @@ export class CodexLoginHandle {
       MAX_CODEX_AUTH_OUTPUT_BYTES,
     );
     if (stream === "stdout") {
-      this.#stdout = appended.value;
+      this.#stdout = appended;
     } else {
-      this.#stderr = appended.value;
-    }
-    if (appended.exceeded) {
-      this.#outputLimitExceeded = true;
-      this.#stdout = "";
-      this.#stderr = LOGIN_OUTPUT_LIMIT_MESSAGE;
-      this.#requestTermination();
-      return;
+      this.#stderr = appended;
     }
 
     const tail =
@@ -244,7 +224,7 @@ export class CodexLoginHandle {
       "",
       candidate.slice(lastDelimiter + 1),
       INSTRUCTION_TAIL_BYTES,
-    ).value;
+    );
     if (stream === "stdout") {
       this.#stdoutAuthUrl ??= url;
       this.#stdoutUserCode ??= userCode;
@@ -412,13 +392,8 @@ export async function runCodex(
       chunk,
       MAX_CODEX_AUTH_OUTPUT_BYTES,
     );
-    if (stream === "stdout") stdout = appended.value;
-    else stderr = appended.value;
-    if (!appended.exceeded) return;
-    stdout = "";
-    stderr = "";
-    processError = new PluginBootstrapError(COMMAND_OUTPUT_LIMIT_MESSAGE);
-    terminate();
+    if (stream === "stdout") stdout = appended;
+    else stderr = appended;
   };
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -451,7 +426,12 @@ export async function runCodex(
       if (processError !== null) {
         reject(processError);
       } else {
-        resolve({ success: exitCode === 0, exitCode, stdout, stderr });
+        resolve({
+          success: exitCode === 0,
+          exitCode,
+          stdout: redactedErrorMessage(stdout),
+          stderr: redactedErrorMessage(stderr),
+        });
       }
     });
   });
@@ -499,24 +479,19 @@ function appendUtf8Tail(
   current: string,
   chunk: string,
   maximumBytes: number,
-): { value: string; exceeded: boolean } {
+): string {
   const currentBytes = Buffer.from(current);
   const chunkBytes = Buffer.from(chunk);
-  const exceeded = currentBytes.length + chunkBytes.length > maximumBytes;
-  if (!exceeded) return { value: `${current}${chunk}`, exceeded: false };
+  if (currentBytes.length + chunkBytes.length <= maximumBytes) {
+    return `${current}${chunk}`;
+  }
   if (chunkBytes.length >= maximumBytes) {
-    return {
-      value: chunkBytes.subarray(chunkBytes.length - maximumBytes).toString(),
-      exceeded: true,
-    };
+    return chunkBytes.subarray(chunkBytes.length - maximumBytes).toString();
   }
   const retained = currentBytes.subarray(
     Math.max(0, currentBytes.length - (maximumBytes - chunkBytes.length)),
   );
-  return {
-    value: Buffer.concat([retained, chunkBytes]).toString(),
-    exceeded: true,
-  };
+  return Buffer.concat([retained, chunkBytes]).toString();
 }
 
 function plainTerminalText(value: string): string {

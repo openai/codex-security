@@ -100,7 +100,7 @@ describe("Codex authentication process boundary", () => {
     ).resolves.toMatchObject({ success: false, exitCode: 1 });
   });
 
-  test("rejects oversized noninteractive authentication output", async () => {
+  test("keeps verbose authentication output bounded and redacted", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-output-"));
     temporaryDirectories.push(root);
     const secret = "sk-proj-SYNTHETIC_OVERSIZED_OUTPUT_SECRET";
@@ -110,21 +110,21 @@ describe("Codex authentication process boundary", () => {
         script,
         `process.${stream}.write(${JSON.stringify(secret)}.repeat(3_000), () => process.exit(0));\n`,
       );
-      const failure = await runCodex(
+      const result = await runCodex(
         { command: process.execPath, prefixArgs: [script] },
         [],
         process.env,
-      ).then(
-        () => null,
-        (error: unknown) => error,
       );
-      expect(failure).toBeInstanceOf(PluginBootstrapError);
-      expect(String(failure)).toContain("64 KiB safety limit");
-      expect(String(failure)).not.toContain(secret);
+      expect(result.success).toBe(true);
+      expect(Buffer.byteLength(result[stream], "utf8")).toBeLessThanOrEqual(
+        64 * 1024,
+      );
+      expect(result[stream]).toContain("[redacted]");
+      expect(JSON.stringify(result)).not.toContain(secret);
     }
   });
 
-  test("forces oversized noninteractive authentication to terminate", async () => {
+  test("does not terminate a verbose authentication command", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "codex-security-auth-command-kill-"),
     );
@@ -133,29 +133,18 @@ describe("Codex authentication process boundary", () => {
     await writeFile(
       script,
       `
-process.on("SIGTERM", () => {});
-process.stderr.write("x".repeat(128 * 1024));
-setInterval(() => {}, 1000);
+process.on("SIGTERM", () => process.exit(9));
+process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit(0), 20));
 `,
     );
-    const timeout = AbortSignal.timeout(2_500);
 
     await expect(
-      Promise.race([
-        runCodex(
-          { command: process.execPath, prefixArgs: [script] },
-          [],
-          process.env,
-        ),
-        new Promise<never>((_, reject) => {
-          timeout.addEventListener(
-            "abort",
-            () => reject(new Error("Oversized authentication did not settle.")),
-            { once: true },
-          );
-        }),
-      ]),
-    ).rejects.toThrow("64 KiB safety limit");
+      runCodex(
+        { command: process.execPath, prefixArgs: [script] },
+        [],
+        process.env,
+      ),
+    ).resolves.toMatchObject({ success: true, exitCode: 0 });
   });
 
   test("reports account state and performs logout", async () => {
@@ -214,13 +203,13 @@ setTimeout(() => {
     expect(handle.verificationUrl).toBe("https://auth.example.test/device");
     expect(handle.userCode).toBe("ABCD-EFGH");
     const result = await handle.wait();
-    expect(result).toMatchObject({
-      success: false,
-      stdout: "",
-      stderr: "Codex login output exceeded the 64 KiB safety limit.",
-    });
+    expect(result).toMatchObject({ success: true, exitCode: 0, stdout: "" });
+    expect(Buffer.byteLength(result.stderr, "utf8")).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    expect(result.stderr).toContain("[redacted]");
     expect(JSON.stringify(result)).not.toContain(secret);
-    expect(succeeded).toBe(false);
+    expect(succeeded).toBe(true);
   });
 
   test("ignores authentication instructions hidden in a split terminal escape", async () => {
@@ -300,13 +289,13 @@ setTimeout(() => {
     await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
-  test("rejects instruction waiters when an unfinished login exceeds its output bound", async () => {
+  test("finds login instructions after verbose output", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tail-"));
     temporaryDirectories.push(root);
     const script = join(root, "login.mjs");
     await writeFile(
       script,
-      'process.stderr.write("Open https://auth.example.test/device"); setTimeout(() => process.stderr.write("x".repeat(128 * 1024)), 20);\n',
+      'process.stderr.write("x".repeat(128 * 1024), () => process.stderr.write("\\nOpen https://auth.example.test/device\\nUser code: ABCD-EFGH\\n", () => process.exit(0)));\n',
     );
     const handle = new CodexLoginHandle(
       { command: process.execPath, prefixArgs: [script] },
@@ -315,13 +304,13 @@ setTimeout(() => {
       () => {},
     );
 
-    await expect(handle.waitForInstructions()).rejects.toThrow(
-      "64 KiB safety limit",
-    );
-    await expect(handle.wait()).resolves.toMatchObject({ success: false });
+    await handle.waitForInstructions({ deviceCode: true });
+    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
+    expect(handle.userCode).toBe("ABCD-EFGH");
+    await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
-  test("forces an oversized login to settle when it ignores termination", async () => {
+  test("does not terminate a verbose interactive login", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "codex-security-auth-output-kill-"),
     );
@@ -332,10 +321,9 @@ setTimeout(() => {
       `
 console.error("Open https://auth.example.test/device");
 console.error("User code: ABCD-EFGH");
-process.on("SIGTERM", () => {});
+process.on("SIGTERM", () => process.exit(9));
 setTimeout(() => {
-  process.stderr.write("x".repeat(128 * 1024));
-  setInterval(() => {}, 1000);
+  process.stderr.write("x".repeat(128 * 1024), () => setTimeout(() => process.exit(0), 20));
 }, 10);
 `,
     );
@@ -348,21 +336,11 @@ setTimeout(() => {
 
     try {
       await handle.waitForInstructions({ deviceCode: true });
-      const timeout = AbortSignal.timeout(2_500);
-      const result = await Promise.race([
-        handle.wait(),
-        new Promise<never>((_, reject) => {
-          timeout.addEventListener(
-            "abort",
-            () => reject(new Error("Oversized login did not settle.")),
-            { once: true },
-          );
-        }),
-      ]);
-      expect(result).toMatchObject({
-        success: false,
-        stderr: "Codex login output exceeded the 64 KiB safety limit.",
-      });
+      const result = await handle.wait();
+      expect(result).toMatchObject({ success: true, exitCode: 0 });
+      expect(Buffer.byteLength(result.stderr, "utf8")).toBeLessThanOrEqual(
+        64 * 1024,
+      );
     } finally {
       handle.cancel();
       await handle.wait();
