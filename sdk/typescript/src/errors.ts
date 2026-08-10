@@ -4,19 +4,39 @@ import { formatUsd, type ScanCost } from "./cost.js";
 export function redactedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const sensitiveRanges: Array<[number, number]> = [];
+  const privateKeys = new Map<string, number[]>();
+  const lineEnd =
+    /(?:$|[\r\n]|\\+[nr]|\\*["']|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
   for (const match of message.matchAll(
-    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----/gu,
+    /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/giu,
   )) {
-    const delimiter = new RegExp(
-      String.raw`(?:\r|\n|\\[nr])-----END ${match[1]}-----(?=$|[\s"']|\\[nr])`,
-      "gu",
-    );
-    delimiter.lastIndex = match.index + match[0].length;
-    const end = delimiter.exec(message);
-    sensitiveRanges.push([
-      match.index,
-      end === null ? message.length : end.index + end[0].length,
-    ]);
+    const label = match[2]!;
+    if (match[1]!.toUpperCase() === "BEGIN") {
+      const starts = privateKeys.get(label) ?? [];
+      starts.push(match.index);
+      privateKeys.set(label, starts);
+      continue;
+    }
+
+    const previous = message[match.index - 1];
+    if (
+      previous !== "\n" &&
+      previous !== "\r" &&
+      !(
+        (previous === "n" || previous === "r") &&
+        message[match.index - 2] === "\\"
+      )
+    ) {
+      continue;
+    }
+    const end = match.index + match[0].length;
+    lineEnd.lastIndex = end;
+    if (!lineEnd.test(message)) continue;
+    const start = privateKeys.get(label)?.pop();
+    if (start !== undefined) sensitiveRanges.push([start, end]);
+  }
+  for (const starts of privateKeys.values()) {
+    for (const start of starts) sensitiveRanges.push([start, message.length]);
   }
   return redactQuotedCredentialValues(message, sensitiveRanges)
     .replaceAll(

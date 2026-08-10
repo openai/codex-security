@@ -59,6 +59,19 @@ describe("credential redaction", () => {
     expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
   });
 
+  test("pairs nested private keys with separate matching delimiters", () => {
+    const message = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "-----END RSA PRIVATE KEY-----",
+      "SYNTHETIC_OUTER_KEY_MATERIAL",
+      "-----END RSA PRIVATE KEY-----",
+      "retrying",
+    ].join("\n");
+
+    expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+  });
+
   test("does not end a private key at a delimiter embedded in another line", () => {
     const message = [
       "-----BEGIN RSA PRIVATE KEY-----",
@@ -69,6 +82,52 @@ describe("credential redaction", () => {
     ].join("\n");
 
     expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+  });
+
+  test("does not end a private key before text on the delimiter line", () => {
+    const message = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "-----END RSA PRIVATE KEY----- NOT_A_BOUNDARY",
+      "SYNTHETIC_KEY_MATERIAL",
+      "-----END RSA PRIVATE KEY-----",
+      "retrying",
+    ].join("\n");
+
+    expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+  });
+
+  test("preserves diagnostics after repeatedly serialized private keys", () => {
+    let message: string | { pem: string; safe: string } = {
+      pem: [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "SYNTHETIC_KEY_MATERIAL",
+        "-----END RSA PRIVATE KEY-----",
+      ].join("\n"),
+      safe: "visible",
+    };
+
+    for (let depth = 1; depth <= 4; depth += 1) {
+      message = JSON.stringify(message);
+      let redacted: unknown = redactedErrorMessage(message);
+      for (let layer = 0; layer < depth; layer += 1) {
+        redacted = JSON.parse(redacted as string);
+      }
+      expect(redacted).toEqual({ pem: "[redacted]", safe: "visible" });
+    }
+  });
+
+  test("redacts lowercase private-key assignments", () => {
+    expect(
+      redactedErrorMessage(
+        "private_key=-----begin rsa private key-----\nSYNTHETIC_KEY\n-----end rsa private key----- safe=value",
+      ),
+    ).toBe("private_key=[redacted] safe=value");
+  });
+
+  test("collapses repeated truncated private-key markers", () => {
+    expect(
+      redactedErrorMessage("-----BEGIN PRIVATE KEY-----\n".repeat(1_000)),
+    ).toBe("[redacted]");
   });
 
   test("redacts quoted credentials and private keys that overlap in either direction", () => {
