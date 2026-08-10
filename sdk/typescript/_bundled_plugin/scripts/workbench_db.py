@@ -74,7 +74,6 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
     FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
-    PATCH_ARTIFACT_MAX_BYTES,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
@@ -2442,16 +2441,10 @@ def require_scan_relative_file(scan: sqlite3.Row, value: str) -> str:
 def require_matching_patch_digest(scan: sqlite3.Row, patch_path: str, patch_digest: str) -> None:
     digest = hashlib.sha256()
     with open_scan_local_file(Path(scan["scan_dir"]), patch_path) as patch:
-        require_bounded_patch_artifact(patch)
         while chunk := patch.read(1024 * 1024):
             digest.update(chunk)
     if f"sha256:{digest.hexdigest()}" != patch_digest:
         raise SystemExit("Patch digest does not match the scan-local patch file.")
-
-
-def require_bounded_patch_artifact(patch: Any) -> None:
-    if os.fstat(patch.fileno()).st_size > PATCH_ARTIFACT_MAX_BYTES:
-        raise SystemExit("Patch artifact must be no larger than 2 MiB.")
 
 
 def open_scan_local_file(scan_dir: Path, relative_path: str) -> Any:
@@ -3150,7 +3143,6 @@ def patch_artifact_preview(
     at_line_start = True
     try:
         with open_scan_local_file(scan_dir, relative_path) as patch:
-            require_bounded_patch_artifact(patch)
             while chunk := patch.readline(1024 * 1024):
                 digest.update(chunk)
                 if len(preview) <= PATCH_PREVIEW_BYTES:

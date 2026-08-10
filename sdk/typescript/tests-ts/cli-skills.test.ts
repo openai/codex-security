@@ -347,23 +347,17 @@ describe("CLI skill commands", () => {
     }
   });
 
-  test("rejects empty, non-file, and oversized skill inputs before launching Codex", async () => {
+  test("rejects empty and non-file skill inputs before launching Codex", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "codex-security-skill-inputs-"),
     );
     try {
       await mkdir(join(directory, "nested"));
-      await writeFile(
-        join(directory, "oversized.txt"),
-        Buffer.alloc(1024 * 1024 + 1),
-      );
       await writeFile(join(directory, "empty.txt"), " \n\t");
       const invalidInputs = [
         ["   ", "must not be empty"],
         ["nested", "must be files or literal text"],
         ["empty.txt", "must not be empty"],
-        ["oversized.txt", "exceeds the 1 MiB limit"],
-        ["x".repeat(1024 * 1024 + 1), "exceeds the 1 MiB limit"],
       ];
       for (const [input, expected] of invalidInputs) {
         let started = false;
@@ -385,25 +379,43 @@ describe("CLI skill commands", () => {
         expect(stderr.text()).toContain(expected!);
         expect(started).toBe(false);
       }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
-      let started = false;
-      const tooMany = capture();
-      expect(
-        await main(
-          ["patch", ...Array.from({ length: 65 }, () => "issue")],
-          capture().stream,
-          tooMany.stream,
-          dependencies({
-            currentDirectory: directory,
-            onCodex: () => {
-              started = true;
-              return 0;
-            },
-          }),
-        ),
-      ).toBe(2);
-      expect(tooMany.text()).toContain("64-item limit");
-      expect(started).toBe(false);
+  test("accepts large skill inputs and more than 64 findings", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-skill-large-inputs-"),
+    );
+    try {
+      const largeInput = "x".repeat(1024 * 1024 + 1);
+      await writeFile(join(directory, "large.txt"), largeInput);
+
+      for (const inputs of [
+        ["large.txt"],
+        [largeInput],
+        Array.from({ length: 65 }, () => "issue"),
+      ]) {
+        let received: string[] = [];
+        expect(
+          await main(
+            ["validate", ...inputs],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              currentDirectory: directory,
+              onCodex: (args) => {
+                received = JSON.parse(args.at(-1)!.split("\n").at(-1)!);
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(received).toEqual(
+          inputs[0] === "large.txt" ? [largeInput] : inputs,
+        );
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -457,7 +469,7 @@ describe("CLI skill commands", () => {
     });
   });
 
-  test("drains and rejects oversized skill events and responses", async () => {
+  test("accepts skill events and responses larger than 16 MiB", async () => {
     let drained = false;
     async function* oversizedLine(): AsyncGenerator<Buffer> {
       for (let remaining = 1_024 * 1_024 + 1; remaining > 0; ) {
@@ -470,25 +482,28 @@ describe("CLI skill commands", () => {
       );
       drained = true;
     }
-    await expect(readSkillCommandOutput(oversizedLine())).rejects.toThrow(
-      "Codex skill output exceeded the 1 MiB event",
-    );
+    await expect(readSkillCommandOutput(oversizedLine())).resolves.toEqual({
+      message: "must still drain",
+      malformed: true,
+    });
     expect(drained).toBe(true);
 
+    const largeResponse = "x".repeat(16 * 1_024 * 1_024 + 1);
     async function* oversizedResponse(): AsyncGenerator<Buffer> {
       yield Buffer.from(
         `${JSON.stringify({
           type: "item.completed",
           item: {
             type: "agent_message",
-            text: "x".repeat(256 * 1_024 + 1),
+            text: largeResponse,
           },
         })}\n`,
       );
     }
-    await expect(readSkillCommandOutput(oversizedResponse())).rejects.toThrow(
-      "Codex skill output exceeded the 1 MiB event",
-    );
+    await expect(readSkillCommandOutput(oversizedResponse())).resolves.toEqual({
+      message: largeResponse,
+      malformed: false,
+    });
 
     const stdout = capture();
     const stderr = capture();
@@ -500,76 +515,12 @@ describe("CLI skill commands", () => {
           command: process.execPath,
           prefixArgs: [
             "-e",
-            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n")',
+            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(1024*1024+1)}})+"\\n")',
           ],
         },
       ),
-    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe("");
-  });
-
-  test("terminates an oversized skill child that keeps its output open", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const timeout = AbortSignal.timeout(2_500);
-    const invocation = runCodexSkillCommand(
-      [],
-      { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-      {
-        command: process.execPath,
-        prefixArgs: [
-          "-e",
-          'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n");setInterval(()=>{},1000)',
-        ],
-      },
-    );
-
-    await expect(
-      Promise.race([
-        invocation,
-        new Promise<never>((_, reject) => {
-          timeout.addEventListener(
-            "abort",
-            () => reject(new Error("Oversized skill process did not settle.")),
-            { once: true },
-          );
-        }),
-      ]),
-    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toBe("");
-  });
-
-  test("terminates an oversized skill child after it closes its stdout", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const timeout = AbortSignal.timeout(2_500);
-    const invocation = runCodexSkillCommand(
-      [],
-      { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-      {
-        command: process.execPath,
-        prefixArgs: [
-          "-e",
-          'process.on("SIGTERM",()=>{});process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(256*1024+1)}})+"\\n");process.stdout.end();setInterval(()=>{},1000)',
-        ],
-      },
-    );
-
-    await expect(
-      Promise.race([
-        invocation,
-        new Promise<never>((_, reject) => {
-          timeout.addEventListener(
-            "abort",
-            () => reject(new Error("Oversized skill process did not settle.")),
-            { once: true },
-          );
-        }),
-      ]),
-    ).rejects.toThrow("Codex skill output exceeded the 1 MiB event");
-    expect(stdout.text()).toBe("");
+    ).resolves.toBe(0);
+    expect(stdout.text()).toBe(`${"x".repeat(1024 * 1024 + 1)}\n`);
     expect(stderr.text()).toBe("");
   });
 
