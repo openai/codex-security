@@ -305,13 +305,18 @@ def resolve_scope(
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
     if reject_symlinks:
-        lexical = Path(os.path.normpath(str(scope_path)))
+        repository = repo.resolve()
         try:
-            relative = lexical.relative_to(repo.resolve())
+            relative = scope_path.relative_to(repository)
         except ValueError as exc:
-            raise SystemExit(f"Scope must be inside repo: {lexical}") from exc
-        ancestor = repo.resolve()
+            raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
+        ancestor = repository
         for part in relative.parts:
+            if part == "..":
+                if ancestor == repository:
+                    raise SystemExit(f"Scope must be inside repo: {scope_path}")
+                ancestor = ancestor.parent
+                continue
             ancestor /= part
             if ancestor.is_symlink():
                 raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")

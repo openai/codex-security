@@ -4130,6 +4130,9 @@ describe("CodexSecurity orchestration", () => {
       await expect(enumerate(["alias/handler.ts"])).rejects.toThrow(
         /symbolic links/,
       );
+      await expect(enumerate(["alias/../src/handler.ts"])).rejects.toThrow(
+        /symbolic links/,
+      );
     }
   });
 
