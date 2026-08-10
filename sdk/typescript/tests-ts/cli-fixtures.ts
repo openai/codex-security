@@ -7,9 +7,13 @@ import type {
   CoverageDocument,
   FindingsDocument,
   JsonObject,
+  ScanActivity,
   ScanCost,
   ScanManifest,
+  ScanOptions,
   ScanPreflight,
+  ScanProgress,
+  ScanWorkerStatus,
   SeverityLevel,
 } from "../src/index.js";
 import { CodexSecurityError, ScanResult } from "../src/index.js";
@@ -250,35 +254,35 @@ export function dependencies(
     environment?: NodeJS.ProcessEnv;
     signals?: FakeSignals;
     result?: ScanResult;
+    activities?: ScanActivity[];
     costUpdates?: ScanCost[];
-    workerStatuses?: import("../src/index.js").ScanWorkerStatus[];
+    scanProgress?: ScanProgress[];
+    workerStatuses?: ScanWorkerStatus[];
   } = {},
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
   const result = options.result ?? fakeResult();
   const security = {
-    run: async (repository: string, runOptions: unknown) => {
+    run: async (repository: string, runOptions: ScanOptions) => {
       options.onTurn?.(repository, runOptions);
-      const signal = (runOptions as { signal?: AbortSignal }).signal;
+      const signal = runOptions.signal;
       signal?.addEventListener("abort", () => options.onInterrupt?.(), {
         once: true,
       });
       options.onRun?.();
       if (!signal?.aborted) {
-        (runOptions as { onScanStarted?: () => void }).onScanStarted?.();
+        runOptions.onScanStarted?.();
+        for (const activity of options.activities ?? []) {
+          runOptions.onActivity?.(activity);
+        }
         for (const cost of options.costUpdates ?? []) {
-          (
-            runOptions as { onCost?: (cost: Readonly<ScanCost>) => void }
-          ).onCost?.(cost);
+          runOptions.onCost?.(cost);
+        }
+        for (const progress of options.scanProgress ?? []) {
+          runOptions.onProgress?.(progress);
         }
         for (const status of options.workerStatuses ?? []) {
-          (
-            runOptions as {
-              onWorkerStatus?: (
-                status: import("../src/index.js").ScanWorkerStatus,
-              ) => void;
-            }
-          ).onWorkerStatus?.(status);
+          runOptions.onWorkerStatus?.(status);
         }
       }
       return result;

@@ -22,6 +22,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
+from workbench_validation import optional_text, user_text
 
 
 def safe_segment(value: str) -> str:
@@ -160,12 +161,14 @@ def insert_running_scan(
     target_summary: str | None,
     scope_file_count: int,
     timestamp: str,
-    scope_exclusions: list[dict[str, str]] | None = None,
     handoff_status: str = "pending",
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     scan_dir: Path | None = None,
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
+    user_context = user_text(workspace["user_context"])
     if scan_dir is None:
         scan_dir = Path(
             tempfile.mkdtemp(
@@ -179,12 +182,10 @@ def insert_running_scan(
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
             target_device, target_inode, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
-            diff_head_revision, diff_content_digest, target_summary, scope_exclusions_json,
-            scan_dir, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', 'preflight', ?, ?, ?, ?
-        )
+            diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
+            reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'running', 'preflight', ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -194,19 +195,16 @@ def insert_running_scan(
             *target_identity,
             scope,
             workspace["default_mode"],
-            workspace["user_context"],
+            user_context,
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,
             diff_target["kind"] if diff_target else None,
             diff_target["baseRevision"] if diff_target else None,
             diff_target["headRevision"] if diff_target else None,
             diff_target.get("contentDigest") if diff_target else None,
             target_summary,
-            (
-                json.dumps(scope_exclusions, allow_nan=False, separators=(",", ":"))
-                if scope_exclusions is not None
-                else None
-            ),
             str(scan_dir),
+            optional_text(model, maximum=200),
+            optional_text(reasoning_effort, maximum=32),
             handoff_status,
             timestamp,
             timestamp,

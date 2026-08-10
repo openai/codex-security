@@ -144,13 +144,13 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
     const { getDocument, VerbosityLevel } = await import(
       "pdfjs-dist/legacy/build/pdf.mjs"
     );
-    const document = await getDocument({
+    const loadingTask = getDocument({
       data: new Uint8Array(bytes),
-      isEvalSupported: false,
       stopAtErrors: true,
       verbosity: VerbosityLevel.ERRORS,
-    }).promise;
+    });
     try {
+      const document = await loadingTask.promise;
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         const content = await (await document.getPage(number)).getTextContent();
@@ -162,7 +162,7 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
       }
       return pages.join("\n");
     } finally {
-      await document.destroy();
+      await loadingTask.destroy();
     }
   } catch (error) {
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {

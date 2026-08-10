@@ -285,13 +285,7 @@ def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
     return value
 
 
-def _require_safe_relative_path(
-    value: str,
-    context: str,
-    *,
-    allow_dot: bool = False,
-    repository_path: bool = False,
-) -> str:
+def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -301,12 +295,7 @@ def _require_safe_relative_path(
     if (
         not value
         or (normalized == "." and not allow_dot)
-        or ("\\" in value and (not repository_path or sys.platform == "win32"))
-        or (
-            repository_path
-            and sys.platform == "win32"
-            and any(":" in part for part in path.parts)
-        )
+        or "\\" in value
         or "\0" in value
         or path.is_absolute()
         or ".." in path.parts
@@ -710,11 +699,7 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
 
 def _validate_location(location: dict[str, Any], context: str) -> None:
-    _require_safe_relative_path(
-        _require_str(location, "path", context),
-        f"{context}.path",
-        repository_path=True,
-    )
+    _require_safe_relative_path(_require_str(location, "path", context), f"{context}.path")
     start = location.get("startLine")
     end = location.get("endLine", start)
     if not isinstance(start, int) or start < 1:
@@ -1130,11 +1115,7 @@ def _populate_unsealed_manifest_envelope(
 
     target = scan.get("target")
     if isinstance(target, dict):
-        target_binding = copy.deepcopy(completion_binding["target"])
-        allowed_target_kinds = completion_binding["allowedTargetKinds"]
-        if len(allowed_target_kinds) == 1:
-            target_binding["kind"] = allowed_target_kinds[0]
-        _populate_unsealed_target_binding(target, target_binding)
+        _populate_unsealed_target_binding(target, completion_binding["target"])
 
     scope = scan.get("scope")
     if isinstance(scope, dict):
@@ -1147,7 +1128,7 @@ def _populate_unsealed_target_binding(
 ) -> None:
     """Replace workbench-owned target coordinates without retaining incompatible drafts."""
 
-    target_kind = target_binding.get("kind", target.get("kind"))
+    target_kind = target.get("kind")
     required_coordinates = (
         TARGET_REQUIRED_COORDINATE_FIELDS.get(target_kind, set())
         if isinstance(target_kind, str)
@@ -1185,10 +1166,6 @@ def _populate_unsealed_artifact_envelope(
         coverage["includePaths"] = copy.deepcopy(scope["includePaths"])
     if "excludePaths" in scope:
         coverage["excludePaths"] = copy.deepcopy(scope["excludePaths"])
-    if "explicitExclusions" in completion_binding:
-        coverage["explicitExclusions"] = copy.deepcopy(
-            completion_binding["explicitExclusions"]
-        )
 
 
 def _normalize_unsealed_open_questions(coverage: dict[str, Any]) -> None:
@@ -1425,10 +1402,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             if not isinstance(value, str):
                 raise ContractError(f"manifest.scan.scope.{field}[{index}]: expected a string")
             _require_safe_relative_path(
-                value,
-                f"manifest.scan.scope.{field}[{index}]",
-                allow_dot=True,
-                repository_path=True,
+                value, f"manifest.scan.scope.{field}[{index}]", allow_dot=True
             )
     _validate_contract_refs(scan)
     artifacts = _require_list(scan, "artifacts", "manifest.scan")
@@ -1845,11 +1819,7 @@ def _github_primary_location_line_hash(
         source_root = source_root.resolve(strict=True)
     except (OSError, RuntimeError):
         return None
-    relative_path = _require_safe_relative_path(
-        primary_location["path"],
-        "SARIF source location",
-        repository_path=True,
-    )
+    relative_path = _require_safe_relative_path(primary_location["path"], "SARIF source location")
     source_path = source_root / relative_path
     start_line = primary_location["startLine"]
     cache_key = (source_path, start_line)
@@ -1875,9 +1845,7 @@ def _github_line_hash_cache(
     for finding in findings:
         primary_location = _sarif_primary_location(finding)
         relative_path = _require_safe_relative_path(
-            primary_location["path"],
-            "SARIF source location",
-            repository_path=True,
+            primary_location["path"], "SARIF source location"
         )
         requested_lines_by_path.setdefault(relative_path, set()).add(primary_location["startLine"])
     line_hash_cache: dict[tuple[Path, int], str | None] = {}

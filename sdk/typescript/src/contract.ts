@@ -263,7 +263,7 @@ function validateCanonicalContract(
     for (const [locationIndex, location] of finding.locations.entries()) {
       const locationContext = `${context}.locations[${locationIndex}]`;
       try {
-        safeRelativePath(location.path, `${locationContext}.path`, true);
+        safeRelativePath(location.path, `${locationContext}.path`);
       } catch (error) {
         throw new ContractValidationError(
           `${locationContext}.path: expected a safe repository-relative POSIX path.`,
@@ -633,25 +633,18 @@ async function verifyScanRoot(
   }
 }
 
-function safeRelativePath(
-  value: string,
-  context: string,
-  nativeRepositoryPath = false,
-): string {
+function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
-  const requiresPortablePath =
-    !nativeRepositoryPath || process.platform === "win32";
   if (
     value.length === 0 ||
     !isWellFormedUnicode(value) ||
     value === "." ||
     value.startsWith("/") ||
+    /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
+    value.includes("\\") ||
     value.includes("\0") ||
-    (requiresPortablePath &&
-      (/^[A-Za-z]:/.test(value) ||
-        value.includes("\\") ||
-        parts.some((part) => part.includes(":"))))
+    parts.some((part) => part.includes(":"))
   ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
@@ -673,7 +666,7 @@ function safeRelativePath(
 function safeScopePath(value: string): string {
   return value === "."
     ? value
-    : safeRelativePath(value, "manifest scope include path", true);
+    : safeRelativePath(value, "manifest scope include path");
 }
 
 async function readScanJson(
