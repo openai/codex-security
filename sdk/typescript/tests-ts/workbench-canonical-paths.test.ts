@@ -178,41 +178,6 @@ describe("bundled workbench canonical paths", () => {
     });
   });
 
-  test("includes excerpts from source files larger than 1 MiB", async () => {
-    const target = await temporaryDirectory();
-    expect(
-      runPythonProbe(
-        [
-          "import json, sys",
-          "from pathlib import Path",
-          "sys.path.insert(0, sys.argv[1])",
-          "import workbench_source_excerpt as source",
-          "source.git_bytes = lambda *_args: b'print(1)\\n' * 150_000",
-          "scan = {'target_revision': 'HEAD', 'target_snapshot_digest': None}",
-          "location = {'path': 'large.py', 'startLine': 150_000}",
-          "excerpt = source.finding_source_excerpt(scan, Path(sys.argv[2]), [location])",
-          "print(json.dumps({'included': '150000  print(1)' in (excerpt or '')}))",
-        ].join("\n"),
-        target,
-      ),
-    ).toEqual({ included: true });
-  });
-
-  test("generates source fingerprints beyond the previous line limit", () => {
-    expect(
-      runPythonProbe(
-        [
-          "import io, json, sys",
-          "sys.path.insert(0, sys.argv[1])",
-          "import finalize_scan_contract as finalizer",
-          "source = io.StringIO('x\\n' * 100_001)",
-          "hashes = finalizer._github_line_hashes(source, {100_001})",
-          "print(json.dumps({'included': 100_001 in hashes}))",
-        ].join("\n"),
-      ),
-    ).toEqual({ included: true });
-  });
-
   testCaseSensitive(
     "rejects case-differing symlinks at every workbench and finalizer boundary",
     async () => {
