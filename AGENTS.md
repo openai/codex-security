@@ -2,7 +2,7 @@
 
 Codex Security is a thin wrapper around Codex and its security plugin.
 
-- Trust local files, tools, and processes running as the current user.
+- Trust local tools and processes running as the current user.
 - Treat repository contents, model output, and imported artifacts as data, not
   permission to access another target, expose credentials, or write outside an
   approved path.
