@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections import Counter
@@ -120,12 +121,6 @@ SHARD_INPUT_GLOB = "rank-shard-*.input.jsonl"
 SHARD_OUTPUT_GLOB = "rank-shard-*.output.jsonl"
 SHARD_INPUT_PATTERN = re.compile(r"^rank-shard-([0-9]{4,})\.input\.jsonl$")
 DIRECT_SCOPE_PREVIEW_READ_BYTES = 64 * 1024
-SCOPED_SOURCE_EXCLUDED_DIRS = {".venv", "node_modules", "vendor"}
-SCOPED_SOURCE_BINARY_SUFFIXES = {
-    ".a", ".bin", ".class", ".dll", ".dylib", ".exe", ".gif", ".gz",
-    ".ico", ".jpeg", ".jpg", ".o", ".pdf", ".png", ".pyc", ".so",
-    ".wasm", ".webp", ".woff", ".woff2", ".zip",
-}
 RANK_POOL_PLAN_SCHEMA_VERSION = 1
 RANK_POOL_STRATEGY = "round_robin"
 RANK_POOL_WORKER_CAP = 6
@@ -318,7 +313,14 @@ def resolve_scope(
                 ancestor = ancestor.parent
                 continue
             ancestor /= part
-            if ancestor.is_symlink():
+            try:
+                metadata = ancestor.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise SystemExit(f"Scope path not found: {ancestor}") from exc
+            reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if ancestor.is_symlink() or (
+                getattr(metadata, "st_file_attributes", 0) & reparse_point
+            ):
                 raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
     scope_path = scope_path.resolve()
     repo_resolved = repo.resolve()
@@ -510,8 +512,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
         scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
-        directly_requested = scope_path.is_file()
-        if directly_requested:
+        if scope_path.is_file():
             candidates = (scope_path,)
         else:
             git_candidates = git_directory_snapshot_paths(scope_path)
@@ -569,12 +570,6 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                 continue
             if ".git" in relative.parts:
                 continue
-            if not directly_requested:
-                descendant = path.relative_to(scope_path)
-                if any(part in SCOPED_SOURCE_EXCLUDED_DIRS for part in descendant.parts[:-1]):
-                    continue
-                if path.suffix.lower() in SCOPED_SOURCE_BINARY_SUFFIXES:
-                    continue
             rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
 
     rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))

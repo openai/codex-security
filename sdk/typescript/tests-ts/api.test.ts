@@ -4062,7 +4062,10 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(environment);
     execFileSync("git", ["init", "-q"], { cwd: repository });
     await Promise.all([
-      writeFile(join(repository, ".gitignore"), "node_modules/\n.env\n"),
+      writeFile(
+        join(repository, ".gitignore"),
+        "node_modules/\n.env\n.venv/\n",
+      ),
       writeFile(join(source, "handler.ts"), "export {};\n"),
       writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
       writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
@@ -4077,6 +4080,11 @@ describe("CodexSecurity orchestration", () => {
       writeFile(join(vendored, "dependency.ts"), "export {};\n"),
       writeFile(join(environment, "installed.py"), "print('installed')\n"),
     ]);
+    execFileSync(
+      "git",
+      ["add", "--force", "src/vendor/dependency.ts", "src/logo.png"],
+      { cwd: repository },
+    );
 
     const enumerate = async (requested: string[]) => {
       await writeFile(scopes, JSON.stringify(requested));
@@ -4106,7 +4114,9 @@ describe("CodexSecurity orchestration", () => {
       "src/examples/demo.ts",
       "src/examples/vendor",
       "src/handler.ts",
+      "src/logo.png",
       "src/tests/handler.test.ts",
+      "src/vendor/dependency.ts",
     ]);
     expect(await enumerate(["src", "src/.env"])).toEqual([
       "src/.env",
@@ -4114,7 +4124,9 @@ describe("CodexSecurity orchestration", () => {
       "src/examples/demo.ts",
       "src/examples/vendor",
       "src/handler.ts",
+      "src/logo.png",
       "src/tests/handler.test.ts",
+      "src/vendor/dependency.ts",
     ]);
     expect(await enumerate(["src/vendor", "src/logo.png"])).toEqual([
       "src/logo.png",
@@ -4131,6 +4143,11 @@ describe("CodexSecurity orchestration", () => {
         /symbolic links/,
       );
       await expect(enumerate(["alias/../src/handler.ts"])).rejects.toThrow(
+        /symbolic links/,
+      );
+    } else {
+      await symlink(source, join(repository, "junction"), "junction");
+      await expect(enumerate(["junction/handler.ts"])).rejects.toThrow(
         /symbolic links/,
       );
     }
