@@ -14,7 +14,6 @@ import {
   rm,
   stat,
   symlink,
-  truncate,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -751,32 +750,26 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
-  test("bounds configured plugin directory discovery", async () => {
-    const overflowRoot = await temporaryDirectory();
-    const overflowSource = await plugin(overflowRoot);
-    const overflowDirectory = join(overflowSource, "many-files");
-    await mkdir(overflowDirectory);
+  test("copies configured plugins with more than 4,096 entries", async () => {
+    const root = await temporaryDirectory();
+    const source = await plugin(root);
+    const directory = join(source, "many-files");
+    await mkdir(directory);
     for (let offset = 0; offset < 4_096; offset += 128) {
       await Promise.all(
         Array.from({ length: 128 }, (_value, index) =>
-          writeFile(join(overflowDirectory, String(offset + index)), ""),
+          writeFile(join(directory, String(offset + index)), ""),
         ),
       );
     }
-    const overflowDestination = join(overflowRoot, "overflow-home");
-    await expect(
-      createMarketplace(overflowDestination, overflowSource),
-    ).rejects.toThrow("copy entry limit");
+
+    const marketplace = await createMarketplace(join(root, "home"), source);
+
     expect(
       existsSync(
-        join(
-          overflowDestination,
-          "sdk-marketplace",
-          "plugins",
-          "codex-security",
-        ),
+        join(marketplace, "plugins", "codex-security", "many-files", "4095"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test("cancels configured plugin directory discovery", async () => {
@@ -949,7 +942,7 @@ describe("plugin runtime preparation", () => {
   testPosix(
     "rejects unsafe configured plugin manifests without hanging",
     async () => {
-      for (const kind of ["fifo", "symlink", "sparse"] as const) {
+      for (const kind of ["fifo", "symlink"] as const) {
         const root = await temporaryDirectory();
         const workspace = join(root, "workspace");
         const source = join(root, "plugin");
@@ -963,11 +956,8 @@ describe("plugin runtime preparation", () => {
         );
         if (kind === "fifo") {
           expect(Bun.spawnSync(["mkfifo", manifest]).exitCode).toBe(0);
-        } else if (kind === "symlink") {
-          await symlink(outside, manifest);
         } else {
-          await writeFile(manifest, "{}");
-          await truncate(manifest, 2 * 1024 * 1024);
+          await symlink(outside, manifest);
         }
 
         await expect(resolvePluginPath(source, workspace)).rejects.toThrow(
@@ -976,6 +966,23 @@ describe("plugin runtime preparation", () => {
       }
     },
   );
+
+  test("accepts configured plugin manifests larger than 1 MiB", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "workspace");
+    const source = await plugin(root);
+    await mkdir(workspace);
+    await writeFile(
+      join(source, ".codex-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "codex-security",
+        version: "1.2.3",
+        description: "x".repeat(1024 * 1024),
+      }),
+    );
+
+    expect(await resolvePluginPath(source, workspace)).toBe(source);
+  });
 
   test("cancels marketplace projection before registering the plugin", async () => {
     const root = await temporaryDirectory();
@@ -1335,6 +1342,10 @@ describe("plugin runtime preparation", () => {
     expect(install.installedRoot).toBe(installed);
     expect(install.version).toBe("1.2.3");
 
+    await writeFile(
+      join(selected, "scripts", "helper.py"),
+      "print('updated')\n",
+    );
     const reused = await bootstrapPlugin(home, selected, {
       codexCommand: { command: "/codex", prefixArgs: [] },
       runCodex: async () => {
@@ -1401,89 +1412,6 @@ describe("plugin runtime preparation", () => {
       '{"token":"preserved"}\n',
     );
     expect(calls).toEqual([
-      ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
-    ]);
-  });
-
-  test("reinstalls changed plugin contents even when the version is unchanged", async () => {
-    const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.3");
-    await writeFile(join(next, "scripts", "helper.py"), "print('updated')\n");
-    const home = join(root, "home");
-    const marketplace = join(home, "sdk-marketplace");
-    const cache = join(
-      home,
-      "plugins",
-      "cache",
-      "codex-security-sdk",
-      "codex-security",
-    );
-    await mkdir(home);
-    let marketplaceRegistered = false;
-    let pluginRegistered = false;
-    const updateConfig = async () => {
-      const sections = ["[features]\nplugins = true\n"];
-      if (marketplaceRegistered) {
-        sections.push(
-          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
-        );
-      }
-      if (pluginRegistered) {
-        sections.push(
-          '[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
-        );
-      }
-      await writeFile(join(home, "config.toml"), sections.join("\n"));
-    };
-    await updateConfig();
-    const calls: string[][] = [];
-    const options = {
-      codexCommand: { command: "/codex", prefixArgs: [] },
-      runCodex: async (
-        _command: { command: string; prefixArgs: readonly string[] },
-        args: readonly string[],
-      ) => {
-        calls.push([...args]);
-        if (args[1] === "marketplace" && args[2] === "add") {
-          marketplaceRegistered = true;
-        } else if (args[1] === "marketplace" && args[2] === "remove") {
-          marketplaceRegistered = false;
-        } else if (args[1] === "remove") {
-          pluginRegistered = false;
-          await rm(cache, { recursive: true, force: true });
-        } else if (args[1] === "add") {
-          const installed = join(cache, "1.2.3");
-          await mkdir(join(installed, ".codex-plugin"), { recursive: true });
-          await writeFile(
-            join(installed, ".codex-plugin", "plugin.json"),
-            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
-          );
-          pluginRegistered = true;
-        } else {
-          throw new Error(`Unexpected plugin command: ${args.join(" ")}`);
-        }
-        await updateConfig();
-        return "";
-      },
-    };
-
-    await bootstrapPlugin(home, previous, options);
-    const result = await bootstrapPlugin(home, next, options);
-
-    expect(result.pluginRoot).toBe(next);
-    expect(
-      await readFile(
-        join(marketplace, "plugins", "codex-security", "scripts", "helper.py"),
-        "utf8",
-      ),
-    ).toBe("print('updated')\n");
-    expect(calls).toEqual([
-      ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
-      ["plugin", "remove", "codex-security@codex-security-sdk"],
-      ["plugin", "marketplace", "remove", "codex-security-sdk"],
       ["plugin", "marketplace", "add", marketplace],
       ["plugin", "add", "codex-security@codex-security-sdk"],
     ]);
@@ -3476,7 +3404,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toMatchObject({ actual: 8, source: configPath });
   });
 
-  test("runs workbench commands without credentials or generated bytecode", async () => {
+  test("runs workbench commands without output limits, credentials, or generated bytecode", async () => {
     const root = await temporaryDirectory();
     const pluginRoot = join(root, "plugin");
     await mkdir(join(pluginRoot, "scripts"), { recursive: true });
@@ -3491,7 +3419,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert os.environ.get('CODEX_API_KEY') is None",
         "assert os.environ.get('OPENROUTER_API_KEY') is None",
         "assert os.environ.get('FIREWORKS_API_KEY') is None",
-        "print(json.dumps({'ok': True}))",
+        "print(json.dumps({'ok': True, 'details': 'x' * (5 * 1024 * 1024)}))",
       ].join("\n"),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -3510,7 +3438,8 @@ describe("runtime directories and plugin Python boundary", () => {
       },
       ["test-command"],
     );
-    expect(result).toEqual({ ok: true });
+    expect(result["ok"]).toBe(true);
+    expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {

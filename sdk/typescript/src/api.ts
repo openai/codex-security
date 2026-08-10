@@ -501,7 +501,7 @@ export class CodexSecurity {
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(
           runtime.configPath,
-          scanPreflightCodexConfig(effectiveConfig, repo),
+          scanPreflightCodexConfig(effectiveConfig),
         );
       }
       const runtimeHome = await realpath(runtime.codexHome);
@@ -675,42 +675,63 @@ export class CodexSecurity {
           { ...progress, filesTotal: scopeFileCount },
         );
       };
+      const reportTrackingError = (error: unknown): void => {
+        if (options.maxCostUsd !== undefined) {
+          costAbortController.abort(error);
+          return;
+        }
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not track scan activity: ${redactedErrorMessage(error)}`,
+        );
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
         repository: repo,
         maxCostUsd: options.maxCostUsd,
-        onActivity: (activity) => {
-          notifyObserver(
-            "onActivity",
-            options.onActivity,
-            options.onObserverError,
-            activity,
-          );
-        },
-        onProgress: reportProgress,
-        onCost: (cost) => {
-          notifyObserver(
-            "onCost",
-            options.onCost,
-            options.onObserverError,
-            cost,
-          );
-          if (
-            options.maxCostUsd !== undefined &&
-            cost.estimatedUsd > options.maxCostUsd
-          ) {
-            costAbortController.abort(
-              new ScanCostLimitExceededError(options.maxCostUsd, cost, scanDir),
-            );
-          }
-        },
-        onError: (error) => costAbortController.abort(error),
+        onActivity:
+          options.onActivity === undefined
+            ? undefined
+            : (activity) =>
+                notifyObserver(
+                  "onActivity",
+                  options.onActivity,
+                  options.onObserverError,
+                  activity,
+                ),
+        onProgress:
+          options.onProgress === undefined ? undefined : reportProgress,
+        onCost:
+          options.onCost === undefined && options.maxCostUsd === undefined
+            ? undefined
+            : (cost) => {
+                notifyObserver(
+                  "onCost",
+                  options.onCost,
+                  options.onObserverError,
+                  cost,
+                );
+                if (
+                  options.maxCostUsd !== undefined &&
+                  cost.estimatedUsd > options.maxCostUsd
+                ) {
+                  costAbortController.abort(
+                    new ScanCostLimitExceededError(
+                      options.maxCostUsd,
+                      cost,
+                      scanDir,
+                    ),
+                  );
+                }
+              },
+        onError: reportTrackingError,
       });
       costTracker = tracker;
       const recipe = scanRecipe(
         repo,
-        protectedRoot,
         normalized,
         mode,
         expectation.repositoryRevision,
@@ -973,7 +994,11 @@ export class CodexSecurity {
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
         onFinalize: async (usage) => {
-          const snapshot = await tracker.stop(usage);
+          const snapshot = await tracker.stop(usage).catch((error: unknown) => {
+            if (options.maxCostUsd !== undefined) throw error;
+            reportTrackingError(error);
+            return { usage, cost: estimateScanCost(model, usage) };
+          });
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
             notifyObserver(
@@ -2095,7 +2120,6 @@ function targetInstruction(target: NormalizedTarget): string {
 
 function scanRecipe(
   repository: string,
-  activeProjectPath: string,
   target: NormalizedTarget,
   mode: ScanMode,
   repositoryRevision: string | null,
@@ -2119,7 +2143,7 @@ function scanRecipe(
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
-    config: scanPreflightCodexConfig(effectiveConfig, activeProjectPath),
+    config: scanPreflightCodexConfig(effectiveConfig),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
@@ -2464,25 +2488,15 @@ export function scanRuntimeCodexConfig(
   };
 }
 
-export function scanPreflightCodexConfig(
-  config: JsonObject,
-  activeProjectPath?: string,
-): JsonObject {
-  const safeString = (value: unknown, maxLength: number): value is string =>
+export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
+  const safeString = (value: unknown): value is string =>
     typeof value === "string" &&
     value.length > 0 &&
-    value.length <= maxLength &&
-    !/[\u0000-\u001f\u007f]/u.test(value) &&
-    !/(?:^|[^a-z0-9])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|key|secret|token|env|mcp|set|password|passwd|credential|authorization|bearer)(?:[^a-z0-9]|$)/iu.test(
-      value,
-    );
+    !/[\u0000-\u001f\u007f]/u.test(value);
   const safeProfileName = (value: unknown): value is string =>
-    safeString(value, 128) && /^[A-Za-z0-9_-]+$/u.test(value);
+    safeString(value) && /^[A-Za-z0-9_-]+$/u.test(value);
   const safeInteger = (value: unknown): value is number =>
-    typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value >= 0 &&
-    value <= 1_000_000;
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   const capabilityFeatures = (value: unknown): JsonObject => {
     if (!isRecord(value)) return {};
     const result: JsonObject = {};
@@ -2516,7 +2530,7 @@ export function scanPreflightCodexConfig(
       "service_tier",
     ]) {
       const value = source[key];
-      if (safeString(value, 512)) result[key] = value;
+      if (safeString(value)) result[key] = value;
     }
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
@@ -2537,20 +2551,6 @@ export function scanPreflightCodexConfig(
     }
     return result;
   };
-  const prioritizedEntries = (
-    value: Record<string, unknown>,
-    priority: string | undefined,
-  ): [string, unknown][] => {
-    const entries = Object.entries(value);
-    if (priority === undefined || !Object.hasOwn(value, priority)) {
-      return entries;
-    }
-    return [
-      [priority, value[priority]],
-      ...entries.filter(([key]) => key !== priority),
-    ];
-  };
-
   const result = executionConfig(config);
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]
@@ -2561,17 +2561,11 @@ export function scanPreflightCodexConfig(
   const profiles = config["profiles"];
   if (isRecord(profiles)) {
     const sanitized: JsonObject = {};
-    let accepted = 0;
-    for (const [name, profile] of prioritizedEntries(
-      profiles,
-      selectedProfile,
-    )) {
+    for (const [name, profile] of Object.entries(profiles)) {
       if (!safeProfileName(name) || !isRecord(profile)) continue;
       const projected = executionConfig(profile as JsonObject);
       if (Object.keys(projected).length === 0) continue;
       sanitized[name] = projected;
-      accepted += 1;
-      if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
   }
@@ -2588,7 +2582,7 @@ export function scanPreflightCodexConfig(
       const sanitized: JsonObject = {};
       for (const key of ["region", "profile"]) {
         const value = aws[key];
-        if (safeString(value, 512)) sanitized[key] = value;
+        if (safeString(value)) sanitized[key] = value;
       }
       if (Object.keys(sanitized).length > 0) {
         result["model_providers"] = {
@@ -2599,48 +2593,20 @@ export function scanPreflightCodexConfig(
   }
   const rootMarkers = config["project_root_markers"];
   if (Array.isArray(rootMarkers)) {
-    result["project_root_markers"] = rootMarkers
-      .filter((value): value is string => safeString(value, 256))
-      .slice(0, 64);
+    result["project_root_markers"] = rootMarkers.filter(safeString);
   }
   const projects = config["projects"];
   if (isRecord(projects)) {
     const sanitized: JsonObject = {};
-    let accepted = 0;
-    const activeProjectRoot =
-      activeProjectPath === undefined
-        ? undefined
-        : Object.keys(projects)
-            .filter((path) => {
-              if (!safeString(path, 4096) || !isAbsolute(path)) return false;
-              const remaining = relative(path, activeProjectPath);
-              return (
-                remaining === "" ||
-                (remaining !== ".." &&
-                  !remaining.startsWith(`..${sep}`) &&
-                  !isAbsolute(remaining))
-              );
-            })
-            .sort((left, right) => right.length - left.length)[0];
-    for (const [path, project] of prioritizedEntries(
-      projects,
-      activeProjectRoot ?? activeProjectPath,
-    )) {
-      if (!safeString(path, 4096) || !isAbsolute(path) || !isRecord(project)) {
+    for (const [path, project] of Object.entries(projects)) {
+      if (!safeString(path) || !isAbsolute(path) || !isRecord(project)) {
         continue;
       }
       const trust = project["trust_level"];
       if (trust !== "trusted" && trust !== "untrusted") continue;
       sanitized[path] = { trust_level: trust };
-      accepted += 1;
-      if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
-  }
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") > 256 * 1024) {
-    throw new CodexSecurityError(
-      "The sanitized Codex Security preflight config exceeds the size limit.",
-    );
   }
   return result;
 }

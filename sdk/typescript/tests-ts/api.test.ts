@@ -2314,6 +2314,65 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each([
+    ["without", false],
+    ["with", true],
+  ] as const)(
+    "handles a session-tracking failure %s an explicit cost limit",
+    async (_description, enforceCostLimit) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(join(codexHome, "sessions"), "not a directory");
+      const commands: string[] = [];
+      const warnings: string[] = [];
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            commands.push(args[0]!);
+            return mockWorkbench(args);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+
+      const scan = client.run(repository, {
+        ...(enforceCostLimit ? { maxCostUsd: 1 } : {}),
+        onActivity: () => {},
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (enforceCostLimit) {
+        await expect(scan).rejects.toThrow("interrupted");
+        expect(commands).toContain("fail-scan");
+      } else {
+        await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
+        expect(warnings).toContainEqual(
+          expect.stringContaining("Could not track scan activity:"),
+        );
+        expect(commands).toContain("complete-scan");
+      }
+      await client.close();
+    },
+  );
+
   test("uses the actual scanner inventory instead of a stale workbench estimate", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
