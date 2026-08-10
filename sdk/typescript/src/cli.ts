@@ -22,7 +22,8 @@ import {
   win32,
 } from "node:path";
 import { cwd } from "node:process";
-import { Writable as NodeWritable } from "node:stream";
+import { createInterface } from "node:readline";
+import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
@@ -112,15 +113,6 @@ import {
 } from "./version.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
-const MAX_CODEX_OVERRIDE_KEY_LENGTH = 1_024;
-const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
-const MAX_CODEX_OVERRIDE_DEPTH = 64;
-const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
-const MAX_SKILL_INPUT_COUNT = 64;
-const MAX_SKILL_EVENT_BYTES = 1_024 * 1_024;
-const MAX_SKILL_RESPONSE_BYTES = 256 * 1_024;
-const SKILL_OUTPUT_LIMIT_MESSAGE =
-  "Codex skill output exceeded the 1 MiB event or 256 KiB response safety limit.";
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
@@ -515,7 +507,6 @@ export async function runCodexSkillCommand(
     windowsHide: true,
   });
   let requestedSignal: SignalName | null = null;
-  let skillOutputLimitExceeded = false;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
   let forceCaptureCompletion: (() => void) | null = null;
@@ -552,10 +543,7 @@ export async function runCodexSkillCommand(
       output === undefined || invocation.stdout === null
         ? Promise.resolve(undefined)
         : Promise.race([
-            readSkillCommandOutput(invocation.stdout, () => {
-              skillOutputLimitExceeded = true;
-              requestTermination("SIGTERM");
-            }),
+            readSkillCommandOutput(invocation.stdout),
             new Promise<undefined>((resolve) => {
               forceCaptureCompletion = () => resolve(undefined);
             }),
@@ -587,9 +575,6 @@ export async function runCodexSkillCommand(
       invocation.once(output === undefined ? "exit" : "close", complete);
     });
     const [status, events] = await Promise.all([invocationStatus, captured]);
-    if (skillOutputLimitExceeded) {
-      throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
-    }
     if (output === undefined || status === 130 || status === 143) return status;
     if (status !== 0) {
       await writeCliOutput(
@@ -2280,9 +2265,6 @@ async function runSkill(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<number> {
-  if (inputs.length > MAX_SKILL_INPUT_COUNT) {
-    throw new CodexSecurityError("Skill inputs exceed the 64-item limit.");
-  }
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
     Object.keys(overrides).some(
@@ -2297,16 +2279,12 @@ async function runSkill(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
   const directory = dependencies.currentDirectory();
-  let totalBytes = 0;
   const contents: string[] = [];
   for (const input of inputs) {
     if (input.trim().length === 0) {
       throw new CodexSecurityError(
         "Finding or issue inputs must not be empty.",
       );
-    }
-    if (Buffer.byteLength(input, "utf8") > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     let contentsOrLiteral = input;
     const windowsNamespace =
@@ -2349,9 +2327,6 @@ async function runSkill(
             "Finding and issue inputs must be files or literal text.",
           );
         }
-        if (metadata.size > MAX_SKILL_INPUT_BYTES) {
-          throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
-        }
         try {
           contentsOrLiteral = await readFile(path, "utf8");
         } catch {
@@ -2365,10 +2340,6 @@ async function runSkill(
           );
         }
       }
-    }
-    totalBytes += Buffer.byteLength(contentsOrLiteral, "utf8");
-    if (totalBytes > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     contents.push(contentsOrLiteral);
   }
@@ -2411,33 +2382,23 @@ async function runSkill(
 
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
-  onLimitExceeded?: () => void,
 ): Promise<{ message?: string; error?: string; malformed: boolean }> {
   let message: string | undefined;
   let error: string | undefined;
   let malformed = false;
-  let exceeded = false;
-  const markExceeded = (): void => {
-    if (exceeded) return;
-    exceeded = true;
-    onLimitExceeded?.();
-  };
 
-  const readLine = (bytes: Buffer): void => {
-    const content =
-      bytes.at(-1) === 0x0d ? bytes.subarray(0, bytes.length - 1) : bytes;
-    const line = content.toString("utf8");
-    if (line.trim().length === 0) return;
+  for await (const line of createInterface({ input: Readable.from(stream) })) {
+    if (line.trim().length === 0) continue;
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
       malformed = true;
-      return;
+      continue;
     }
     if (typeof event !== "object" || event === null) {
       malformed = true;
-      return;
+      continue;
     }
     const value = event as Record<string, unknown>;
     if (value["type"] === "item.completed") {
@@ -2450,11 +2411,7 @@ export async function readSkillCommandOutput(
         "text" in item &&
         typeof item.text === "string"
       ) {
-        if (Buffer.byteLength(item.text, "utf8") > MAX_SKILL_RESPONSE_BYTES) {
-          markExceeded();
-        } else {
-          message = item.text;
-        }
+        message = item.text;
       }
     } else if (value["type"] === "turn.failed") {
       const detail = value["error"];
@@ -2464,63 +2421,15 @@ export async function readSkillCommandOutput(
         "message" in detail &&
         typeof detail.message === "string"
       ) {
-        if (
-          Buffer.byteLength(detail.message, "utf8") > MAX_SKILL_RESPONSE_BYTES
-        ) {
-          markExceeded();
-        } else {
-          error = detail.message;
-        }
+        error = detail.message;
       }
     } else if (
       value["type"] === "error" &&
       typeof value["message"] === "string"
     ) {
-      if (
-        Buffer.byteLength(value["message"], "utf8") > MAX_SKILL_RESPONSE_BYTES
-      ) {
-        markExceeded();
-      } else {
-        error = value["message"];
-      }
-    }
-  };
-
-  const pending = Buffer.alloc(MAX_SKILL_EVENT_BYTES);
-  let pendingBytes = 0;
-  let discardingOversizedLine = false;
-  for await (const rawChunk of stream) {
-    const chunk = Buffer.isBuffer(rawChunk)
-      ? rawChunk
-      : Buffer.from(rawChunk, "utf8");
-    let start = 0;
-    while (start < chunk.length) {
-      const newline = chunk.indexOf(0x0a, start);
-      const end = newline === -1 ? chunk.length : newline;
-      const segment = chunk.subarray(start, end);
-      if (!discardingOversizedLine) {
-        if (pendingBytes + segment.length > MAX_SKILL_EVENT_BYTES) {
-          markExceeded();
-          discardingOversizedLine = true;
-          pendingBytes = 0;
-        } else if (segment.length > 0) {
-          segment.copy(pending, pendingBytes);
-          pendingBytes += segment.length;
-        }
-      }
-      if (newline === -1) break;
-      if (!discardingOversizedLine) {
-        readLine(pending.subarray(0, pendingBytes));
-      }
-      pendingBytes = 0;
-      discardingOversizedLine = false;
-      start = newline + 1;
+      error = value["message"];
     }
   }
-  if (!discardingOversizedLine && pendingBytes > 0) {
-    readLine(pending.subarray(0, pendingBytes));
-  }
-  if (exceeded) throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
@@ -3628,15 +3537,8 @@ export function parseCodexOverrides(
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE");
     }
-    if (
-      Buffer.byteLength(key, "utf8") > MAX_CODEX_OVERRIDE_KEY_LENGTH ||
-      Buffer.byteLength(literal, "utf8") > MAX_CODEX_OVERRIDE_VALUE_LENGTH
-    ) {
-      throw new CodexSecurityError("--codex key or value exceeds the limit");
-    }
     const parts = key.split(".");
     if (
-      parts.length > MAX_CODEX_OVERRIDE_DEPTH ||
       parts.some(
         (part) =>
           part.length === 0 ||
