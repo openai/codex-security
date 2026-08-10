@@ -4,17 +4,32 @@ import { formatUsd, type ScanCost } from "./cost.js";
 export function redactedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const sensitiveRanges: Array<[number, number]> = [];
-  const privateKeys = new Map<string, number[]>();
-  const lineStart = /(?:$|[\r\n]|\\+[nr])/uy;
+  const privateKeys = new Map<
+    string,
+    Array<{ start: number; escapedNewline: number }>
+  >();
+  const lineStart = /(?:$|[\r\n]|(\\+)[nr])/uy;
   const lineEnd =
-    /(?:$|[\r\n]|\\+[nr]|\\*["'](?=$|[,}\]\r\n])|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
+    /(?:$|[\r\n]|\\+[nr]|\\*["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,[ \t]*\\*["'])|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
   for (const match of message.matchAll(
     /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/giu,
   )) {
     const label = match[2]!;
     if (match[1]!.toUpperCase() === "BEGIN") {
+      const preceding = message[match.index - 1];
+      if (
+        match.index !== 0 &&
+        !/[\s"'=:\\]/u.test(preceding!) &&
+        !(
+          (preceding === "n" || preceding === "r") &&
+          message[match.index - 2] === "\\"
+        )
+      ) {
+        continue;
+      }
       lineStart.lastIndex = match.index + match[0].length;
-      if (!lineStart.test(message)) {
+      const boundary = lineStart.exec(message);
+      if (boundary === null) {
         let previous = match.index - 1;
         while (message[previous] === " " || message[previous] === "\t") {
           previous -= 1;
@@ -22,30 +37,38 @@ export function redactedErrorMessage(error: unknown): string {
         if (message[previous] !== "=" && message[previous] !== ":") continue;
       }
       const starts = privateKeys.get(label) ?? [];
-      starts.push(match.index);
+      starts.push({
+        start: match.index,
+        escapedNewline: boundary?.[1]?.length ?? 0,
+      });
       privateKeys.set(label, starts);
       continue;
     }
 
+    const starts = privateKeys.get(label);
+    const opening = starts?.at(-1);
+    if (opening === undefined) continue;
     const previous = message[match.index - 1];
-    if (
-      previous !== "\n" &&
-      previous !== "\r" &&
-      !(
-        (previous === "n" || previous === "r") &&
-        message[match.index - 2] === "\\"
-      )
-    ) {
+    let escapedNewline = 0;
+    if (previous === "n" || previous === "r") {
+      while (message[match.index - escapedNewline - 2] === "\\") {
+        escapedNewline += 1;
+      }
+    } else if (previous !== "\n" && previous !== "\r") {
+      continue;
+    }
+    if (escapedNewline !== opening.escapedNewline) {
       continue;
     }
     const end = match.index + match[0].length;
     lineEnd.lastIndex = end;
     if (!lineEnd.test(message)) continue;
-    const start = privateKeys.get(label)?.pop();
-    if (start !== undefined) sensitiveRanges.push([start, end]);
+    starts!.pop();
+    sensitiveRanges.push([opening.start, end]);
   }
   for (const starts of privateKeys.values()) {
-    for (const start of starts) sensitiveRanges.push([start, message.length]);
+    for (const { start } of starts)
+      sensitiveRanges.push([start, message.length]);
   }
   return redactQuotedCredentialValues(message, sensitiveRanges)
     .replaceAll(

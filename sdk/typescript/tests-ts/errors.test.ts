@@ -97,22 +97,36 @@ describe("credential redaction", () => {
   });
 
   test("does not end a private key at an unrelated quote", () => {
+    for (const suffix of ['"NOT_A_BOUNDARY', '",NOT_A_BOUNDARY']) {
+      const message = [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        `-----END RSA PRIVATE KEY-----${suffix}`,
+        "SYNTHETIC_SECOND_KEY_MATERIAL",
+        "-----END RSA PRIVATE KEY-----",
+        "retrying",
+      ].join("\n");
+
+      expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+    }
+  });
+
+  test("preserves text containing an invalid opening delimiter", () => {
+    for (const suffix of ["NOT_A_PEM; retry=visible", "\nretry=visible"]) {
+      const message = `parser rejected abc-----BEGIN RSA PRIVATE KEY-----${suffix}`;
+      expect(redactedErrorMessage(message)).toBe(message);
+    }
+  });
+
+  test("does not confuse literal escapes with serialized line boundaries", () => {
     const message = [
       "-----BEGIN RSA PRIVATE KEY-----",
-      '-----END RSA PRIVATE KEY-----"NOT_A_BOUNDARY',
+      "prefix\\n-----END RSA PRIVATE KEY-----",
       "SYNTHETIC_SECOND_KEY_MATERIAL",
       "-----END RSA PRIVATE KEY-----",
       "retrying",
     ].join("\n");
 
     expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
-  });
-
-  test("preserves text containing an invalid opening delimiter", () => {
-    const message =
-      "parser rejected abc-----BEGIN RSA PRIVATE KEY-----NOT_A_PEM; retry=visible";
-
-    expect(redactedErrorMessage(message)).toBe(message);
   });
 
   test("preserves diagnostics after repeatedly serialized private keys", () => {
