@@ -29,7 +29,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
 from collections import Counter
@@ -317,11 +316,7 @@ def resolve_scope(
                 metadata = ancestor.stat(follow_symlinks=False)
             except OSError as exc:
                 raise SystemExit(f"Scope path not found: {ancestor}") from exc
-            redirecting_tags = (
-                getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
-                getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003),
-            )
-            if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", None) in redirecting_tags:
+            if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
                 raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
     scope_path = scope_path.resolve()
     repo_resolved = repo.resolve()
