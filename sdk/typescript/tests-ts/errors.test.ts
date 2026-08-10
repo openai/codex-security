@@ -135,46 +135,62 @@ describe("credential redaction", () => {
   });
 
   test("preserves diagnostics after repeatedly serialized private keys", () => {
-    let message: string | { pem: string; safe: string } = {
-      pem: [
-        "-----BEGIN RSA PRIVATE KEY-----",
-        "SYNTHETIC_KEY_MATERIAL",
-        "-----END RSA PRIVATE KEY-----",
-      ].join("\n"),
-      safe: "visible",
-    };
+    for (const indentation of ["", "\t"]) {
+      let message: string | { pem: string; safe: string } = {
+        pem: [
+          "-----BEGIN RSA PRIVATE KEY-----",
+          "SYNTHETIC_KEY_MATERIAL",
+          "-----END RSA PRIVATE KEY-----",
+        ]
+          .map((line) => `${indentation}${line}`)
+          .join("\n"),
+        safe: "visible",
+      };
 
-    for (let depth = 1; depth <= 4; depth += 1) {
-      message = JSON.stringify(message);
-      let redacted: unknown = redactedErrorMessage(message);
-      for (let layer = 0; layer < depth; layer += 1) {
-        redacted = JSON.parse(redacted as string);
+      for (let depth = 1; depth <= 4; depth += 1) {
+        message = JSON.stringify(message);
+        let redacted: unknown = redactedErrorMessage(message);
+        for (let layer = 0; layer < depth; layer += 1) {
+          redacted = JSON.parse(redacted as string);
+        }
+        expect(redacted).toEqual({
+          pem: `${indentation}[redacted]`,
+          safe: "visible",
+        });
       }
-      expect(redacted).toEqual({ pem: "[redacted]", safe: "visible" });
     }
   });
 
   test("preserves fields after pretty-printed private-key values", () => {
-    const message = JSON.stringify(
-      {
-        nested: {
-          pem: [
-            "-----BEGIN RSA PRIVATE KEY-----",
-            "SYNTHETIC_KEY_MATERIAL",
-            "-----END RSA PRIVATE KEY-----",
-          ].join("\n"),
-          safe: "visible",
+    for (const indentation of [2, "\t"]) {
+      let message = JSON.stringify(
+        {
+          nested: {
+            pem: [
+              "-----BEGIN RSA PRIVATE KEY-----",
+              "SYNTHETIC_KEY_MATERIAL",
+              "-----END RSA PRIVATE KEY-----",
+            ].join("\n"),
+            safe: "visible",
+          },
+          tail: "kept",
         },
-        tail: "kept",
-      },
-      null,
-      2,
-    );
+        null,
+        indentation,
+      );
 
-    expect(JSON.parse(redactedErrorMessage(message))).toEqual({
-      nested: { pem: "[redacted]", safe: "visible" },
-      tail: "kept",
-    });
+      for (let depth = 1; depth <= 2; depth += 1) {
+        if (depth > 1) message = JSON.stringify(message);
+        let redacted: unknown = redactedErrorMessage(message);
+        for (let layer = 0; layer < depth; layer += 1) {
+          redacted = JSON.parse(redacted as string);
+        }
+        expect(redacted).toEqual({
+          nested: { pem: "[redacted]", safe: "visible" },
+          tail: "kept",
+        });
+      }
+    }
   });
 
   test("preserves non-string array values after private keys", () => {
@@ -184,12 +200,17 @@ describe("credential redaction", () => {
       "-----END RSA PRIVATE KEY-----",
     ].join("\n");
     for (const value of [123, true, null, {}, []]) {
-      const message = JSON.stringify([pem, value, "tail"], null, 2);
-      expect(JSON.parse(redactedErrorMessage(message))).toEqual([
-        "[redacted]",
-        value,
-        "tail",
-      ]);
+      for (const indentation of [2, "\t"]) {
+        let message = JSON.stringify([pem, value, "tail"], null, indentation);
+        for (let depth = 1; depth <= 2; depth += 1) {
+          if (depth > 1) message = JSON.stringify(message);
+          let redacted: unknown = redactedErrorMessage(message);
+          for (let layer = 0; layer < depth; layer += 1) {
+            redacted = JSON.parse(redacted as string);
+          }
+          expect(redacted).toEqual(["[redacted]", value, "tail"]);
+        }
+      }
     }
   });
 
@@ -245,6 +266,13 @@ describe("credential redaction", () => {
         "private_key=-----begin rsa private key-----\nSYNTHETIC_KEY\n-----end rsa private key----- safe=value",
       ),
     ).toBe("private_key=[redacted] safe=value");
+  });
+
+  test("preserves already-redacted encoded authorization schemes", () => {
+    for (const scheme of ["Negotiate", "AWS4-HMAC-SHA256", "DPoP"]) {
+      const message = `authorization=${scheme}%20[redacted]`;
+      expect(redactedErrorMessage(message)).toBe(message);
+    }
   });
 
   test("collapses repeated truncated private-key markers", () => {

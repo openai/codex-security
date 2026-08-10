@@ -8,16 +8,32 @@ export function redactedErrorMessage(error: unknown): string {
     string,
     Array<{ start: number; escapedNewline: number }>
   >();
+  const indentationStart = (index: number, escapedNewline: number): number => {
+    let cursor = index - 1;
+    while (cursor >= 0) {
+      if (message[cursor] === " " || message[cursor] === "\t") {
+        cursor -= 1;
+        continue;
+      }
+      if (escapedNewline === 0 || message[cursor] !== "t") break;
+      let slashes = cursor;
+      while (message[slashes - 1] === "\\") slashes -= 1;
+      if (cursor - slashes !== escapedNewline) break;
+      cursor = slashes - 1;
+    }
+    return cursor;
+  };
   const lineStart = /(?:$|[\r\n]|(\\+)[nr])/uy;
   const lineEnd =
-    /(?:$|[\r\n]|(\\+)[nr]|\\*["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,(?:\s|\\+[nr])*(?:\\*["']|[\[{0-9-]|true\b|false\b|null\b))|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
+    /(?:$|[\r\n]|(\\+)[nr]|(\\*)["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,(?:\s|\\+[nrt])*(?:\\*["']|[\[{0-9-]|true\b|false\b|null\b))|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
   for (const match of message.matchAll(
     /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/giu,
   )) {
     const label = match[2]!;
     if (match[1]!.toUpperCase() === "BEGIN") {
-      let frame = match.index - 1;
-      while (message[frame] === " " || message[frame] === "\t") frame -= 1;
+      lineStart.lastIndex = match.index + match[0].length;
+      const boundary = lineStart.exec(message);
+      const frame = indentationStart(match.index, boundary?.[1]?.length ?? 0);
       const preceding = message[frame];
       if (
         frame >= 0 &&
@@ -26,7 +42,7 @@ export function redactedErrorMessage(error: unknown): string {
           (preceding === "n" || preceding === "r") &&
           message[frame - 1] === "\\"
         ) &&
-        !/\b[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|authorization|auth|token|secret|credential|password|passwd)[A-Za-z0-9_-]*\s*[:=]\s*[^\s;]+[ \t]*$/iu.test(
+        !/\b[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|authorization|auth|token|secret|credential|password|passwd)[A-Za-z0-9_-]*\s*[:=]\s*(?:[A-Za-z][A-Za-z0-9._~-]{0,63}[ \t]+)?[^\s;]+[ \t]*$/iu.test(
           message.slice(
             message.lastIndexOf("\n", match.index) + 1,
             match.index,
@@ -35,14 +51,8 @@ export function redactedErrorMessage(error: unknown): string {
       ) {
         continue;
       }
-      lineStart.lastIndex = match.index + match[0].length;
-      const boundary = lineStart.exec(message);
       if (boundary === null) {
-        let previous = match.index - 1;
-        while (message[previous] === " " || message[previous] === "\t") {
-          previous -= 1;
-        }
-        if (message[previous] !== "=" && message[previous] !== ":") continue;
+        if (preceding !== "=" && preceding !== ":") continue;
       }
       const starts = privateKeys.get(label) ?? [];
       starts.push({
@@ -56,8 +66,7 @@ export function redactedErrorMessage(error: unknown): string {
     const starts = privateKeys.get(label);
     const opening = starts?.at(-1);
     if (opening === undefined) continue;
-    let frame = match.index - 1;
-    while (message[frame] === " " || message[frame] === "\t") frame -= 1;
+    const frame = indentationStart(match.index, opening.escapedNewline);
     const previous = message[frame];
     let escapedNewline = 0;
     if (previous === "n" || previous === "r") {
@@ -78,7 +87,9 @@ export function redactedErrorMessage(error: unknown): string {
       ((closingBoundary[0] === "\n" || closingBoundary[0] === "\r") &&
         opening.escapedNewline !== 0) ||
       (closingBoundary[1] !== undefined &&
-        closingBoundary[1].length !== opening.escapedNewline)
+        closingBoundary[1].length !== opening.escapedNewline) ||
+      (closingBoundary[2] !== undefined &&
+        closingBoundary[2].length !== Math.max(0, opening.escapedNewline - 1))
     ) {
       continue;
     }
@@ -99,16 +110,13 @@ export function redactedErrorMessage(error: unknown): string {
       (match: string, prefix: string, offset: number, source: string) => {
         if (/(?:authorization|auth)/iu.test(prefix)) {
           const value = match.slice(prefix.length);
-          const schemeName = value.split(/(?:%20|\+|\s)/u, 1)[0];
-          if (
-            !/^(?:ApiKey|Basic|Bearer|Custom|Digest|Token)$/iu.test(schemeName!)
-          ) {
-            return `${prefix}[redacted]`;
-          }
           if (
             /^[A-Za-z][A-Za-z0-9._~-]{0,63}(?:%20|\+)+\[redacted$/iu.test(value)
           ) {
             return match;
+          }
+          if (!/^(?:ApiKey|Basic|Bearer|Custom|Digest|Token)$/iu.test(value)) {
+            return `${prefix}[redacted]`;
           }
           const scheme = /(?:\s|%20|\+)+\[redacted\]/uy;
           scheme.lastIndex = offset + match.length;
