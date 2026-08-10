@@ -46,6 +46,31 @@ describe("credential redaction", () => {
     }
   });
 
+  test("redacts overlapping private-key blocks through their own delimiters", () => {
+    const message = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "-----BEGIN EC PRIVATE KEY-----",
+      "-----END RSA PRIVATE KEY-----",
+      "SYNTHETIC_EC_KEY_MATERIAL",
+      "-----END EC PRIVATE KEY-----",
+      "retrying",
+    ].join("\n");
+
+    expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+  });
+
+  test("does not end a private key at a delimiter embedded in another line", () => {
+    const message = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "prefix-----END RSA PRIVATE KEY-----suffix",
+      "SYNTHETIC_KEY_MATERIAL",
+      "-----END RSA PRIVATE KEY-----",
+      "retrying",
+    ].join("\n");
+
+    expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+  });
+
   test("redacts quoted credentials and private keys that overlap in either direction", () => {
     for (const [lines, credential] of [
       [

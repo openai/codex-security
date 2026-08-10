@@ -5,9 +5,18 @@ export function redactedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const sensitiveRanges: Array<[number, number]> = [];
   for (const match of message.matchAll(
-    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/gu,
+    /-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----/gu,
   )) {
-    sensitiveRanges.push([match.index, match.index + match[0].length]);
+    const delimiter = new RegExp(
+      String.raw`(?:\r|\n|\\[nr])-----END ${match[1]}-----(?=$|[\s"']|\\[nr])`,
+      "gu",
+    );
+    delimiter.lastIndex = match.index + match[0].length;
+    const end = delimiter.exec(message);
+    sensitiveRanges.push([
+      match.index,
+      end === null ? message.length : end.index + end[0].length,
+    ]);
   }
   return redactQuotedCredentialValues(message, sensitiveRanges)
     .replaceAll(
