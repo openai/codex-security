@@ -112,8 +112,10 @@ describe("credential redaction", () => {
 
   test("preserves text containing an invalid opening delimiter", () => {
     for (const suffix of ["NOT_A_PEM; retry=visible", "\nretry=visible"]) {
-      const message = `parser rejected abc-----BEGIN RSA PRIVATE KEY-----${suffix}`;
-      expect(redactedErrorMessage(message)).toBe(message);
+      for (const padding of ["", " "]) {
+        const message = `parser rejected abc${padding}-----BEGIN RSA PRIVATE KEY-----${suffix}`;
+        expect(redactedErrorMessage(message)).toBe(message);
+      }
     }
   });
 
@@ -147,6 +149,57 @@ describe("credential redaction", () => {
       }
       expect(redacted).toEqual({ pem: "[redacted]", safe: "visible" });
     }
+  });
+
+  test("preserves fields after pretty-printed private-key values", () => {
+    const message = JSON.stringify(
+      {
+        nested: {
+          pem: [
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "SYNTHETIC_KEY_MATERIAL",
+            "-----END RSA PRIVATE KEY-----",
+          ].join("\n"),
+          safe: "visible",
+        },
+        tail: "kept",
+      },
+      null,
+      2,
+    );
+
+    expect(JSON.parse(redactedErrorMessage(message))).toEqual({
+      nested: { pem: "[redacted]", safe: "visible" },
+      tail: "kept",
+    });
+  });
+
+  test("checks serialized newline depth after private-key delimiters", () => {
+    const message = JSON.stringify({
+      pem: [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----\\nSYNTHETIC_SECOND_KEY_MATERIAL",
+        "-----END RSA PRIVATE KEY-----",
+      ].join("\n"),
+      safe: "visible",
+    });
+
+    expect(JSON.parse(redactedErrorMessage(message))).toEqual({
+      pem: "[redacted]",
+      safe: "visible",
+    });
+  });
+
+  test("redacts unquoted credentials next to a private-key placeholder", () => {
+    const message = [
+      "password=SYNTHETIC_VICTIM_PASSWORD -----BEGIN RSA PRIVATE KEY-----",
+      "SYNTHETIC_KEY_MATERIAL",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
+
+    expect(redactedErrorMessage(message)).toBe(
+      "password=[redacted] [redacted]",
+    );
   });
 
   test("redacts lowercase private-key assignments", () => {

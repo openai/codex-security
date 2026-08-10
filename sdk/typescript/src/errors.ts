@@ -10,19 +10,27 @@ export function redactedErrorMessage(error: unknown): string {
   >();
   const lineStart = /(?:$|[\r\n]|(\\+)[nr])/uy;
   const lineEnd =
-    /(?:$|[\r\n]|\\+[nr]|\\*["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,[ \t]*\\*["'])|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
+    /(?:$|[\r\n]|(\\+)[nr]|\\*["'](?=$|[\r\n]|[}\]](?:$|[\r\n,}\]]|\\*["'])|,(?:\s|\\+[nr])*\\*["'])|[ \t]+[A-Za-z][A-Za-z0-9_-]*=)/uy;
   for (const match of message.matchAll(
     /-----(BEGIN|END) ([A-Z0-9 ]*PRIVATE KEY)-----/giu,
   )) {
     const label = match[2]!;
     if (match[1]!.toUpperCase() === "BEGIN") {
-      const preceding = message[match.index - 1];
+      let frame = match.index - 1;
+      while (message[frame] === " " || message[frame] === "\t") frame -= 1;
+      const preceding = message[frame];
       if (
-        match.index !== 0 &&
-        !/[\s"'=:\\]/u.test(preceding!) &&
+        frame >= 0 &&
+        !/[\r\n"'=:]/u.test(preceding!) &&
         !(
           (preceding === "n" || preceding === "r") &&
-          message[match.index - 2] === "\\"
+          message[frame - 1] === "\\"
+        ) &&
+        !/[:=]/u.test(
+          message.slice(
+            message.lastIndexOf("\n", match.index) + 1,
+            match.index,
+          ),
         )
       ) {
         continue;
@@ -62,7 +70,14 @@ export function redactedErrorMessage(error: unknown): string {
     }
     const end = match.index + match[0].length;
     lineEnd.lastIndex = end;
-    if (!lineEnd.test(message)) continue;
+    const closingBoundary = lineEnd.exec(message);
+    if (
+      closingBoundary === null ||
+      (closingBoundary[1] !== undefined &&
+        closingBoundary[1].length !== opening.escapedNewline)
+    ) {
+      continue;
+    }
     starts!.pop();
     sensitiveRanges.push([opening.start, end]);
   }
@@ -76,8 +91,22 @@ export function redactedErrorMessage(error: unknown): string {
       "$1$2$3[redacted]",
     )
     .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\]|[A-Za-z][A-Za-z0-9._~-]{0,63}(?:\s|%20|\+)+\[redacted\])[^\s"',;}&\\\]]+/giu,
-      "$1[redacted]",
+      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\])[^\s"',;}&\\\]]+/giu,
+      (match: string, prefix: string, offset: number, source: string) => {
+        if (/(?:authorization|auth)/iu.test(prefix)) {
+          if (
+            /^[A-Za-z][A-Za-z0-9._~-]{0,63}(?:%20|\+)+\[redacted$/iu.test(
+              match.slice(prefix.length),
+            )
+          ) {
+            return match;
+          }
+          const scheme = /(?:\s|%20|\+)+\[redacted\]/uy;
+          scheme.lastIndex = offset + match.length;
+          if (scheme.test(source)) return match;
+        }
+        return `${prefix}[redacted]`;
+      },
     )
     .replaceAll(/sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}/gu, "[redacted]")
     .replaceAll(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_-]{8,}/giu, "[redacted]")
