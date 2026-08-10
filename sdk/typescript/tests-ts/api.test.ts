@@ -4106,6 +4106,7 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const source = join(repository, "src");
     const ignored = join(source, "node_modules");
+    const vendored = join(source, "vendor");
     const scopes = join(root, "scopes.json");
     const output = join(root, "scoped-source-input.jsonl");
     const interpreter =
@@ -4115,16 +4116,30 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(join(source, "tests"), { recursive: true });
     await mkdir(join(source, "examples"));
     await mkdir(ignored);
+    await mkdir(vendored);
     execFileSync("git", ["init", "-q"], { cwd: repository });
     await Promise.all([
-      writeFile(join(repository, ".gitignore"), "node_modules/\n.env\n"),
+      writeFile(
+        join(repository, ".gitignore"),
+        "node_modules/\n.env\nvendor/\n",
+      ),
       writeFile(join(source, "handler.ts"), "export {};\n"),
       writeFile(join(source, "Dockerfile"), "FROM scratch\n"),
       writeFile(join(source, "tests", "handler.test.ts"), "export {};\n"),
       writeFile(join(source, "examples", "demo.ts"), "export {};\n"),
       writeFile(join(source, ".env"), "SECRET=private\n"),
+      writeFile(
+        join(source, "logo.png"),
+        Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      ),
       writeFile(join(ignored, "dependency.ts"), "export {};\n"),
+      writeFile(join(vendored, "dependency.ts"), "export {};\n"),
     ]);
+    execFileSync(
+      "git",
+      ["add", "--force", "src/vendor/dependency.ts", "src/logo.png"],
+      { cwd: repository },
+    );
 
     const enumerate = async (requested: string[]) => {
       await writeFile(scopes, JSON.stringify(requested));
@@ -4153,16 +4168,42 @@ describe("CodexSecurity orchestration", () => {
       "src/Dockerfile",
       "src/examples/demo.ts",
       "src/handler.ts",
+      "src/logo.png",
       "src/tests/handler.test.ts",
+      "src/vendor/dependency.ts",
     ]);
     expect(await enumerate(["src", "src/.env"])).toEqual([
       "src/.env",
       "src/Dockerfile",
       "src/examples/demo.ts",
       "src/handler.ts",
+      "src/logo.png",
       "src/tests/handler.test.ts",
+      "src/vendor/dependency.ts",
+    ]);
+    expect(await enumerate(["src/vendor", "src/logo.png"])).toEqual([
+      "src/logo.png",
+      "src/vendor/dependency.ts",
     ]);
     await expect(enumerate(["../scopes.json"])).rejects.toThrow();
+    if (process.platform !== "win32") {
+      await symlink(join(source, "handler.ts"), join(source, "alias.ts"));
+      await symlink(source, join(repository, "alias"));
+      await expect(enumerate(["src/alias.ts"])).rejects.toThrow(
+        /symbolic links/,
+      );
+      await expect(enumerate(["alias/handler.ts"])).rejects.toThrow(
+        /symbolic links/,
+      );
+      await expect(enumerate(["alias/../src/handler.ts"])).rejects.toThrow(
+        /symbolic links/,
+      );
+    } else {
+      await symlink(source, join(repository, "junction"), "junction");
+      await expect(enumerate(["junction/handler.ts"])).rejects.toThrow(
+        /symbolic links/,
+      );
+    }
   });
 
   test("removes scoped target files after a scan settles", async () => {

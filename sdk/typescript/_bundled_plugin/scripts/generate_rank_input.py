@@ -288,10 +288,36 @@ def path_is_excluded(path: Path) -> bool:
     return path.name.endswith((".min.js", ".map"))
 
 
-def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
+def resolve_scope(
+    repo: Path,
+    scope: str,
+    *,
+    expand_user: bool = True,
+    reject_symlinks: bool = False,
+) -> Path:
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
+    if reject_symlinks:
+        repository = repo.resolve()
+        try:
+            relative = scope_path.relative_to(repository)
+        except ValueError as exc:
+            raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
+        ancestor = repository
+        for part in relative.parts:
+            if part == "..":
+                if ancestor == repository:
+                    raise SystemExit(f"Scope must be inside repo: {scope_path}")
+                ancestor = ancestor.parent
+                continue
+            ancestor /= part
+            try:
+                metadata = ancestor.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise SystemExit(f"Scope path not found: {ancestor}") from exc
+            if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+                raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
     scope_path = scope_path.resolve()
     repo_resolved = repo.resolve()
     try:
@@ -481,7 +507,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     scopes = load_scopes_file(Path(args.scopes_file).expanduser())
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
-        scope_path = resolve_scope(repo, scope, expand_user=False)
+        scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
         if scope_path.is_file():
             candidates = (scope_path,)
         else:
