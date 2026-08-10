@@ -675,37 +675,59 @@ export class CodexSecurity {
           { ...progress, filesTotal: scopeFileCount },
         );
       };
+      const reportTrackingError = (error: unknown): void => {
+        if (options.maxCostUsd !== undefined) {
+          costAbortController.abort(error);
+          return;
+        }
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not track scan activity: ${redactedErrorMessage(error)}`,
+        );
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
         repository: repo,
         maxCostUsd: options.maxCostUsd,
-        onActivity: (activity) => {
-          notifyObserver(
-            "onActivity",
-            options.onActivity,
-            options.onObserverError,
-            activity,
-          );
-        },
-        onProgress: reportProgress,
-        onCost: (cost) => {
-          notifyObserver(
-            "onCost",
-            options.onCost,
-            options.onObserverError,
-            cost,
-          );
-          if (
-            options.maxCostUsd !== undefined &&
-            cost.estimatedUsd > options.maxCostUsd
-          ) {
-            costAbortController.abort(
-              new ScanCostLimitExceededError(options.maxCostUsd, cost, scanDir),
-            );
-          }
-        },
-        onError: (error) => costAbortController.abort(error),
+        onActivity:
+          options.onActivity === undefined
+            ? undefined
+            : (activity) =>
+                notifyObserver(
+                  "onActivity",
+                  options.onActivity,
+                  options.onObserverError,
+                  activity,
+                ),
+        onProgress:
+          options.onProgress === undefined ? undefined : reportProgress,
+        onCost:
+          options.onCost === undefined && options.maxCostUsd === undefined
+            ? undefined
+            : (cost) => {
+                notifyObserver(
+                  "onCost",
+                  options.onCost,
+                  options.onObserverError,
+                  cost,
+                );
+                if (
+                  options.maxCostUsd !== undefined &&
+                  cost.estimatedUsd > options.maxCostUsd
+                ) {
+                  costAbortController.abort(
+                    new ScanCostLimitExceededError(
+                      options.maxCostUsd,
+                      cost,
+                      scanDir,
+                    ),
+                  );
+                }
+              },
+        onError: reportTrackingError,
       });
       costTracker = tracker;
       const recipe = scanRecipe(
@@ -973,7 +995,11 @@ export class CodexSecurity {
         model,
         onThreadStarted: (threadId) => tracker.start(threadId),
         onFinalize: async (usage) => {
-          const snapshot = await tracker.stop(usage);
+          const snapshot = await tracker.stop(usage).catch((error: unknown) => {
+            if (options.maxCostUsd !== undefined) throw error;
+            reportTrackingError(error);
+            return { usage, cost: estimateScanCost(model, usage) };
+          });
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
             notifyObserver(
