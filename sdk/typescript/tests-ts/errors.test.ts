@@ -25,15 +25,19 @@ describe("credential redaction", () => {
   });
 
   test("does not end a private key at a different key-type delimiter", () => {
-    const message = [
-      "-----BEGIN RSA PRIVATE KEY-----",
-      "synthetic-before",
-      "-----END EC PRIVATE KEY-----",
-      "synthetic-after",
-      "-----END RSA PRIVATE KEY-----",
-      "retrying",
-    ].join("\n");
+    for (const assignment of ["", "private_key="]) {
+      const message = [
+        `${assignment}-----BEGIN RSA PRIVATE KEY-----`,
+        "synthetic-before",
+        "-----END EC PRIVATE KEY-----",
+        "synthetic-after",
+        "-----END RSA PRIVATE KEY-----",
+        "retrying",
+      ].join("\n");
 
-    expect(redactedErrorMessage(message)).toBe("[redacted]\nretrying");
+      expect(redactedErrorMessage(message)).toBe(
+        `${assignment}[redacted]\nretrying`,
+      );
+    }
   });
 });
