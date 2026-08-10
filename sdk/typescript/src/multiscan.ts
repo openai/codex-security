@@ -342,8 +342,12 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     if (!existing.stale) {
       throw new Error("A multiscan supervisor is already running.");
     }
-    await recoverLock(output, path, existing.owner);
-    return await acquireLock(output);
+    const stale = await recoverLock(output, path, existing.owner);
+    try {
+      return await acquireLock(output);
+    } finally {
+      await rm(stale, { recursive: true, force: true });
+    }
   }
   const createdLock = await lstat(path);
   const owner = `${JSON.stringify({
@@ -477,7 +481,7 @@ async function recoverLock(
   output: string,
   path: string,
   expectedOwner: string | undefined,
-): Promise<void> {
+): Promise<string> {
   const recoveryPath = join(path, ".recovering");
   let claim;
   try {
@@ -506,7 +510,7 @@ async function recoverLock(
     const stale = join(output, `.lock.stale-${randomUUID()}`);
     await rename(path, stale);
     moved = true;
-    await rm(stale, { recursive: true });
+    return stale;
   } finally {
     if (!moved) await rm(recoveryPath, { force: true });
   }

@@ -883,6 +883,11 @@ describe("multiscan", () => {
 
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
     await expect(access(lock)).rejects.toThrow();
+    expect(
+      (await readdir(paths.output)).some((name) =>
+        name.startsWith(".lock.stale-"),
+      ),
+    ).toBe(false);
   });
 
   test("preserves an active legacy supervisor lock", async () => {
