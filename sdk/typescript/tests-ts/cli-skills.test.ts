@@ -60,6 +60,8 @@ describe("CLI skill commands", () => {
           'model_reasoning_effort="xhigh"',
           "--config",
           'approval_policy="never"',
+          "--config",
+          'responses_api_metadata.codex_security_surface="cli"',
           "--sandbox",
           "workspace-write",
           "--skip-git-repo-check",

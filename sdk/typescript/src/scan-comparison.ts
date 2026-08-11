@@ -8,6 +8,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import type { CodexSecuritySurface } from "./api.js";
 import { accountStatus } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -87,6 +88,14 @@ export async function matchScanFindings(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
 ): Promise<ScanComparisonResult> {
+  return await matchScanFindingsInternal(input, options, { surface: "sdk" });
+}
+
+export async function matchScanFindingsInternal(
+  input: ScanComparisonInput,
+  options: ScanComparisonOptions = {},
+  runtimeOptions: { surface: CodexSecuritySurface },
+): Promise<ScanComparisonResult> {
   const codex =
     options.codex ??
     new Codex({
@@ -97,6 +106,9 @@ export async function matchScanFindings(
       ),
       config: {
         allow_login_shell: false,
+        responses_api_metadata: {
+          codex_security_surface: runtimeOptions.surface,
+        },
         "features.apps": false,
         "features.code_mode": false,
         "features.code_mode_only": false,

@@ -20,7 +20,7 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
-import { redactedErrorMessage } from "./errors.js";
+import { safeErrorMessage } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -247,7 +247,7 @@ async function runCampaign(
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
-          failure = redactedErrorMessage(error);
+          failure = safeErrorMessage(error);
         } finally {
           await rm(checkout, { recursive: true, force: true });
         }
