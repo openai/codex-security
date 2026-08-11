@@ -12,17 +12,6 @@ describe("scan history renderer", () => {
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
           comparable: true,
           coverage: { afterCompleteness: "complete" },
-          changes: {
-            targetRevision: { before: "revision-a", after: "revision-b" },
-            targetSnapshotDigest: { before: "snapshot-a", after: "snapshot-b" },
-            pluginVersion: { before: "0.1.8", after: "0.1.9" },
-            model: { before: "gpt-5.6-luna", after: "gpt-5.6-sol" },
-            reasoningEffort: { before: "medium", after: "high" },
-            config: { before: { goals: true }, after: { goals: false } },
-            mode: { before: "standard", after: "deep" },
-            scope: { before: ".", after: "src" },
-            coverage: { before: "partial", after: "complete" },
-          },
           summary: {
             new: 1,
             persisting: 2,
@@ -33,8 +22,6 @@ describe("scan history renderer", () => {
           findings: [
             {
               findingId: "internal-persisting-id",
-              beforeFindingIds: ["previous-identity"],
-              afterFindingIds: ["internal-persisting-id"],
               status: "persisting",
               severity: "high",
               title: "Basket ownership check is missing",
@@ -107,21 +94,12 @@ describe("scan history renderer", () => {
       "CRITICAL",
       "2 → 1",
       "Both routes share the same unchecked basket lookup.",
-      "Finding identity changed: previous-identity → internal-persisting-id",
-      "REVISION  revision-a → revision-b",
-      "SOURCE  changed",
-      "PLUGIN  0.1.8 → 0.1.9",
-      "MODEL  gpt-5.6-luna → gpt-5.6-sol",
-      "EFFORT  medium → high",
-      "CONFIG  changed",
-      "MODE  standard → deep",
-      "SCOPE  . → src",
-      "COVERAGE  partial → complete",
     ]) {
       expect(text).toContain(expected);
     }
     for (const hidden of [
       "follow-up scope",
+      "internal-persisting-id",
       "before-resolved",
       "NOT_RESCANNED",
       "REOPENED",

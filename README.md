@@ -70,8 +70,7 @@ directory outside the repository.
 `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
 root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is
-incomplete, their original location was not reviewed, or the source did not
-change. Comparisons also show changes to the scanner, model, and settings.
+incomplete or their original location was not reviewed.
 
 ## Verbose diagnostics
 

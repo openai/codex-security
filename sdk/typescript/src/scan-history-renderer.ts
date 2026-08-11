@@ -117,14 +117,6 @@ export function renderScanHistory(
       entry["path"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
     lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
-    const beforeFindingIds = entry["beforeFindingIds"] as string[] | undefined;
-    const afterFindingIds = entry["afterFindingIds"] as string[] | undefined;
-    if (beforeFindingIds && afterFindingIds) {
-      wrap(
-        `Finding identity changed: ${beforeFindingIds.join(", ")} → ${afterFindingIds.join(", ")}`,
-        14,
-      );
-    }
     const showLinkedFindings = command !== "show" || options.showLinkedFindings;
     if (matches?.length && showLinkedFindings) {
       lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
@@ -333,27 +325,6 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const changes = result["changes"] as JsonObject | undefined;
-    for (const [key, label] of [
-      ["targetRevision", "REVISION"],
-      ["pluginVersion", "PLUGIN"],
-      ["model", "MODEL"],
-      ["reasoningEffort", "EFFORT"],
-      ["mode", "MODE"],
-      ["scope", "SCOPE"],
-      ["coverage", "COVERAGE"],
-    ] as const) {
-      const change = changes?.[key] as JsonObject | undefined;
-      if (change) {
-        lines.push(
-          `  ${strong(label)}  ${clean(change["before"] ?? "unknown")} → ${clean(change["after"] ?? "unknown")}`,
-        );
-      }
-    }
-    if (changes?.["targetSnapshotDigest"]) {
-      lines.push(`  ${strong("SOURCE")}  changed`);
-    }
-    if (changes?.["config"]) lines.push(`  ${strong("CONFIG")}  changed`);
     const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
     if (coverage !== "complete") {
       lines.push(

@@ -333,43 +333,8 @@ def compare_scans(
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
-    before_coverage = read_coverage(before)
     after_coverage = read_coverage(after)
     comparable = after_coverage.get("completeness") == "complete"
-    source_changed = before["target_revision"] != after["target_revision"] or (
-        before["target_snapshot_digest"] is not None
-        and after["target_snapshot_digest"] is not None
-        and before["target_snapshot_digest"] != after["target_snapshot_digest"]
-    )
-    before_recipe = json.loads(before["recipe_json"]) if before["recipe_json"] is not None else {}
-    after_recipe = json.loads(after["recipe_json"]) if after["recipe_json"] is not None else {}
-    changes = {
-        name: {"before": previous, "after": current}
-        for name, previous, current in (
-            ("targetRevision", before["target_revision"], after["target_revision"]),
-            (
-                "targetSnapshotDigest",
-                before["target_snapshot_digest"],
-                after["target_snapshot_digest"],
-            ),
-            (
-                "pluginVersion",
-                before_recipe.get("pluginVersion"),
-                after_recipe.get("pluginVersion"),
-            ),
-            ("model", before["model"], after["model"]),
-            ("reasoningEffort", before["reasoning_effort"], after["reasoning_effort"]),
-            ("config", before_recipe.get("config"), after_recipe.get("config")),
-            ("mode", before["mode"], after["mode"]),
-            ("scope", before["scope"], after["scope"]),
-            (
-                "coverage",
-                before_coverage.get("completeness"),
-                after_coverage.get("completeness"),
-            ),
-        )
-        if previous != current
-    }
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
@@ -402,11 +367,6 @@ def compare_scans(
             "severity": selected["severity"],
             "title": selected["title"],
         }
-        before_finding_ids = sorted({row["finding_id"] for row in previous_rows})
-        after_finding_ids = sorted({row["finding_id"] for row in current_rows})
-        if previous is not None and current is not None and before_finding_ids != after_finding_ids:
-            item["beforeFindingIds"] = before_finding_ids
-            item["afterFindingIds"] = after_finding_ids
         if previous is None:
             uncertain_reason = uncertain.get(("after", current["id"])) if current else None
             if uncertain_reason is None:
@@ -440,9 +400,6 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        elif not source_changed:
-            status = "unknown"
-            item["reason"] = "The finding was not rediscovered, and no source change was recorded."
         else:
             status = "resolved"
         if len(previous_rows) == 1:
@@ -465,12 +422,8 @@ def compare_scans(
     result = {
         "afterScanId": after["id"],
         "beforeScanId": before["id"],
-        "changes": changes,
         "comparable": comparable,
-        "coverage": {
-            "beforeCompleteness": before_coverage.get("completeness"),
-            "afterCompleteness": after_coverage.get("completeness"),
-        },
+        "coverage": {"afterCompleteness": after_coverage.get("completeness")},
         "findings": findings,
         "repository": before["target_path"],
         "summary": summary,
