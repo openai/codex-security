@@ -32,6 +32,7 @@ import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
+  createSecurityInternal,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -86,7 +87,8 @@ import {
   type CodexCommand,
 } from "./runtime.js";
 import {
-  matchScanFindings,
+  matchScanFindingsInternal,
+  type matchScanFindings,
   type ScanComparisonInput,
 } from "./scan-comparison.js";
 import { readScanLogs } from "./scan-logs.js";
@@ -359,7 +361,8 @@ interface CliDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
-  createSecurity: (config) => new CodexSecurity(config),
+  createSecurity: (config) =>
+    createSecurityInternal(config, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: () => checkForUpdate({ environment: process.env }),
@@ -484,7 +487,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       args,
     );
   },
-  matchFindings: matchScanFindings,
+  matchFindings: (input, options) =>
+    matchScanFindingsInternal(input, options, { surface: "cli" }),
 };
 
 export async function runCodexSkillCommand(
@@ -2368,6 +2372,8 @@ async function runSkill(
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
       "--config",
       'approval_policy="never"',
+      "--config",
+      'responses_api_metadata.codex_security_surface="cli"',
       "--sandbox",
       "workspace-write",
       "--skip-git-repo-check",

@@ -258,6 +258,12 @@ export interface CodexSecurityMetadata {
   executableVersion: string;
 }
 
+export type CodexSecuritySurface = "cli" | "sdk";
+
+interface CodexSecurityRuntimeOptions {
+  surface: CodexSecuritySurface;
+}
+
 interface ClientDependencies {
   createCodex(options: CodexOptions): CodexClientLike;
   environment: ProcessEnvironment;
@@ -298,6 +304,7 @@ export class CodexSecurity {
   };
 
   readonly #dependencies: ClientDependencies;
+  readonly #surface: CodexSecuritySurface;
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -308,12 +315,20 @@ export class CodexSecurity {
   #closePromise: Promise<void> | null = null;
 
   public constructor(config?: CodexSecurityConfig);
+  /** @internal */
+  public constructor(
+    config: CodexSecurityConfig,
+    dependencies: ClientDependencies,
+    runtimeOptions: CodexSecurityRuntimeOptions,
+  );
   public constructor(
     config: CodexSecurityConfig = {},
     dependencies: ClientDependencies = DEFAULT_DEPENDENCIES,
+    runtimeOptions: CodexSecurityRuntimeOptions = { surface: "sdk" },
   ) {
     this.config = structuredClone(config);
     this.#dependencies = dependencies;
+    this.#surface = runtimeOptions.surface;
   }
 
   public async run(
@@ -953,6 +968,9 @@ export class CodexSecurity {
           ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
+          responses_api_metadata: {
+            codex_security_surface: this.#surface,
+          },
         },
       });
       const thread = codex.startThread({
@@ -1684,6 +1702,19 @@ async function prepareDeepScanConfig(
     }),
     { mode: 0o600, signal },
   );
+}
+
+export function createSecurity(
+  config: CodexSecurityConfig = {},
+): CodexSecurity {
+  return createSecurityInternal(config, { surface: "sdk" });
+}
+
+export function createSecurityInternal(
+  config: CodexSecurityConfig = {},
+  runtimeOptions: CodexSecurityRuntimeOptions,
+): CodexSecurity {
+  return new CodexSecurity(config, DEFAULT_DEPENDENCIES, runtimeOptions);
 }
 
 export async function initialCredentialsAvailable(
