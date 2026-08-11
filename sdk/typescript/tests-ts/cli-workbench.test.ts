@@ -5,9 +5,76 @@ import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { capture, dependencies, SYNTHETIC_CREDENTIALS } from "./support/cli.js";
+import {
+  capture,
+  dependencies,
+  fakeResult,
+  SYNTHETIC_CREDENTIALS,
+} from "./support/cli.js";
 
 describe("CLI workbench", () => {
+  test("lists and summarizes open findings for the current repository", async () => {
+    const repository = resolve("/current/repository");
+    const stdout = capture();
+    const calls: Array<readonly string[]> = [];
+    const responses: JsonObject[] = [
+      {
+        repositories: [
+          { targetId: "other", targetPath: `${repository}-clone` },
+          { targetId: "selected", targetPath: repository },
+        ],
+      },
+      { findings: [{ title: "Finding 1" }], nextOffset: 1 },
+      { findings: [{ title: "Finding 2" }], nextOffset: null },
+    ];
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => responses[calls.push(args) - 1]!,
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[0]).toEqual(["list-repositories"]);
+    expect(calls[1]).toEqual([
+      "list-global-findings",
+      "--target-id",
+      "selected",
+      "--status",
+      "open",
+    ]);
+    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
+    expect(JSON.parse(stdout.text())).toEqual({
+      repository,
+      findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
+    });
+    for (const confirmed of [[true, false], []]) {
+      const result = fakeResult(["high"]);
+      Object.assign(result, {
+        repositoryFindings: confirmed.map((confirmedInLatestScan) => ({
+          severity: { level: "high" },
+          confirmedInLatestScan,
+        })),
+      });
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan"],
+          capture().stream,
+          stderr.stream,
+          dependencies({ result }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toContain(
+        confirmed.length
+          ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
+          : "FINDINGS  0\n",
+      );
+    }
+  });
+
   test("lists repository and scan-root history without starting Codex", async () => {
     const repository = resolve("/current/repository");
     const cases: Array<[string[], string[]]> = [

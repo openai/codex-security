@@ -40,7 +40,7 @@ description = "Capabilities for Git-backed Codex Security diff scans."
 [[profiles.security_diff_scan.requirements]]
 capability = "delegated_workers"
 severity = "warn"
-reason = "Large exhaustive diff scans use delegated workers when available; without them, the scan may need a narrower or parent-agent-only path."
+reason = "Large diff scans may use discovery workers when available; otherwise the parent reviews every changed file."
 
 [[profiles.security_diff_scan.requirements]]
 capability = "goal_tools"

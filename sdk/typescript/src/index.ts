@@ -47,7 +47,11 @@ export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
 export { ScanResult } from "./result.js";
-export type { ScanResultOptions, TurnResultMetadata } from "./result.js";
+export type {
+  RepositoryFinding,
+  ScanResultOptions,
+  TurnResultMetadata,
+} from "./result.js";
 export {
   bootstrapPlugin,
   bundledPluginRoot,

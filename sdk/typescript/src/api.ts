@@ -57,9 +57,17 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
-import { ScanResult, type TurnResultMetadata } from "./result.js";
+import {
+  ScanResult,
+  type RepositoryFinding,
+  type TurnResultMetadata,
+} from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
+import {
+  matchCompletedScan,
+  type matchScanFindings,
+} from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
@@ -277,6 +285,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  matchFindings?: typeof matchScanFindings;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -1030,7 +1039,7 @@ export class CodexSecurity {
               "onWarning",
               options.onWarning,
               options.onObserverError,
-              `Could not save scan session: ${redactedErrorMessage(error)}`,
+              `Could not save scan session: ${safeErrorMessage(error)}`,
             );
           }
         },
@@ -1132,6 +1141,44 @@ export class CodexSecurity {
           onObserverError: options.onObserverError,
         });
         checkOpen();
+      }
+      try {
+        const runWorkbench = (args: readonly string[]) =>
+          workbench(workbenchOptions, args);
+        const previousFindings = await listRepositoryFindings(
+          runWorkbench,
+          targetId,
+          "all",
+        );
+        if (previousFindings !== undefined) {
+          await matchCompletedScan({
+            scanId,
+            repository: repo,
+            previousFindings: previousFindings.filter(
+              (finding) =>
+                finding["scanId"] !== scanId &&
+                finding["targetId"] === targetId,
+            ),
+            falsePositives: falsePositiveExamples as Record<string, unknown>[],
+            findings: result.findings.findings,
+            workbench: runWorkbench,
+            matchFindings: this.#dependencies.matchFindings,
+            environment,
+            model,
+            signal,
+          });
+          result.repositoryFindings = (await listRepositoryFindings(
+            runWorkbench,
+            targetId,
+          )) as RepositoryFinding[] | undefined;
+        }
+      } catch (error) {
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not update repository findings: ${errorMessage(error)}`,
+        );
       }
       return result;
     } catch (error) {
@@ -1631,6 +1678,29 @@ export class CodexSecurity {
   #requireOpen(): void {
     if (this.#closed) throw new CodexSecurityError("CodexSecurity is closed.");
   }
+}
+
+export async function listRepositoryFindings(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  targetId: string,
+  status: "open" | "all" = "open",
+): Promise<JsonObject[] | undefined> {
+  const findings: JsonObject[] = [];
+  let offset: number | undefined;
+  do {
+    const page = await workbench([
+      "list-global-findings",
+      "--target-id",
+      targetId,
+      ...(status === "open" ? ["--status", "open"] : []),
+      ...(offset === undefined ? [] : ["--offset", String(offset)]),
+    ]);
+    if (!Array.isArray(page["findings"])) return undefined;
+    findings.push(...(page["findings"] as JsonObject[]));
+    offset =
+      typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;
+  } while (offset !== undefined);
+  return findings;
 }
 
 function deepScanOptions(options: ScanOptions): DeepScanOptions {
