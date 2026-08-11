@@ -37,7 +37,6 @@ import {
 } from "../src/index.js";
 import {
   classifyConnectionFailure,
-  environmentValue,
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
@@ -284,22 +283,6 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(classifyConnectionFailure("403 model access denied")).toBe(
       "forbidden",
-    );
-  });
-
-  test("treats empty environment variables as unset and finds case variants", () => {
-    expect(environmentValue({ CODEX_HOME: "" }, "CODEX_HOME")).toBeUndefined();
-    expect(
-      environmentValue({ CODEX_HOME: "   " }, "CODEX_HOME"),
-    ).toBeUndefined();
-    expect(
-      environmentValue(
-        { CODEX_HOME: "", Codex_Home: "/ambient" },
-        "CODEX_HOME",
-      ),
-    ).toBe("/ambient");
-    expect(environmentValue({ Home: "/shell-home" }, "HOME")).toBe(
-      "/shell-home",
     );
   });
 

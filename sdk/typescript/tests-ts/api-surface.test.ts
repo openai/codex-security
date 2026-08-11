@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
-import { CodexSecurity, createSecurity } from "../src/index.js";
+import { CodexSecurity } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   completedEvents,
@@ -104,12 +104,6 @@ async function scanResponseSurface(runtimeOptions?: {
 }
 
 describe("CodexSecurity Responses metadata", () => {
-  test("the public factory creates an SDK client", async () => {
-    const client = createSecurity();
-    expect(client).toBeInstanceOf(CodexSecurity);
-    await client.close();
-  });
-
   test("SDK runtime scans use sdk metadata", async () => {
     expect(await scanResponseSurface()).toBe("sdk");
   });
