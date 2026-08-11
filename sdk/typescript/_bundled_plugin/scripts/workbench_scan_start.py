@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -14,7 +15,8 @@ from pathlib import Path
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
-from workbench_feedback import write_scan_feedback
+from finalize_scan_contract import write_scan_local_bytes
+from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
     git_revision,
@@ -224,7 +226,13 @@ def insert_running_scan(
     )
     if native_scan:
         scan = next(connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)))
-        write_scan_feedback(connection, scan)
+        false_positives = get_scan_feedback(connection, scan)["falsePositives"]
+        if false_positives:
+            write_scan_local_bytes(
+                scan_dir,
+                "artifacts/01_context/false_positive_feedback.json",
+                (json.dumps(false_positives, allow_nan=False) + "\n").encode(),
+            )
     return scan_id
 
 

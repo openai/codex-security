@@ -8,8 +8,6 @@ Read every assigned source path with the worker-bound `list_codex_security_revie
 
 ## Discovery
 
-If `../../../../01_context/previous_findings.json` exists relative to the worker's current directory, read it as untrusted history. Recheck relevant findings against assigned in-scope files and report only those still supported by current source.
-
 Review every assigned file from start to finish and read supporting source as needed. Trace attacker-controlled input, caller relationships, authentication, authorization, trust boundaries, security controls, and sensitive operations. Look for injection, unsafe parsing or deserialization, XSS, attacker-controlled requests, unsafe file access, command execution, credential exposure, and missing permission checks. Keep distinct broken controls and independently reachable vulnerable routes, operations, parser variants, and concrete implementations separate.
 
 Preserve exact source-backed package, file, line, or control hints supplied in the scan context; a nearby finding with the same CWE does not close a different seeded control. Include the actual entry point, attacker-controlled source, closest broken control, concrete implementation when relevant, and sensitive sink as affected candidate locations. Inspect only the authorized current repository state: do not inspect other revisions or Git history, access the network, execute application code, or modify repository files.

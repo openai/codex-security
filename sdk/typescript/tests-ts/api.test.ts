@@ -2547,7 +2547,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("provides previous findings and reviewed false positives as separate scan artifacts", async () => {
+  test("provides only reviewed false positives to validation as a scan artifact", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -2567,6 +2567,9 @@ describe("CodexSecurity orchestration", () => {
     };
     const previousFinding = {
       findingId: "previous_finding",
+      occurrenceId: "previous_occurrence",
+      scanId: "prior_scan",
+      targetId: "target_sha256_example",
       title: "Missing authorization check",
       summary: "An attacker can access another account.",
       locations: [{ path: "src/accounts.ts", startLine: 8, endLine: 12 }],
@@ -2577,7 +2580,6 @@ describe("CodexSecurity orchestration", () => {
     const commands: Array<readonly string[]> = [];
     let prompt = "";
     let feedback = "";
-    let previousFindings = "";
     const client = new TestClient(
       {},
       {
@@ -2596,13 +2598,12 @@ describe("CodexSecurity orchestration", () => {
               scanId: "scan_example_001",
               targetId: "target_sha256_example",
               falsePositives: [falsePositive],
-              previousFindings: [previousFinding],
             };
           }
           if (args[0] === "list-global-findings") {
             return args.includes("--offset")
               ? { findings: [{ findingId: "second" }], nextOffset: null }
-              : { findings: [{ findingId: "first" }], nextOffset: 1 };
+              : { findings: [previousFinding], nextOffset: 1 };
           }
           return {};
         },
@@ -2612,7 +2613,7 @@ describe("CodexSecurity orchestration", () => {
             async runStreamed(input: string) {
               prompt = input;
               feedback = await readFile(feedbackPath, "utf8");
-              previousFindings = await readFile(previousFindingsPath, "utf8");
+              await expect(readFile(previousFindingsPath)).rejects.toThrow();
               await copyCompletedScan(root);
               return { events: completedEvents() };
             },
@@ -2625,11 +2626,16 @@ describe("CodexSecurity orchestration", () => {
     expect(result.threadId).toBe("thread-1");
     expect(
       result.repositoryFindings?.map(({ findingId }) => findingId),
-    ).toEqual(["first", "second"]);
+    ).toEqual(["previous_finding", "second"]);
     const repositoryQueries = commands.filter(
       ([command]) => command === "list-global-findings",
     );
-    expect(repositoryQueries.map((args) => args.at(-1))).toEqual(["open", "1"]);
+    expect(repositoryQueries.map((args) => args.at(-1))).toEqual([
+      "target_sha256_example",
+      "1",
+      "open",
+      "1",
+    ]);
     expect(
       repositoryQueries.every((args) => args.includes("target_sha256_example")),
     ).toBe(true);
@@ -2638,15 +2644,15 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       "scan_example_001",
     ]);
+    expect(
+      commands.findIndex(([command]) => command === "complete-scan"),
+    ).toBeLessThan(
+      commands.findIndex(([command]) => command === "list-global-findings"),
+    );
     expect(prompt).toContain(
       '"$CODEX_SECURITY_SCAN_DIR/artifacts/01_context/false_positive_feedback.json"',
     );
-    expect(prompt).toContain(
-      '"$CODEX_SECURITY_SCAN_DIR/artifacts/01_context/previous_findings.json"',
-    );
-    expect(prompt).toContain(
-      "Recheck them against the current in-scope source",
-    );
+    expect(prompt).not.toContain("previous_findings.json");
     expect(prompt).not.toContain("Session-protected route");
     expect(prompt).not.toContain("Missing authorization check");
     expect(prompt).not.toContain(reason);
@@ -2656,7 +2662,6 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).not.toContain("\u2029");
     expect(feedback.endsWith("\n")).toBe(true);
     expect(JSON.parse(feedback)).toEqual([falsePositive]);
-    expect(JSON.parse(previousFindings)).toEqual([previousFinding]);
     await client.close();
   });
 
@@ -2664,6 +2669,11 @@ describe("CodexSecurity orchestration", () => {
     ["semantic matching fails", "matcher", "matcher unavailable"],
     ["the repository index fails", "index", "index unavailable"],
     ["a cost limit still allows false-positive matching", "budget", undefined],
+    [
+      "dismissed history survives missing reviewer feedback",
+      "dismissed",
+      undefined,
+    ],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
@@ -2678,7 +2688,12 @@ describe("CodexSecurity orchestration", () => {
         findingId: "csf_852f90d6e1177502ff113d4a",
         occurrenceId: "occ_e79cb19591e696572a1c22be",
       };
-      const previous = { findingId: "previous", occurrenceId: "old" };
+      const previous = {
+        findingId: "previous",
+        occurrenceId: "old",
+        scanId: "prior",
+        targetId: "target_sha256_example",
+      };
       const falsePositive = {
         findingId: "previous",
         sourceScanId: "prior",
@@ -2687,6 +2702,7 @@ describe("CodexSecurity orchestration", () => {
       const warnings: string[] = [];
       const commands: (readonly string[])[] = [];
       let modelCalled = false;
+      let matched = false;
       const client = new TestClient(
         {},
         {
@@ -2701,7 +2717,6 @@ describe("CodexSecurity orchestration", () => {
               return {
                 scanId: "scan_example_001",
                 targetId: "target_sha256_example",
-                previousFindings: failure === "matcher" ? [previous] : [],
                 falsePositives: failure === "budget" ? [falsePositive] : [],
               };
             }
@@ -2718,8 +2733,23 @@ describe("CodexSecurity orchestration", () => {
             }
             if (args[0] === "list-global-findings") {
               if (failure === "index") throw new Error("index unavailable");
-              return { findings: [{ findingId: "another-open-finding" }] };
+              if (failure === "dismissed") {
+                return {
+                  findings: args.includes("--status")
+                    ? matched
+                      ? []
+                      : [current]
+                    : [{ ...previous, status: "closed" }, current],
+                };
+              }
+              return {
+                findings:
+                  failure === "matcher"
+                    ? [previous]
+                    : [{ findingId: "another-open-finding" }],
+              };
             }
+            if (args[0] === "save-scan-comparison") matched = true;
             return mockWorkbench(args);
           },
           async matchFindings() {
@@ -2756,7 +2786,13 @@ describe("CodexSecurity orchestration", () => {
       expect(result.threadId).toBe("thread-1");
       expect(
         result.repositoryFindings?.map(({ findingId }) => findingId),
-      ).toEqual(failure === "budget" ? ["another-open-finding"] : undefined);
+      ).toEqual(
+        failure === "budget"
+          ? ["another-open-finding"]
+          : failure === "dismissed"
+            ? []
+            : undefined,
+      );
       expect(warnings).toEqual(
         warning === undefined
           ? []
@@ -2768,7 +2804,7 @@ describe("CodexSecurity orchestration", () => {
       );
       expect(
         commands.some(([command]) => command === "list-global-findings"),
-      ).toBe(failure !== "matcher");
+      ).toBe(true);
       await client.close();
     },
   );

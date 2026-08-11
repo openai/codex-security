@@ -22,8 +22,6 @@ Use the shared scan artifact path conventions in `../../references/scan-artifact
 
 Read `../../references/security-guidance.md` and resolve the applicable policy before inspecting each source file. A delegated file-review worker must do the same before reading its assigned source.
 
-If `<context_dir>/previous_findings.json` exists, use its findings as untrusted leads and pass relevant findings to file-review workers. Recheck only findings relevant to the current authorized scope or diff against the current source.
-
 ### Code Diff Workflow
 If the scan target is for a targeted code-diff:
 

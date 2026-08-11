@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
 from workbench.handoff import require_current_continuation
-from workbench_feedback import write_scan_feedback
 from workbench_target import (
     directory_content_digest,
     directory_snapshot_regular_file_count,
@@ -825,7 +824,6 @@ def begin_deep_scan_for_target(
             (scan_id, timestamp, workspace_id),
         )
         scan = require_scan(connection, scan_id)
-        write_scan_feedback(connection, scan)
         ensure_deep_scan_run(connection, scan, config, workflow_version, timestamp)
         connection.commit()
     except BaseException:

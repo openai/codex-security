@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -12,7 +11,6 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from finalize_scan_contract import write_scan_local_bytes
 from workbench_constants import (
     FINDING_LOCATION_PATH_BYTES,
     FINDING_SUMMARY_BYTES,
@@ -25,8 +23,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
     rows = connection.execute(
         """
         WITH ranked_decisions AS (
-            SELECT occurrences.id AS occurrence_id,
-                findings.id AS finding_id, findings.fingerprint, findings.rule_id,
+            SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
                 findings.identity_anchor, findings.identity_instance, occurrences.title,
                 occurrences.summary, COALESCE(triage.status, 'open') AS triage_status,
                 triage.close_reason, triage.note,
@@ -56,39 +53,20 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
         )
-        SELECT ranked_decisions.*, occurrences.details_json
+        SELECT *
         FROM ranked_decisions
-        JOIN finding_occurrences AS occurrences ON occurrences.id = ranked_decisions.occurrence_id
         WHERE decision_rank = 1
-            AND (triage_status = 'open' OR (close_reason = 'false_positive' AND trim(note) != ''))
+            AND triage_status = 'closed'
+            AND close_reason = 'false_positive'
+            AND note IS NOT NULL
+            AND trim(note) != ''
         ORDER BY updated_at DESC, source_completed_at DESC, source_scan_id DESC, finding_id DESC
+        LIMIT 50
         """,
         (scan["target_id"], scan["id"]),
     )
     false_positives = []
-    previous_findings = []
     for row in rows:
-        if row["triage_status"] == "open":
-            previous_findings.append(
-                json.loads(row["details_json"])
-                or {
-                    "findingId": row["finding_id"],
-                    "occurrenceId": row["occurrence_id"],
-                    "ruleId": row["rule_id"],
-                    "title": row["title"],
-                    "summary": row["summary"],
-                    "locations": [
-                        {
-                            "path": row["relative_path"],
-                            "startLine": row["start_line"],
-                            "endLine": row["end_line"],
-                        }
-                    ],
-                }
-            )
-            continue
-        if len(false_positives) == 50:
-            continue
         identity = {"anchor": row["identity_anchor"]}
         if row["identity_instance"] is not None:
             identity["instance"] = row["identity_instance"]
@@ -113,26 +91,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 "updatedAt": row["updated_at"],
             }
         )
-    return {
-        "scanId": scan["id"],
-        "targetId": scan["target_id"],
-        "falsePositives": false_positives,
-        "previousFindings": previous_findings,
-    }
-
-
-def write_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
-    feedback = get_scan_feedback(connection, scan)
-    for filename, findings in (
-        ("false_positive_feedback.json", feedback["falsePositives"]),
-        ("previous_findings.json", feedback["previousFindings"]),
-    ):
-        if findings:
-            write_scan_local_bytes(
-                Path(scan["scan_dir"]),
-                f"artifacts/01_context/{filename}",
-                (json.dumps(findings, allow_nan=False) + "\n").encode(),
-            )
+    return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": false_positives}
 
 
 if __name__ == "__main__":
