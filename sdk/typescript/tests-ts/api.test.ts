@@ -1940,11 +1940,18 @@ describe("CodexSecurity orchestration", () => {
       "scan_example_001",
     ]);
     expect(commands[2]).toEqual([
+      "set-scan-thread",
+      "--scan-id",
+      "scan_example_001",
+      "--thread-id",
+      "thread-1",
+    ]);
+    expect(commands[3]).toEqual([
       "prepare-scan-completion",
       "--scan-id",
       "scan_example_001",
     ]);
-    expect(commands[3]).toEqual([
+    expect(commands[4]).toEqual([
       "complete-scan",
       "--scan-id",
       "scan_example_001",
@@ -2308,6 +2315,7 @@ describe("CodexSecurity orchestration", () => {
     expect(commands).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
+      "set-scan-thread",
       "prepare-scan-completion",
       "fail-scan",
     ]);
@@ -2820,6 +2828,7 @@ describe("CodexSecurity orchestration", () => {
     expect(commands.map((command) => command[0])).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
+      "set-scan-thread",
       "prepare-scan-completion",
       "complete-scan",
     ]);
@@ -3033,6 +3042,13 @@ describe("CodexSecurity orchestration", () => {
       "scan_example_001",
     ]);
     expect(commands[2]).toEqual([
+      "set-scan-thread",
+      "--scan-id",
+      "scan_example_001",
+      "--thread-id",
+      "scan-thread",
+    ]);
+    expect(commands[3]).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
@@ -3108,6 +3124,7 @@ describe("CodexSecurity orchestration", () => {
     expect(commands.map(([command]) => command)).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
+      "set-scan-thread",
       "prepare-scan-completion",
       "complete-scan",
     ]);
@@ -3299,6 +3316,65 @@ describe("CodexSecurity orchestration", () => {
     );
     expect(history["scans"]).toMatchObject([
       { progress: { status: "failed" } },
+    ]);
+    await client.close();
+  });
+
+  test("keeps the session ID when a started scan fails", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const stateDirectory = join(root, "state");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const environment = {
+      PATH: process.env["PATH"],
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => python!,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench,
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "failed-thread" };
+                yield {
+                  type: "turn.failed",
+                  error: { message: "validation failed" },
+                };
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository)).rejects.toThrow("validation failed");
+    const history = await runWorkbench(
+      { python: python!, pluginRoot: PLUGIN_ROOT, environment },
+      ["list-scans", "--repository", repository],
+    );
+    expect(history["scans"]).toMatchObject([
+      {
+        continuationThreadId: "failed-thread",
+        progress: { status: "failed" },
+      },
     ]);
     await client.close();
   });
