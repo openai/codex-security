@@ -259,7 +259,7 @@ describe("semantic scan comparison", () => {
     ];
     const commands: (readonly string[])[] = [];
     let input: ScanComparisonInput | undefined;
-    const skipped = await matchCompletedScan({
+    await matchCompletedScan({
       scanId: "current",
       repository: "/repository",
       previousFindings: [open],
@@ -308,7 +308,6 @@ describe("semantic scan comparison", () => {
         };
       },
     });
-    expect(skipped).toBe(false);
     expect(input).toEqual({ before: [dismissed], after: [after[1]!] });
     expect(commands.map(([command]) => command)).toEqual([
       "list-unmatched-scan-pairs",
@@ -321,49 +320,34 @@ describe("semantic scan comparison", () => {
   });
 
   test.each([
-    {
-      scenario: "no history",
-      open: false,
-      dismissed: false,
-      stable: false,
-      calls: 0,
-      skipped: false,
-    },
-    {
-      scenario: "a stable identity",
-      open: true,
-      dismissed: false,
-      stable: true,
-      calls: 2,
-      skipped: false,
-    },
-    {
-      scenario: "a dismissed identity",
-      open: false,
-      dismissed: true,
-      stable: false,
-      calls: 1,
-      skipped: true,
-    },
-  ])(
-    "avoids a model turn for $scenario under a cost limit",
-    async (scenario) => {
+    ["no history", false, false, false, 0, false],
+    ["a stable identity", true, false, true, 2, false],
+    ["a renamed dismissed identity", false, true, false, 2, true],
+  ] as const)(
+    "only starts a model turn when needed for %s",
+    async (
+      _scenario,
+      open,
+      dismissed,
+      stable,
+      expectedCalls,
+      expectedModel,
+    ) => {
       const before = { findingId: "previous", occurrenceId: "old" };
       const after = {
-        findingId: scenario.stable ? "previous" : "new",
+        findingId: stable ? "previous" : "new",
         occurrenceId: "new",
       };
       let calls = 0;
       let modelCalled = false;
-      const skipped = await matchCompletedScan({
+      await matchCompletedScan({
         scanId: "current",
         repository: "/repository",
-        previousFindings: scenario.open ? [before] : [],
-        falsePositives: scenario.dismissed
+        previousFindings: open ? [before] : [],
+        falsePositives: dismissed
           ? [{ findingId: "previous", sourceScanId: "prior" }]
           : [],
         findings: [after],
-        allowModel: false,
         async workbench(args) {
           calls += 1;
           return args[0] === "list-unmatched-scan-pairs"
@@ -383,9 +367,8 @@ describe("semantic scan comparison", () => {
           return { matches: [], uncertain: [] };
         },
       });
-      expect(skipped).toBe(scenario.skipped);
-      expect(calls).toBe(scenario.calls);
-      expect(modelCalled).toBe(false);
+      expect(calls).toBe(expectedCalls);
+      expect(modelCalled).toBe(expectedModel);
     },
   );
 

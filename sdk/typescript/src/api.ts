@@ -1107,7 +1107,7 @@ export class CodexSecurity {
         checkOpen();
       }
       try {
-        const skippedFalsePositiveMatching = await matchCompletedScan({
+        await matchCompletedScan({
           scanId,
           repository: repo,
           previousFindings: previousFindings as Record<string, unknown>[],
@@ -1118,37 +1118,27 @@ export class CodexSecurity {
           environment,
           model,
           signal,
-          allowModel: options.maxCostUsd === undefined,
         });
-        if (skippedFalsePositiveMatching) {
-          notifyObserver(
-            "onWarning",
-            options.onWarning,
-            options.onObserverError,
-            "Could not check previous false positives because this scan has a cost limit.",
-          );
-        } else {
-          const repositoryFindings: RepositoryFinding[] = [];
-          let offset: number | undefined;
-          do {
-            const repositoryFindingsPage = await workbench(workbenchOptions, [
-              "list-global-findings",
-              "--target-id",
-              targetId,
-              "--status",
-              "open",
-              ...(offset === undefined ? [] : ["--offset", String(offset)]),
-            ]);
-            const findings = repositoryFindingsPage["findings"];
-            if (!Array.isArray(findings)) break;
-            repositoryFindings.push(...(findings as RepositoryFinding[]));
-            const nextOffset = repositoryFindingsPage["nextOffset"];
-            offset = typeof nextOffset === "number" ? nextOffset : undefined;
-            if (offset === undefined) {
-              result.repositoryFindings = repositoryFindings;
-            }
-          } while (offset !== undefined);
-        }
+        const repositoryFindings: RepositoryFinding[] = [];
+        let offset: number | undefined;
+        do {
+          const repositoryFindingsPage = await workbench(workbenchOptions, [
+            "list-global-findings",
+            "--target-id",
+            targetId,
+            "--status",
+            "open",
+            ...(offset === undefined ? [] : ["--offset", String(offset)]),
+          ]);
+          const findings = repositoryFindingsPage["findings"];
+          if (!Array.isArray(findings)) break;
+          repositoryFindings.push(...(findings as RepositoryFinding[]));
+          const nextOffset = repositoryFindingsPage["nextOffset"];
+          offset = typeof nextOffset === "number" ? nextOffset : undefined;
+          if (offset === undefined) {
+            result.repositoryFindings = repositoryFindings;
+          }
+        } while (offset !== undefined);
       } catch (error) {
         notifyObserver(
           "onWarning",

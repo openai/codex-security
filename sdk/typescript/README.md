@@ -55,8 +55,8 @@ scan.
 
 Successful results expose `repositoryFindings`, when available, with open
 findings across the repository's scans. `findings` remains the current scan.
-Matching earlier findings can make one additional model call. Setting
-`maxCostUsd` or the CLI `--max-cost` option disables that call.
+Matching earlier findings can make one additional model call, including when a
+scan cost limit is set.
 
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and

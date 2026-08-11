@@ -54,7 +54,6 @@ interface CompletedScanMatchingOptions {
   environment?: NodeJS.ProcessEnv;
   model?: string;
   signal?: AbortSignal;
-  allowModel?: boolean;
 }
 
 const reason = z
@@ -154,7 +153,7 @@ export async function matchScanFindings(
 
 export async function matchCompletedScan(
   options: CompletedScanMatchingOptions,
-): Promise<boolean> {
+): Promise<void> {
   const openOccurrences = new Set(
     options.previousFindings.flatMap(({ occurrenceId }) =>
       typeof occurrenceId === "string" ? [occurrenceId] : [],
@@ -171,7 +170,7 @@ export async function matchCompletedScan(
     options.findings.length === 0 ||
     (openOccurrences.size === 0 && falsePositiveScans.size === 0)
   ) {
-    return false;
+    return;
   }
 
   const plan = await options.workbench([
@@ -189,23 +188,20 @@ export async function matchCompletedScan(
   const batch = batches?.find(
     ({ afterScanId }) => afterScanId === options.scanId,
   );
-  if (batch === undefined) return false;
+  if (batch === undefined) return;
 
-  const historical = new Map<
-    string,
-    { scanId: string; finding: Finding; falsePositive: boolean }
-  >();
+  const historical = new Map<string, { scanId: string; finding: Finding }>();
   for (const { scanId, findings } of batch.beforeScans) {
     for (const finding of findings) {
       const findingId = finding["findingId"];
       if (typeof findingId !== "string") continue;
       const falsePositive = falsePositiveScans.get(findingId) === scanId;
       if (openOccurrences.has(finding.occurrenceId) || falsePositive) {
-        historical.set(findingId, { scanId, finding, falsePositive });
+        historical.set(findingId, { scanId, finding });
       }
     }
   }
-  if (historical.size === 0) return false;
+  if (historical.size === 0) return;
 
   const remaining = new Map(historical);
   const matches: ScanComparisonResult["matches"] = [];
@@ -226,11 +222,7 @@ export async function matchCompletedScan(
   }
 
   let semanticComparison: ScanComparisonResult | undefined;
-  const skippedFalsePositiveMatching =
-    options.allowModel === false &&
-    after.length > 0 &&
-    [...remaining.values()].some(({ falsePositive }) => falsePositive);
-  if (remaining.size > 0 && after.length > 0 && options.allowModel !== false) {
+  if (remaining.size > 0 && after.length > 0) {
     semanticComparison = await (options.matchFindings ?? matchScanFindings)(
       {
         before: [...remaining.values()].map(({ finding }) => finding),
@@ -279,7 +271,6 @@ export async function matchCompletedScan(
       JSON.stringify({ matches: scanMatches, uncertain: scanUncertain }),
     ]);
   }
-  return skippedFalsePositiveMatching;
 }
 
 function comparisonPrompt(input: ScanComparisonInput): string {

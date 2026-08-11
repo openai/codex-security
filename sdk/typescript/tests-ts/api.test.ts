@@ -2672,9 +2672,8 @@ describe("CodexSecurity orchestration", () => {
       failure: "index",
     },
     {
-      scenario: "a cost limit prevents false-positive matching",
-      warning:
-        "Could not check previous false positives because this scan has a cost limit.",
+      scenario: "a cost limit still allows false-positive matching",
+      warning: undefined,
       failure: "budget",
     },
   ] as const)(
@@ -2730,13 +2729,25 @@ describe("CodexSecurity orchestration", () => {
               };
             }
             if (args[0] === "list-global-findings") {
-              throw new Error("index unavailable");
+              if (failure === "index") throw new Error("index unavailable");
+              return { findings: [{ findingId: "another-open-finding" }] };
             }
             return mockWorkbench(args);
           },
           async matchFindings() {
             modelCalled = true;
-            throw new Error("matcher unavailable");
+            if (failure === "matcher") throw new Error("matcher unavailable");
+            return {
+              matches: [
+                {
+                  beforeOccurrenceIds: [previous.occurrenceId],
+                  afterOccurrenceIds: [current.occurrenceId],
+                  confidence: "high",
+                  reason: "Same dismissed root cause.",
+                },
+              ],
+              uncertain: [],
+            };
           },
           createCodex: () => ({
             startThread: () => ({
@@ -2755,15 +2766,17 @@ describe("CodexSecurity orchestration", () => {
         onWarning: (message) => warnings.push(message),
       });
       expect(result.threadId).toBe("thread-1");
-      expect(result.repositoryFindings).toBeUndefined();
-      expect(warnings).toEqual([warning]);
-      expect(modelCalled).toBe(failure === "matcher");
+      expect(
+        result.repositoryFindings?.map(({ findingId }) => findingId),
+      ).toEqual(failure === "budget" ? ["another-open-finding"] : undefined);
+      expect(warnings).toEqual(warning === undefined ? [] : [warning]);
+      expect(modelCalled).toBe(failure !== "index");
       expect(commands.some(([command]) => command === "complete-scan")).toBe(
         true,
       );
       expect(
         commands.some(([command]) => command === "list-global-findings"),
-      ).toBe(failure === "index");
+      ).toBe(failure !== "matcher");
       await client.close();
     },
   );
@@ -5451,7 +5464,7 @@ if (args === "login --with-api-key") {
           credentialsAvailable: false,
         }),
         resolveCodexCommand: () => ({
-          command: process.execPath,
+          command: "node",
           prefixArgs: [fakeCodex],
         }),
         resolvePluginPython: async () => "/managed/python",
