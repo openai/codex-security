@@ -135,7 +135,7 @@ def normalize_locations(
     )
 
 
-def read_scope(path: Path, repo_root: Path) -> set[str]:
+def read_scope(path: Path, repo_root: Path, *, allow_missing: bool = False) -> set[str]:
     contents = path.read_bytes().decode("utf-8")
     lines = contents.split("\n")
     listed_rows = set(lines)
@@ -183,6 +183,19 @@ def read_scope(path: Path, repo_root: Path) -> set[str]:
         try:
             relative, _ = relative_file(line, repo_root)
         except (OSError, ValueError) as error:
+            if allow_missing and isinstance(error, FileNotFoundError):
+                candidate = PurePosixPath(line)
+                if candidate.is_absolute() or ".." in candidate.parts or "\0" in line:
+                    raise ValueError(f"in-scope file row {number}: unsafe deleted path") from error
+                resolved = (repo_root / line).resolve(strict=False)
+                try:
+                    relative = resolved.relative_to(repo_root).as_posix()
+                except ValueError as escaped:
+                    raise ValueError(
+                        f"in-scope file row {number}: path escapes repository"
+                    ) from escaped
+                scope.add(relative)
+                continue
             raise ValueError(f"in-scope file row {number}: {error}") from error
         scope.add(relative)
     return scope
@@ -261,6 +274,11 @@ def main() -> None:
     parser.add_argument("--out", required=True, help="Combined candidate JSONL output.")
     parser.add_argument("--repo-root", required=True, help="Repository root for candidate paths.")
     parser.add_argument("--in-scope-files", required=True, help="Repository-relative file list.")
+    parser.add_argument(
+        "--allow-missing-in-scope",
+        action="store_true",
+        help="Keep deleted Git paths in a diff inventory while validating existing candidate files.",
+    )
     args = parser.parse_args()
     try:
         repo_root = Path(args.repo_root).expanduser().resolve(strict=True)
@@ -273,7 +291,7 @@ def main() -> None:
             raise ValueError("--out: must not also be an input")
         if output == scope_path:
             raise ValueError("--out: must not replace --in-scope-files")
-        scope = read_scope(scope_path, repo_root)
+        scope = read_scope(scope_path, repo_root, allow_missing=args.allow_missing_in_scope)
         line_counts: dict[Path, int] = {}
         rows: list[dict[str, Any]] = []
         for source in inputs:
