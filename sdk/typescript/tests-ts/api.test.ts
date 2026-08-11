@@ -3692,6 +3692,211 @@ describe("CodexSecurity orchestration", () => {
     expect(runtimeHomes).toEqual([credentialHome, credentialHome]);
   });
 
+  test.each([
+    ["OpenAI", "OPENAI_API_KEY", undefined, "gpt-5.6-sol"],
+    [
+      "OpenRouter",
+      "OPENROUTER_API_KEY",
+      "openrouter",
+      "anthropic/claude-sonnet-4.5",
+    ],
+    [
+      "Fireworks AI",
+      "FIREWORKS_API_KEY",
+      "fireworks",
+      "accounts/fireworks/models/qwen3-235b-a22b",
+    ],
+  ] as const)(
+    "retains %s scan sessions in the managed Codex home",
+    async (_name, apiKey, provider, model) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const stateDirectory = join(root, "state");
+      const codexHome = join(stateDirectory, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir, { mode: 0o700 });
+      const client = new TestClient(
+        {
+          pluginPath: PLUGIN_ROOT,
+          codexOverrides: {
+            model,
+            ...(provider === undefined
+              ? {}
+              : {
+                  model_provider: provider,
+                  model_providers: {
+                    [provider]:
+                      provider === "openrouter"
+                        ? OPENROUTER_CODEX_PROVIDER
+                        : FIREWORKS_CODEX_PROVIDER,
+                  },
+                }),
+          },
+        },
+        {
+          environment: {
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+            [apiKey]: "synthetic-transient-key",
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options: CodexOptions) => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
+                expect(options.apiKey).toBe(
+                  provider === undefined
+                    ? "synthetic-transient-key"
+                    : undefined,
+                );
+                await writeUsageSession(codexHome, "persistent-thread", {
+                  input_tokens: 1,
+                });
+                throw new Error("persistent session recorded");
+              },
+            }),
+          }),
+        },
+      );
+
+      try {
+        await expect(client.run(repository)).rejects.toThrow(
+          "persistent session recorded",
+        );
+      } finally {
+        await client.close();
+      }
+
+      expect(existsSync(codexHome)).toBe(true);
+      expect(
+        existsSync(
+          join(
+            codexHome,
+            "sessions",
+            "2026",
+            "07",
+            "26",
+            "rollout-persistent-thread.jsonl",
+          ),
+        ),
+      ).toBe(true);
+      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
+      expect(
+        await readFile(join(codexHome, "config.toml"), "utf8"),
+      ).not.toContain("synthetic-transient-key");
+    },
+  );
+
+  test("runs API-key scans in parallel through the same managed home", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    const codexHome = join(stateDirectory, "codex-home");
+    await mkdir(repository);
+    let activeScans = 0;
+    let maximumActiveScans = 0;
+    let releaseScans!: () => void;
+    const timeout = AbortSignal.timeout(5_000);
+    const concurrentScans = new Promise<void>((resolve, reject) => {
+      releaseScans = resolve;
+      timeout.addEventListener(
+        "abort",
+        () => reject(new Error("API-key scans were serialized")),
+        { once: true },
+      );
+    });
+
+    const clients = await Promise.all(
+      [
+        ["OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+        ["OPENROUTER_API_KEY", "anthropic/claude-sonnet-4.5", "openrouter"],
+      ].map(async ([apiKey, model, provider], index) => {
+        const scanDir = join(root, `parallel-api-key-scan-${index}`);
+        await mkdir(scanDir, { mode: 0o700 });
+        return new TestClient(
+          {
+            pluginPath: PLUGIN_ROOT,
+            codexOverrides: {
+              model,
+              ...(provider === undefined
+                ? {}
+                : {
+                    model_provider: provider,
+                    model_providers: {
+                      [provider]: OPENROUTER_CODEX_PROVIDER,
+                    },
+                  }),
+            },
+          },
+          {
+            environment: {
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+              [apiKey!]: `synthetic-key-${index}`,
+            },
+            resolvePluginPython: async () => "/managed/python",
+            prepareOutputDir: async () => scanDir,
+            repositoryRevision: async () => "deadbeef",
+            createCodex: (options: CodexOptions) => {
+              expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
+              expect(options.config).toMatchObject({
+                model,
+                ...(provider === undefined
+                  ? {}
+                  : {
+                      model_provider: provider,
+                      model_providers: {
+                        [provider]: OPENROUTER_CODEX_PROVIDER,
+                      },
+                    }),
+              });
+              return {
+                startThread: () => ({
+                  id: null,
+                  async runStreamed() {
+                    activeScans += 1;
+                    maximumActiveScans = Math.max(
+                      maximumActiveScans,
+                      activeScans,
+                    );
+                    if (activeScans === 2) releaseScans();
+                    try {
+                      await concurrentScans;
+                      throw new Error("parallel API-key scan reached");
+                    } finally {
+                      activeScans -= 1;
+                    }
+                  },
+                }),
+              };
+            },
+          },
+        );
+      }),
+    );
+
+    try {
+      const results = await Promise.allSettled(
+        clients.map(async (client) => await client.run(repository)),
+      );
+      for (const result of results) {
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            message: "parallel API-key scan reached",
+          }),
+        });
+      }
+      expect(maximumActiveScans).toBe(2);
+      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
+    } finally {
+      await Promise.all(clients.map(async (client) => await client.close()));
+    }
+    expect(existsSync(codexHome)).toBe(true);
+  });
+
   test("serializes parallel scans sharing a managed credential home", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -4528,7 +4733,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     }
   });
 
-  test("recreates isolated and managed runtimes when scan authentication changes", async () => {
+  test("reuses the managed runtime when scan authentication changes", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-codex-home");
@@ -4566,10 +4771,9 @@ if (process.argv.slice(2).join(" ") !== "login status") {
       await expect(client.run(repository, { auth: "api-key" })).rejects.toThrow(
         "authentication-selected scan reached",
       );
-      const firstIsolatedHome = runs[0]?.home;
-      expect(firstIsolatedHome).toBeDefined();
-      expect(firstIsolatedHome).not.toBe(dedicatedHome);
+      expect(runs[0]?.home).toBe(dedicatedHome);
       expect(runs[0]?.apiKey).toBe("synthetic-transient-key");
+      expect(existsSync(join(dedicatedHome, "auth.json"))).toBe(false);
 
       await expect(client.run(repository, { auth: "chatgpt" })).rejects.toThrow(
         "authentication-selected scan reached",
@@ -4578,12 +4782,10 @@ if (process.argv.slice(2).join(" ") !== "login status") {
       expect(await readFile(join(dedicatedHome, "auth.json"), "utf8")).toBe(
         ambientAuthentication,
       );
-      expect(existsSync(firstIsolatedHome!)).toBe(false);
-
       await expect(client.run(repository, { auth: "api-key" })).rejects.toThrow(
         "authentication-selected scan reached",
       );
-      expect(runs[2]?.home).not.toBe(dedicatedHome);
+      expect(runs[2]?.home).toBe(dedicatedHome);
       expect(runs[2]?.apiKey).toBe("synthetic-transient-key");
       expect(await readFile(join(dedicatedHome, "auth.json"), "utf8")).toBe(
         ambientAuthentication,
@@ -4591,6 +4793,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     } finally {
       await client.close();
     }
+    expect(existsSync(dedicatedHome)).toBe(true);
   });
 
   test("does not cache an environment key as reusable file authentication", async () => {

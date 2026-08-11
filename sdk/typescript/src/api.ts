@@ -467,10 +467,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
-      if (
-        authentication.method === "stored_credentials" &&
-        this.#dependencies.prepareRuntime === undefined
-      ) {
+      if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
           (path) =>
@@ -572,6 +569,10 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
+      if (authentication.method !== "stored_credentials") {
+        await releaseCredentialHome?.();
+        releaseCredentialHome = null;
+      }
       notifyObserver(
         "onAuthentication",
         options.onAuthentication,
@@ -941,12 +942,15 @@ export class CodexSecurity {
         CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
       };
+      const sdkCodexConfig = scanPreflightCodexConfig(effectiveConfig);
+      delete sdkCodexConfig["projects"];
       const codex = this.#dependencies.createCodex({
         ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
         ),
         config: {
+          ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
         },
@@ -1379,23 +1383,7 @@ export class CodexSecurity {
     modelProvider?: unknown,
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
-    if (this.#runtime !== null) {
-      const usePersistentCredentials =
-        scanAuthentication(this.#dependencies.environment, auth, modelProvider)
-          .method === "stored_credentials";
-      if (
-        this.#dependencies.prepareRuntime !== undefined ||
-        this.#runtime.persistentCredentialHome === undefined ||
-        this.#runtime.persistentCredentialHome === usePersistentCredentials
-      ) {
-        return this.#runtime;
-      }
-      await this.#cleanupRuntime(this.#runtime);
-      this.#runtime = null;
-      this.#runtimePromise = null;
-      this.#runtimeCredentialSource = null;
-      this.#requireOpen();
-    }
+    if (this.#runtime !== null) return this.#runtime;
     if (this.#runtimePromise === null) {
       const runtimePromise = this.#prepareRuntime(
         signal ?? this.#abortController.signal,
@@ -1522,15 +1510,10 @@ export class CodexSecurity {
       auth,
       modelProvider,
     );
-    const persistentCredentialHome =
-      scanAuthentication(this.#dependencies.environment, auth, modelProvider)
-        .method === "stored_credentials";
-    const codexHome = persistentCredentialHome
-      ? await prepareCodexSecurityCredentialHome(
-          processEnvironment,
-          validateLocation,
-        )
-      : await createIsolatedHome(temporaryRoot, validateLocation);
+    const codexHome = await prepareCodexSecurityCredentialHome(
+      processEnvironment,
+      validateLocation,
+    );
     let bootstrapWorkspace: string | undefined;
     try {
       throwIfAborted(signal);
@@ -1555,7 +1538,7 @@ export class CodexSecurity {
         scanRuntimeCodexConfig(
           mergedConfig,
           codexSecurityStateDirectory(processEnvironment),
-          persistentCredentialHome ? codexHome : undefined,
+          codexHome,
         ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
@@ -1580,7 +1563,7 @@ export class CodexSecurity {
             );
       return {
         codexHome,
-        persistentCredentialHome,
+        persistentCredentialHome: true,
         bootstrapWorkspace,
         configPath,
         plugin,
@@ -1595,7 +1578,7 @@ export class CodexSecurity {
       };
     } catch (error) {
       const cleanupResults = await Promise.allSettled(
-        [bootstrapWorkspace, persistentCredentialHome ? undefined : codexHome]
+        [bootstrapWorkspace]
           .filter((path): path is string => path !== undefined)
           .map((path) => cleanupSdkDirectory(path)),
       );
