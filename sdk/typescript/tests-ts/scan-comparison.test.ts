@@ -5,6 +5,7 @@ import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   comparisonEnvironment,
+  matchCompletedScan,
   matchScanFindings,
   type ScanComparisonInput,
   type ScanComparisonOptions,
@@ -248,6 +249,145 @@ describe("semantic scan comparison", () => {
     expect(calls.prompt).toContain("untrusted data");
     expect(calls.prompt).toContain(JSON.stringify(input));
   });
+
+  test("matches open and dismissed findings from the same target", async () => {
+    const open = { findingId: "open", occurrenceId: "old-open" };
+    const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
+    const after = [
+      { findingId: "open", occurrenceId: "new-open" },
+      { findingId: "renamed", occurrenceId: "new-renamed" },
+    ];
+    const commands: (readonly string[])[] = [];
+    let input: ScanComparisonInput | undefined;
+    const skipped = await matchCompletedScan({
+      scanId: "current",
+      repository: "/repository",
+      previousFindings: [open],
+      falsePositives: [{ findingId: "dismissed", sourceScanId: "prior" }],
+      findings: after,
+      environment: {
+        CODEX_HOME: "/provider-home",
+        FIREWORKS_API_KEY: "synthetic-provider-key",
+      },
+      async workbench(args) {
+        commands.push(args);
+        return args[0] === "list-unmatched-scan-pairs"
+          ? {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [
+                    {
+                      scanId: "another-target",
+                      findings: [{ ...dismissed, occurrenceId: "foreign" }],
+                    },
+                    { scanId: "prior", findings: [open, dismissed] },
+                  ],
+                },
+              ],
+            }
+          : {};
+      },
+      async matchFindings(value, options) {
+        input = value;
+        expect(options).toMatchObject({
+          preparedEnvironment: true,
+          environment: { CODEX_HOME: "/provider-home" },
+        });
+        return {
+          matches: [
+            {
+              beforeOccurrenceIds: ["old-dismissed"],
+              afterOccurrenceIds: ["new-renamed"],
+              confidence: "high",
+              reason: "Same dismissed root cause.",
+            },
+          ],
+          uncertain: [],
+        };
+      },
+    });
+    expect(skipped).toBe(false);
+    expect(input).toEqual({ before: [dismissed], after: [after[1]!] });
+    expect(commands.map(([command]) => command)).toEqual([
+      "list-unmatched-scan-pairs",
+      "save-scan-comparison",
+    ]);
+    const saved = JSON.parse(commands[1]!.at(-1)!) as ScanComparisonResult;
+    expect(
+      saved.matches.map(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
+    ).toEqual([["old-open"], ["old-dismissed"]]);
+  });
+
+  test.each([
+    {
+      scenario: "no history",
+      open: false,
+      dismissed: false,
+      stable: false,
+      calls: 0,
+      skipped: false,
+    },
+    {
+      scenario: "a stable identity",
+      open: true,
+      dismissed: false,
+      stable: true,
+      calls: 2,
+      skipped: false,
+    },
+    {
+      scenario: "a dismissed identity",
+      open: false,
+      dismissed: true,
+      stable: false,
+      calls: 1,
+      skipped: true,
+    },
+  ])(
+    "avoids a model turn for $scenario under a cost limit",
+    async (scenario) => {
+      const before = { findingId: "previous", occurrenceId: "old" };
+      const after = {
+        findingId: scenario.stable ? "previous" : "new",
+        occurrenceId: "new",
+      };
+      let calls = 0;
+      let modelCalled = false;
+      const skipped = await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: scenario.open ? [before] : [],
+        falsePositives: scenario.dismissed
+          ? [{ findingId: "previous", sourceScanId: "prior" }]
+          : [],
+        findings: [after],
+        allowModel: false,
+        async workbench(args) {
+          calls += 1;
+          return args[0] === "list-unmatched-scan-pairs"
+            ? {
+                batches: [
+                  {
+                    afterScanId: "current",
+                    afterFindings: [after],
+                    beforeScans: [{ scanId: "prior", findings: [before] }],
+                  },
+                ],
+              }
+            : {};
+        },
+        async matchFindings() {
+          modelCalled = true;
+          return { matches: [], uncertain: [] };
+        },
+      });
+      expect(skipped).toBe(scenario.skipped);
+      expect(calls).toBe(scenario.calls);
+      expect(modelCalled).toBe(false);
+    },
+  );
 
   test("rejects malformed model JSON", async () => {
     const { codex } = fakeCodex("not-json");

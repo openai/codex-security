@@ -287,6 +287,15 @@ describe("malformed scan artifact recovery", () => {
       previousFindings: [],
       falsePositives: [{ findingId: previousFinding["findingId"] }],
     });
+    expect(
+      await workbench(fixture, [
+        "list-global-findings",
+        "--target-id",
+        String(fixture.registration["targetId"]),
+        "--status",
+        "open",
+      ]),
+    ).toMatchObject({ findings: [] });
 
     const otherRepository = join(fixture.stateDir, "..", "other-repository");
     await mkdir(otherRepository);

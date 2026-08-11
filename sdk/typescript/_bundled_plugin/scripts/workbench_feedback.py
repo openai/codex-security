@@ -73,6 +73,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 json.loads(row["details_json"])
                 or {
                     "findingId": row["finding_id"],
+                    "occurrenceId": row["occurrence_id"],
                     "ruleId": row["rule_id"],
                     "title": row["title"],
                     "summary": row["summary"],

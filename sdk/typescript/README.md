@@ -53,6 +53,11 @@ Use `security.preflight()` to validate local inputs, `onWorkerStatus` and
 `onReconnect` to observe long-running scans, and an `AbortSignal` to cancel a
 scan.
 
+Successful results expose `repositoryFindings`, when available, with open
+findings across the repository's scans. `findings` remains the current scan.
+Matching earlier findings can make one additional model call. Setting
+`maxCostUsd` or the CLI `--max-cost` option disables that call.
+
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
@@ -222,6 +227,7 @@ npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings list /path/to/repository
 npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
@@ -523,6 +529,10 @@ default directory, select a writable directory outside the scanned repository:
 ```bash
 export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
 ```
+
+Use `findings list [repository]` to see open findings across a repository's
+scans. Findings from earlier scans remain visible when they were not confirmed
+in the latest scan.
 
 Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as
 a false positive and explain why. Later scans dismiss a matching finding only

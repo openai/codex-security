@@ -2599,6 +2599,11 @@ describe("CodexSecurity orchestration", () => {
               previousFindings: [previousFinding],
             };
           }
+          if (args[0] === "list-global-findings") {
+            return args.includes("--offset")
+              ? { findings: [{ findingId: "second" }], nextOffset: null }
+              : { findings: [{ findingId: "first" }], nextOffset: 1 };
+          }
           return {};
         },
         createCodex: () => ({
@@ -2616,9 +2621,18 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
-    await expect(client.run(repository)).resolves.toMatchObject({
-      threadId: "thread-1",
-    });
+    const result = await client.run(repository);
+    expect(result.threadId).toBe("thread-1");
+    expect(
+      result.repositoryFindings?.map(({ findingId }) => findingId),
+    ).toEqual(["first", "second"]);
+    const repositoryQueries = commands.filter(
+      ([command]) => command === "list-global-findings",
+    );
+    expect(repositoryQueries.map((args) => args.at(-1))).toEqual(["open", "1"]);
+    expect(
+      repositoryQueries.every((args) => args.includes("target_sha256_example")),
+    ).toBe(true);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
       "--scan-id",
@@ -2645,6 +2659,114 @@ describe("CodexSecurity orchestration", () => {
     expect(JSON.parse(previousFindings)).toEqual([previousFinding]);
     await client.close();
   });
+
+  test.each([
+    {
+      scenario: "semantic matching fails",
+      warning: "Could not update repository findings: matcher unavailable",
+      failure: "matcher",
+    },
+    {
+      scenario: "the repository index fails",
+      warning: "Could not update repository findings: index unavailable",
+      failure: "index",
+    },
+    {
+      scenario: "a cost limit prevents false-positive matching",
+      warning:
+        "Could not check previous false positives because this scan has a cost limit.",
+      failure: "budget",
+    },
+  ] as const)(
+    "keeps a completed scan when $scenario",
+    async ({ warning, failure }) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const current = {
+        findingId: "csf_852f90d6e1177502ff113d4a",
+        occurrenceId: "occ_e79cb19591e696572a1c22be",
+      };
+      const previous = { findingId: "previous", occurrenceId: "old" };
+      const falsePositive = {
+        findingId: "previous",
+        sourceScanId: "prior",
+        reason: "A reviewer confirmed this code is safe.",
+      };
+      const warnings: string[] = [];
+      const commands: (readonly string[])[] = [];
+      let modelCalled = false;
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            commands.push(args);
+            if (args[0] === "get-scan-feedback") {
+              return {
+                scanId: "scan_example_001",
+                targetId: "target_sha256_example",
+                previousFindings: failure === "matcher" ? [previous] : [],
+                falsePositives: failure === "budget" ? [falsePositive] : [],
+              };
+            }
+            if (args[0] === "list-unmatched-scan-pairs") {
+              return {
+                batches: [
+                  {
+                    afterScanId: "scan_example_001",
+                    afterFindings: [current],
+                    beforeScans: [{ scanId: "prior", findings: [previous] }],
+                  },
+                ],
+              };
+            }
+            if (args[0] === "list-global-findings") {
+              throw new Error("index unavailable");
+            }
+            return mockWorkbench(args);
+          },
+          async matchFindings() {
+            modelCalled = true;
+            throw new Error("matcher unavailable");
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+
+      const result = await client.run(repository, {
+        ...(failure === "budget" ? { maxCostUsd: 1 } : {}),
+        onWarning: (message) => warnings.push(message),
+      });
+      expect(result.threadId).toBe("thread-1");
+      expect(result.repositoryFindings).toBeUndefined();
+      expect(warnings).toEqual([warning]);
+      expect(modelCalled).toBe(failure === "matcher");
+      expect(commands.some(([command]) => command === "complete-scan")).toBe(
+        true,
+      );
+      expect(
+        commands.some(([command]) => command === "list-global-findings"),
+      ).toBe(failure === "index");
+      await client.close();
+    },
+  );
 
   test("rejects feedback from another scan or invalid reviewer feedback", async () => {
     const scanId = "scan_example_001";
@@ -3124,6 +3246,7 @@ describe("CodexSecurity orchestration", () => {
       "get-scan-feedback",
       "prepare-scan-completion",
       "complete-scan",
+      "list-global-findings",
     ]);
     expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
     await client.close();

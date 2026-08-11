@@ -36,10 +36,25 @@ export interface ScanComparisonOptions {
   allowHistoricalUncertainty?: boolean;
   codex?: ComparisonCodex;
   environment?: NodeJS.ProcessEnv;
+  preparedEnvironment?: true;
   model?: string;
   reasoningEffort?: ModelReasoningEffort;
   signal?: AbortSignal;
   workingDirectory?: string;
+}
+
+interface CompletedScanMatchingOptions {
+  scanId: string;
+  repository: string;
+  previousFindings: readonly Record<string, unknown>[];
+  falsePositives: readonly Record<string, unknown>[];
+  findings: readonly Finding[];
+  workbench(args: readonly string[]): Promise<Record<string, unknown>>;
+  matchFindings?: typeof matchScanFindings;
+  environment?: NodeJS.ProcessEnv;
+  model?: string;
+  signal?: AbortSignal;
+  allowModel?: boolean;
 }
 
 const reason = z
@@ -79,11 +94,17 @@ export async function matchScanFindings(
   const codex =
     options.codex ??
     new Codex({
-      env: await comparisonEnvironment(
-        options.environment,
-        accountStatus,
-        options.signal,
-      ),
+      env: options.preparedEnvironment
+        ? Object.fromEntries(
+            Object.entries(options.environment ?? {}).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          )
+        : await comparisonEnvironment(
+            options.environment,
+            accountStatus,
+            options.signal,
+          ),
       config: {
         allow_login_shell: false,
         "features.apps": false,
@@ -129,6 +150,136 @@ export async function matchScanFindings(
     response,
     options.allowHistoricalUncertainty ?? false,
   );
+}
+
+export async function matchCompletedScan(
+  options: CompletedScanMatchingOptions,
+): Promise<boolean> {
+  const openOccurrences = new Set(
+    options.previousFindings.flatMap(({ occurrenceId }) =>
+      typeof occurrenceId === "string" ? [occurrenceId] : [],
+    ),
+  );
+  const falsePositiveScans = new Map(
+    options.falsePositives.flatMap(({ findingId, sourceScanId }) =>
+      typeof findingId === "string" && typeof sourceScanId === "string"
+        ? [[findingId, sourceScanId] as const]
+        : [],
+    ),
+  );
+  if (
+    options.findings.length === 0 ||
+    (openOccurrences.size === 0 && falsePositiveScans.size === 0)
+  ) {
+    return false;
+  }
+
+  const plan = await options.workbench([
+    "list-unmatched-scan-pairs",
+    "--repository",
+    options.repository,
+  ]);
+  const batches = plan["batches"] as
+    | {
+        afterScanId: string;
+        afterFindings: Finding[];
+        beforeScans: { scanId: string; findings: Finding[] }[];
+      }[]
+    | undefined;
+  const batch = batches?.find(
+    ({ afterScanId }) => afterScanId === options.scanId,
+  );
+  if (batch === undefined) return false;
+
+  const historical = new Map<
+    string,
+    { scanId: string; finding: Finding; falsePositive: boolean }
+  >();
+  for (const { scanId, findings } of batch.beforeScans) {
+    for (const finding of findings) {
+      const findingId = finding["findingId"];
+      if (typeof findingId !== "string") continue;
+      const falsePositive = falsePositiveScans.get(findingId) === scanId;
+      if (openOccurrences.has(finding.occurrenceId) || falsePositive) {
+        historical.set(findingId, { scanId, finding, falsePositive });
+      }
+    }
+  }
+  if (historical.size === 0) return false;
+
+  const remaining = new Map(historical);
+  const matches: ScanComparisonResult["matches"] = [];
+  const after: Finding[] = [];
+  for (const finding of batch.afterFindings) {
+    const previous = remaining.get(finding["findingId"] as string);
+    if (previous === undefined) {
+      after.push(finding);
+      continue;
+    }
+    matches.push({
+      beforeOccurrenceIds: [previous.finding.occurrenceId],
+      afterOccurrenceIds: [finding.occurrenceId],
+      confidence: "high",
+      reason: "The findings have the same stable identity.",
+    });
+    remaining.delete(finding["findingId"] as string);
+  }
+
+  let semanticComparison: ScanComparisonResult | undefined;
+  const skippedFalsePositiveMatching =
+    options.allowModel === false &&
+    after.length > 0 &&
+    [...remaining.values()].some(({ falsePositive }) => falsePositive);
+  if (remaining.size > 0 && after.length > 0 && options.allowModel !== false) {
+    semanticComparison = await (options.matchFindings ?? matchScanFindings)(
+      {
+        before: [...remaining.values()].map(({ finding }) => finding),
+        after,
+      },
+      {
+        allowHistoricalUncertainty: true,
+        environment: options.environment,
+        preparedEnvironment: true,
+        model: options.model,
+        signal: options.signal,
+        workingDirectory: options.repository,
+      },
+    );
+    matches.push(...semanticComparison.matches);
+  }
+
+  for (const scanId of new Set(
+    [...historical.values()].map((finding) => finding.scanId),
+  )) {
+    const beforeIds = new Set(
+      [...historical.values()]
+        .filter((finding) => finding.scanId === scanId)
+        .map(({ finding }) => finding.occurrenceId),
+    );
+    const scanMatches = matches.flatMap((match) => {
+      const beforeOccurrenceIds = match.beforeOccurrenceIds.filter((id) =>
+        beforeIds.has(id),
+      );
+      return beforeOccurrenceIds.length === 0
+        ? []
+        : [{ ...match, beforeOccurrenceIds }];
+    });
+    const scanUncertain =
+      semanticComparison?.uncertain.filter(({ beforeOccurrenceId }) =>
+        beforeIds.has(beforeOccurrenceId),
+      ) ?? [];
+    if (semanticComparison === undefined && scanMatches.length === 0) continue;
+    await options.workbench([
+      "save-scan-comparison",
+      "--before-scan-id",
+      scanId,
+      "--after-scan-id",
+      options.scanId,
+      "--matches-json",
+      JSON.stringify({ matches: scanMatches, uncertain: scanUncertain }),
+    ]);
+  }
+  return skippedFalsePositiveMatching;
 }
 
 function comparisonPrompt(input: ScanComparisonInput): string {

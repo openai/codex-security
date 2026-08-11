@@ -56,9 +56,17 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
-import { ScanResult, type TurnResultMetadata } from "./result.js";
+import {
+  ScanResult,
+  type RepositoryFinding,
+  type TurnResultMetadata,
+} from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
+import {
+  matchCompletedScan,
+  type matchScanFindings,
+} from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
@@ -269,6 +277,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  matchFindings?: typeof matchScanFindings;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -1096,6 +1105,57 @@ export class CodexSecurity {
           onObserverError: options.onObserverError,
         });
         checkOpen();
+      }
+      try {
+        const skippedFalsePositiveMatching = await matchCompletedScan({
+          scanId,
+          repository: repo,
+          previousFindings: previousFindings as Record<string, unknown>[],
+          falsePositives: falsePositiveExamples as Record<string, unknown>[],
+          findings: result.findings.findings,
+          workbench: (args) => workbench(workbenchOptions, args),
+          matchFindings: this.#dependencies.matchFindings,
+          environment,
+          model,
+          signal,
+          allowModel: options.maxCostUsd === undefined,
+        });
+        if (skippedFalsePositiveMatching) {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            "Could not check previous false positives because this scan has a cost limit.",
+          );
+        } else {
+          const repositoryFindings: RepositoryFinding[] = [];
+          let offset: number | undefined;
+          do {
+            const repositoryFindingsPage = await workbench(workbenchOptions, [
+              "list-global-findings",
+              "--target-id",
+              targetId,
+              "--status",
+              "open",
+              ...(offset === undefined ? [] : ["--offset", String(offset)]),
+            ]);
+            const findings = repositoryFindingsPage["findings"];
+            if (!Array.isArray(findings)) break;
+            repositoryFindings.push(...(findings as RepositoryFinding[]));
+            const nextOffset = repositoryFindingsPage["nextOffset"];
+            offset = typeof nextOffset === "number" ? nextOffset : undefined;
+            if (offset === undefined) {
+              result.repositoryFindings = repositoryFindings;
+            }
+          } while (offset !== undefined);
+        }
+      } catch (error) {
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not update repository findings: ${redactedErrorMessage(error)}`,
+        );
       }
       return result;
     } catch (error) {
