@@ -22,6 +22,8 @@ describe("scan history renderer", () => {
           findings: [
             {
               findingId: "internal-persisting-id",
+              beforeFindingIds: ["previous-identity"],
+              afterFindingIds: ["internal-persisting-id"],
               status: "persisting",
               severity: "high",
               title: "Basket ownership check is missing",
@@ -94,12 +96,12 @@ describe("scan history renderer", () => {
       "CRITICAL",
       "2 → 1",
       "Both routes share the same unchecked basket lookup.",
+      "Finding identity changed: previous-identity → internal-persisting-id",
     ]) {
       expect(text).toContain(expected);
     }
     for (const hidden of [
       "follow-up scope",
-      "internal-persisting-id",
       "before-resolved",
       "NOT_RESCANNED",
       "REOPENED",
@@ -152,6 +154,33 @@ describe("scan history renderer", () => {
         );
       }
     }
+  });
+
+  test("shows changed scanner settings with scan comparisons", () => {
+    const output = renderScanHistory(
+      {
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        coverage: { afterCompleteness: "complete" },
+        changes: {
+          pluginVersion: { before: "0.1.8", after: "0.1.9" },
+          model: { before: "gpt-5.6-luna", after: "gpt-5.6-sol" },
+          reasoningEffort: { before: "medium", after: "high" },
+          config: { before: { goals: true }, after: { goals: false } },
+          coverage: { before: "partial", after: "complete" },
+        },
+        summary: {},
+        findings: [],
+      },
+      "compare",
+      { color: false },
+    );
+
+    expect(output).toContain("PLUGIN  0.1.8 → 0.1.9");
+    expect(output).toContain("MODEL  gpt-5.6-luna → gpt-5.6-sol");
+    expect(output).toContain("EFFORT  medium → high");
+    expect(output).toContain("CONFIG  changed");
+    expect(output).toContain("COVERAGE  partial → complete");
   });
 
   test("keeps repositories visible at narrow and wide terminal widths", () => {

@@ -539,7 +539,8 @@ are reused unless `--force` is passed. Scans without sealed artifacts are skippe
 `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
 root cause, reuses saved matches, and reports findings as new, persisting,
 reopened, resolved, or unknown. Missing findings are not treated as resolved when
-the later scan is incomplete or does not cover their original scope.
+the later scan is incomplete, does not cover their original scope, or scans
+unchanged source. Comparisons show changes to the scanner, model, and settings.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
