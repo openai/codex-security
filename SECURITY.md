@@ -75,10 +75,10 @@ credential. Other variables, such as `GITHUB_TOKEN` or `AWS_SECRET_ACCESS_KEY`,
 can remain available to local subprocesses. Run a scan with only the
 environment credentials it needs.
 
-Local diagnostics, error messages, and saved scan history are not automatically
-redacted. They can contain credentials, repository contents, or other sensitive
-data from upstream failures. Limit access to logs and scan state, and remove
-sensitive information before sharing or uploading them.
+Local diagnostics can contain repository contents or other sensitive data.
+Limit access to logs and scan state, and review them before sharing or
+uploading them. Saved failure summaries and bulk-scan receipts omit messages
+that contain recognizable credentials.
 
 ### Security boundaries
 

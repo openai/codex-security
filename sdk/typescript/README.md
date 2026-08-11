@@ -454,9 +454,9 @@ Progress and summaries use stderr; structured scan results remain on stdout.
 Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Structured JSON results remain on stdout. Diagnostics and error messages are
-not redacted and may contain credentials or other sensitive data; restrict
-access to logs and review them before sharing them.
+Structured JSON results remain on stdout. Verbose diagnostics may contain
+sensitive data; review local logs before sharing them. The interactive
+dashboard omits activity containing recognizable credentials.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
@@ -515,8 +515,8 @@ least eight characters.
 Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
-are never stored in the scan configuration, but recorded upstream errors and
-other scan-history fields are not redacted and may contain credentials.
+are never stored in the scan configuration. Recorded failure summaries and
+bulk-scan receipts omit messages that contain recognizable credentials.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the

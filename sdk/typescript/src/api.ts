@@ -49,6 +49,7 @@ import {
   OutputInsideProtectedRootError,
   type ProtectedScanPathKind,
   errorMessage,
+  safeErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -1108,9 +1109,9 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Preserve the upstream message within the workbench field limit.
+            // Scan history can be shared; never persist credential-bearing failures.
             "--message",
-            errorMessage(failure).slice(0, 2400),
+            safeErrorMessage(failure).slice(0, 2400),
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),

@@ -67,6 +67,7 @@ import {
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
   errorMessage,
+  safeErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -2756,6 +2757,7 @@ async function runScan(
           : { maxCostUsd: arguments_.maxCostUsd }),
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
+        sanitize: safeErrorMessage,
         input: process.stdin,
         onInterrupt,
       });

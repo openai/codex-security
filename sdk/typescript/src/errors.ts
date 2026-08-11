@@ -5,6 +5,16 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Omit credential-bearing messages at persistence and display boundaries. */
+export function safeErrorMessage(error: unknown): string {
+  const message = errorMessage(error);
+  return /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|\b[\w.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?|token|secret|credential|signature|sig|password|passwd)[\w.-]*(?:\\?["'])?\s*(?::|=|%3d)|(?:https?|ssh|git\+ssh):\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY-----)/iu.test(
+    message,
+  )
+    ? "[redacted]"
+    : message;
+}
+
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
   public constructor(message: string, options?: ErrorOptions) {

@@ -3303,7 +3303,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("preserves the original stored scan failure message", async () => {
+  test("keeps credential-bearing failures out of saved scan history", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3323,7 +3323,7 @@ describe("CodexSecurity orchestration", () => {
       client_secret_value: "SYNTHETIC correct horse battery staple",
     });
     const originalFailure = `${SYNTHETIC_CREDENTIALS} ${quotedCredential}`;
-    const storedFailure = originalFailure.slice(0, 2400);
+    const storedFailure = "[redacted]";
     const client = new TestClient(
       {},
       {
@@ -3377,7 +3377,7 @@ describe("CodexSecurity orchestration", () => {
     });
 
     const database = await readFile(join(stateDirectory, "workbench.sqlite3"));
-    expect(database.toString("latin1")).toContain("SYNTHETIC");
+    expect(database.toString("latin1")).not.toContain("SYNTHETIC");
     await client.close();
   });
 

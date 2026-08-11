@@ -835,7 +835,7 @@ describe("CLI", () => {
     },
   );
 
-  test("preserves the bulk-scan failure summary and progress errors", async () => {
+  test("keeps credentials out of bulk-scan failures and progress", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
     try {
       await multiscanInventory(root);
@@ -869,7 +869,8 @@ describe("CLI", () => {
         skipped: 0,
       });
       expect(stderr.text()).toContain("sample failed (attempt 1)");
-      expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
+      expect(stderr.text()).toContain("[redacted]");
+      expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1704,9 +1705,8 @@ describe("CLI", () => {
     );
     expect(text).not.toContain("thinking ·");
     expect(text).not.toContain("said ·");
-    expect(text).toContain(
-      'curl -H "Authorization: Bearer sk-proj-SYNTHETIC_OPENAI_VALUE_123"',
-    );
+    expect(text).toContain("[redacted]");
+    expect(text).not.toContain("SYNTHETIC_OPENAI_VALUE_123");
     expect(text).not.toContain("Building the file inventory");
     expect(text).not.toContain("Running a scan command");
     expect(text).toContain("3 / 1,258 reviewed");
