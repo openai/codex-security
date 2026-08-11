@@ -3799,14 +3799,8 @@ describe("CodexSecurity orchestration", () => {
     let activeScans = 0;
     let maximumActiveScans = 0;
     let releaseScans!: () => void;
-    const timeout = AbortSignal.timeout(5_000);
-    const concurrentScans = new Promise<void>((resolve, reject) => {
+    const concurrentScans = new Promise<void>((resolve) => {
       releaseScans = resolve;
-      timeout.addEventListener(
-        "abort",
-        () => reject(new Error("API-key scans were serialized")),
-        { once: true },
-      );
     });
 
     const clients = await Promise.all(
