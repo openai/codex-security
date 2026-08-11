@@ -12,6 +12,17 @@ describe("scan history renderer", () => {
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
           comparable: true,
           coverage: { afterCompleteness: "complete" },
+          changes: {
+            targetRevision: { before: "revision-a", after: "revision-b" },
+            targetSnapshotDigest: { before: "snapshot-a", after: "snapshot-b" },
+            pluginVersion: { before: "0.1.8", after: "0.1.9" },
+            model: { before: "gpt-5.6-luna", after: "gpt-5.6-sol" },
+            reasoningEffort: { before: "medium", after: "high" },
+            config: { before: { goals: true }, after: { goals: false } },
+            mode: { before: "standard", after: "deep" },
+            scope: { before: ".", after: "src" },
+            coverage: { before: "partial", after: "complete" },
+          },
           summary: {
             new: 1,
             persisting: 2,
@@ -97,6 +108,15 @@ describe("scan history renderer", () => {
       "2 → 1",
       "Both routes share the same unchecked basket lookup.",
       "Finding identity changed: previous-identity → internal-persisting-id",
+      "REVISION  revision-a → revision-b",
+      "SOURCE  changed",
+      "PLUGIN  0.1.8 → 0.1.9",
+      "MODEL  gpt-5.6-luna → gpt-5.6-sol",
+      "EFFORT  medium → high",
+      "CONFIG  changed",
+      "MODE  standard → deep",
+      "SCOPE  . → src",
+      "COVERAGE  partial → complete",
     ]) {
       expect(text).toContain(expected);
     }
@@ -154,33 +174,6 @@ describe("scan history renderer", () => {
         );
       }
     }
-  });
-
-  test("shows changed scanner settings with scan comparisons", () => {
-    const output = renderScanHistory(
-      {
-        beforeScanId: "before-scan",
-        afterScanId: "after-scan",
-        coverage: { afterCompleteness: "complete" },
-        changes: {
-          pluginVersion: { before: "0.1.8", after: "0.1.9" },
-          model: { before: "gpt-5.6-luna", after: "gpt-5.6-sol" },
-          reasoningEffort: { before: "medium", after: "high" },
-          config: { before: { goals: true }, after: { goals: false } },
-          coverage: { before: "partial", after: "complete" },
-        },
-        summary: {},
-        findings: [],
-      },
-      "compare",
-      { color: false },
-    );
-
-    expect(output).toContain("PLUGIN  0.1.8 → 0.1.9");
-    expect(output).toContain("MODEL  gpt-5.6-luna → gpt-5.6-sol");
-    expect(output).toContain("EFFORT  medium → high");
-    expect(output).toContain("CONFIG  changed");
-    expect(output).toContain("COVERAGE  partial → complete");
   });
 
   test("keeps repositories visible at narrow and wide terminal widths", () => {
