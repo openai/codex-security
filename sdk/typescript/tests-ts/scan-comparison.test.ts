@@ -60,6 +60,10 @@ describe("semantic scan comparison", () => {
     const credentialHome = join(stateDirectory, "codex-home");
     await mkdir(credentialHome, { recursive: true, mode: 0o700 });
     let statusProbed = false;
+    const account = async () => {
+      statusProbed = true;
+      return { authenticated: true, details: "Logged in using ChatGPT" };
+    };
 
     const environment = await comparisonEnvironment(
       {
@@ -67,13 +71,7 @@ describe("semantic scan comparison", () => {
         OPENAI_API_KEY: "synthetic-key-must-not-be-used",
         CODEX_API_KEY: "synthetic-secondary-must-not-be-used",
       },
-      async () => {
-        statusProbed = true;
-        return {
-          authenticated: true,
-          details: "Logged in using ChatGPT",
-        };
-      },
+      account,
     );
 
     expect(environment["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
@@ -84,6 +82,13 @@ describe("semantic scan comparison", () => {
       "synthetic-secondary-must-not-be-used",
     );
     expect(environment["CODEX_HOME"]).toBeUndefined();
+    const provider = {
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      CODEX_SECURITY_SCAN_ID: "scan",
+      CODEX_HOME: "/provider-home",
+      FIREWORKS_API_KEY: "provider-key",
+    };
+    expect(await comparisonEnvironment(provider, account)).toEqual(provider);
     expect(statusProbed).toBe(false);
   });
 
@@ -253,10 +258,7 @@ describe("semantic scan comparison", () => {
   test("matches open and dismissed findings from the same target", async () => {
     const open = { findingId: "open", occurrenceId: "old-open" };
     const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
-    const after = [
-      { findingId: "open", occurrenceId: "new-open" },
-      { findingId: "renamed", occurrenceId: "new-renamed" },
-    ];
+    const after = { findingId: "renamed", occurrenceId: "new-renamed" };
     const commands: (readonly string[])[] = [];
     let input: ScanComparisonInput | undefined;
     await matchCompletedScan({
@@ -264,9 +266,10 @@ describe("semantic scan comparison", () => {
       repository: "/repository",
       previousFindings: [open],
       falsePositives: [{ findingId: "dismissed", sourceScanId: "prior" }],
-      findings: after,
+      findings: [after],
       environment: {
         CODEX_HOME: "/provider-home",
+        CODEX_SECURITY_SCAN_ID: "current",
         FIREWORKS_API_KEY: "synthetic-provider-key",
       },
       async workbench(args) {
@@ -276,7 +279,7 @@ describe("semantic scan comparison", () => {
               batches: [
                 {
                   afterScanId: "current",
-                  afterFindings: after,
+                  afterFindings: [after],
                   beforeScans: [
                     {
                       scanId: "another-target",
@@ -292,8 +295,10 @@ describe("semantic scan comparison", () => {
       async matchFindings(value, options) {
         input = value;
         expect(options).toMatchObject({
-          preparedEnvironment: true,
-          environment: { CODEX_HOME: "/provider-home" },
+          environment: {
+            CODEX_HOME: "/provider-home",
+            CODEX_SECURITY_SCAN_ID: "current",
+          },
         });
         return {
           matches: [
@@ -304,11 +309,17 @@ describe("semantic scan comparison", () => {
               reason: "Same dismissed root cause.",
             },
           ],
-          uncertain: [],
+          uncertain: [
+            {
+              beforeOccurrenceId: "old-open",
+              afterOccurrenceId: "new-renamed",
+              reason: "Possible match.",
+            },
+          ],
         };
       },
     });
-    expect(input).toEqual({ before: [dismissed], after: [after[1]!] });
+    expect(input).toEqual({ before: [open, dismissed], after: [after] });
     expect(commands.map(([command]) => command)).toEqual([
       "list-unmatched-scan-pairs",
       "save-scan-comparison",
@@ -316,7 +327,8 @@ describe("semantic scan comparison", () => {
     const saved = JSON.parse(commands[1]!.at(-1)!) as ScanComparisonResult;
     expect(
       saved.matches.map(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
-    ).toEqual([["old-open"], ["old-dismissed"]]);
+    ).toEqual([["old-dismissed"]]);
+    expect(saved.uncertain).toEqual([]);
   });
 
   test.each([

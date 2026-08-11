@@ -2661,24 +2661,12 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
-    {
-      scenario: "semantic matching fails",
-      warning: "Could not update repository findings: matcher unavailable",
-      failure: "matcher",
-    },
-    {
-      scenario: "the repository index fails",
-      warning: "Could not update repository findings: index unavailable",
-      failure: "index",
-    },
-    {
-      scenario: "a cost limit still allows false-positive matching",
-      warning: undefined,
-      failure: "budget",
-    },
+    ["semantic matching fails", "matcher", "matcher unavailable"],
+    ["the repository index fails", "index", "index unavailable"],
+    ["a cost limit still allows false-positive matching", "budget", undefined],
   ] as const)(
-    "keeps a completed scan when $scenario",
-    async ({ warning, failure }) => {
+    "keeps a completed scan when %s",
+    async (_scenario, failure, warning) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -2769,7 +2757,11 @@ describe("CodexSecurity orchestration", () => {
       expect(
         result.repositoryFindings?.map(({ findingId }) => findingId),
       ).toEqual(failure === "budget" ? ["another-open-finding"] : undefined);
-      expect(warnings).toEqual(warning === undefined ? [] : [warning]);
+      expect(warnings).toEqual(
+        warning === undefined
+          ? []
+          : [`Could not update repository findings: ${warning}`],
+      );
       expect(modelCalled).toBe(failure !== "index");
       expect(commands.some(([command]) => command === "complete-scan")).toBe(
         true,

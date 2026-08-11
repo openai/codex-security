@@ -1119,26 +1119,10 @@ export class CodexSecurity {
           model,
           signal,
         });
-        const repositoryFindings: RepositoryFinding[] = [];
-        let offset: number | undefined;
-        do {
-          const repositoryFindingsPage = await workbench(workbenchOptions, [
-            "list-global-findings",
-            "--target-id",
-            targetId,
-            "--status",
-            "open",
-            ...(offset === undefined ? [] : ["--offset", String(offset)]),
-          ]);
-          const findings = repositoryFindingsPage["findings"];
-          if (!Array.isArray(findings)) break;
-          repositoryFindings.push(...(findings as RepositoryFinding[]));
-          const nextOffset = repositoryFindingsPage["nextOffset"];
-          offset = typeof nextOffset === "number" ? nextOffset : undefined;
-          if (offset === undefined) {
-            result.repositoryFindings = repositoryFindings;
-          }
-        } while (offset !== undefined);
+        result.repositoryFindings = (await listRepositoryFindings(
+          (args) => workbench(workbenchOptions, args),
+          targetId,
+        )) as RepositoryFinding[] | undefined;
       } catch (error) {
         notifyObserver(
           "onWarning",
@@ -1671,6 +1655,29 @@ export class CodexSecurity {
   #requireOpen(): void {
     if (this.#closed) throw new CodexSecurityError("CodexSecurity is closed.");
   }
+}
+
+export async function listRepositoryFindings(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  targetId: string,
+): Promise<JsonObject[] | undefined> {
+  const findings: JsonObject[] = [];
+  let offset: number | undefined;
+  do {
+    const page = await workbench([
+      "list-global-findings",
+      "--target-id",
+      targetId,
+      "--status",
+      "open",
+      ...(offset === undefined ? [] : ["--offset", String(offset)]),
+    ]);
+    if (!Array.isArray(page["findings"])) return undefined;
+    findings.push(...(page["findings"] as JsonObject[]));
+    offset =
+      typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;
+  } while (offset !== undefined);
+  return findings;
 }
 
 function deepScanOptions(options: ScanOptions): DeepScanOptions {

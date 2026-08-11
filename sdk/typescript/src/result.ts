@@ -2,9 +2,9 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
+  Finding,
   FindingsDocument,
   ScanManifest,
-  SeverityLevel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
 
@@ -18,14 +18,13 @@ export interface TurnResultMetadata {
   [key: string]: unknown;
 }
 
-export interface RepositoryFinding {
-  findingId: string;
-  occurrenceId: string;
+export interface RepositoryFinding
+  extends Pick<
+    Finding,
+    "findingId" | "occurrenceId" | "title" | "summary" | "severity"
+  > {
   scanId: string;
   targetId: string;
-  title: string;
-  summary: string;
-  severity: { level: SeverityLevel };
   status: "open" | "closed";
   confirmedInLatestScan: boolean;
   knownSince?: string;

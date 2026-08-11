@@ -53,10 +53,9 @@ Use `security.preflight()` to validate local inputs, `onWorkerStatus` and
 `onReconnect` to observe long-running scans, and an `AbortSignal` to cancel a
 scan.
 
-Successful results expose `repositoryFindings`, when available, with open
-findings across the repository's scans. `findings` remains the current scan.
-Matching earlier findings can make one additional model call, including when a
-scan cost limit is set.
+Successful results include open repository findings in `repositoryFindings`,
+when available; `findings` remains the current scan. Matching earlier findings
+can make one additional model call, including with a scan cost limit.
 
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
@@ -529,10 +528,6 @@ default directory, select a writable directory outside the scanned repository:
 ```bash
 export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
 ```
-
-Use `findings list [repository]` to see open findings across a repository's
-scans. Findings from earlier scans remain visible when they were not confirmed
-in the latest scan.
 
 Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as
 a false positive and explain why. Later scans dismiss a matching finding only

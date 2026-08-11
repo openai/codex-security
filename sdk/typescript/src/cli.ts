@@ -32,6 +32,7 @@ import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
+  listRepositoryFindings,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -840,23 +841,14 @@ export async function main(
             const target = (value["repositories"] as JsonObject[]).find(
               (entry) => entry["targetPath"] === repository,
             );
-            const findings: JsonObject[] = [];
-            if (target !== undefined) {
-              for (let offset = 0; ; ) {
-                const page = await dependencies.runWorkbench([
-                  "list-global-findings",
-                  "--target-id",
-                  target["targetId"] as string,
-                  "--status",
-                  "open",
-                  ...(offset ? ["--offset", String(offset)] : []),
-                ]);
-                findings.push(...(page["findings"] as JsonObject[]));
-                if (typeof page["nextOffset"] !== "number") break;
-                offset = page["nextOffset"];
-              }
-            }
-            return { repository, findings };
+            const findings =
+              target === undefined
+                ? []
+                : await listRepositoryFindings(
+                    dependencies.runWorkbench,
+                    target["targetId"] as string,
+                  );
+            return { repository, findings: findings ?? [] };
           },
         ),
         "findings",

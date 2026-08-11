@@ -99,12 +99,12 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         if before != after:
             parents[after] = before
 
-    latest_scan_by_target: dict[str, str] = {}
-    for scan in connection.execute(
-        "SELECT id, target_id FROM scans "
-        "WHERE status = 'complete' ORDER BY started_at DESC, id DESC"
-    ):
-        latest_scan_by_target.setdefault(scan["target_id"], scan["id"])
+    latest_scan_by_target = dict(
+        connection.execute(
+            "SELECT target_id, id FROM scans "
+            "WHERE status = 'complete' ORDER BY started_at, id"
+        )
+    )
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
@@ -153,7 +153,6 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         status = decision["decision_status"] if decision is not None else "open"
         if (
             status == "closed"
-            and decision is not None
             and decision["close_reason"] == "already_fixed"
             and latest["created_at"] > decision["decision_updated_at"]
         ):
@@ -177,14 +176,15 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         )
 
     findings.sort(key=lambda finding: finding["occurrence_id"])
-    findings.sort(key=lambda finding: finding["created_at"], reverse=True)
-    yield from sorted(
-        findings,
+    findings.sort(
         key=lambda finding: (
-            finding["status"] != "open",
-            scan_history.SEVERITY_ORDER.get(finding["severity"], 5),
+            finding["status"] == "open",
+            -scan_history.SEVERITY_ORDER.get(finding["severity"], 5),
+            finding["created_at"],
         ),
+        reverse=True,
     )
+    yield from findings
 
 
 def list_repositories(
