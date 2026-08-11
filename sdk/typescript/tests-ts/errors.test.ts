@@ -20,6 +20,10 @@ describe("error messages", () => {
       'upstream failed: {"clientSecret":"correct horse battery staple"}',
       JSON.stringify(JSON.stringify({ clientSecret: "SYNTHETIC_SECRET" })),
       "https://example.test/?credentials[access_token]=SYNTHETIC_SECRET",
+      "https://example.test/?user[password]=SYNTHETIC_SECRET",
+      "https://example.test/?config[api_key]=SYNTHETIC_SECRET",
+      "https://example.test/?access%5Fkey=SYNTHETIC_SECRET",
+      "https://example.test/?private%2Dkey=SYNTHETIC_SECRET",
       "proxy https://user:SYNTHETIC_PASSWORD@example.test",
       "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_KEY",
       "-----BEGIN PGP PRIVATE KEY BLOCK-----\nSYNTHETIC_PRIVATE_KEY",
@@ -29,5 +33,6 @@ describe("error messages", () => {
     expect(safeErrorMessage("upstream service unavailable")).toBe(
       "upstream service unavailable",
     );
+    expect(safeErrorMessage("secret".repeat(200))).toBe("secret".repeat(200));
   });
 });

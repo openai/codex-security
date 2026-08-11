@@ -8,7 +8,7 @@ export function errorMessage(error: unknown): string {
 /** Omit credential-bearing messages at persistence and display boundaries. */
 export function safeErrorMessage(error: unknown): string {
   const message = errorMessage(error);
-  return /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|(?:api[_-]?key|access[_-]?key|private[_-]?key|auth(?:orization)?|token|secret|credential|signature|sig|password|passwd)(?:[\w.-]|\[[\w.-]+\])*(?:\\*["'])?\s*(?::|=|%3d)|(?:https?|ssh|git\+ssh):\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)/iu.test(
+  return /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|(?:api(?:[_-]|%5f|%2d)?key|access(?:[_-]|%5f|%2d)?key(?:[_-]?id)?|private(?:[_-]|%5f|%2d)?key|auth(?:orization)?|token|secret|credential|signature|sig|password|passwd)(?:(?:[_-]|%5f|%2d)?(?:value|data|token|secret|credential|password|header|field|id|key))?(?:\]|%5d)*(?:\\*["'])?\s*(?::|=|%3d)|(?:https?|ssh|git\+ssh):\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)/iu.test(
     message,
   )
     ? "[redacted]"
