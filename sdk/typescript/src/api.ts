@@ -48,7 +48,7 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   type ProtectedScanPathKind,
-  redactedErrorMessage,
+  errorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -684,7 +684,7 @@ export class CodexSecurity {
           "onWarning",
           options.onWarning,
           options.onObserverError,
-          `Could not track scan activity: ${redactedErrorMessage(error)}`,
+          `Could not track scan activity: ${errorMessage(error)}`,
         );
       };
       const tracker = new ScanCostTracker({
@@ -1108,10 +1108,9 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Redact before truncating: the stored message is read back by
-            // `scans show` and travels inside the results directory.
+            // Preserve the upstream message within the workbench field limit.
             "--message",
-            redactedErrorMessage(failure).slice(0, 2400),
+            errorMessage(failure).slice(0, 2400),
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
@@ -1130,7 +1129,7 @@ export class CodexSecurity {
             "onWarning",
             options.onWarning,
             options.onObserverError,
-            `Could not run post-scan instructions: ${redactedErrorMessage(postScanError)}`,
+            `Could not run post-scan instructions: ${errorMessage(postScanError)}`,
           );
         }
       }
@@ -1705,7 +1704,7 @@ export async function initialCredentialsAvailable(
 
 // Reports a cleanup failure without letting it decide the result of the scan. Only the
 // message is forwarded, and it reaches the onWarning observer alone: unlike the fail-scan
-// path it is never written to the workbench, so it adds no persisted, unredacted text.
+// path it is never written to the workbench, so it adds no persisted warning text.
 function warnCleanupFailed(
   options: Pick<ScanOptions, "onWarning" | "onObserverError">,
   reason: unknown,
@@ -2402,8 +2401,8 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
 //
 // Only `error.message` is reused, because that is the single shape the previous
 // code already surfaced. No other shape is forwarded or stringified: this message
-// reaches `fail-scan --message` and is stored in `scans.failure_message` without
-// redaction, so widening what is copied out of the payload would add a new
+// reaches `fail-scan --message` and is stored unchanged in `scans.failure_message`,
+// so widening what is copied out of the payload would add a new
 // credential-disclosure path to persistent scan history.
 function turnFailureMessage(error: unknown): string {
   if (isRecord(error) && typeof error["message"] === "string") {

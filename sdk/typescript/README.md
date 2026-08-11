@@ -400,7 +400,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics.                                            |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
@@ -451,11 +451,12 @@ token and worker counts, estimated cost, the results directory, and the next
 useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
 
-Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print redacted
+Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Credentials and provider identifiers remain redacted, and structured JSON
-results remain on stdout.
+Structured JSON results remain on stdout. Diagnostics and error messages are
+not redacted and may contain credentials or other sensitive data; restrict
+access to logs and review them before sharing them.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
@@ -514,7 +515,8 @@ least eight characters.
 Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
-are never stored in the scan configuration.
+are never stored in the scan configuration, but recorded upstream errors and
+other scan-history fields are not redacted and may contain credentials.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the

@@ -74,15 +74,18 @@ incomplete or their original location was not reviewed.
 
 ## Verbose diagnostics
 
-Add `--verbose` to print redacted scan diagnostics to stderr:
+Add `--verbose` to print scan diagnostics to stderr:
 
 ```bash
 npx @openai/codex-security scan . --verbose
 ```
 
 `CODEX_SECURITY_LOG_LEVEL=debug` also enables diagnostics;
-`LOG_LEVEL=debug` is its fallback. JSON results remain on stdout, and
-credentials and provider identifiers remain redacted.
+`LOG_LEVEL=debug` is its fallback. JSON results remain on stdout.
+
+Diagnostics, errors, and saved scan history are not redacted and may contain
+credentials or other sensitive data. Restrict access to local logs and scan
+state, and review them before sharing them.
 
 ## TypeScript SDK
 
