@@ -139,7 +139,7 @@ const {
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
-const releaseTagTimeout = process.platform === "win32" ? 30_000 : 10_000;
+const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 const releaseSigningCertificate =
   "MIIHOjCCBr+gAwIBAgIUDDD6xE6tccKRAzn6GcB6Ajvw2+swCgYIKoZIzj0EAwMwNzEVMBMGA1UEChMMc2lnc3Rv" +
   "cmUuZGV2MR4wHAYDVQQDExVzaWdzdG9yZS1pbnRlcm1lZGlhdGUwHhcNMjYwNzI5MTg1MTA1WhcNMjYwNzI5MTkw" +
