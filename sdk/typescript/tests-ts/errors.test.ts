@@ -29,6 +29,8 @@ describe("error messages", () => {
       "https://example.test/?config[api_key]=SYNTHETIC_SECRET",
       "https://example.test/?access%5Fkey=SYNTHETIC_SECRET",
       "https://example.test/?private%2Dkey=SYNTHETIC_SECRET",
+      "sig_value=SYNTHETIC_SIGNATURE",
+      "sigHeader=SYNTHETIC_SIGNATURE",
       "proxy https://user:SYNTHETIC_PASSWORD@example.test",
       "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_KEY",
       "-----BEGIN PGP PRIVATE KEY BLOCK-----\nSYNTHETIC_PRIVATE_KEY",
@@ -40,6 +42,7 @@ describe("error messages", () => {
     );
     expect(safeErrorMessage("author=Michael")).toBe("author=Michael");
     expect(safeErrorMessage("signal=active")).toBe("signal=active");
+    expect(safeErrorMessage("design=complete")).toBe("design=complete");
     expect(safeErrorMessage('worker 1: rg -n "password" src/login.ts')).toBe(
       'worker 1: rg -n "password" src/login.ts',
     );

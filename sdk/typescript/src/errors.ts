@@ -16,7 +16,7 @@ export function safeErrorMessage(error: unknown): string {
     /(?<![\w%.-])[\w%.-]+(?:\\*["']|\]|%5d)*\s*(?:[:=]|%3[ad])/giu,
   );
   const sensitiveField = Array.from(assignments).some(([field]) =>
-    /(?:api(?:[_-]|%5f|%2d)?key|access(?:[_-]|%5f|%2d)?key|private(?:[_-]|%5f|%2d)?key|authorization|auth(?!or)|token|secret|credential|signature|\bsig\b|password|passwd)/iu.test(
+    /(?:api(?:[_-]|%5f|%2d)?key|access(?:[_-]|%5f|%2d)?key|private(?:[_-]|%5f|%2d)?key|authorization|auth(?!or)|token|secret|credential|signature|sig(?=[^A-Za-z0-9]|value|data|token|secret|credential|password|header|field|id|key|$)|password|passwd)/iu.test(
       field,
     ),
   );
