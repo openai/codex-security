@@ -311,7 +311,7 @@ export class ScanCostTracker {
   }
 }
 
-async function* sessionFiles(directory: string): AsyncGenerator<string> {
+export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });

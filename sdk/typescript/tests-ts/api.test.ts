@@ -3320,65 +3320,6 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("keeps the session ID when a started scan fails", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const stateDirectory = join(root, "state");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const environment = {
-      PATH: process.env["PATH"],
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
-    };
-    const client = new TestClient(
-      {},
-      {
-        environment,
-        prepareRuntime: async () => ({
-          ...preparedRuntime(codexHome),
-          environment,
-        }),
-        resolvePluginPython: async () => python!,
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench,
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              async function* events(): AsyncGenerator<ThreadEvent> {
-                yield { type: "thread.started", thread_id: "failed-thread" };
-                yield {
-                  type: "turn.failed",
-                  error: { message: "validation failed" },
-                };
-              }
-              return { events: events() };
-            },
-          }),
-        }),
-      },
-    );
-
-    await expect(client.run(repository)).rejects.toThrow("validation failed");
-    const history = await runWorkbench(
-      { python: python!, pluginRoot: PLUGIN_ROOT, environment },
-      ["list-scans", "--repository", repository],
-    );
-    expect(history["scans"]).toMatchObject([
-      {
-        continuationThreadId: "failed-thread",
-        progress: { status: "failed" },
-      },
-    ]);
-    await client.close();
-  });
-
   test("redacts credentials from the stored scan failure message", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -3422,6 +3363,7 @@ describe("CodexSecurity orchestration", () => {
             id: null,
             async runStreamed() {
               async function* failingEvents(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "failed-thread" };
                 yield {
                   type: "error",
                   message: `${SYNTHETIC_CREDENTIALS} ${quotedCredential}`,
@@ -3449,6 +3391,7 @@ describe("CodexSecurity orchestration", () => {
       ["get-scan", "--scan-id", scanId],
     );
     expect(context["scan"]).toMatchObject({
+      continuationThreadId: "failed-thread",
       progress: { status: "failed" },
       failureMessage: redactedFailure,
     });

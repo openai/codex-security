@@ -219,7 +219,6 @@ npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
 npx @openai/codex-security scans logs SCAN_ID
-npx @openai/codex-security scans logs SCAN_ID --raw --json
 npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
@@ -510,9 +509,8 @@ whose artifacts are under a particular root. `scans show SCAN_ID` includes the
 scan configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
-`scans logs SCAN_ID` shows saved commands, tool calls, reasoning, and messages
-from the scan and its workers. Credentials are redacted. Add `--raw` only when
-you need complete session events; raw logs can contain source code and secrets.
+`scans logs SCAN_ID` shows complete session events from the scan and its
+workers, which can include source code and credentials.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.

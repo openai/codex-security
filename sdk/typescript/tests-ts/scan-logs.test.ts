@@ -57,35 +57,45 @@ async function temporaryHome(): Promise<string> {
   return directory;
 }
 
+function commandEvent(command: string, id: string, timestamp?: string) {
+  return {
+    type: "response_item",
+    ...(timestamp === undefined ? {} : { timestamp }),
+    payload: {
+      type: "function_call",
+      call_id: id,
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: command }),
+    },
+  };
+}
+
 describe("saved scan logs", () => {
-  test("includes parent and worker activity but excludes unrelated sessions", async () => {
+  test("returns complete parent and worker events without unrelated sessions", async () => {
     const home = await temporaryHome();
     await writeSession(home, "parent", [
-      {
-        type: "response_item",
-        timestamp: "2026-08-11T12:00:00.000Z",
-        payload: {
-          type: "function_call",
-          call_id: "call-parent",
-          name: "exec_command",
-          arguments: JSON.stringify({
-            cmd: "rg authorization /repo/src/auth.ts",
-          }),
-        },
-      },
+      commandEvent(
+        "OPENAI_API_KEY=sk-proj-SYNTHETIC_KEY_123 rg authorization /repo/src/auth.ts",
+        "call-parent",
+        "2026-08-11T12:00:00.000Z",
+      ),
     ]);
     await writeSession(
       home,
       "worker",
       [
+        commandEvent(
+          "python3 -m pytest /repo/tests",
+          "call-worker",
+          "2026-08-11T12:00:01.000Z",
+        ),
         {
           type: "response_item",
-          timestamp: "2026-08-11T12:00:01.000Z",
           payload: {
-            type: "function_call",
+            type: "function_call_output",
             call_id: "call-worker",
-            name: "exec_command",
-            arguments: JSON.stringify({ cmd: "python3 -m pytest /repo/tests" }),
+            status: "failed",
+            output: "private command output",
           },
         },
       ],
@@ -101,7 +111,6 @@ describe("saved scan logs", () => {
     const result = await readScanLogs({
       scanId: "scan-1",
       threadId: "parent",
-      repository: "/repo",
       codexHome: home,
     });
 
@@ -109,61 +118,23 @@ describe("saved scan logs", () => {
       "parent",
       "worker",
     ]);
-    expect(result.events).toEqual([
-      {
-        threadId: "parent",
-        timestamp: "2026-08-11T12:00:00.000Z",
-        kind: "command",
-        status: "running",
-        description: "rg authorization /repo/src/auth.ts",
-        paths: ["src/auth.ts"],
-      },
-      {
-        threadId: "worker",
-        timestamp: "2026-08-11T12:00:01.000Z",
-        kind: "command",
-        status: "running",
-        description: "python3 -m pytest /repo/tests",
-        paths: ["tests"],
-      },
+    expect(result.events.map(({ threadId }) => threadId)).toEqual([
+      "parent",
+      "parent",
+      "worker",
+      "worker",
+      "worker",
     ]);
-    expect(JSON.stringify(result)).not.toContain("private unrelated scan");
-  });
-
-  test("redacts credentials unless raw events are explicitly requested", async () => {
-    const home = await temporaryHome();
-    await writeSession(home, "parent", [
-      {
+    expect(result.events.at(-1)).toMatchObject({
+      threadId: "worker",
+      event: {
         type: "response_item",
-        payload: {
-          type: "function_call",
-          call_id: "call-1",
-          name: "exec_command",
-          arguments: JSON.stringify({
-            cmd: "OPENAI_API_KEY=sk-proj-SYNTHETIC_KEY_123 cat /repo/config/AWS_SECRET_ACCESS_KEY=SYNTHETIC_VALUE",
-          }),
-        },
+        payload: { status: "failed", output: "private command output" },
       },
-    ]);
-
-    const options = {
-      scanId: "scan-1",
-      threadId: "parent",
-      repository: "/repo",
-      codexHome: home,
-    };
-    const redacted = await readScanLogs(options);
-    expect(redacted.events[0]?.["description"]).toBe(
-      "OPENAI_API_KEY=[redacted] cat /repo/config/AWS_SECRET_ACCESS_KEY=[redacted]",
-    );
-    expect(redacted.events[0]?.["paths"]).toEqual([
-      "config/AWS_SECRET_ACCESS_KEY=[redacted]",
-    ]);
-    expect(JSON.stringify(redacted)).not.toContain("SYNTHETIC_KEY");
-    expect(JSON.stringify(redacted)).not.toContain("SYNTHETIC_VALUE");
-
-    const raw = await readScanLogs({ ...options, raw: true });
-    expect(JSON.stringify(raw)).toContain("sk-proj-SYNTHETIC_KEY_123");
+    });
+    expect(JSON.stringify(result)).toContain("SYNTHETIC_KEY");
+    expect(JSON.stringify(result)).toContain("private command output");
+    expect(JSON.stringify(result)).not.toContain("private unrelated scan");
   });
 
   test("excludes inherited parent history from worker logs", async () => {
@@ -211,53 +182,13 @@ describe("saved scan logs", () => {
       startedAt,
     );
 
-    for (const raw of [false, true]) {
-      const result = await readScanLogs({
-        scanId: "scan-1",
-        threadId: "parent",
-        repository: "/repo",
-        codexHome: home,
-        raw,
-      });
-      expect(JSON.stringify(result)).toContain("Reviewing authorization");
-      expect(JSON.stringify(result)).not.toContain("PRIVATE PRE-SCAN");
-    }
-  });
-
-  test("records completed and failed tool calls", async () => {
-    const home = await temporaryHome();
-    await writeSession(home, "parent", [
-      {
-        type: "response_item",
-        payload: {
-          type: "function_call",
-          call_id: "call-1",
-          name: "exec_command",
-          arguments: JSON.stringify({ cmd: "pytest /repo/tests" }),
-        },
-      },
-      {
-        type: "response_item",
-        payload: {
-          type: "function_call_output",
-          call_id: "call-1",
-          status: "failed",
-          output: "private command output",
-        },
-      },
-    ]);
-
     const result = await readScanLogs({
       scanId: "scan-1",
       threadId: "parent",
-      repository: "/repo",
       codexHome: home,
     });
-    expect(result.events.map((event) => event["status"])).toEqual([
-      "running",
-      "failed",
-    ]);
-    expect(JSON.stringify(result)).not.toContain("private command output");
+    expect(JSON.stringify(result)).toContain("Reviewing authorization");
+    expect(JSON.stringify(result)).not.toContain("PRIVATE PRE-SCAN");
   });
 
   test("reports when the saved scan session is missing", async () => {
@@ -266,7 +197,6 @@ describe("saved scan logs", () => {
       readScanLogs({
         scanId: "scan-1",
         threadId: "missing",
-        repository: "/repo",
         codexHome: home,
       }),
     ).rejects.toThrow("No saved session logs are available for scan scan-1.");

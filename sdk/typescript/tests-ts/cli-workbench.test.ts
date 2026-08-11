@@ -203,36 +203,33 @@ describe("CLI workbench", () => {
           .join("\n"),
       );
 
-      for (const raw of [false, true]) {
-        const calls: Array<readonly string[]> = [];
-        const stdout = capture();
-        const deps = dependencies({
-          environment: { CODEX_SECURITY_STATE_DIR: state },
-          onWorkbench: (args) => {
-            calls.push(args);
-            return {
-              scan: {
-                scanId: "scan-1",
-                targetPath: "/repo",
-                continuationThreadId: "thread-1",
-              },
-            };
-          },
-        });
-        deps.createSecurity = () => {
-          throw new Error("logs must not initialize Codex");
-        };
-        expect(
-          await main(
-            ["scans", "logs", "scan-1", ...(raw ? ["--raw"] : []), "--json"],
-            stdout.stream,
-            capture().stream,
-            deps,
-          ),
-        ).toBe(0);
-        expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
-        expect(stdout.text().includes("SYNTHETIC_KEY")).toBe(raw);
-      }
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_STATE_DIR: state },
+        onWorkbench: (args) => {
+          calls.push(args);
+          return {
+            scan: {
+              scanId: "scan-1",
+              continuationThreadId: "thread-1",
+            },
+          };
+        },
+      });
+      deps.createSecurity = () => {
+        throw new Error("logs must not initialize Codex");
+      };
+      expect(
+        await main(
+          ["scans", "logs", "scan-1", "--json"],
+          stdout.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
+      expect(stdout.text()).toContain("SYNTHETIC_KEY");
     } finally {
       await rm(state, { recursive: true, force: true });
     }
