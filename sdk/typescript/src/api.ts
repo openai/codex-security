@@ -1039,7 +1039,7 @@ export class CodexSecurity {
               "onWarning",
               options.onWarning,
               options.onObserverError,
-              `Could not save scan session: ${errorMessage(error)}`,
+              `Could not save scan session: ${safeErrorMessage(error)}`,
             );
           }
         },
