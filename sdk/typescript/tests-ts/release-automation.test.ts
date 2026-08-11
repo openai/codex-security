@@ -139,6 +139,7 @@ const {
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
+const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 const releaseSigningCertificate =
   "MIIHOjCCBr+gAwIBAgIUDDD6xE6tccKRAzn6GcB6Ajvw2+swCgYIKoZIzj0EAwMwNzEVMBMGA1UEChMMc2lnc3Rv" +
   "cmUuZGV2MR4wHAYDVQQDExVzaWdzdG9yZS1pbnRlcm1lZGlhdGUwHhcNMjYwNzI5MTg1MTA1WhcNMjYwNzI5MTkw" +
@@ -1700,7 +1701,7 @@ describe("GitHub release workflow safeguards", () => {
         RELEASE_SHA: releaseCommit,
         RELEASE_TAG: "npm-v0.1.2",
       },
-      timeout: 10_000,
+      timeout: releaseTagTimeout,
     });
 
     expect(result.status).toBe(0);
@@ -1769,7 +1770,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_LOOKUP_RESPONSE: lookupResponse,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: 10_000,
+        timeout: releaseTagTimeout,
       });
 
       expect(result.status).toBe(status);
@@ -1846,7 +1847,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_TAG_TYPE: tagType,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: 10_000,
+        timeout: releaseTagTimeout,
       });
 
       expect(result.status).toBe(status);

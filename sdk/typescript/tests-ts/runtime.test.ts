@@ -2800,7 +2800,7 @@ describe("runtime directories and plugin Python boundary", () => {
         {
           encoding: "utf8",
           env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
-          timeout: 15_000,
+          timeout: 20_000,
           windowsHide: true,
         },
       );

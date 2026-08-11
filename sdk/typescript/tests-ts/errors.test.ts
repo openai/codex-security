@@ -40,6 +40,9 @@ describe("error messages", () => {
     );
     expect(safeErrorMessage("author=Michael")).toBe("author=Michael");
     expect(safeErrorMessage("signal=active")).toBe("signal=active");
+    expect(safeErrorMessage('worker 1: rg -n "password" src/login.ts')).toBe(
+      'worker 1: rg -n "password" src/login.ts',
+    );
     expect(safeErrorMessage("secret".repeat(4_000))).toBe(
       "secret".repeat(4_000),
     );

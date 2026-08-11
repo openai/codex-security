@@ -8,27 +8,19 @@ export function errorMessage(error: unknown): string {
 /** Omit credential-bearing messages at persistence and display boundaries. */
 export function safeErrorMessage(error: unknown): string {
   const message = errorMessage(error);
-  if (
-    /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|(?:https?|ssh|git\+ssh):\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)/iu.test(
+  const recognizableCredential =
+    /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|:\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)/iu.test(
       message,
-    )
-  ) {
-    return "[redacted]";
-  }
-
+    );
   const assignments = message.matchAll(
-    /(?<![A-Za-z0-9_%.-])[A-Za-z0-9_%.-]+(?:\\*["']|%22|%27)?(?:\]|%5d)*(?:\\*["']|%22|%27)?\s*(?::|=|%3[ad])/giu,
+    /(?<![\w%.-])[\w%.-]+(?:\\*["']|\]|%5d)*\s*(?:[:=]|%3[ad])/giu,
   );
-  for (const [assignment] of assignments) {
-    if (
-      /(?:api(?:[_-]|%5f|%2d)?key|access(?:[_-]|%5f|%2d)?key(?:[_-]?id)?|private(?:[_-]|%5f|%2d)?key|auth(?:orization)?|token|secret|credential|signature|sig|password|passwd)(?=[^A-Za-z0-9]|value|data|token|secret|credential|password|header|field|id|key|$)/iu.test(
-        assignment,
-      )
-    ) {
-      return "[redacted]";
-    }
-  }
-  return message;
+  const sensitiveField = Array.from(assignments).some(([field]) =>
+    /(?:api(?:[_-]|%5f|%2d)?key|access(?:[_-]|%5f|%2d)?key|private(?:[_-]|%5f|%2d)?key|authorization|auth(?!or)|token|secret|credential|signature|\bsig\b|password|passwd)/iu.test(
+      field,
+    ),
+  );
+  return recognizableCredential || sensitiveField ? "[redacted]" : message;
 }
 
 /** Base error for Codex Security SDK failures. */
