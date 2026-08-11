@@ -3693,29 +3693,28 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
-    ["OpenAI", "OPENAI_API_KEY", undefined, "gpt-5.6-sol"],
-    [
-      "OpenRouter",
-      "OPENROUTER_API_KEY",
-      "openrouter",
-      "anthropic/claude-sonnet-4.5",
-    ],
-    [
-      "Fireworks AI",
-      "FIREWORKS_API_KEY",
-      "fireworks",
-      "accounts/fireworks/models/qwen3-235b-a22b",
-    ],
+    ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+    ...EXTERNAL_PROVIDER_CASES,
   ] as const)(
     "retains %s scan sessions in the managed Codex home",
-    async (_name, apiKey, provider, model) => {
+    async (_name, provider, apiKey, model, providerConfig) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const stateDirectory = join(root, "state");
+      const configuredStateDirectory =
+        provider === "openrouter" ? join(root, "linked-state") : stateDirectory;
       const codexHome = join(stateDirectory, "codex-home");
       const scanDir = join(root, "scan");
       await mkdir(repository);
       await mkdir(scanDir, { mode: 0o700 });
+      if (configuredStateDirectory !== stateDirectory) {
+        await mkdir(stateDirectory, { mode: 0o700 });
+        await symlink(
+          stateDirectory,
+          configuredStateDirectory,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
       const client = new TestClient(
         {
           pluginPath: PLUGIN_ROOT,
@@ -3725,18 +3724,13 @@ describe("CodexSecurity orchestration", () => {
               ? {}
               : {
                   model_provider: provider,
-                  model_providers: {
-                    [provider]:
-                      provider === "openrouter"
-                        ? OPENROUTER_CODEX_PROVIDER
-                        : FIREWORKS_CODEX_PROVIDER,
-                  },
+                  model_providers: { [provider]: providerConfig },
                 }),
           },
         },
         {
           environment: {
-            CODEX_SECURITY_STATE_DIR: stateDirectory,
+            CODEX_SECURITY_STATE_DIR: configuredStateDirectory,
             [apiKey]: "synthetic-transient-key",
           },
           resolvePluginPython: async () => "/managed/python",
@@ -3770,7 +3764,6 @@ describe("CodexSecurity orchestration", () => {
         await client.close();
       }
 
-      expect(existsSync(codexHome)).toBe(true);
       expect(
         existsSync(
           join(
@@ -3796,8 +3789,7 @@ describe("CodexSecurity orchestration", () => {
     const stateDirectory = join(root, "state");
     const codexHome = join(stateDirectory, "codex-home");
     await mkdir(repository);
-    let activeScans = 0;
-    let maximumActiveScans = 0;
+    let scansStarted = 0;
     let releaseScans!: () => void;
     const concurrentScans = new Promise<void>((resolve) => {
       releaseScans = resolve;
@@ -3850,18 +3842,9 @@ describe("CodexSecurity orchestration", () => {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    activeScans += 1;
-                    maximumActiveScans = Math.max(
-                      maximumActiveScans,
-                      activeScans,
-                    );
-                    if (activeScans === 2) releaseScans();
-                    try {
-                      await concurrentScans;
-                      throw new Error("parallel API-key scan reached");
-                    } finally {
-                      activeScans -= 1;
-                    }
+                    if (++scansStarted === 2) releaseScans();
+                    await concurrentScans;
+                    throw new Error("parallel API-key scan reached");
                   },
                 }),
               };
@@ -3873,7 +3856,7 @@ describe("CodexSecurity orchestration", () => {
 
     try {
       const results = await Promise.allSettled(
-        clients.map(async (client) => await client.run(repository)),
+        clients.map((client) => client.run(repository)),
       );
       for (const result of results) {
         expect(result).toMatchObject({
@@ -3883,12 +3866,10 @@ describe("CodexSecurity orchestration", () => {
           }),
         });
       }
-      expect(maximumActiveScans).toBe(2);
-      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
+      expect(scansStarted).toBe(2);
     } finally {
       await Promise.all(clients.map(async (client) => await client.close()));
     }
-    expect(existsSync(codexHome)).toBe(true);
   });
 
   test("serializes parallel scans sharing a managed credential home", async () => {

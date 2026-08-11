@@ -71,6 +71,7 @@ import {
   bootstrapPlugin,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
+  codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
@@ -489,7 +490,6 @@ export class CodexSecurity {
       );
       if (
         runtime === previousRuntime &&
-        runtime.persistentCredentialHome === true &&
         this.#dependencies.prepareRuntime === undefined
       ) {
         await this.#refreshPersistentRuntime(runtime, scanEnvironment, signal);
@@ -1510,10 +1510,10 @@ export class CodexSecurity {
       auth,
       modelProvider,
     );
-    const codexHome = await prepareCodexSecurityCredentialHome(
-      processEnvironment,
-      validateLocation,
-    );
+    const codexHome =
+      validateLocation === undefined
+        ? await prepareCodexSecurityCredentialHome(processEnvironment)
+        : await realpath(codexSecurityCredentialHome(processEnvironment));
     let bootstrapWorkspace: string | undefined;
     try {
       throwIfAborted(signal);
@@ -1577,20 +1577,16 @@ export class CodexSecurity {
         effectiveConfig: mergedConfig,
       };
     } catch (error) {
-      const cleanupResults = await Promise.allSettled(
-        [bootstrapWorkspace]
-          .filter((path): path is string => path !== undefined)
-          .map((path) => cleanupSdkDirectory(path)),
-      );
-      const cleanupFailures = cleanupResults.flatMap((result) =>
-        result.status === "rejected" ? [result.reason] : [],
-      );
-      if (cleanupFailures.length > 0) {
-        throw new AggregateError(
-          [error, ...cleanupFailures],
-          "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
-          { cause: error },
-        );
+      if (bootstrapWorkspace !== undefined) {
+        try {
+          await cleanupSdkDirectory(bootstrapWorkspace);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
+            { cause: error },
+          );
+        }
       }
       throw error;
     }
