@@ -1,4 +1,4 @@
-export { CodexSecurity } from "./api.js";
+export { CodexSecurity, createSecurity } from "./api.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost } from "./cost.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";

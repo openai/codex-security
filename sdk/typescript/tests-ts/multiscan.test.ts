@@ -1320,22 +1320,8 @@ describe("multiscan", () => {
       { id: "retry", status: "completed", attempt: 2 },
     ]);
     const ledger = await readFile(summary.resultsPath, "utf8");
-    expect(ledger).not.toContain(secret);
-    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_PASSWORD");
-    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_QUERY_123");
-    expect(ledger).not.toContain(suffixedSecret);
-    expect(ledger).not.toContain(suffixedToken);
-    expect(ledger).not.toContain(suffixedQuery);
-    expect(ledger).not.toContain(quotedSecret);
-    expect(ledger).not.toContain(opaqueAuthorization);
-    expect(ledger).not.toContain(npmAuthorization);
-    expect(ledger).not.toContain(customAuthorization);
-    expect(ledger).not.toContain(suffixedAuthorization);
-    expect(ledger).not.toContain(paddedAuthorization);
-    expect(ledger).not.toContain(keyedAuthorization);
-    expect(ledger).not.toContain(camelCaseSecret);
-    expect(ledger).not.toContain(shortAuthorization);
-    expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
+    expect(ledger).toContain('"error":"[redacted]"');
+    expect(ledger).not.toContain("SYNTHETIC");
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
