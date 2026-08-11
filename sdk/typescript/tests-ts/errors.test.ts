@@ -18,8 +18,11 @@ describe("error messages", () => {
       "request failed: token=SYNTHETIC_TOKEN",
       "Authorization: Bearer sk-proj-SYNTHETIC_KEY_123",
       'upstream failed: {"clientSecret":"correct horse battery staple"}',
+      JSON.stringify(JSON.stringify({ clientSecret: "SYNTHETIC_SECRET" })),
+      "https://example.test/?credentials[access_token]=SYNTHETIC_SECRET",
       "proxy https://user:SYNTHETIC_PASSWORD@example.test",
       "-----BEGIN PRIVATE KEY-----\nSYNTHETIC_PRIVATE_KEY",
+      "-----BEGIN PGP PRIVATE KEY BLOCK-----\nSYNTHETIC_PRIVATE_KEY",
     ]) {
       expect(safeErrorMessage(new Error(message))).toBe("[redacted]");
     }
