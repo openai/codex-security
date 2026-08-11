@@ -19,6 +19,11 @@ describe("error messages", () => {
       "Authorization: Bearer sk-proj-SYNTHETIC_KEY_123",
       'upstream failed: {"clientSecret":"correct horse battery staple"}',
       JSON.stringify(JSON.stringify({ clientSecret: "SYNTHETIC_SECRET" })),
+      "authorizationHeaderValue=SYNTHETIC_SECRET",
+      "api_key_header_value=SYNTHETIC_SECRET",
+      'config["api_key"]="SYNTHETIC_SECRET"',
+      JSON.stringify('config["api_key"]="SYNTHETIC_SECRET"'),
+      encodeURIComponent(JSON.stringify({ api_key: "SYNTHETIC_SECRET" })),
       "https://example.test/?credentials[access_token]=SYNTHETIC_SECRET",
       "https://example.test/?user[password]=SYNTHETIC_SECRET",
       "https://example.test/?config[api_key]=SYNTHETIC_SECRET",
@@ -33,6 +38,10 @@ describe("error messages", () => {
     expect(safeErrorMessage("upstream service unavailable")).toBe(
       "upstream service unavailable",
     );
-    expect(safeErrorMessage("secret".repeat(200))).toBe("secret".repeat(200));
+    expect(safeErrorMessage("author=Michael")).toBe("author=Michael");
+    expect(safeErrorMessage("signal=active")).toBe("signal=active");
+    expect(safeErrorMessage("secret".repeat(4_000))).toBe(
+      "secret".repeat(4_000),
+    );
   });
 });
