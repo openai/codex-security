@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { VERSION } from "../src/index.js";
-import { REDACTED_CREDENTIALS, SYNTHETIC_CREDENTIALS } from "./support/cli.js";
+import { SYNTHETIC_CREDENTIALS } from "./support/cli.js";
 
 const packageRoot = join(import.meta.dir, "..");
 
@@ -40,7 +40,7 @@ describe("CLI launcher", () => {
     }
   });
 
-  test("maps unexpected source-entrypoint failures to exit 2 and redacts credentials", async () => {
+  test("maps unexpected source-entrypoint failures to exit 2", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-failure-"));
     try {
       const preload = join(root, "unavailable-cwd.mjs");
@@ -57,7 +57,7 @@ describe("CLI launcher", () => {
       expect(child.status).toBe(2);
       expect(child.stdout).toBe("");
       expect(child.stderr).toBe(
-        `working directory is unavailable: ${REDACTED_CREDENTIALS}\n`,
+        `working directory is unavailable: ${SYNTHETIC_CREDENTIALS}\n`,
       );
     } finally {
       await rm(root, { recursive: true, force: true });

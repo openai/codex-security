@@ -139,6 +139,7 @@ const {
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
+const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 const releaseSigningCertificate =
   "MIIHOjCCBr+gAwIBAgIUDDD6xE6tccKRAzn6GcB6Ajvw2+swCgYIKoZIzj0EAwMwNzEVMBMGA1UEChMMc2lnc3Rv" +
   "cmUuZGV2MR4wHAYDVQQDExVzaWdzdG9yZS1pbnRlcm1lZGlhdGUwHhcNMjYwNzI5MTg1MTA1WhcNMjYwNzI5MTkw" +
@@ -1700,7 +1701,7 @@ describe("GitHub release workflow safeguards", () => {
         RELEASE_SHA: releaseCommit,
         RELEASE_TAG: "npm-v0.1.2",
       },
-      timeout: 10_000,
+      timeout: releaseTagTimeout,
     });
 
     expect(result.status).toBe(0);
@@ -1769,7 +1770,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_LOOKUP_RESPONSE: lookupResponse,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: 10_000,
+        timeout: releaseTagTimeout,
       });
 
       expect(result.status).toBe(status);
@@ -1846,7 +1847,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_TAG_TYPE: tagType,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: 10_000,
+        timeout: releaseTagTimeout,
       });
 
       expect(result.status).toBe(status);
@@ -2055,6 +2056,60 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
+  test("dispatches GitHub releases after publishing with isolated permissions", () => {
+    expect(protectedReleaseWorkflow).toContain(
+      [
+        "  dispatch-github-release:",
+        "    if: github.repository == 'openai/codex-security'",
+        "    name: dispatch GitHub release",
+        "    needs: publish",
+        "    runs-on: ubuntu-latest",
+        "    permissions:",
+        "      actions: write",
+      ].join("\n"),
+    );
+    expect(protectedReleaseWorkflow).toMatch(
+      /  publish:\n[\s\S]*?    permissions:\n      contents: read\n      id-token: write\n/u,
+    );
+    expect(githubReleaseWorkflow).not.toContain("workflow_run:");
+    expect(githubReleaseWorkflow).not.toContain("github.event.workflow_run");
+    expect(githubReleaseWorkflow).not.toContain("TRIGGER_TAG");
+    expect(githubReleaseWorkflow).not.toContain("TRIGGER_RUN_ID");
+  });
+
+  test("dispatches the exact protected run and release tag from trusted main", () => {
+    const script = workflowStepShell(
+      protectedReleaseWorkflow,
+      "Dispatch the verified GitHub release",
+    );
+    const mock = "gh() { printf '%s\\n' \"$@\"; }";
+    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: releaseRepository,
+        RELEASE_RUN_ID: releaseRun,
+        RELEASE_TAG: "npm-v0.1.2",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim().split("\n")).toEqual([
+      "workflow",
+      "run",
+      "node-github-release.yml",
+      "--repo",
+      releaseRepository,
+      "--ref",
+      "main",
+      "-f",
+      "tag=npm-v0.1.2",
+      "-f",
+      `run_id=${releaseRun}`,
+    ]);
+  });
+
   test("serializes every GitHub release and historical backfill", () => {
     expect(githubReleaseWorkflow).toMatch(
       /concurrency:\s*\n\s+group: node-github-release\s*\n\s+queue: max/u,
@@ -2064,7 +2119,8 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("runs manually dispatched GitHub backfills from trusted main", () => {
+  test("runs manually dispatched GitHub releases from trusted main", () => {
+    expect(githubReleaseWorkflow).toContain("workflow_dispatch:");
     expect(githubReleaseWorkflow).toContain("github.ref == 'refs/heads/main'");
     expect(githubReleaseWorkflow).toMatch(
       /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: refs\/heads\/main/u,
@@ -2074,6 +2130,139 @@ describe("GitHub release workflow safeguards", () => {
   test("requires an actual Git tag for GitHub releases", () => {
     expect(githubReleaseWorkflow).toContain(
       '"repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag"',
+    );
+  });
+
+  test.each(["queued", "in_progress"])(
+    "waits for a %s protected npm release to finish before publishing notes",
+    (pendingStatus) => {
+      const script = workflowStepShell(
+        githubReleaseWorkflow,
+        "Resolve the successful protected release",
+      );
+      const root = mkdtempSync(join(tmpdir(), "codex-security-release-wait-"));
+      const state = join(root, "release-state");
+      const sleeps = join(root, "release-sleeps");
+      const mocks = [
+        "gh() {",
+        '  if [[ "$1" != "api" ]]; then return 64; fi',
+        "  shift",
+        '  case "$1" in',
+        '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
+        `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
+        "      ;;",
+        `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
+        '      if [[ -f "$MOCK_RUN_STATE" ]]; then',
+        `        printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'completed' 'success' '${releaseCommit}' 'npm-v0.1.2'`,
+        "      else",
+        '        touch "$MOCK_RUN_STATE"',
+        `        printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' '${pendingStatus}' 'pending' '${releaseCommit}' 'npm-v0.1.2'`,
+        "      fi",
+        "      ;;",
+        "    *) return 65 ;;",
+        "  esac",
+        "}",
+        `sleep() { printf '%s\\n' "$1" >> "${sleeps}"; }`,
+      ].join("\n");
+
+      try {
+        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: "/dev/null",
+            GITHUB_REPOSITORY: releaseRepository,
+            INPUT_RUN_ID: releaseRun,
+            INPUT_TAG: "npm-v0.1.2",
+            MOCK_RUN_STATE: state,
+          },
+          timeout: 10_000,
+        });
+
+        expect(result.status).toBe(0);
+        expect(readFileSync(sleeps, "utf8")).toBe("2\n");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("rejects a pending npm release for a different tagged commit", () => {
+    const script = workflowStepShell(
+      githubReleaseWorkflow,
+      "Resolve the successful protected release",
+    );
+    const differentCommit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const mocks = [
+      "gh() {",
+      '  if [[ "$1" != "api" ]]; then return 64; fi',
+      "  shift",
+      '  case "$1" in',
+      '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
+      `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
+      "      ;;",
+      `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
+      `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'in_progress' 'pending' '${differentCommit}' 'npm-v0.1.2'`,
+      "      ;;",
+      "    *) return 65 ;;",
+      "  esac",
+      "}",
+      "sleep() { return 99; }",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: "/dev/null",
+        GITHUB_REPOSITORY: releaseRepository,
+        INPUT_RUN_ID: releaseRun,
+        INPUT_TAG: "npm-v0.1.2",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The release run must successfully publish the exact tagged commit.",
+    );
+  });
+
+  test("times out safely if a protected npm release never completes", () => {
+    const script = workflowStepShell(
+      githubReleaseWorkflow,
+      "Resolve the successful protected release",
+    );
+    const mocks = [
+      "gh() {",
+      '  if [[ "$1" != "api" ]]; then return 64; fi',
+      "  shift",
+      '  case "$1" in',
+      '    "repos/openai/codex-security/git/ref/tags/npm-v0.1.2")',
+      `      printf '%s\\t%s\\n' 'commit' '${releaseCommit}'`,
+      "      ;;",
+      `    "repos/openai/codex-security/actions/runs/${releaseRun}")`,
+      `      printf '%s\\t%s\\t%s\\t%s\\t%s\\n' 'node-release' 'in_progress' 'pending' '${releaseCommit}' 'npm-v0.1.2'`,
+      "      ;;",
+      "    *) return 65 ;;",
+      "  esac",
+      "}",
+      "sleep() { :; }",
+    ].join("\n");
+    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: "/dev/null",
+        GITHUB_REPOSITORY: releaseRepository,
+        INPUT_RUN_ID: releaseRun,
+        INPUT_TAG: "npm-v0.1.2",
+      },
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `Timed out waiting for protected npm release ${releaseRun} to complete.`,
     );
   });
 
@@ -2108,8 +2297,6 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REPOSITORY: "openai/codex-security",
         INPUT_RUN_ID: releaseRun,
         INPUT_TAG: "npm-v0.1.2",
-        TRIGGER_RUN_ID: "",
-        TRIGGER_TAG: "",
       },
       timeout: 10_000,
     });
@@ -2174,8 +2361,6 @@ describe("GitHub release workflow safeguards", () => {
           INPUT_RUN_ID: releaseRun,
           INPUT_TAG: "npm-v0.1.2",
           MOCK_TAG_TYPE: tagType,
-          TRIGGER_RUN_ID: "",
-          TRIGGER_TAG: "",
         },
         timeout: 10_000,
       });
@@ -2217,8 +2402,6 @@ describe("GitHub release workflow safeguards", () => {
           GITHUB_REPOSITORY: "openai/codex-security",
           INPUT_RUN_ID: runId,
           INPUT_TAG: "npm-v0.1.2",
-          TRIGGER_RUN_ID: "",
-          TRIGGER_TAG: "",
         },
         timeout: 10_000,
       });

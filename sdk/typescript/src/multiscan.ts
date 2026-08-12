@@ -8,16 +8,20 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   truncate,
+  utimes,
   writeFile,
 } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
-import { redactedErrorMessage } from "./errors.js";
+import { safeErrorMessage } from "./errors.js";
+import type { CoverageDocument } from "./models.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -28,6 +32,8 @@ const REQUIRED_ARTIFACTS = [
   "coverage.json",
   "report.md",
 ];
+const LOCK_LEASE_MS = 30_000;
+const LOCK_HEARTBEAT_MS = 5_000;
 
 interface MultiscanTask {
   id: string;
@@ -35,12 +41,14 @@ interface MultiscanTask {
   revision: string;
   mode: ScanMode;
   scope?: string;
+  prompt?: string;
 }
 
 interface MultiscanReceipt extends MultiscanTask {
-  status: "completed" | "failed";
+  status: "completed" | "completed_with_incomplete_coverage" | "failed";
   attempt: number;
   outputDir: string;
+  coverage?: CoverageDocument["completeness"];
   cost?: ScanCost;
   error?: string;
   // Optional in exactly the way `error` is, because the ledger is append-only JSONL that
@@ -48,6 +56,7 @@ interface MultiscanReceipt extends MultiscanTask {
   // to keep resuming, so the key is omitted when the attempt warned about nothing rather
   // than written as an empty array.
   warnings?: string[];
+  warning?: string;
 }
 
 export interface MultiscanOptions {
@@ -58,6 +67,8 @@ export interface MultiscanOptions {
   workers: number;
   mode: ScanMode;
   maxAttempts: number;
+  scanPrompt?: string;
+  postScanPrompt?: string;
   config: CodexSecurityConfig;
   createSecurity(
     config: CodexSecurityConfig,
@@ -65,15 +76,21 @@ export interface MultiscanOptions {
   signal?: AbortSignal;
   onProgress?(event: {
     repository: string;
-    status: "started" | "completed" | "failed";
+    status:
+      | "started"
+      | "completed"
+      | "completed_with_incomplete_coverage"
+      | "failed";
     attempt: number;
     error?: string;
+    warning?: string;
   }): void;
 }
 
 export interface MultiscanResult {
   total: number;
   completed: number;
+  incomplete: number;
   failed: number;
   // Repositories with at least one warned attempt in the ledger: from the attempts this
   // run made and from the attempts a resumed ledger already records, the same way
@@ -119,35 +136,51 @@ async function runCampaign(
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
-  await ensureManifest(join(output, "manifest.json"), tasks);
+  await ensureManifest(join(output, "manifest.json"), tasks, options);
   const { receipts, warnedIds } = await readReceipts(ledger);
   const pending: MultiscanTask[] = [];
   let completed = 0;
   let warned = 0;
+  let incomplete = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
     if (
-      receipt?.status === "completed" &&
+      receipt !== undefined &&
       receipt.outputDir ===
         join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
       (await hasArtifacts(receipt.outputDir))
     ) {
-      completed += 1;
-      // This repository is not scanned again, so the ledger is the only place its warnings
-      // still exist. Every attempt counts, not just the receipt that won: a retry that
-      // succeeded quietly leaves a final receipt with no warnings at all, and reading only
-      // that one would report warned: 0 for a campaign the run that wrote the ledger
-      // reported as warned: 1, even though resuming did no new work.
-      if (warnedIds.has(task.id.toLowerCase())) warned += 1;
-    } else {
-      pending.push(task);
+      if (receipt.status === "completed") {
+        completed += 1;
+        if (warnedIds.has(task.id.toLowerCase())) warned += 1;
+        continue;
+      }
+      const coverage =
+        receipt.status === "completed_with_incomplete_coverage"
+          ? receipt.coverage ?? "unknown"
+          : await legacyIncompleteCoverage(receipt);
+      if (coverage !== undefined) {
+        incomplete += 1;
+        if (warnedIds.has(task.id.toLowerCase())) warned += 1;
+        options.onProgress?.({
+          repository: task.id,
+          status: "completed_with_incomplete_coverage",
+          attempt: receipt.attempt,
+          warning:
+            receipt.warning ??
+            `Scan coverage is ${coverage}; results may be incomplete.`,
+        });
+        continue;
+      }
     }
+    pending.push(task);
   }
-  const skipped = completed;
+  const skipped = completed + incomplete;
   if (pending.length === 0) {
     return {
       total: tasks.length,
       completed,
+      incomplete,
       failed: 0,
       warned,
       skipped,
@@ -183,6 +216,8 @@ async function runCampaign(
         const progress = { repository: task.id, attempt };
         options.onProgress?.({ ...progress, status: "started" });
         let failure: string | undefined;
+        let warning: string | undefined;
+        let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         // Warnings are collected through the observer rather than read off the returned
         // ScanResult, which does not carry them, and the observer is also the only channel
@@ -212,6 +247,9 @@ async function runCampaign(
               throw new Error("Multiscan scope escapes its repository.");
             }
           }
+          const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
+            .filter(Boolean)
+            .join("\n\n");
           const result = await security.run(checkout, {
             ...(task.scope === undefined ? {} : { target: [task.scope] }),
             ...(options.knowledgeBasePaths?.length
@@ -222,22 +260,37 @@ async function runCampaign(
             onWarning: (warning) => {
               // Redacted like `error` is: unlike the observer the CLI installs, this text
               // is about to be persisted in the ledger and read back on resume.
-              warnings.push(redactedErrorMessage(warning));
+              warnings.push(safeErrorMessage(warning));
             },
+            ...(scanPrompt ? { scanPrompt } : {}),
+            ...(options.postScanPrompt === undefined
+              ? {}
+              : { postScanPrompt: options.postScanPrompt }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
-          if (result.coverage.completeness !== "complete") {
-            throw new Error("Multiscan repository coverage is incomplete.");
+          coverage = result.coverage.completeness;
+          if (coverage !== "complete") {
+            if (!(await hasArtifacts(scanDir))) {
+              throw new Error(
+                "Multiscan scan output is missing required artifacts.",
+              );
+            }
+            warning = `Scan coverage is ${coverage}; results may be incomplete.`;
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
-          failure = redactedErrorMessage(error);
+          failure = safeErrorMessage(error);
         } finally {
           await rm(checkout, { recursive: true, force: true });
         }
-        const status = failure === undefined ? "completed" : "failed";
         if (warnings.length > 0) repositoryWarned = true;
+        const status =
+          failure !== undefined
+            ? "failed"
+            : warning === undefined
+              ? "completed"
+              : "completed_with_incomplete_coverage";
         await appendReceipt(
           ledger,
           `${JSON.stringify({
@@ -245,18 +298,22 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(coverage === undefined ? {} : { coverage }),
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warnings.length === 0 ? {} : { warnings }),
+            ...(warning === undefined ? {} : { warning }),
           })}\n`,
         );
         options.onProgress?.({
           ...progress,
           status,
           ...(failure === undefined ? {} : { error: failure }),
+          ...(warning === undefined ? {} : { warning }),
         });
         if (failure === undefined) {
-          completed += 1;
+          if (warning === undefined) completed += 1;
+          else incomplete += 1;
           break;
         }
         if (retry === options.maxAttempts - 1) failed += 1;
@@ -282,6 +339,7 @@ async function runCampaign(
   return {
     total: tasks.length,
     completed,
+    incomplete,
     failed,
     warned,
     skipped,
@@ -317,32 +375,203 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     await mkdir(path, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const { pid } = JSON.parse(await readFile(ownerPath, "utf8")) as {
-      pid: number;
-    };
-    try {
-      process.kill(pid, 0);
+    const existing = await inspectLock(path);
+    if (!existing.stale) {
       throw new Error("A multiscan supervisor is already running.");
-    } catch (failure) {
-      if ((failure as NodeJS.ErrnoException).code !== "ESRCH") throw failure;
+    }
+    const stale = await recoverLock(output, path, existing.owner);
+    try {
+      return await acquireLock(output);
+    } finally {
+      await rm(stale, { recursive: true, force: true });
+    }
+  }
+  const createdLock = await lstat(path);
+  const owner = `${JSON.stringify({
+    pid: process.pid,
+    ownerId: randomUUID(),
+    hostname: hostname(),
+    processStartedAt: performance.timeOrigin,
+  })}\n`;
+  try {
+    await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    const currentLock = await lstat(path).catch(
+      (cleanup: NodeJS.ErrnoException) => {
+        if (cleanup.code !== "ENOENT") throw cleanup;
+        return undefined;
+      },
+    );
+    if (
+      currentLock?.dev === createdLock.dev &&
+      currentLock.ino === createdLock.ino
+    ) {
+      await rmdir(path).catch((cleanup: NodeJS.ErrnoException) => {
+        if (
+          cleanup.code !== "ENOENT" &&
+          cleanup.code !== "ENOTEMPTY" &&
+          cleanup.code !== "EEXIST"
+        ) {
+          throw cleanup;
+        }
+      });
+    }
+    throw error;
+  }
+
+  let heartbeat = Promise.resolve();
+  const timer = setInterval(() => {
+    heartbeat = heartbeat
+      .then(async () => {
+        if ((await readFile(ownerPath, "utf8")) !== owner) return;
+        const now = new Date();
+        await utimes(ownerPath, now, now);
+      })
+      .catch(() => {});
+  }, LOCK_HEARTBEAT_MS);
+  timer.unref();
+
+  return async () => {
+    clearInterval(timer);
+    await heartbeat;
+    const current = await readFile(ownerPath, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return undefined;
+      },
+    );
+    if (current === owner) await rm(path, { recursive: true });
+  };
+}
+
+async function inspectLock(
+  path: string,
+): Promise<{ owner: string | undefined; stale: boolean }> {
+  const ownerPath = join(path, "owner.json");
+  let owner: string;
+  let modifiedAt: number;
+  try {
+    owner = await readFile(ownerPath, "utf8");
+    modifiedAt = (await lstat(ownerPath)).mtimeMs;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return {
+      owner: undefined,
+      stale: Date.now() - (await lstat(path)).mtimeMs > LOCK_LEASE_MS,
+    };
+  }
+
+  let identity: {
+    pid?: number;
+    ownerId?: string;
+    hostname?: string;
+    processStartedAt?: number;
+  };
+  try {
+    identity = JSON.parse(owner) as typeof identity;
+  } catch {
+    return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
+  }
+
+  if (
+    typeof identity.ownerId === "string" &&
+    typeof identity.hostname === "string" &&
+    typeof identity.processStartedAt === "number"
+  ) {
+    const sameProcess =
+      identity.pid === process.pid &&
+      identity.hostname === hostname() &&
+      identity.processStartedAt === performance.timeOrigin;
+    return {
+      owner,
+      stale: !sameProcess && Date.now() - modifiedAt > LOCK_LEASE_MS,
+    };
+  }
+
+  if (
+    identity.pid === undefined ||
+    !Number.isSafeInteger(identity.pid) ||
+    identity.pid < 1
+  ) {
+    return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
+  }
+  try {
+    process.kill(identity.pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      return { owner, stale: true };
+    }
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      return { owner, stale: false };
+    }
+    throw error;
+  }
+  return {
+    owner,
+    stale:
+      identity.pid === process.pid &&
+      modifiedAt + 1_000 < performance.timeOrigin,
+  };
+}
+
+async function recoverLock(
+  output: string,
+  path: string,
+  expectedOwner: string | undefined,
+): Promise<string> {
+  const recoveryPath = join(path, ".recovering");
+  let claim;
+  try {
+    claim = await open(recoveryPath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      if (Date.now() - (await lstat(recoveryPath)).mtimeMs > LOCK_LEASE_MS) {
+        await rm(recoveryPath, { force: true });
+        return await recoverLock(output, path, expectedOwner);
+      }
+      throw new Error("A multiscan supervisor is already running.");
+    }
+    throw error;
+  }
+  await claim.close();
+
+  let moved = false;
+  try {
+    const current = await inspectLock(path);
+    if (
+      current.owner !== expectedOwner ||
+      (expectedOwner !== undefined && !current.stale)
+    ) {
+      throw new Error("A multiscan supervisor is already running.");
     }
     const stale = join(output, `.lock.stale-${randomUUID()}`);
     await rename(path, stale);
-    await rm(stale, { recursive: true });
-    return await acquireLock(output);
+    moved = true;
+    return stale;
+  } finally {
+    if (!moved) await rm(recoveryPath, { force: true });
   }
-  await writeFile(ownerPath, `${JSON.stringify({ pid: process.pid })}\n`, {
-    flag: "wx",
-    mode: 0o600,
-  });
-  return async () => rm(path, { recursive: true });
 }
 
 async function ensureManifest(
   path: string,
   tasks: MultiscanTask[],
+  options: Pick<MultiscanOptions, "scanPrompt" | "postScanPrompt">,
 ): Promise<void> {
-  const expected = `${JSON.stringify({ version: 1, tasks }, null, 2)}\n`;
+  const expected = `${JSON.stringify(
+    {
+      version: 1,
+      tasks,
+      ...(options.scanPrompt === undefined
+        ? {}
+        : { scanPrompt: options.scanPrompt }),
+      ...(options.postScanPrompt === undefined
+        ? {}
+        : { postScanPrompt: options.postScanPrompt }),
+    },
+    null,
+    2,
+  )}\n`;
   try {
     await writeFile(path, expected, { flag: "wx", mode: 0o600 });
   } catch (error) {
@@ -406,6 +635,28 @@ async function hasArtifacts(path: string): Promise<boolean> {
   }
 }
 
+async function legacyIncompleteCoverage(
+  receipt: MultiscanReceipt,
+): Promise<Exclude<CoverageDocument["completeness"], "complete"> | undefined> {
+  if (
+    receipt.status !== "failed" ||
+    receipt.error !== "Multiscan repository coverage is incomplete."
+  ) {
+    return undefined;
+  }
+  try {
+    const coverage = JSON.parse(
+      await readFile(join(receipt.outputDir, "coverage.json"), "utf8"),
+    ) as { completeness?: unknown };
+    return coverage.completeness === "partial" ||
+      coverage.completeness === "unknown"
+      ? coverage.completeness
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function parseInventory(
   source: string,
   directory: string,
@@ -453,6 +704,7 @@ function parseInventory(
       throw new Error("Multiscan mode must be standard or deep.");
     }
     const scope = get("scope");
+    const prompt = get("prompt");
     if (
       scope &&
       (isAbsolute(scope) ||
@@ -468,6 +720,7 @@ function parseInventory(
       revision,
       mode,
       ...(scope ? { scope } : {}),
+      ...(prompt ? { prompt } : {}),
     };
   });
 }
