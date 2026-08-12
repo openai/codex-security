@@ -36,6 +36,7 @@ import {
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
+import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -1007,8 +1008,8 @@ describe("CLI", () => {
       bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
       scanMcp: false,
       cliVersion: VERSION,
-      codexVersion: "0.144.6",
-      codexSdkVersion: "0.144.6",
+      codexVersion: CODEX_EXECUTABLE_VERSION,
+      codexSdkVersion: CODEX_SDK_VERSION,
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",

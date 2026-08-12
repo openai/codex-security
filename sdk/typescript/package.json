@@ -55,8 +55,8 @@
   "dependencies": {
     "@inquirer/prompts": "8.3.0",
     "@octokit/core": "7.0.6",
-    "@openai/codex": "0.144.6",
-    "@openai/codex-sdk": "0.144.6",
+    "@openai/codex": "0.148.0-alpha.8",
+    "@openai/codex-sdk": "0.148.0-alpha.8",
     "ajv": "8.20.0",
     "extract-zip": "2.0.1",
     "fast-uri": "3.1.5",
