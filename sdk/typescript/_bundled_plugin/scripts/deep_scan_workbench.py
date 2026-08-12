@@ -366,6 +366,23 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         """,
         (run["scan_id"],),
     ).fetchone()
+    canonical_artifacts = None
+    if run["canonical_inventory_path"] is None:
+        if successful_reducer is not None:
+            canonical_artifacts = canonical_discovery_artifacts(scan)
+        elif (
+            run["status"] == "succeeded"
+            and run["terminal_reason"] == "capped"
+            and run["completion_sequence"] == 0
+            and deep_scan_deadline_reached(run)
+        ):
+            candidate_artifacts = canonical_discovery_artifacts(scan)
+            if Path(candidate_artifacts["candidateLedgerPath"]).stat().st_size != 0:
+                raise SystemExit(
+                    "A capped Deep Scan without completed discoveries requires an empty "
+                    "candidate ledger."
+                )
+            canonical_artifacts = candidate_artifacts
     return {
         "scanId": run["scan_id"],
         "targetPath": scan["target_path"],
@@ -390,11 +407,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "noNewStreak": run["consecutive_no_new"],
         "consecutiveErrors": run["consecutive_errors"],
         "cancelRequested": bool(run["cancel_requested"]),
-        "canonicalArtifacts": (
-            canonical_discovery_artifacts(scan)
-            if successful_reducer is not None and run["canonical_inventory_path"] is None
-            else None
-        ),
+        "canonicalArtifacts": canonical_artifacts,
         "manifestPath": run["manifest_path"],
         "terminalReason": run["terminal_reason"],
         "error": run["error_message"],
@@ -1695,7 +1708,7 @@ def finish_deep_scan_locked(
                 "Deep Scan cannot finish capped before reaching its configured maximum."
             )
         try:
-            canonical_discovery_artifacts(scan)
+            canonical_artifacts = canonical_discovery_artifacts(scan)
         except SystemExit as exc:
             raise SystemExit(
                 f"Deep Scan cannot finish without canonical discovery artifacts: {exc}"
@@ -1708,7 +1721,13 @@ def finish_deep_scan_locked(
             """,
             (scan_id,),
         ).fetchone()
-        if successful_reducer is None:
+        zero_discovery_deadline = (
+            args.terminal_reason == "capped"
+            and deep_scan_deadline_reached(run)
+            and run["completion_sequence"] == 0
+            and Path(canonical_artifacts["candidateLedgerPath"]).stat().st_size == 0
+        )
+        if successful_reducer is None and not zero_discovery_deadline:
             raise SystemExit("Deep Scan cannot finish without a successful dedup worker.")
         failed_worker = connection.execute(
             """
