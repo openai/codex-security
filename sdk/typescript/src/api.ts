@@ -113,6 +113,7 @@ import {
   type ScanMode,
   type ScanTarget,
   validatedGitEnvironment,
+  validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
 
@@ -1560,6 +1561,8 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const mode = options.mode ?? "standard";
     validateMode(normalized, mode);
+    await validateCommittedDiffCheckout(repo, normalized, signal);
+    throwIfAborted(signal);
     const protectedRoot =
       (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
     const requestedOutput = await validateOutputDir(

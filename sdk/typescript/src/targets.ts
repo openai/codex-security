@@ -273,6 +273,32 @@ export async function normalizeTarget(
   return { kind: "paths", paths };
 }
 
+export async function validateCommittedDiffCheckout(
+  repository: string,
+  target: NormalizedTarget,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (target.kind !== "refs") return;
+
+  const checkoutHead = await resolveGitRef(repository, "HEAD", signal);
+  if (checkoutHead !== target.head) {
+    throw new InvalidTargetError(
+      `Committed-diff scans require the repository checkout to match the requested head revision. Checkout HEAD is ${checkoutHead}; requested head is ${target.head}. Check out the requested head and retry.`,
+    );
+  }
+
+  const status = await gitOutput(
+    repository,
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    signal,
+  );
+  if (status.length !== 0) {
+    throw new InvalidTargetError(
+      "Committed-diff scans require a clean repository checkout. Commit or stash local changes and retry.",
+    );
+  }
+}
+
 export function validateMode(target: NormalizedTarget, mode: ScanMode): void {
   if (mode !== "standard" && mode !== "deep") {
     throw new InvalidTargetError(`Unsupported scan mode: ${String(mode)}`);

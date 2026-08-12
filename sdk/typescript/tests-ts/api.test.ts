@@ -4692,6 +4692,64 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects committed diffs when checkout bytes can differ from head", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await writeFile(
+      join(repository, "tracked.ts"),
+      "export const value = 'base';\n",
+    );
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: repository, stdio: "pipe" });
+    git("init", "-q", "-b", "main");
+    git("add", "tracked.ts");
+    git(
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.com",
+      "commit",
+      "-qm",
+      "base",
+    );
+    git("checkout", "-qb", "feature");
+    await writeFile(
+      join(repository, "tracked.ts"),
+      "export const value = 'head';\n",
+    );
+    git("add", "tracked.ts");
+    git(
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.com",
+      "commit",
+      "-qm",
+      "head",
+    );
+    git("checkout", "-q", "main");
+
+    const client = new TestClient({}, { environment: {} });
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base: "main", head: "feature" }),
+      }),
+    ).rejects.toThrow("checkout to match the requested head revision");
+
+    git("checkout", "-q", "feature");
+    await writeFile(
+      join(repository, "tracked.ts"),
+      "export const value = 'dirty';\n",
+    );
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base: "main", head: "feature" }),
+      }),
+    ).rejects.toThrow("clean repository checkout");
+    await client.close();
+  });
+
   test("reports effective ambient API-key authentication", async () => {
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
