@@ -20,24 +20,20 @@ export interface AccountStatus {
 export class CodexLoginHandle {
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #completion: Promise<LoginResult>;
-  readonly #urlReady: Promise<void>;
-  readonly #deviceReady: Promise<void>;
-  #resolveUrlReady!: () => void;
-  #rejectUrlReady!: (error: unknown) => void;
-  #resolveDeviceReady!: () => void;
-  #rejectDeviceReady!: (error: unknown) => void;
-  #urlReadySettled = false;
-  #deviceReadySettled = false;
+  readonly #urlReady = Promise.withResolvers<void>();
+  readonly #deviceReady = Promise.withResolvers<void>();
   #canceled = false;
   #forcedTermination: ReturnType<typeof setTimeout> | undefined;
-  #stdout = "";
-  #stderr = "";
-  #stdoutInstructionTail = "";
-  #stderrInstructionTail = "";
-  #stdoutAuthUrl: string | null = null;
-  #stderrAuthUrl: string | null = null;
-  #stdoutUserCode: string | null = null;
-  #stderrUserCode: string | null = null;
+  readonly #output = { stdout: "", stderr: "" };
+  readonly #tails = { stdout: "", stderr: "" };
+  readonly #urls: Record<"stdout" | "stderr", string | null> = {
+    stdout: null,
+    stderr: null,
+  };
+  readonly #codes: Record<"stdout" | "stderr", string | null> = {
+    stdout: null,
+    stderr: null,
+  };
 
   public constructor(
     command: CodexCommand,
@@ -45,16 +41,8 @@ export class CodexLoginHandle {
     environment: ProcessEnvironment,
     onSuccess: () => void | Promise<void>,
   ) {
-    this.#urlReady = new Promise<void>((resolve, reject) => {
-      this.#resolveUrlReady = resolve;
-      this.#rejectUrlReady = reject;
-    });
-    this.#deviceReady = new Promise<void>((resolve, reject) => {
-      this.#resolveDeviceReady = resolve;
-      this.#rejectDeviceReady = reject;
-    });
-    void this.#urlReady.catch(() => undefined);
-    void this.#deviceReady.catch(() => undefined);
+    void this.#urlReady.promise.catch(() => undefined);
+    void this.#deviceReady.promise.catch(() => undefined);
     this.#child = spawn(command.command, [...command.prefixArgs, ...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
@@ -71,17 +59,14 @@ export class CodexLoginHandle {
     });
     this.#completion = new Promise((resolve, reject) => {
       this.#child.once("close", (exitCode) => {
-        if (this.#forcedTermination !== undefined) {
-          clearTimeout(this.#forcedTermination);
-        }
+        clearTimeout(this.#forcedTermination);
         if (!this.#canceled) {
           this.#flushInstructionTails();
         }
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
-          stdout: this.#stdout,
-          stderr: this.#stderr,
+          ...this.#output,
         };
         this.#settleInstructionWaiters(result);
         if (result.success) {
@@ -91,13 +76,11 @@ export class CodexLoginHandle {
         }
       });
       this.#child.once("error", (error) => {
-        if (this.#forcedTermination !== undefined) {
-          clearTimeout(this.#forcedTermination);
-        }
+        clearTimeout(this.#forcedTermination);
         this.#settleInstructionWaiters({
           success: false,
           exitCode: null,
-          stdout: this.#stdout,
+          stdout: this.#output.stdout,
           stderr: error.message,
         });
         reject(error);
@@ -110,7 +93,7 @@ export class CodexLoginHandle {
   }
 
   public get authUrl(): string | null {
-    return this.#stdoutAuthUrl ?? this.#stderrAuthUrl;
+    return this.#urls.stdout ?? this.#urls.stderr;
   }
 
   public get verificationUrl(): string | null {
@@ -118,7 +101,7 @@ export class CodexLoginHandle {
   }
 
   public get userCode(): string | null {
-    return this.#stdoutUserCode ?? this.#stderrUserCode;
+    return this.#codes.stdout ?? this.#codes.stderr;
   }
 
   public async wait(): Promise<LoginResult> {
@@ -128,7 +111,8 @@ export class CodexLoginHandle {
   public async waitForInstructions(
     options: { deviceCode?: boolean } = {},
   ): Promise<void> {
-    await (options.deviceCode === true ? this.#deviceReady : this.#urlReady);
+    await (options.deviceCode === true ? this.#deviceReady : this.#urlReady)
+      .promise;
   }
 
   public cancel(): void {
@@ -145,69 +129,36 @@ export class CodexLoginHandle {
   }
 
   #recordOutput(stream: "stdout" | "stderr", chunk: string): void {
-    if (stream === "stdout") {
-      this.#stdout += chunk;
-    } else {
-      this.#stderr += chunk;
-    }
-
-    const tail =
-      stream === "stdout"
-        ? this.#stdoutInstructionTail
-        : this.#stderrInstructionTail;
-    const output = `${tail}${chunk.replaceAll("\r", "\n")}`;
+    this.#output[stream] += chunk;
+    const output = `${this.#tails[stream]}${chunk.replaceAll("\r", "\n")}`;
     const lastDelimiter = output.lastIndexOf("\n");
     const completed =
       lastDelimiter === -1 ? "" : output.slice(0, lastDelimiter + 1);
-    const url = preferredAuthUrl(completed);
-    const userCode = userCodeFromOutput(completed);
-    const nextTail =
+    this.#urls[stream] ??= preferredAuthUrl(completed);
+    this.#codes[stream] ??= userCodeFromOutput(completed);
+    this.#tails[stream] =
       lastDelimiter === -1 ? output : output.slice(lastDelimiter + 1);
-    if (stream === "stdout") {
-      this.#stdoutAuthUrl ??= url;
-      this.#stdoutUserCode ??= userCode;
-      this.#stdoutInstructionTail = nextTail;
-    } else {
-      this.#stderrAuthUrl ??= url;
-      this.#stderrUserCode ??= userCode;
-      this.#stderrInstructionTail = nextTail;
-    }
     this.#notifyInstructions();
   }
 
   #flushInstructionTails(): void {
-    this.#stdoutAuthUrl ??= preferredAuthUrl(this.#stdoutInstructionTail);
-    this.#stdoutUserCode ??= userCodeFromOutput(this.#stdoutInstructionTail);
-    this.#stderrAuthUrl ??= preferredAuthUrl(this.#stderrInstructionTail);
-    this.#stderrUserCode ??= userCodeFromOutput(this.#stderrInstructionTail);
+    for (const stream of ["stdout", "stderr"] as const) {
+      this.#urls[stream] ??= preferredAuthUrl(this.#tails[stream]);
+      this.#codes[stream] ??= userCodeFromOutput(this.#tails[stream]);
+    }
   }
 
   #notifyInstructions(): void {
-    if (!this.#urlReadySettled && this.authUrl !== null) {
-      this.#urlReadySettled = true;
-      this.#resolveUrlReady();
-    }
-    if (
-      !this.#deviceReadySettled &&
-      this.verificationUrl !== null &&
-      this.userCode !== null
-    ) {
-      this.#deviceReadySettled = true;
-      this.#resolveDeviceReady();
-    }
+    if (this.authUrl !== null) this.#urlReady.resolve();
+    if (this.verificationUrl !== null && this.userCode !== null)
+      this.#deviceReady.resolve();
   }
 
   #settleInstructionWaiters(result: LoginResult): void {
     this.#notifyInstructions();
     if (result.success) {
-      if (!this.#urlReadySettled) {
-        this.#urlReadySettled = true;
-        this.#resolveUrlReady();
-      }
-      if (!this.#deviceReadySettled) {
-        this.#deviceReadySettled = true;
-        this.#resolveDeviceReady();
-      }
+      this.#urlReady.resolve();
+      this.#deviceReady.resolve();
       return;
     }
     const error = new PluginBootstrapError(
@@ -215,14 +166,8 @@ export class CodexLoginHandle {
         ? "Codex login was canceled."
         : `Codex login exited before authentication instructions were available: ${result.stderr.trim() || result.stdout.trim() || result.exitCode || "unknown error"}`,
     );
-    if (!this.#urlReadySettled) {
-      this.#urlReadySettled = true;
-      this.#rejectUrlReady(error);
-    }
-    if (!this.#deviceReadySettled) {
-      this.#deviceReadySettled = true;
-      this.#rejectDeviceReady(error);
-    }
+    this.#urlReady.reject(error);
+    this.#deviceReady.reject(error);
   }
 }
 
