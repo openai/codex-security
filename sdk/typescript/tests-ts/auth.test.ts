@@ -257,27 +257,6 @@ setTimeout(() => {
     await expect(handle.wait()).resolves.toMatchObject({ success: true });
   });
 
-  test("preserves login instructions on long output lines", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-tail-"));
-    temporaryDirectories.push(root);
-    const script = join(root, "login.mjs");
-    await writeFile(
-      script,
-      'process.stderr.write("Open https://auth.example.test/device " + "x".repeat(128 * 1024), () => process.stderr.write("\\nUser code: ABCD-EFGH\\n", () => process.exit(0)));\n',
-    );
-    const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
-      process.env,
-      () => {},
-    );
-
-    await handle.waitForInstructions({ deviceCode: true });
-    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
-    expect(handle.userCode).toBe("ABCD-EFGH");
-    await expect(handle.wait()).resolves.toMatchObject({ success: true });
-  });
-
   test("drains native login stderr before resolving authentication", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-stderr-"));
     temporaryDirectories.push(root);

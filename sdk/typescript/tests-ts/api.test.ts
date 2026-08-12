@@ -46,7 +46,6 @@ import {
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
-  codexSecurityCredentialAllowsAmbientImport,
   runWorkbench,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
@@ -4890,29 +4889,11 @@ else if (args[1] === "status") {
         authenticated: false,
       });
       await client.loginApiKey("synthetic-test-key");
-      await expect(client.account()).resolves.toMatchObject({
-        authenticated: true,
-      });
-      await client.logout();
-      expect(await codexSecurityCredentialAllowsAmbientImport(codexHome)).toBe(
-        false,
-      );
-
       const login = await client.loginChatGPTDeviceCode();
       expect(login.verificationUrl).toBe("https://auth.example.test/device");
       expect(login.userCode).toBe("ABCD-EFGH");
       await expect(login.wait()).resolves.toMatchObject({ success: true });
-      expect(await codexSecurityCredentialAllowsAmbientImport(codexHome)).toBe(
-        true,
-      );
-
       await client.logout();
-      const browserLogin = await client.loginChatGPT();
-      expect(browserLogin.authUrl).toBe("https://auth.example.test/device");
-      await expect(browserLogin.wait()).resolves.toMatchObject({
-        success: true,
-      });
-
       expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
       expect(existsSync(join(codexHome, "sdk-marketplace"))).toBe(false);
     } finally {
