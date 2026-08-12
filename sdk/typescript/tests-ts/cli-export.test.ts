@@ -17,7 +17,6 @@ import { describe, expect, mock, test } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
 import { CodexSecurityError } from "../src/index.js";
 import {
-  REDACTED_CREDENTIALS,
   SYNTHETIC_CREDENTIALS,
   capture,
   dependencies,
@@ -626,7 +625,7 @@ describe("CLI", () => {
     );
   });
 
-  test("redacts credentials from caught export failures", async () => {
+  test("preserves caught export failures", async () => {
     const stdout = capture();
     const stderr = capture();
     const deps = dependencies();
@@ -644,7 +643,7 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe(
-      `codex-security: export failed ${REDACTED_CREDENTIALS}\n`,
+      `codex-security: export failed ${SYNTHETIC_CREDENTIALS}\n`,
     );
   });
 });

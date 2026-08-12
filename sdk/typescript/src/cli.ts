@@ -22,7 +22,8 @@ import {
   win32,
 } from "node:path";
 import { cwd } from "node:process";
-import { Writable as NodeWritable } from "node:stream";
+import { createInterface } from "node:readline";
+import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ModelReasoningEffort } from "@openai/codex-sdk";
@@ -31,6 +32,8 @@ import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
+  createSecurityInternal,
+  listRepositoryFindings,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -47,13 +50,17 @@ import {
 } from "./bulk-scan-discovery.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  EXTERNAL_CODEX_PROVIDERS,
+  isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
+  type ExternalModelProvider,
   type JsonObject,
   type JsonValue,
 } from "./config.js";
-import { formatUsd } from "./cost.js";
+import { formatUsd, type ScanCost } from "./cost.js";
 import {
   CodexSecurityError,
   ConfigurationError,
@@ -61,7 +68,9 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
-  redactedErrorMessage,
+  errorMessage,
+  safeErrorMessage,
+  ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
@@ -80,14 +89,22 @@ import {
   type CodexCommand,
 } from "./runtime.js";
 import {
-  matchScanFindings,
+  matchScanFindingsInternal,
+  type matchScanFindings,
   type ScanComparisonInput,
 } from "./scan-comparison.js";
+import { readScanLogs } from "./scan-logs.js";
 import {
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
-import type { ScanWorkerPhase, ScanWorkerStatus } from "./worker-progress.js";
+import { ScanDashboard } from "./scan-dashboard.js";
+import type {
+  ScanPhase,
+  ScanProgress,
+  ScanWorkerPhase,
+  ScanWorkerStatus,
+} from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -101,15 +118,6 @@ import {
 } from "./version.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
-const MAX_CODEX_OVERRIDE_KEY_LENGTH = 1_024;
-const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
-const MAX_CODEX_OVERRIDE_DEPTH = 64;
-const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
-const MAX_SKILL_INPUT_COUNT = 64;
-const MAX_SKILL_EVENT_BYTES = 1_024 * 1_024;
-const MAX_SKILL_RESPONSE_BYTES = 256 * 1_024;
-const SKILL_OUTPUT_LIMIT_MESSAGE =
-  "Codex skill output exceeded the 1 MiB event or 256 KiB response safety limit.";
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
@@ -161,12 +169,15 @@ const VALUE_OPTIONS = new Set([
   "--auth",
   "--path",
   "--knowledge-base",
+  "--scan-prompt-file",
+  "--post-scan-prompt-file",
   "--diff",
   "--head",
   "--base",
   "--mode",
   "--model",
   "--effort",
+  "--provider",
   "--output-dir",
   "--plugin-path",
   "--python",
@@ -188,6 +199,10 @@ const VALUE_OPTIONS = new Set([
   "--scan-root",
   "--reason",
 ]);
+const PROVIDER_OPTION = z
+  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
+  .default("openai")
+  .describe("Inference provider for scans.");
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -231,11 +246,33 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .describe("Maximum deep-scan discovery runs."),
 };
 
+async function readPromptFiles(
+  directory: string,
+  scanPromptFile?: string,
+  postScanPromptFile?: string,
+): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
+  const [scanPrompt, postScanPrompt] = await Promise.all([
+    scanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, scanPromptFile), "utf8"),
+    postScanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+  ]);
+  return {
+    ...(scanPrompt?.trim() ? { scanPrompt } : {}),
+    ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
+  };
+}
+
 interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
+  verbose?: boolean;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
+  scanPromptFile?: string;
+  postScanPromptFile?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -243,6 +280,7 @@ interface ScanArguments extends DeepScanOptions {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -251,6 +289,7 @@ interface ScanArguments extends DeepScanOptions {
   codexOverrides?: JsonObject;
   failOnSeverity?: FailureSeverity;
   maxCostUsd?: number;
+  headless?: boolean;
   dryRun: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
@@ -324,7 +363,8 @@ interface CliDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
-  createSecurity: (config) => new CodexSecurity(config),
+  createSecurity: (config) =>
+    createSecurityInternal(config, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: () => checkForUpdate({ environment: process.env }),
@@ -449,7 +489,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       args,
     );
   },
-  matchFindings: matchScanFindings,
+  matchFindings: (input, options) =>
+    matchScanFindingsInternal(input, options, { surface: "cli" }),
 };
 
 export async function runCodexSkillCommand(
@@ -473,7 +514,6 @@ export async function runCodexSkillCommand(
     windowsHide: true,
   });
   let requestedSignal: SignalName | null = null;
-  let skillOutputLimitExceeded = false;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
   let forceCaptureCompletion: (() => void) | null = null;
@@ -510,10 +550,7 @@ export async function runCodexSkillCommand(
       output === undefined || invocation.stdout === null
         ? Promise.resolve(undefined)
         : Promise.race([
-            readSkillCommandOutput(invocation.stdout, () => {
-              skillOutputLimitExceeded = true;
-              requestTermination("SIGTERM");
-            }),
+            readSkillCommandOutput(invocation.stdout),
             new Promise<undefined>((resolve) => {
               forceCaptureCompletion = () => resolve(undefined);
             }),
@@ -545,9 +582,6 @@ export async function runCodexSkillCommand(
       invocation.once(output === undefined ? "exit" : "close", complete);
     });
     const [status, events] = await Promise.all([invocationStatus, captured]);
-    if (skillOutputLimitExceeded) {
-      throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
-    }
     if (output === undefined || status === 130 || status === 143) return status;
     if (status !== 0) {
       await writeCliOutput(
@@ -692,7 +726,7 @@ export async function main(
     try {
       return await select(await dependencies.runWorkbench(args));
     } catch (error) {
-      errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
       return undefined;
     }
@@ -795,6 +829,44 @@ export async function main(
       ]);
     },
   });
+  findingFeedback.command("list", {
+    description: "List open findings for a repository across its scans.",
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .optional()
+        .describe("Repository to inspect (default: current directory)."),
+    }),
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, format }) {
+      const repository = resolve(
+        dependencies.currentDirectory(),
+        args.repository ?? ".",
+      );
+      return presentHistory(
+        await history(
+          ["list-repositories"],
+          async (value): Promise<JsonObject> => {
+            const target = (value["repositories"] as JsonObject[]).find(
+              (entry) => entry["targetPath"] === repository,
+            );
+            const findings =
+              target === undefined
+                ? []
+                : await listRepositoryFindings(
+                    dependencies.runWorkbench,
+                    target["targetId"] as string,
+                  );
+            return { repository, findings: findings ?? [] };
+          },
+        ),
+        "findings",
+        format,
+        { repository },
+      );
+    },
+  });
   const scanHistory = Cli.create("scans", {
     description:
       "List, inspect, rerun, match, and compare saved Codex Security scans.",
@@ -873,6 +945,39 @@ export async function main(
         );
       },
     })
+    .command("logs", {
+      description: "Show saved activity for a scan and its workers.",
+      mcp: false,
+      args: z.object({
+        scanId: z
+          .string()
+          .min(1)
+          .describe("Saved scan identifier or unique prefix."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args }) {
+        return await history(
+          ["get-scan", "--scan-id", args.scanId],
+          async (value) => {
+            const scan = value["scan"] as {
+              scanId: string;
+              continuationThreadId?: string;
+            };
+            const threadId = scan.continuationThreadId;
+            if (!threadId) {
+              throw new CodexSecurityError(
+                `No session is associated with scan ${scan.scanId}.`,
+              );
+            }
+            return (await readScanLogs({
+              scanId: scan.scanId,
+              threadId,
+              codexHome: codexSecurityCredentialHome(dependencies.environment),
+            })) as unknown as JsonObject;
+          },
+        );
+      },
+    })
     .command("rerun", {
       description: "Rerun a saved scan with its original configuration.",
       destructive: true,
@@ -880,8 +985,14 @@ export async function main(
       args: z.object({
         scanId: z.string().min(1).describe("Saved scan identifier."),
       }),
+      options: z.object({
+        verbose: z
+          .boolean()
+          .default(false)
+          .describe("Print scan diagnostics to stderr."),
+      }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError }) {
+      async run({ args, error: incurError, options }) {
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
@@ -890,8 +1001,9 @@ export async function main(
             args.scanId,
           ]);
           scanArguments = scanArgumentsFromRecipe(recipe, args.scanId);
+          scanArguments.verbose = options.verbose;
         } catch (error) {
-          const message = redactedErrorMessage(error);
+          const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
           return incurError({
@@ -954,7 +1066,7 @@ export async function main(
             format,
           );
         } catch (error) {
-          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -1004,6 +1116,10 @@ export async function main(
             .describe(
               "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
             ),
+          verbose: z
+            .boolean()
+            .default(false)
+            .describe("Print scan diagnostics to stderr."),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -1016,6 +1132,12 @@ export async function main(
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
+          scanPromptFile: optionValue("--scan-prompt-file")
+            .optional()
+            .describe("Append scan instructions from FILE."),
+          postScanPromptFile: optionValue("--post-scan-prompt-file")
+            .optional()
+            .describe("Run FILE after each scan, including failures."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan committed Git changes from BASE to --head."),
@@ -1040,6 +1162,7 @@ export async function main(
               `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
             ),
           effort: effortOption(),
+          provider: PROVIDER_OPTION,
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -1068,6 +1191,12 @@ export async function main(
             .positive()
             .optional()
             .describe("Stop the scan if estimated USD cost exceeds AMOUNT."),
+          headless: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Use plain text progress instead of the interactive dashboard.",
+            ),
           dryRun: z
             .boolean()
             .default(false)
@@ -1138,9 +1267,12 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            verbose: options.verbose,
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
+            scanPromptFile: options.scanPromptFile,
+            postScanPromptFile: options.postScanPromptFile,
             diff: options.diff,
             workingTree: options.workingTree,
             head: options.head,
@@ -1152,6 +1284,7 @@ export async function main(
             maxDiscoveryRuns: options.maxDiscoveryRuns,
             model: options.model,
             effort: options.effort,
+            provider: options.provider,
             outputDir: options.outputDir,
             archiveExisting: options.archiveExisting,
             pluginPath: options.pluginPath,
@@ -1159,6 +1292,7 @@ export async function main(
             codex: options.codex,
             failOnSeverity: options.failOnSeverity,
             maxCostUsd: options.maxCost,
+            headless: options.headless,
             dryRun: options.dryRun,
           },
           errorOutput,
@@ -1249,7 +1383,7 @@ export async function main(
             failOnSeverity: options.failOnSeverity,
           };
         } catch (error) {
-          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
           exitCode = 2;
           return undefined;
         }
@@ -1295,12 +1429,19 @@ export async function main(
           .enum(["standard", "deep"])
           .default("standard")
           .describe("Default scan mode for repositories without a CSV mode."),
+        scanPromptFile: optionValue("--scan-prompt-file")
+          .optional()
+          .describe("Append instructions from FILE to every scan."),
+        postScanPromptFile: optionValue("--post-scan-prompt-file")
+          .optional()
+          .describe("Run FILE after each scan, including failures."),
         model: optionValue("--model")
           .optional()
           .describe(
             `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ),
         effort: effortOption(),
+        provider: PROVIDER_OPTION,
         maxAttempts: z
           .number()
           .int()
@@ -1344,34 +1485,18 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          const prompts = await readPromptFiles(
+            currentDirectory,
+            options.scanPromptFile,
+            options.postScanPromptFile,
+          );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            let optionIndex = 1;
-            while (optionIndex < argv.length) {
-              const argument = argv[optionIndex]!;
-              if (
-                argument === "--model" ||
-                argument === "--effort" ||
-                argument === "--codex" ||
-                argument === "--knowledge-base"
-              ) {
-                optionIndex += 2;
-              } else if (
-                argument.startsWith("--model=") ||
-                argument.startsWith("--effort=") ||
-                argument.startsWith("--codex=") ||
-                argument.startsWith("--knowledge-base=")
-              ) {
-                optionIndex += 1;
-              } else {
-                break;
-              }
-            }
-            if (argv[0] !== "bulk-scan" || optionIndex !== argv.length) {
+            if (options.outputDir !== undefined) {
               throw new Error(
-                "Run 'codex-security bulk-scan [--model MODEL] [--effort EFFORT] [--codex KEY=VALUE] [--knowledge-base PATH]' to discover repositories, or provide a CSV and --output-dir.",
+                "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
               );
             }
             const wizard = await runBulkScanWizard(
@@ -1404,6 +1529,7 @@ export async function main(
             mode: options.mode,
             maxAttempts: options.maxAttempts,
             knowledgeBasePaths: options.knowledgeBase,
+            ...prompts,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -1411,17 +1537,21 @@ export async function main(
                 options.codex,
                 options.model,
                 options.effort,
+                options.provider,
               ),
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error }) => {
+            onProgress: ({ repository, status, attempt, error, warning }) => {
+              const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${error === undefined ? "" : `: ${redactedErrorMessage(error)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${errorMessage(detail)}`}\n`,
               );
             },
           });
-          exitCode = interruptedExitCode() ?? (result.failed > 0 ? 2 : 0);
+          exitCode =
+            interruptedExitCode() ??
+            (result.failed > 0 || result.incomplete > 0 ? 2 : 0);
           return { ...result };
         } catch (error) {
           exitCode =
@@ -1429,7 +1559,7 @@ export async function main(
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
-          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
           dependencies.removeSignalListener("SIGINT", onInterrupt);
           dependencies.removeSignalListener("SIGTERM", onTerminate);
@@ -1533,7 +1663,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         }
       },
     })
@@ -1569,7 +1699,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         }
       },
     })
@@ -1758,7 +1888,7 @@ export async function main(
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
-      `codex-security: ${redactedErrorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
     );
     return 2;
   }
@@ -1767,7 +1897,7 @@ export async function main(
     await writeCliOutput(output, renderedHistory ?? frameworkOutput);
     return exitCode;
   } catch (error) {
-    errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
     return 2;
   }
 }
@@ -2193,9 +2323,6 @@ async function runSkill(
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<number> {
-  if (inputs.length > MAX_SKILL_INPUT_COUNT) {
-    throw new CodexSecurityError("Skill inputs exceed the 64-item limit.");
-  }
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
     Object.keys(overrides).some(
@@ -2210,16 +2337,12 @@ async function runSkill(
     await mergedCodexConfig({ codexOverrides: overrides }),
   );
   const directory = dependencies.currentDirectory();
-  let totalBytes = 0;
   const contents: string[] = [];
   for (const input of inputs) {
     if (input.trim().length === 0) {
       throw new CodexSecurityError(
         "Finding or issue inputs must not be empty.",
       );
-    }
-    if (Buffer.byteLength(input, "utf8") > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     let contentsOrLiteral = input;
     const windowsNamespace =
@@ -2262,9 +2385,6 @@ async function runSkill(
             "Finding and issue inputs must be files or literal text.",
           );
         }
-        if (metadata.size > MAX_SKILL_INPUT_BYTES) {
-          throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
-        }
         try {
           contentsOrLiteral = await readFile(path, "utf8");
         } catch {
@@ -2278,10 +2398,6 @@ async function runSkill(
           );
         }
       }
-    }
-    totalBytes += Buffer.byteLength(contentsOrLiteral, "utf8");
-    if (totalBytes > MAX_SKILL_INPUT_BYTES) {
-      throw new CodexSecurityError("Skill input exceeds the 1 MiB limit.");
     }
     contents.push(contentsOrLiteral);
   }
@@ -2303,6 +2419,8 @@ async function runSkill(
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
       "--config",
       'approval_policy="never"',
+      "--config",
+      'responses_api_metadata.codex_security_surface="cli"',
       "--sandbox",
       "workspace-write",
       "--skip-git-repo-check",
@@ -2324,33 +2442,23 @@ async function runSkill(
 
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
-  onLimitExceeded?: () => void,
 ): Promise<{ message?: string; error?: string; malformed: boolean }> {
   let message: string | undefined;
   let error: string | undefined;
   let malformed = false;
-  let exceeded = false;
-  const markExceeded = (): void => {
-    if (exceeded) return;
-    exceeded = true;
-    onLimitExceeded?.();
-  };
 
-  const readLine = (bytes: Buffer): void => {
-    const content =
-      bytes.at(-1) === 0x0d ? bytes.subarray(0, bytes.length - 1) : bytes;
-    const line = content.toString("utf8");
-    if (line.trim().length === 0) return;
+  for await (const line of createInterface({ input: Readable.from(stream) })) {
+    if (line.trim().length === 0) continue;
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
       malformed = true;
-      return;
+      continue;
     }
     if (typeof event !== "object" || event === null) {
       malformed = true;
-      return;
+      continue;
     }
     const value = event as Record<string, unknown>;
     if (value["type"] === "item.completed") {
@@ -2363,11 +2471,7 @@ export async function readSkillCommandOutput(
         "text" in item &&
         typeof item.text === "string"
       ) {
-        if (Buffer.byteLength(item.text, "utf8") > MAX_SKILL_RESPONSE_BYTES) {
-          markExceeded();
-        } else {
-          message = item.text;
-        }
+        message = item.text;
       }
     } else if (value["type"] === "turn.failed") {
       const detail = value["error"];
@@ -2377,63 +2481,15 @@ export async function readSkillCommandOutput(
         "message" in detail &&
         typeof detail.message === "string"
       ) {
-        if (
-          Buffer.byteLength(detail.message, "utf8") > MAX_SKILL_RESPONSE_BYTES
-        ) {
-          markExceeded();
-        } else {
-          error = detail.message;
-        }
+        error = detail.message;
       }
     } else if (
       value["type"] === "error" &&
       typeof value["message"] === "string"
     ) {
-      if (
-        Buffer.byteLength(value["message"], "utf8") > MAX_SKILL_RESPONSE_BYTES
-      ) {
-        markExceeded();
-      } else {
-        error = value["message"];
-      }
-    }
-  };
-
-  const pending = Buffer.alloc(MAX_SKILL_EVENT_BYTES);
-  let pendingBytes = 0;
-  let discardingOversizedLine = false;
-  for await (const rawChunk of stream) {
-    const chunk = Buffer.isBuffer(rawChunk)
-      ? rawChunk
-      : Buffer.from(rawChunk, "utf8");
-    let start = 0;
-    while (start < chunk.length) {
-      const newline = chunk.indexOf(0x0a, start);
-      const end = newline === -1 ? chunk.length : newline;
-      const segment = chunk.subarray(start, end);
-      if (!discardingOversizedLine) {
-        if (pendingBytes + segment.length > MAX_SKILL_EVENT_BYTES) {
-          markExceeded();
-          discardingOversizedLine = true;
-          pendingBytes = 0;
-        } else if (segment.length > 0) {
-          segment.copy(pending, pendingBytes);
-          pendingBytes += segment.length;
-        }
-      }
-      if (newline === -1) break;
-      if (!discardingOversizedLine) {
-        readLine(pending.subarray(0, pendingBytes));
-      }
-      pendingBytes = 0;
-      discardingOversizedLine = false;
-      start = newline + 1;
+      error = value["message"];
     }
   }
-  if (!discardingOversizedLine && pendingBytes > 0) {
-    readLine(pending.subarray(0, pendingBytes));
-  }
-  if (exceeded) throw new CodexSecurityError(SKILL_OUTPUT_LIMIT_MESSAGE);
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
@@ -2564,9 +2620,18 @@ async function runExport(
     }
     return 0;
   } catch (error) {
-    errorOutput.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
     return 2;
   }
+}
+
+type VerboseDiagnosticValue = string | number | boolean | null | undefined;
+
+function diagnosticValue(value: unknown): string {
+  return errorMessage(value).replaceAll(
+    /[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu,
+    " ",
+  );
 }
 
 async function runScan(
@@ -2579,8 +2644,45 @@ async function runScan(
   let requestedSignal: SignalName | null = null;
   let firstSignalAt = 0;
   let progress: Progress | null = null;
+  let dashboard: ScanDashboard | null = null;
   let lastWorkerUpdate = "";
+  let lastProgressUpdate = "";
+  let workerCapacity: { planned: number; started: number } | null = null;
+  let fileProgress: ScanProgress | null = null;
+  let runningCost: Readonly<ScanCost> | null = null;
   let phase: string | null = null;
+  const targetWarnings: string[] = [];
+  const configuredLogLevel =
+    dependencies.environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
+    dependencies.environment["LOG_LEVEL"]?.trim();
+  const verbose =
+    arguments_.verbose === true ||
+    configuredLogLevel?.toLowerCase() === "debug";
+  const writeAboveProgress = (write: () => void): void => {
+    if (progress === null) {
+      write();
+      return;
+    }
+    progress.writeAboveTimer(write);
+  };
+  const diagnostic = (
+    event: string,
+    fields: Readonly<Record<string, VerboseDiagnosticValue>> = {},
+  ): void => {
+    if (!verbose) return;
+    const attributes = Object.entries(fields).flatMap(([name, value]) =>
+      value === undefined
+        ? []
+        : [
+            `${name}=${JSON.stringify(typeof value === "string" ? diagnosticValue(value) : value)}`,
+          ],
+    );
+    writeAboveProgress(() => {
+      errorOutput.write(
+        `codex-security: debug: ${event}${attributes.length === 0 ? "" : ` ${attributes.join(" ")}`}\n`,
+      );
+    });
+  };
   const preparationAbortController = new AbortController();
   const signalListener = (signal: SignalName) => () => {
     if (requestedSignal !== null) {
@@ -2593,6 +2695,7 @@ async function runScan(
         return;
       }
       requestedSignal = signal;
+      dashboard?.stop();
       progress?.stopTimer();
       if (progress?.interactive === true) {
         try {
@@ -2622,12 +2725,20 @@ async function runScan(
     null;
   let result: ScanResult | null = null;
   let preflight: ScanPreflight | null = null;
+  let effectiveModel = DEFAULT_SCAN_MODEL_CONFIGURATION.model;
+  let effectiveReasoningEffort =
+    DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort;
   let selectedAuthentication: ScanAuthentication | null = null;
   let failed = false;
   let failure: unknown;
   try {
     const repository = arguments_.repository ?? dependencies.currentDirectory();
     const target = targetFromArguments(arguments_);
+    const prompts = await readPromptFiles(
+      dependencies.currentDirectory(),
+      arguments_.scanPromptFile,
+      arguments_.postScanPromptFile,
+    );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
@@ -2637,11 +2748,25 @@ async function runScan(
           arguments_.codex,
           arguments_.model,
           arguments_.effort,
+          arguments_.provider,
         ),
     };
+    const selectedProfileName = config.codexOverrides?.["profile"];
+    const effectiveConfiguration = {
+      ...DEFAULT_CODEX_CONFIG,
+      ...config.codexOverrides,
+    };
+    ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
+      scanModelConfiguration(effectiveConfiguration));
     let auth = arguments_.auth;
-    selectedAuthentication = scanAuthentication(dependencies.environment, auth);
+    const provider = scanModelProvider(effectiveConfiguration);
+    selectedAuthentication = scanAuthentication(
+      dependencies.environment,
+      auth,
+      provider,
+    );
     if (
+      !isExternalModelProvider(provider) &&
       (auth === undefined || auth === "auto") &&
       !arguments_.dryRun &&
       interactive &&
@@ -2673,25 +2798,99 @@ async function runScan(
         selectedAuthentication = scanAuthentication(
           dependencies.environment,
           auth,
+          provider,
         );
       }
     }
-    progress = new Progress(errorOutput, dependencies, interactive);
-    const scope = scanScope(arguments_);
-    const runningMessage = (): string =>
-      phase === null
-        ? scope === null
-          ? "Running scan"
-          : `Running scan: ${scope}`
-        : `Running scan: ${phase}${scope === null ? "" : ` (${scope})`}`;
-    progress.startTimer(
-      arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
+    diagnostic("scan.configuration", {
+      cli_version: VERSION,
+      bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
+      codex_version: CODEX_EXECUTABLE_VERSION,
+      codex_sdk_version: CODEX_SDK_VERSION,
+      mode: arguments_.mode,
+      max_cost_usd: arguments_.maxCostUsd,
+      target:
+        arguments_.paths.length > 0
+          ? "paths"
+          : arguments_.diff !== undefined
+            ? "diff"
+            : arguments_.workingTree
+              ? "working_tree"
+              : "repository",
+      requested_auth: auth ?? "auto",
+      dry_run: arguments_.dryRun,
+      profile:
+        typeof selectedProfileName === "string"
+          ? selectedProfileName
+          : undefined,
+      model: effectiveModel,
+      reasoning_effort: effectiveReasoningEffort,
+    });
+    progress = new Progress(
+      errorOutput,
+      dependencies,
+      interactive &&
+        !arguments_.headless &&
+        dependencies.environment["CI"] === undefined &&
+        dependencies.environment["TERM"] !== "dumb",
     );
+    if (progress.interactive && !arguments_.dryRun && !verbose) {
+      dashboard = new ScanDashboard(errorOutput, {
+        repository,
+        model: scanModelConfiguration(await mergedCodexConfig(config)),
+        ...(arguments_.maxCostUsd === undefined
+          ? {}
+          : { maxCostUsd: arguments_.maxCostUsd }),
+        clock: dependencies,
+        color: dependencies.environment["NO_COLOR"] === undefined,
+        sanitize: safeErrorMessage,
+        input: process.stdin,
+        onInterrupt,
+      });
+    }
+    const scope = scanScope(arguments_);
+    const runningMessage = (): string => {
+      const stage =
+        phase === null
+          ? scope === null
+            ? "Running scan"
+            : `Running scan: ${scope}`
+          : `Running scan: ${phase}${scope === null ? "" : ` (${scope})`}`;
+      const details: string[] = [];
+      if (workerCapacity !== null) {
+        details.push(
+          `Workers: ${workerCapacity.started}/${workerCapacity.planned}`,
+        );
+      }
+      if (fileProgress !== null && fileProgress.filesTotal > 0) {
+        details.push(
+          `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
+        );
+      }
+      if (runningCost !== null) {
+        const tokens = formatTokenUsage({
+          input_tokens: runningCost.inputTokens,
+          cached_input_tokens: runningCost.cachedInputTokens,
+          output_tokens: runningCost.outputTokens,
+        });
+        if (tokens !== null) details.push(`Tokens: ${tokens}`);
+        details.push(`Cost: ${formatUsd(runningCost.estimatedUsd)}`);
+      }
+      return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
+    };
+    if (dashboard === null) {
+      progress.startTimer(
+        arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
+      );
+    } else {
+      dashboard.start();
+    }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
       auth,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
+      ...prompts,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
@@ -2704,27 +2903,81 @@ async function runScan(
       failureSeverity: arguments_.failOnSeverity,
       maxCostUsd: arguments_.maxCostUsd,
       onCost: (cost) => {
-        if (arguments_.maxCostUsd === undefined) return;
+        diagnostic("cost.updated", {
+          model: cost.model,
+          estimated_usd: cost.estimatedUsd,
+          input_tokens: cost.inputTokens,
+          cached_input_tokens: cost.cachedInputTokens,
+          cache_write_input_tokens: cost.cacheWriteInputTokens,
+          output_tokens: cost.outputTokens,
+          max_cost_usd: arguments_.maxCostUsd,
+        });
+        runningCost = cost;
+        if (dashboard !== null) {
+          dashboard.setCost(cost);
+          return;
+        }
         progress?.stopTimer();
-        progress?.stage(
-          `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
-        );
-        if (cost.estimatedUsd <= arguments_.maxCostUsd) {
+        if (arguments_.maxCostUsd === undefined) {
+          const tokens = formatTokenUsage({
+            input_tokens: cost.inputTokens,
+            cached_input_tokens: cost.cachedInputTokens,
+            output_tokens: cost.outputTokens,
+          });
+          progress?.stage(
+            `${tokens === null ? "" : `Tokens: ${tokens}. `}Estimated cost: ${formatUsd(cost.estimatedUsd)} USD.`,
+          );
+        } else {
+          progress?.stage(
+            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
+          );
+        }
+        if (
+          arguments_.maxCostUsd === undefined ||
+          cost.estimatedUsd <= arguments_.maxCostUsd
+        ) {
           progress?.startTimer(runningMessage());
         }
       },
       onOutputArchived: (archiveDir) => {
+        diagnostic("scan.output_archived", { archive_dir: archiveDir });
+        if (dashboard !== null) {
+          dashboard.note(
+            `Moved existing results to: ${errorMessage(archiveDir)}`,
+          );
+          return;
+        }
         progress?.stopTimer();
         errorOutput.write(
-          `Moved existing results to: ${redactedErrorMessage(archiveDir)}\n`,
+          `Moved existing results to: ${errorMessage(archiveDir)}\n`,
         );
       },
       signal: preparationAbortController.signal,
       onOutputDirReady: (path) => {
         scanDir = path;
+        diagnostic("scan.output_ready", { scan_dir: path });
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        diagnostic("authentication.selected", {
+          requested: auth ?? "auto",
+          method: authentication.method,
+          source:
+            authentication.method !== "stored_credentials"
+              ? authentication.source
+              : undefined,
+          verified: authentication.verified,
+        });
+        if (dashboard !== null) {
+          dashboard.note(
+            authentication.method === "api_key"
+              ? `Using API key from ${authentication.source}`
+              : authentication.method === "aws_credentials"
+                ? `Using AWS credentials from ${authentication.source}`
+                : "Using stored Codex credentials",
+          );
+          return;
+        }
         progress?.stopTimer();
         if (authentication.method === "api_key") {
           progress?.stage(
@@ -2733,16 +2986,38 @@ async function runScan(
           progress?.stage(
             "To use your ChatGPT sign-in, retry with --auth chatgpt.",
           );
+        } else if (authentication.method === "aws_credentials") {
+          progress?.stage(
+            `Authentication: AWS credentials from ${authentication.source}.`,
+          );
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
         progress?.startTimer("Preparing scan");
       },
+      onTrustedAccessStatus: (status) => {
+        if (status === "granted") {
+          errorOutput.write(
+            "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
+          );
+        }
+      },
       onScanStarted: () => {
+        diagnostic("scan.started");
+        if (dashboard !== null) {
+          dashboard.setStage(phase ?? "Scanning repository");
+          return;
+        }
         progress?.stopTimer();
         progress?.startTimer(runningMessage());
       },
       onReconnect: (attempt, maxAttempts, details) => {
+        diagnostic("connection.retry", {
+          reason: details?.reason ?? "unknown",
+          attempt,
+          max_attempts: maxAttempts,
+          retry_after_seconds: details?.retryAfterSeconds,
+        });
         progress?.stopTimer();
         const message =
           details?.reason === "rate_limit"
@@ -2758,8 +3033,39 @@ async function runScan(
                 : details?.reason === "authorization"
                   ? `Model access interrupted; retrying (${attempt}/${maxAttempts}).`
                   : `Codex connection interrupted; retrying (${attempt}/${maxAttempts})`;
+        if (dashboard !== null) {
+          dashboard.note(message);
+          return;
+        }
         progress?.stage(message);
         progress?.startTimer(runningMessage());
+      },
+      onActivity: (activity) => {
+        if (dashboard === null) return;
+        dashboard.record(activity);
+        if (activity.paths.length > 0 && phase === "preflight") {
+          dashboard.setStage("inspecting repository files");
+        }
+      },
+      onProgress: (update) => {
+        const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
+        if (key === lastProgressUpdate) return;
+        lastProgressUpdate = key;
+        fileProgress = update;
+        const previousPhase = phase;
+        phase = scanPhase(update.phase);
+        if (dashboard !== null) {
+          dashboard.setFiles(update);
+          dashboard.setStage(phase);
+          if (previousPhase !== phase) dashboard.note(`Started ${phase}`);
+          return;
+        }
+        if (progress === null) return;
+        progress.stopTimer();
+        progress.stage(
+          `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
+        );
+        progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
         const update =
@@ -2768,22 +3074,56 @@ async function runScan(
             : `dispatch:${status.phase}:${status.planned}:${status.started}`;
         if (update === lastWorkerUpdate) return;
         lastWorkerUpdate = update;
-        if (status.kind === "dispatch") phase = scanPhase(status.phase);
+        if (status.kind === "preflight") {
+          diagnostic("worker.preflight", {
+            delegation: status.delegation,
+            configured_slots: status.configuredSlots,
+          });
+        } else {
+          diagnostic("worker.phase", {
+            phase: status.phase,
+            planned: status.planned,
+            started: status.started,
+          });
+          workerCapacity = { planned: status.planned, started: status.started };
+          phase = scanPhase(status.phase);
+        }
         const message = workerStatusMessage(status);
+        if (dashboard !== null) {
+          if (status.kind === "dispatch") {
+            dashboard.setStage(scanPhase(status.phase));
+          }
+          if (message !== null) dashboard.note(message);
+          return;
+        }
         if (message === null || progress === null) return;
         progress.stopTimer();
         progress.stage(message);
         progress.startTimer(runningMessage());
       },
-      onWarning: (warning) => {
-        errorOutput.write(
-          `codex-security: warning: ${redactedErrorMessage(warning)}\n`,
-        );
+      onWarning: (warning, details) => {
+        const message = diagnosticValue(warning);
+        if (details?.kind === "target_changed") {
+          targetWarnings.push(message);
+        }
+        writeAboveProgress(() => {
+          diagnostic("scan.warning", { message });
+          errorOutput.write(`codex-security: warning: ${message}\n`);
+        });
       },
       onObserverError: (observer, error) => {
-        errorOutput.write(
-          `codex-security: warning: ${observer} observer failed: ${redactedErrorMessage(error)}\n`,
-        );
+        diagnostic("scan.observer_failed", {
+          observer,
+          classification: classifyConnectionFailure(error),
+        });
+        const warning = `${observer} observer failed: ${diagnosticValue(error)}`;
+        if (dashboard === null) {
+          writeAboveProgress(() => {
+            errorOutput.write(`codex-security: warning: ${warning}\n`);
+          });
+        } else {
+          dashboard.note(`Warning: ${warning}`);
+        }
       },
     };
     if (arguments_.dryRun) {
@@ -2792,22 +3132,35 @@ async function runScan(
       result = await security.run(repository, options);
       scanDir = result.scanDir;
     }
-    progress.stopTimer();
   } catch (error) {
     failed = true;
     failure = error;
   } finally {
+    dashboard?.stop();
     progress?.stopTimer();
-    await security?.close().catch((error: unknown) => {
-      if (!failed) {
-        failed = true;
-        failure = error;
-      }
-    });
+    if (security !== null) {
+      diagnostic("runtime.cleanup.started");
+      await security.close().then(
+        () => diagnostic("runtime.cleanup.completed"),
+        (error: unknown) => {
+          diagnostic("runtime.cleanup.failed", {
+            classification: classifyConnectionFailure(error),
+          });
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        },
+      );
+    }
     removeSignalListeners();
   }
 
   if (requestedSignal !== null) {
+    diagnostic("scan.interrupted", {
+      signal: requestedSignal,
+      partial_output: scanDir !== null,
+    });
     return {
       exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
       error:
@@ -2817,26 +3170,58 @@ async function runScan(
     };
   }
   if (failed) {
+    const costLimitFailure =
+      failure instanceof ScanCostLimitExceededError ? failure : undefined;
     const message =
       failure instanceof OutputInsideProtectedRootError
-        ? redactedErrorMessage(protectedRootErrorMessage(failure))
+        ? errorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
+    diagnostic("scan.failed", {
+      classification:
+        costLimitFailure !== undefined
+          ? "cost_limit_exceeded"
+          : isLocalScanFailure(failure)
+            ? "local"
+            : classifyConnectionFailure(failure),
+      partial_output: scanDir !== null,
+      max_cost_usd: costLimitFailure?.maxCostUsd,
+      estimated_usd: costLimitFailure?.cost.estimatedUsd,
+    });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
       return { exitCode: 2, error: message };
     }
     if (scanDir !== null) {
       errorOutput.write(
-        `Partial output was kept at ${redactedErrorMessage(scanDir)}.\n`,
+        `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
     }
     return { exitCode: 2, error: message };
   }
   if (preflight !== null) {
+    const effectivePreflight: ScanPreflight = {
+      ...preflight,
+      model: effectiveModel,
+      reasoningEffort: effectiveReasoningEffort,
+    };
     progress?.stage("Preflight complete");
-    return { exitCode: 0, data: { dryRun: true, ...preflight } };
+    diagnostic("scan.preflight.completed", {
+      model: effectivePreflight.model,
+      reasoning_effort: effectivePreflight.reasoningEffort,
+      method: effectivePreflight.authentication.method,
+      source:
+        effectivePreflight.authentication.method !== "stored_credentials"
+          ? effectivePreflight.authentication.source
+          : undefined,
+      verified: effectivePreflight.authentication.verified,
+    });
+    return { exitCode: 0, data: { dryRun: true, ...effectivePreflight } };
   }
   if (result === null) {
+    diagnostic("scan.failed", {
+      classification: "unknown",
+      message: "Scan completed without a result.",
+    });
     errorOutput.write("scan completed without a result\n");
     return { exitCode: 2, error: "Scan completed without a result." };
   }
@@ -2852,8 +3237,12 @@ async function runScan(
   const blockingCount = result.findings.findings.filter(({ severity }) =>
     blockingSeverities.has(severity.level),
   ).length;
+  const scanData =
+    targetWarnings.length === 0
+      ? result.toJSON()
+      : { ...result.toJSON(), warnings: targetWarnings };
   const incomplete = result.coverage.completeness !== "complete";
-  progress?.stage("Scan complete");
+  progress?.stage(`Scan complete · ${result.manifest.scan.id.slice(0, 8)}`);
   printScanSummary(
     result,
     progress,
@@ -2862,15 +3251,29 @@ async function runScan(
       dependencies.environment["NO_COLOR"] === undefined &&
       dependencies.environment["TERM"] !== "dumb",
   );
+  diagnostic("scan.completed", {
+    coverage: result.coverage.completeness,
+    findings: result.findings.findings.length,
+    scan_id: result.manifest.scan.id,
+    estimated_usd: result.cost?.estimatedUsd,
+    exit_code:
+      targetWarnings.length > 0 || incomplete ? 2 : blockingCount > 0 ? 1 : 0,
+  });
+  if (targetWarnings.length > 0) {
+    errorOutput.write(
+      "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
+    );
+    return { exitCode: 2, data: scanData };
+  }
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
         ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
         : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
     );
-    return { exitCode: 2, data: result.toJSON() };
+    return { exitCode: 2, data: scanData };
   }
-  return { exitCode: blockingCount > 0 ? 1 : 0, data: result.toJSON() };
+  return { exitCode: blockingCount > 0 ? 1 : 0, data: scanData };
 }
 
 // Filesystem and OS syscall failures cannot originate from the model transport,
@@ -2927,9 +3330,15 @@ function scanFailureMessage(
   // appending it. That is deliberate: upstream authentication and authorization
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
-  if (isLocalScanFailure(error)) return redactedErrorMessage(error);
+  if (isLocalScanFailure(error)) return diagnosticValue(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `Authentication failed using AWS credentials from ${authentication.source}. ` +
+          "Check your Amazon Bedrock bearer token or AWS credential chain."
+        );
+      }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
             "Your ChatGPT sign-in was not used. " +
@@ -2937,6 +3346,12 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions."
+        );
+      }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
@@ -2947,7 +3362,7 @@ function scanFailureMessage(
     case "network_error":
     case "timeout":
     case "unknown":
-      return redactedErrorMessage(error);
+      return diagnosticValue(error);
   }
 }
 
@@ -2961,9 +3376,7 @@ function scanScope(arguments_: ScanArguments): string | null {
         portable.startsWith("//")
           ? portable.split("/").at(-1) ?? portable
           : portable;
-      return redactedErrorMessage(
-        scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "),
-      );
+      return errorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
     });
     return `${displayed.join(", ")}${arguments_.paths.length > displayed.length ? `, +${arguments_.paths.length - displayed.length} more` : ""}`;
   }
@@ -2972,12 +3385,16 @@ function scanScope(arguments_: ScanArguments): string | null {
   return null;
 }
 
-function scanPhase(value: ScanWorkerPhase): string {
+function scanPhase(value: ScanWorkerPhase | ScanPhase): string {
   return {
+    preflight: "preflight",
+    threat_model: "building threat model",
+    discovery: "reviewing files",
     ranking: "ranking scan targets",
     file_review: "reviewing files",
     validation: "validating findings",
     attack_path: "analyzing attack paths",
+    reporting: "writing report",
   }[value];
 }
 
@@ -2989,8 +3406,10 @@ function printScanSummary(
 ): void {
   const paint = (value: string, code: number | string): string =>
     color ? `\u001B[${code}m${value}\u001B[0m` : value;
+  const repositoryFindings = result.repositoryFindings;
+  const findings = repositoryFindings ?? result.findings.findings;
   const severities = new Map<SeverityLevel, number>();
-  for (const finding of result.findings.findings) {
+  for (const finding of findings) {
     severities.set(
       finding.severity.level,
       (severities.get(finding.severity.level) ?? 0) + 1,
@@ -3015,7 +3434,13 @@ function printScanSummary(
     elapsed < 60
       ? `${elapsed}s`
       : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-  const findingCount = result.findings.findings.length;
+  const findingCount = findings.length;
+  const confirmedCount =
+    repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
+      .length ?? 0;
+  const findingSummary = repositoryFindings?.length
+    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    : severitySummary;
   const findingColor =
     findingCount === 0
       ? 32
@@ -3025,8 +3450,8 @@ function printScanSummary(
           ? 33
           : 36;
   errorOutput.write(
-    `\n  ${paint("REPORT", "1;36")}    ${paint(redactedErrorMessage(result.reportPath), 4)}\n\n` +
-      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${severitySummary === "" ? "" : ` (${severitySummary})`}`, findingColor)}\n` +
+    `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
+      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
       `  ${paint("ELAPSED", 1)}   ${duration}\n`,
   );
@@ -3041,7 +3466,7 @@ function printScanSummary(
     );
   }
   errorOutput.write(
-    `  ${paint("RESULTS", 1)}   ${redactedErrorMessage(result.scanDir)}\n`,
+    `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
 }
 
@@ -3156,10 +3581,19 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelReasoningEffort,
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
+  if (isExternalModelProvider(provider)) {
+    result["model_provider"] = provider;
+    result["model_providers"] = {
+      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+    };
+  } else if (provider === "amazon-bedrock") {
+    result["model_provider"] = provider;
+  }
   for (const value of values) {
     const separator = value.indexOf("=");
     const key = separator < 0 ? "" : value.slice(0, separator);
@@ -3167,15 +3601,8 @@ export function parseCodexOverrides(
     if (key.length === 0 || literal.length === 0) {
       throw new CodexSecurityError("--codex expects KEY=VALUE");
     }
-    if (
-      Buffer.byteLength(key, "utf8") > MAX_CODEX_OVERRIDE_KEY_LENGTH ||
-      Buffer.byteLength(literal, "utf8") > MAX_CODEX_OVERRIDE_VALUE_LENGTH
-    ) {
-      throw new CodexSecurityError("--codex key or value exceeds the limit");
-    }
     const parts = key.split(".");
     if (
-      parts.length > MAX_CODEX_OVERRIDE_DEPTH ||
       parts.some(
         (part) =>
           part.length === 0 ||
@@ -3215,9 +3642,25 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
+      if (
+        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+        key === "model_provider"
+      ) {
+        throw new CodexSecurityError(
+          "--provider conflicts with --codex model_provider",
+        );
+      }
       throw new CodexSecurityError("Duplicate --codex key");
     }
     cursor[final] = parsed;
+  }
+  if (
+    (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+    !("model" in result)
+  ) {
+    throw new CodexSecurityError(
+      `--model is required when using --provider ${provider}`,
+    );
   }
   return result;
 }
@@ -3253,6 +3696,7 @@ export class Progress {
   readonly #startedAt: number;
   readonly #interactive: boolean;
   #timer: NodeJS.Timeout | null = null;
+  #timerMessage: string | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
 
@@ -3297,6 +3741,7 @@ export class Progress {
       () => this.#renderTimer(message),
       PROGRESS_REFRESH_MILLISECONDS,
     );
+    this.#timerMessage = message;
   }
 
   public stopTimer(): void {
@@ -3304,6 +3749,7 @@ export class Progress {
       this.#dependencies.clearInterval(this.#timer);
       this.#timer = null;
     }
+    this.#timerMessage = null;
     if (this.#timerLineActive) {
       this.#stream.write("\n");
       this.#timerLineActive = false;
@@ -3311,6 +3757,20 @@ export class Progress {
     if (this.#cursorHidden) {
       this.#stream.write(SHOW_CURSOR);
       this.#cursorHidden = false;
+    }
+  }
+
+  public writeAboveTimer(write: () => void): void {
+    const message = this.#timerMessage;
+    if (message === null) {
+      write();
+      return;
+    }
+    this.stopTimer();
+    try {
+      write();
+    } finally {
+      this.startTimer(message);
     }
   }
 
@@ -3341,7 +3801,7 @@ function interruptedExit(
   errorOutput.write(
     scanDir === null
       ? "codex-security: No partial output was kept.\n"
-      : `codex-security: Partial output was kept at ${redactedErrorMessage(scanDir)}.\n`,
+      : `codex-security: Partial output was kept at ${errorMessage(scanDir)}.\n`,
   );
   return ctrlC ? 130 : 143;
 }
@@ -3367,7 +3827,7 @@ if (invokedAsMain()) {
       process.exitCode = exitCode;
     },
     (error: unknown) => {
-      process.stderr.write(`codex-security: ${redactedErrorMessage(error)}\n`);
+      process.stderr.write(`codex-security: ${errorMessage(error)}\n`);
       process.exitCode = 2;
     },
   );
