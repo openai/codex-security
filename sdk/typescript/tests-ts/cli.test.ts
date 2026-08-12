@@ -117,6 +117,7 @@ describe("CLI", () => {
           subagents: { type: "integer" },
           stopAfterNoNew: { type: "integer" },
           maxDiscoveryRuns: { type: "integer" },
+          maxTimeHours: { type: "number", maximum: 96 },
           model: { type: "string" },
           verbose: { type: "boolean" },
           effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
@@ -334,6 +335,7 @@ describe("CLI", () => {
       "[deep_scan]",
       "stop_after_no_new",
       "max_discovery_runs",
+      "max_time_hours",
     ]) {
       expect(readme).toContain(setting);
     }
@@ -397,6 +399,7 @@ describe("CLI", () => {
         subagents: number;
         stopAfterNoNew: number;
         maxDiscoveryRuns: number;
+        maxTimeHours: number;
       };
       expect(defaults.workers).toBe(6);
       expect(readme).toContain('workers = "auto"');
@@ -407,6 +410,7 @@ describe("CLI", () => {
       expect(readme).toContain(
         `max_discovery_runs = ${defaults.maxDiscoveryRuns}`,
       );
+      expect(readme).toContain(`max_time_hours = ${defaults.maxTimeHours}`);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1921,6 +1925,7 @@ describe("CLI", () => {
     expect(help.text()).toContain("--subagents <number>");
     expect(help.text()).toContain("--stop-after-no-new <number>");
     expect(help.text()).toContain("--max-discovery-runs <number>");
+    expect(help.text()).toContain("--max-time-hours <number>");
     expect(help.text()).toContain("--headless");
     expect(help.text()).toContain(
       "Use plain text progress instead of the interactive dashboard.",
@@ -2135,6 +2140,8 @@ describe("CLI", () => {
           "3",
           "--max-discovery-runs",
           "10",
+          "--max-time-hours",
+          "1.5",
           "--plugin-path",
           "plugin.zip",
           "--python=/managed/python",
@@ -2159,6 +2166,7 @@ describe("CLI", () => {
       subagents: 0,
       stopAfterNoNew: 3,
       maxDiscoveryRuns: 10,
+      maxTimeHours: 1.5,
     });
     expect(pathConfig).toMatchObject({
       pluginPath: "plugin.zip",
@@ -2293,6 +2301,10 @@ describe("CLI", () => {
         "Deep scan settings require --mode deep",
       ],
       [
+        ["scan", ".", "--max-time-hours", "1.5"],
+        "Deep scan settings require --mode deep",
+      ],
+      [
         ["scan", ".", "--mode", "deep", "--workers", "0"],
         "expected number to be >0",
       ],
@@ -2307,6 +2319,14 @@ describe("CLI", () => {
       [
         ["scan", ".", "--mode", "deep", "--max-discovery-runs", "0"],
         "expected number to be >0",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--max-time-hours", "0"],
+        "expected number to be >0",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--max-time-hours", "96.5"],
+        "expected number to be <=96",
       ],
       [["scan", ".", "--path="], "--path must not be empty"],
       [
@@ -2337,6 +2357,10 @@ describe("CLI", () => {
       [["scan", ".", "--effort", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
+      [
+        ["scan", ".", "--max-time-hours", "--dry-run"],
+        "Missing value for flag",
+      ],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
       [["findings", "false-positive"], "occurrenceId"],
       [["findings", "false-positive", "occurrence-1"], "reason"],

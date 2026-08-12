@@ -188,6 +188,7 @@ const VALUE_OPTIONS = new Set([
   "--subagents",
   "--stop-after-no-new",
   "--max-discovery-runs",
+  "--max-time-hours",
   "--max-attempts",
   "--export-format",
   "--output",
@@ -244,6 +245,12 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .positive()
     .optional()
     .describe("Maximum deep-scan discovery runs."),
+  maxTimeHours: z
+    .number()
+    .positive()
+    .max(96)
+    .optional()
+    .describe("Maximum deep-scan discovery hours (default: 96; maximum: 96)."),
 };
 
 async function readPromptFiles(
@@ -1230,7 +1237,8 @@ export async function main(
             (options.workers === undefined &&
               options.subagents === undefined &&
               options.stopAfterNoNew === undefined &&
-              options.maxDiscoveryRuns === undefined),
+              options.maxDiscoveryRuns === undefined &&
+              options.maxTimeHours === undefined),
           { message: "Deep scan settings require --mode deep." },
         ),
       examples: [
@@ -1278,6 +1286,7 @@ export async function main(
             subagents: options.subagents,
             stopAfterNoNew: options.stopAfterNoNew,
             maxDiscoveryRuns: options.maxDiscoveryRuns,
+            maxTimeHours: options.maxTimeHours,
             model: options.model,
             effort: options.effort,
             provider: options.provider,
@@ -2889,6 +2898,7 @@ async function runScan(
       subagents: arguments_.subagents,
       stopAfterNoNew: arguments_.stopAfterNoNew,
       maxDiscoveryRuns: arguments_.maxDiscoveryRuns,
+      maxTimeHours: arguments_.maxTimeHours,
       outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,

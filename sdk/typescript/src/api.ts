@@ -153,6 +153,7 @@ export interface DeepScanOptions {
   subagents?: number;
   stopAfterNoNew?: number;
   maxDiscoveryRuns?: number;
+  maxTimeHours?: number;
 }
 
 export interface ScanOptions extends DeepScanOptions {
@@ -302,6 +303,7 @@ const DEEP_SCAN_SETTINGS = [
   ["subagents", "subagents", 0],
   ["stopAfterNoNew", "stop_after_no_new", 1],
   ["maxDiscoveryRuns", "max_discovery_runs", 1],
+  ["maxTimeHours", "max_time_hours", 0],
 ] as const;
 
 export class CodexSecurity {
@@ -1725,7 +1727,13 @@ function deepScanOptions(options: ScanOptions): DeepScanOptions {
     if ((options.mode ?? "standard") !== "deep") {
       throw new CodexSecurityError("Deep scan settings require deep mode.");
     }
-    if (!Number.isSafeInteger(value) || value < minimum) {
+    if (name === "maxTimeHours") {
+      if (!Number.isFinite(value) || value <= 0 || value > 96) {
+        throw new CodexSecurityError(
+          "Deep scan maxTimeHours must be a positive number no greater than 96.",
+        );
+      }
+    } else if (!Number.isSafeInteger(value) || value < minimum) {
       throw new CodexSecurityError(
         `Deep scan ${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer.`,
       );

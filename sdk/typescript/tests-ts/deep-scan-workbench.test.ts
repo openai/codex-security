@@ -94,6 +94,139 @@ function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
 
 describe("deep scan workbench ownership", () => {
   test.each([
+    [undefined, 96],
+    [0.5, 0.5],
+    [96, 96],
+  ] as const)(
+    "resolves the configured discovery deadline %s as %s hours",
+    async (configuredHours, expectedHours) => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-deep-deadline-config-")),
+      );
+      temporaryDirectories.push(root);
+      const codexHome = join(root, "codex-home");
+      const configDirectory = join(codexHome, "codex-security");
+      await mkdir(configDirectory, { recursive: true });
+      await writeFile(
+        join(configDirectory, "config.toml"),
+        `[deep_scan]\n${configuredHours === undefined ? "" : `max_time_hours = ${configuredHours}\n`}`,
+      );
+
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const result = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
+          "--available-parallelism",
+          "8",
+        ],
+        {
+          env: { ...process.env, CODEX_HOME: codexHome },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      expect(JSON.parse(new TextDecoder().decode(result.stdout))).toMatchObject(
+        {
+          maxTimeHours: expectedHours,
+        },
+      );
+    },
+  );
+
+  test("rejects invalid discovery deadlines before returning scan configuration", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-invalid-deadline-")),
+    );
+    temporaryDirectories.push(root);
+    const codexHome = join(root, "codex-home");
+    const configDirectory = join(codexHome, "codex-security");
+    const configPath = join(configDirectory, "config.toml");
+    await mkdir(configDirectory, { recursive: true });
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    for (const hours of ["0", "-0.5", "true", '"2"', "nan", "inf", "96.5"]) {
+      await writeFile(configPath, `[deep_scan]\nmax_time_hours = ${hours}\n`);
+      const result = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "deep_scan_config.py"),
+          "--available-parallelism",
+          "8",
+        ],
+        {
+          env: { ...process.env, CODEX_HOME: codexHome },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(new TextDecoder().decode(result.stderr)).toContain(
+        "deep_scan.max_time_hours must be a positive finite number no greater than 96",
+      );
+    }
+  });
+
+  test.each([false, true] as const)(
+    "backfills and repairs discovery deadline migration when already recorded: %s",
+    (migrationRecorded) => {
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const script = [
+        "import json, runpy, sqlite3, sys",
+        "from unittest import mock",
+        "namespace = runpy.run_path(sys.argv[1], run_name='codex_security_workbench_db')",
+        "apply_migrations = namespace['apply_migrations']",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.row_factory = sqlite3.Row",
+        "historical = tuple(item for item in namespace['MIGRATIONS'] if item[0] < 28)",
+        "with mock.patch.dict(apply_migrations.__globals__, {'MIGRATIONS': historical}):",
+        "    apply_migrations(connection)",
+        "timestamp = '2026-07-01T00:00:00Z'",
+        "connection.execute('INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)', ('legacy-workspace', timestamp, timestamp))",
+        "connection.execute(\"INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES (?, ?, '/legacy/target', 'legacy-revision', '.', 'deep', '/legacy/scan', 'running', 'discovery', ?, ?, ?)\", ('legacy-scan', 'legacy-workspace', timestamp, timestamp, timestamp))",
+        "connection.execute(\"INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at) VALUES (?, 1, 'legacy-workflow', 'running', 'discovery', 1, 0, 3, 10, ?, ?)\", ('legacy-scan', timestamp, timestamp))",
+        "if sys.argv[2] == 'true':",
+        "    connection.execute('INSERT INTO schema_migrations (version, name, applied_at) VALUES (28, ?, ?)', ('persist deep scan discovery time limit', timestamp))",
+        "connection.commit()",
+        "apply_migrations(connection)",
+        "default = connection.execute('SELECT max_time_hours FROM deep_scan_runs').fetchone()[0]",
+        "connection.execute('UPDATE deep_scan_runs SET max_time_hours = 2.5')",
+        "connection.commit()",
+        "apply_migrations(connection)",
+        "configured = connection.execute('SELECT max_time_hours FROM deep_scan_runs').fetchone()[0]",
+        "migration = connection.execute('SELECT name FROM schema_migrations WHERE version = 28').fetchone()[0]",
+        "print(json.dumps({'default': default, 'configured': configured, 'migration': migration}))",
+      ].join("\n");
+      const result = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          "-c",
+          script,
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          String(migrationRecorded),
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+        default: 96,
+        configured: 2.5,
+        migration: "persist deep scan discovery time limit",
+      });
+    },
+  );
+
+  test.each([
     ["a malformed continuation token", null, "not-a-valid-token"],
     ["an unexpected token for a legacy delivery", null, originalClaimToken],
     ["a missing continuation token", originalClaimToken, null],
@@ -353,7 +486,7 @@ describe("deep scan workbench ownership", () => {
     expect(staleProgress["stderr"]).toContain("newer generation");
   });
 
-  test("requeues a failed reducer's inputs and completes without losing findings", async () => {
+  test("requeues a failed reducer's inputs and preserves findings at the discovery deadline", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-deep-reducer-recovery-")),
     );
@@ -367,7 +500,7 @@ describe("deep scan workbench ownership", () => {
     await writeFile(join(repository, "source.py"), "# source fixture\n");
     await writeFile(
       join(configDir, "config.toml"),
-      "[deep_scan]\nworkers = 3\nmax_discovery_runs = 5\n",
+      "[deep_scan]\nworkers = 3\nmax_discovery_runs = 6\nmax_time_hours = 0.5\n",
     );
 
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -416,6 +549,10 @@ describe("deep scan workbench ownership", () => {
     );
     const scanId = initial["scanId"] as string;
     const scanDir = initial["scanDir"] as string;
+    expect(initial["config"]).toMatchObject({
+      maxDiscoveryRuns: 6,
+      maxTimeHours: 0.5,
+    });
     const discoveryDir = join(scanDir, "artifacts", "02_discovery");
     const ledgerPath = join(discoveryDir, "candidate_ledger.jsonl");
     const existingFinding = '{"candidate":"previously committed"}\n';
@@ -604,6 +741,55 @@ describe("deep scan workbench ownership", () => {
 
     const manifestPath = join(scanDir, "coordinator-manifest.json");
     await writeFile(manifestPath, "{}\n");
+    const premature = Bun.spawnSync(
+      [
+        python!,
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+        "finish-deep-scan",
+        "--scan-id",
+        scanId,
+        "--terminal-reason",
+        "capped",
+        "--manifest-path",
+        manifestPath,
+      ],
+      {
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: stateDir,
+          CODEX_HOME: codexHome,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    expect(premature.exitCode).not.toBe(0);
+    expect(new TextDecoder().decode(premature.stderr)).toContain(
+      "before reaching its configured maximum",
+    );
+    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
+
+    const expire = Bun.spawnSync(
+      [
+        python!,
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import sqlite3, sys",
+          "connection = sqlite3.connect(sys.argv[1])",
+          "connection.execute('UPDATE deep_scan_runs SET created_at = ? WHERE scan_id = ?', ('2000-01-01T00:00:00+00:00', sys.argv[2]))",
+          "connection.commit()",
+        ].join("\n"),
+        join(stateDir, "workbench.sqlite3"),
+        scanId,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(expire.exitCode, new TextDecoder().decode(expire.stderr)).toBe(0);
+
     const completed = state(
       command([
         "finish-deep-scan",

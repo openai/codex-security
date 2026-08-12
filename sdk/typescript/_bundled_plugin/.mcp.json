@@ -37,7 +37,7 @@
         "REQUESTS_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS"
       ],
-      "tool_timeout_sec": 86400
+      "tool_timeout_sec": 349200
     }
   }
 }

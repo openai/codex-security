@@ -494,6 +494,7 @@ describe("CodexSecurity orchestration", () => {
         subagents: 0,
         stopAfterNoNew: 3,
         maxDiscoveryRuns: 10,
+        maxTimeHours: 1.5,
       }),
     ).resolves.toMatchObject({
       mode: "deep",
@@ -501,10 +502,14 @@ describe("CodexSecurity orchestration", () => {
       subagents: 0,
       stopAfterNoNew: 3,
       maxDiscoveryRuns: 10,
+      maxTimeHours: 1.5,
     });
     await expect(client.preflight(repository, { workers: 1 })).rejects.toThrow(
       "Deep scan settings require deep mode",
     );
+    await expect(
+      client.preflight(repository, { maxTimeHours: 1.5 }),
+    ).rejects.toThrow("Deep scan settings require deep mode");
     for (const invalid of [
       { workers: 0 },
       { workers: 1.5 },
@@ -516,6 +521,20 @@ describe("CodexSecurity orchestration", () => {
         client.preflight(repository, { mode: "deep", ...invalid }),
       ).rejects.toThrow("integer");
     }
+    for (const maxTimeHours of [
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      96.5,
+    ]) {
+      await expect(
+        client.preflight(repository, { mode: "deep", maxTimeHours }),
+      ).rejects.toThrow("positive number no greater than 96");
+    }
+    await expect(
+      client.preflight(repository, { mode: "deep", maxTimeHours: 96 }),
+    ).resolves.toMatchObject({ maxTimeHours: 96 });
     expect(runtimeStarted).toBe(false);
     await client.close();
   });
@@ -2025,6 +2044,7 @@ describe("CodexSecurity orchestration", () => {
         "subagents = 2",
         "stop_after_no_new = 7",
         "max_discovery_runs = 60",
+        "max_time_hours = 48",
         "[other]",
         "enabled = true",
         "",
@@ -2067,6 +2087,7 @@ describe("CodexSecurity orchestration", () => {
         workers: 2,
         subagents: 0,
         maxDiscoveryRuns: 10,
+        maxTimeHours: 1.5,
       }),
     ).rejects.toThrow("deep scan settings captured");
     const configuration = await readFile(
@@ -2077,11 +2098,17 @@ describe("CodexSecurity orchestration", () => {
     expect(configuration).toContain("subagents = 0");
     expect(configuration).toContain("stop_after_no_new = 7");
     expect(configuration).toContain("max_discovery_runs = 10");
+    expect(configuration).toContain("max_time_hours = 1.5");
     expect(configuration).toContain("[other]");
     expect(configuration).toContain("enabled = true");
     expect(recipe).toMatchObject({
       mode: "deep",
-      deepScan: { workers: 2, subagents: 0, maxDiscoveryRuns: 10 },
+      deepScan: {
+        workers: 2,
+        subagents: 0,
+        maxDiscoveryRuns: 10,
+        maxTimeHours: 1.5,
+      },
     });
     await client.close();
   });
