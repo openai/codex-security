@@ -10,11 +10,13 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
+import { expandHome } from "../src/runtime.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -103,6 +105,33 @@ describe("scan knowledge bases", () => {
         );
       }
     }
+  });
+
+  test("expands ~ in requested paths and leaves absolute and ~user paths alone", async () => {
+    const home = await temporaryDirectory();
+    const documents = join(home, "docs");
+    await mkdir(documents, { recursive: true });
+    await writeFile(join(documents, "scope.md"), "Review the payment service.");
+    const realHomeDirectory = os.homedir();
+    const homeSpy = spyOn(os, "homedir").mockImplementation(() => home);
+    try {
+      const expanded = await prepareKnowledgeBase(["~/docs"]);
+      temporaryDirectories.push(expanded.path);
+      expect(expanded.sources).toEqual([documents]);
+
+      const bare = await prepareKnowledgeBase(["~"]);
+      temporaryDirectories.push(bare.path);
+      expect(bare.sources).toEqual([home]);
+
+      const absolute = await prepareKnowledgeBase([documents]);
+      temporaryDirectories.push(absolute.path);
+      expect(absolute.sources).toEqual([documents]);
+
+      expect(expandHome("~other/docs")).toBe("~other/docs");
+    } finally {
+      homeSpy.mockRestore();
+    }
+    expect(os.homedir()).toBe(realHomeDirectory);
   });
 
   test("extracts searchable text from PDFs and DOCX documents", async () => {

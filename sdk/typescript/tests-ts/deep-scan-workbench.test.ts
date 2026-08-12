@@ -1,9 +1,27 @@
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const originalClaimToken = "22222222-2222-4222-8222-222222222222";
 const replacementClaimToken = "33333333-3333-4333-8333-333333333333";
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
 
 const deepScanOwnershipProbe = [
   "import argparse, json, sqlite3, sys",
@@ -31,7 +49,7 @@ const deepScanOwnershipProbe = [
   "deep_scan.now = lambda: 'after'",
   "deep_scan.deep_scan_result = lambda database, value, *, start_disposition=None: {'startDisposition': start_disposition}",
   "try:",
-  "    result = deep_scan.begin_deep_scan_for_scan(connection, scan_id, 'requesting-thread', argparse.Namespace(claim_token=case['suppliedToken']))",
+  "    result = deep_scan.begin_deep_scan_for_scan(connection, scan_id, 'requesting-thread', argparse.Namespace(claim_token=case['suppliedToken'], model=None, reasoning_effort=None))",
   "except SystemExit as error:",
   "    accepted, message, result = False, str(error), None",
   "else:",
@@ -137,5 +155,471 @@ describe("deep scan workbench ownership", () => {
       storedToken: token,
       handoffStatus: "delivered",
     });
+  });
+
+  test("adopts an expired coordinator without repeating completed discovery", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-resume-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const stateDir = join(root, "state");
+    const codexHome = join(root, "codex-home");
+    await mkdir(repository);
+    await writeFile(join(repository, "source.py"), "# source fixture\n");
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const command = (args: string[], allowFailure = false) => {
+      const result = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          ...args,
+        ],
+        {
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDir,
+            CODEX_HOME: codexHome,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const stdout = new TextDecoder().decode(result.stdout);
+      const stderr = new TextDecoder().decode(result.stderr);
+      if (allowFailure) return { status: result.exitCode, stderr };
+      expect(result.exitCode, stderr).toBe(0);
+      return JSON.parse(stdout) as Record<string, unknown>;
+    };
+
+    const started = command([
+      "begin-deep-scan",
+      "--thread-id",
+      "thread-deep-scan",
+      "--target-path",
+      repository,
+      "--scope",
+      ".",
+      "--scan-root",
+      join(root, "scans"),
+      "--available-parallelism",
+      "4",
+    ]);
+    const initial = started["deepScan"] as Record<string, unknown>;
+    const scanId = initial["scanId"] as string;
+    const scanDir = initial["scanDir"] as string;
+    expect(initial["coordinatorGeneration"]).toBe(1);
+
+    const updateDatabase = (statement: string, ...values: string[]) => {
+      const result = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          "-c",
+          "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); connection.execute(sys.argv[2],sys.argv[3:]); connection.commit()",
+          join(stateDir, "workbench.sqlite3"),
+          statement,
+          ...values,
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    };
+    updateDatabase(
+      "UPDATE scans SET handoff_claim_token = ? WHERE id = ?",
+      originalClaimToken,
+      scanId,
+    );
+    command([
+      "update-progress",
+      "--scan-id",
+      scanId,
+      "--phase",
+      "discovery",
+      "--claim-token",
+      originalClaimToken,
+    ]);
+
+    const completedWorkerId = "44444444-4444-4444-8444-444444444444";
+    const interruptedWorkerId = "55555555-5555-4555-8555-555555555555";
+    for (const workerId of [completedWorkerId, interruptedWorkerId]) {
+      const artifactDir = join(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        workerId,
+      );
+      const promptPath = join(artifactDir, "prompt.md");
+      await mkdir(artifactDir, { recursive: true });
+      await writeFile(promptPath, "Review the source.\n");
+      const workerArgs = [
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scanId,
+        "--worker-id",
+        workerId,
+        "--kind",
+        "discovery",
+        "--prompt-path",
+        promptPath,
+        "--artifact-dir",
+        artifactDir,
+        "--attempt",
+        "1",
+      ];
+      command([...workerArgs, "--status", "running"]);
+      if (workerId === completedWorkerId) {
+        const resultPath = join(artifactDir, "result.json");
+        await writeFile(resultPath, "{}\n");
+        command([
+          ...workerArgs,
+          "--status",
+          "succeeded",
+          "--result-manifest-path",
+          resultPath,
+        ]);
+      }
+    }
+
+    updateDatabase(
+      "UPDATE deep_scan_runs SET updated_at = ? WHERE scan_id = ?",
+      "2000-01-01T00:00:00+00:00",
+      scanId,
+    );
+    const claimArgs = [
+      "claim-deep-scan-coordinator",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      "thread-deep-scan",
+    ];
+    const missingClaim = command(claimArgs, true);
+    expect(missingClaim["status"]).not.toBe(0);
+    expect(missingClaim["stderr"]).toContain("another continuation");
+
+    const resumed = command([
+      ...claimArgs,
+      "--claim-token",
+      originalClaimToken,
+    ]);
+    const recovered = resumed["deepScan"] as Record<string, unknown>;
+    expect(resumed["coordinatorDisposition"]).toBe("adopted");
+    expect(recovered).toMatchObject({
+      status: "running",
+      phase: "discovery",
+      coordinatorGeneration: 2,
+      dispatchedCount: 1,
+    });
+    expect(recovered["workers"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: completedWorkerId,
+          status: "succeeded",
+        }),
+        expect.objectContaining({
+          id: interruptedWorkerId,
+          status: "canceled",
+        }),
+      ]),
+    );
+
+    const observing = command([
+      ...claimArgs,
+      "--claim-token",
+      originalClaimToken,
+    ]);
+    expect(observing["coordinatorDisposition"]).toBe("observing");
+
+    const staleProgress = command(
+      [
+        "update-progress",
+        "--scan-id",
+        scanId,
+        "--phase",
+        "discovery",
+        "--claim-token",
+        originalClaimToken,
+        "--coordinator-generation",
+        "1",
+      ],
+      true,
+    );
+    expect(staleProgress["status"]).not.toBe(0);
+    expect(staleProgress["stderr"]).toContain("newer generation");
+  });
+
+  test("requeues a failed reducer's inputs and completes without losing findings", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-reducer-recovery-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const stateDir = join(root, "state");
+    const codexHome = join(root, "codex-home");
+    const configDir = join(codexHome, "codex-security");
+    await mkdir(repository);
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(repository, "source.py"), "# source fixture\n");
+    await writeFile(
+      join(configDir, "config.toml"),
+      "[deep_scan]\nworkers = 3\nmax_discovery_runs = 5\n",
+    );
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const command = (args: string[]): Record<string, unknown> => {
+      const result = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          ...args,
+        ],
+        {
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDir,
+            CODEX_HOME: codexHome,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
+        string,
+        unknown
+      >;
+    };
+    const state = (result: Record<string, unknown>) =>
+      result["deepScan"] as Record<string, unknown>;
+    const initial = state(
+      command([
+        "begin-deep-scan",
+        "--thread-id",
+        "thread-deep-scan",
+        "--target-path",
+        repository,
+        "--scope",
+        ".",
+        "--scan-root",
+        join(root, "scans"),
+        "--available-parallelism",
+        "4",
+      ]),
+    );
+    const scanId = initial["scanId"] as string;
+    const scanDir = initial["scanDir"] as string;
+    const discoveryDir = join(scanDir, "artifacts", "02_discovery");
+    const ledgerPath = join(discoveryDir, "candidate_ledger.jsonl");
+    const existingFinding = '{"candidate":"previously committed"}\n';
+    await mkdir(discoveryDir, { recursive: true });
+    await writeFile(join(discoveryDir, "in_scope_files.txt"), "source.py\n");
+    await writeFile(ledgerPath, existingFinding);
+
+    const workerPaths = async (workerId: string) => {
+      const artifactDir = join(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        workerId,
+      );
+      const promptPath = join(artifactDir, "prompt.md");
+      const resultPath = join(artifactDir, "result.json");
+      await mkdir(artifactDir, { recursive: true });
+      await writeFile(promptPath, "Review the source.\n");
+      return { artifactDir, promptPath, resultPath };
+    };
+    const discoveryIds = [
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+      "10000000-0000-4000-8000-000000000003",
+      "10000000-0000-4000-8000-000000000004",
+      "10000000-0000-4000-8000-000000000005",
+    ];
+    for (const workerId of discoveryIds) {
+      const paths = await workerPaths(workerId);
+      const args = [
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scanId,
+        "--worker-id",
+        workerId,
+        "--kind",
+        "discovery",
+        "--prompt-path",
+        paths.promptPath,
+        "--artifact-dir",
+        paths.artifactDir,
+        "--attempt",
+        "1",
+      ];
+      command([...args, "--status", "running"]);
+      await writeFile(paths.resultPath, "{}\n");
+      command([
+        ...args,
+        "--status",
+        "succeeded",
+        "--result-manifest-path",
+        paths.resultPath,
+      ]);
+    }
+
+    const startReducer = async (workerId: string, inputIds: string[]) => {
+      const paths = await workerPaths(workerId);
+      command([
+        "claim-deep-scan-dedup",
+        "--scan-id",
+        scanId,
+        "--worker-id",
+        workerId,
+        "--prompt-path",
+        paths.promptPath,
+        "--artifact-dir",
+        paths.artifactDir,
+        ...inputIds.flatMap((inputId) => ["--input-worker-id", inputId]),
+      ]);
+      const args = [
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scanId,
+        "--worker-id",
+        workerId,
+        "--kind",
+        "dedup",
+        "--prompt-path",
+        paths.promptPath,
+        "--artifact-dir",
+        paths.artifactDir,
+        "--attempt",
+        "1",
+      ];
+      command([...args, "--status", "running"]);
+      return { args, ...paths };
+    };
+    const commitReducer = async (
+      workerId: string,
+      resultPath: string,
+      newFindingsCount: number,
+    ) => {
+      await writeFile(resultPath, "{}\n");
+      return state(
+        command([
+          "commit-deep-scan-dedup",
+          "--scan-id",
+          scanId,
+          "--worker-id",
+          workerId,
+          "--result-manifest-path",
+          resultPath,
+          "--new-findings-count",
+          String(newFindingsCount),
+        ]),
+      );
+    };
+    const previousReducerId = "20000000-0000-4000-8000-000000000001";
+    const previous = await startReducer(
+      previousReducerId,
+      discoveryIds.slice(0, 2),
+    );
+    await commitReducer(previousReducerId, previous.resultPath, 1);
+
+    const failedReducerId = "20000000-0000-4000-8000-000000000002";
+    const claimedInputs = discoveryIds.slice(2, 4);
+    const failedReducer = await startReducer(failedReducerId, claimedInputs);
+    const failureArgs = [
+      ...failedReducer.args,
+      "--status",
+      "failed",
+      "--error-message",
+      "reducer exhausted its attempts",
+    ];
+    const failed = state(command(failureArgs));
+    const workersById = (result: Record<string, unknown>) =>
+      new Map(
+        (result["workers"] as Record<string, unknown>[]).map((worker) => [
+          worker["id"] as string,
+          worker,
+        ]),
+      );
+    const failedWorkers = workersById(failed);
+    expect(failed).toMatchObject({
+      status: "running",
+      phase: "discovery",
+      dispatchedCount: 5,
+      consecutiveErrors: 0,
+    });
+    for (const workerId of discoveryIds.slice(0, 2)) {
+      expect(failedWorkers.get(workerId)).toMatchObject({
+        status: "succeeded",
+        mergeState: "merged",
+      });
+    }
+    for (const workerId of discoveryIds.slice(2)) {
+      expect(failedWorkers.get(workerId)).toMatchObject({
+        status: "succeeded",
+        mergeState: "buffered",
+      });
+    }
+    expect(failedWorkers.get(failedReducerId)).toMatchObject({
+      status: "failed",
+      error: "reducer exhausted its attempts",
+    });
+    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
+
+    const replacementReducerId = "20000000-0000-4000-8000-000000000003";
+    const replacementInputs = discoveryIds.slice(2);
+    const replacement = await startReducer(
+      replacementReducerId,
+      replacementInputs,
+    );
+    const replayed = state(command(failureArgs));
+    expect(replayed["phase"]).toBe("reducing");
+    for (const workerId of replacementInputs) {
+      expect(workersById(replayed).get(workerId)?.["mergeState"]).toBe(
+        "merging",
+      );
+    }
+
+    const committed = await commitReducer(
+      replacementReducerId,
+      replacement.resultPath,
+      0,
+    );
+    for (const workerId of discoveryIds) {
+      expect(workersById(committed).get(workerId)?.["mergeState"]).toBe(
+        "merged",
+      );
+    }
+    expect(workersById(committed).get(failedReducerId)?.["status"]).toBe(
+      "failed",
+    );
+    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
+
+    const manifestPath = join(scanDir, "coordinator-manifest.json");
+    await writeFile(manifestPath, "{}\n");
+    const completed = state(
+      command([
+        "finish-deep-scan",
+        "--scan-id",
+        scanId,
+        "--terminal-reason",
+        "capped",
+        "--manifest-path",
+        manifestPath,
+      ]),
+    );
+    expect(completed).toMatchObject({
+      status: "succeeded",
+      terminalReason: "capped",
+      consecutiveErrors: 0,
+    });
+    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
   });
 });
