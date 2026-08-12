@@ -1,72 +1,26 @@
 import { formatUsd, type ScanCost } from "./cost.js";
 
-/** Returns an error message with credential-shaped substrings redacted. */
-export function redactedErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const withoutPrivateKeys = message.replaceAll(
-    /(\b[A-Za-z0-9_-]{0,64}private[_-]?key(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)(?:\\?["'])?-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----(?:\\?["'])?|$)/giu,
-    "$1[redacted]",
-  );
-  return redactQuotedCredentialValues(withoutPrivateKeys)
-    .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:authorization|auth)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*)([A-Za-z][A-Za-z0-9._~-]{0,63})((?:\s|%20|\+)+)(?!\[redacted\]|(?!key\s*=)[A-Za-z_][A-Za-z0-9_-]{0,64}\s*[:=]\s*(?=[^=\s"',;}&\\\]]))[^\s"',;}&\\\]]+/giu,
-      "$1$2$3[redacted]",
-    )
-    .replaceAll(
-      /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?!\[redacted\]|[A-Za-z][A-Za-z0-9._~-]{0,63}(?:\s|%20|\+)+\[redacted\])[^\s"',;}&\\\]]+/giu,
-      "$1[redacted]",
-    )
-    .replaceAll(/sk-(?:proj-)?[A-Za-z0-9_*=-]{8,}/gu, "[redacted]")
-    .replaceAll(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_-]{8,}/giu, "[redacted]")
-    .replaceAll(/npm_[A-Za-z0-9_-]{8,}/giu, "[redacted]")
-    .replaceAll(
-      /(^|%20|[^A-Za-z0-9_])(Bearer|Basic|Token)((?:\s|%20|\+)+)[A-Za-z0-9.%_~+/*=-]+/giu,
-      "$1$2$3[redacted]",
-    )
-    .replaceAll(/((?:https?|ssh|git\+ssh):\/\/)[^\s/@]+@/giu, "$1[redacted]@")
-    .replaceAll(
-      /((?:[?&]|%3F|%26)(?:(?!%3F|%26|%3D)(?:[A-Za-z0-9_.%-]|\[|\])){0,64}(?:api[_-]?key|access(?:[_-]|%5F|%2D)?key(?:(?:[_-]|%5F|%2D)?id)?|private(?:[_-]|%5F|%2D)?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:(?:[_-]|%5F|%2D)[A-Za-z0-9_.%-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_.%-]{0,48})?(?:\]|%5D)?(?:=|%3D))(?:(?!%26)[^&\s])+/giu,
-      "$1[redacted]",
-    );
+/** Returns the original error message without altering its contents. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function redactQuotedCredentialValues(message: string): string {
-  const assignment =
-    /(\b[A-Za-z0-9_-]{0,64}(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|authorization|auth|token|secret|credential|signature|sig|password|passwd)(?:[_-][A-Za-z0-9_-]{1,64}|(?:value|data|token|secret|credential|password|header|field|id|key)[A-Za-z0-9_-]{0,48})?\b(?:\\*["'])?\s*[:=]\s*)(\\*)(["'])/giu;
-  let output = "";
-  let consumed = 0;
-  for (
-    let match = assignment.exec(message);
-    match !== null;
-    match = assignment.exec(message)
-  ) {
-    const openingSlashes = match[2]!.length;
-    const quote = match[3]!;
-    let position = assignment.lastIndex;
-    let closed = false;
-    while (position < message.length) {
-      const delimiter = message.indexOf(quote, position);
-      if (delimiter < 0) break;
-      let preceding = delimiter;
-      while (preceding > position && message[preceding - 1] === "\\") {
-        preceding -= 1;
-      }
-      if (delimiter - preceding === openingSlashes) {
-        output += `${message.slice(consumed, assignment.lastIndex)}[redacted]${message.slice(preceding, delimiter + 1)}`;
-        consumed = delimiter + 1;
-        assignment.lastIndex = consumed;
-        closed = true;
-        break;
-      }
-      position = delimiter + 1;
-    }
-    if (!closed) {
-      output += `${message.slice(consumed, assignment.lastIndex)}[redacted]`;
-      consumed = message.length;
-      break;
-    }
-  }
-  return output + message.slice(consumed);
+/** Omit credential-bearing messages at persistence and display boundaries. */
+export function safeErrorMessage(error: unknown): string {
+  const message = errorMessage(error);
+  const recognizableCredential =
+    /(?:\b(?:sk-(?:proj-)?|github_pat_|gh[pousr]_|npm_)\S+|\b(?:bearer|basic|token)(?:\s|%20|\+)+\S+|:\/\/[^\s/@]+@|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----)/iu.test(
+      message,
+    );
+  const assignments = message.matchAll(
+    /(?<![\w%.-])[\w%.-]+(?:\\*["']|\]|%5d)*\s*(?:[:=]|%3[ad])/giu,
+  );
+  const sensitiveField = Array.from(assignments).some(([field]) =>
+    /(?:api(?:[_-]|%5f|%2d)?key|access(?:[_-]|%5f|%2d)?key|private(?:[_-]|%5f|%2d)?key|authorization|auth(?!or)|token|secret|credential|signature|sig(?=[^A-Za-z0-9]|value|data|token|secret|credential|password|header|field|id|key|$)|password|passwd)/iu.test(
+      field,
+    ),
+  );
+  return recognizableCredential || sensitiveField ? "[redacted]" : message;
 }
 
 /** Base error for Codex Security SDK failures. */

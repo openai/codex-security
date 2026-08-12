@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
+import { scanModelConfiguration, scanModelProvider } from "../src/config.js";
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
@@ -69,11 +70,127 @@ describe("Codex configuration", () => {
     );
   });
 
+  test("resolves selected profile model and effort before root settings", async () => {
+    const scenarios = [
+      {
+        overrides: {
+          profile: "review",
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "low",
+          profiles: {
+            review: {
+              model: "gpt-5.6-terra",
+              model_reasoning_effort: "high",
+            },
+          },
+        },
+        expected: { model: "gpt-5.6-terra", reasoningEffort: "high" },
+      },
+      {
+        overrides: {
+          profile: "review",
+          model_reasoning_effort: "low",
+          profiles: { review: { model: "gpt-5.6-terra" } },
+        },
+        expected: { model: "gpt-5.6-terra", reasoningEffort: "low" },
+      },
+      {
+        overrides: {
+          profile: "review",
+          model: "gpt-5.6-terra",
+          profiles: { review: { model_reasoning_effort: "medium" } },
+        },
+        expected: { model: "gpt-5.6-terra", reasoningEffort: "medium" },
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const config = await mergedCodexConfig({
+        codexOverrides: scenario.overrides,
+      });
+      expect(scanModelConfiguration(config)).toEqual(scenario.expected);
+    }
+  });
+
+  test("ignores model overrides from unselected Codex profiles", async () => {
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        profile: "missing",
+        model: "gpt-5.6-sol",
+        model_reasoning_effort: "low",
+        profiles: {
+          other: {
+            model: "gpt-5.6-terra",
+            model_reasoning_effort: "high",
+          },
+        },
+      },
+    });
+
+    expect(scanModelConfiguration(config)).toEqual({
+      model: "gpt-5.6-sol",
+      reasoningEffort: "low",
+    });
+  });
+
+  test("resolves the selected profile's provider before the root provider", async () => {
+    for (const [overrides, expected] of [
+      [
+        {
+          profile: "bedrock",
+          model_provider: "openai",
+          profiles: {
+            bedrock: { model_provider: "amazon-bedrock" },
+          },
+        },
+        "amazon-bedrock",
+      ],
+      [
+        {
+          profile: "bedrock",
+          model_provider: "amazon-bedrock",
+          profiles: { bedrock: { model: "openai.gpt-5.6-luna" } },
+        },
+        "amazon-bedrock",
+      ],
+      [
+        {
+          profile: "missing",
+          model_provider: "openai",
+          profiles: { bedrock: { model_provider: "amazon-bedrock" } },
+        },
+        "openai",
+      ],
+      [{}, undefined],
+    ] as const) {
+      const config = await mergedCodexConfig({ codexOverrides: overrides });
+      expect(scanModelProvider(config)).toBe(expected);
+    }
+  });
+
+  test("rejects invalid model settings from the selected Codex profile", async () => {
+    for (const [profile, message] of [
+      [{ model: " " }, "model must be a nonempty string"],
+      [
+        { model_reasoning_effort: " " },
+        "reasoning effort must be a nonempty string",
+      ],
+    ] as const) {
+      const config = await mergedCodexConfig({
+        codexOverrides: { profile: "review", profiles: { review: profile } },
+      });
+
+      expect(() => scanModelConfiguration(config)).toThrow(message);
+    }
+  });
+
   test("deep-merges native multi-agent v2 defaults", async () => {
     const merged = await mergedCodexConfig({
       codexOverrides: {
         features: { multi_agent_v2: { max_concurrent_threads_per_session: 4 } },
         model_reasoning_effort: "high",
+        model_reasoning_summary: "concise",
+        show_raw_agent_reasoning: false,
         windows: { sandbox: "elevated" },
       },
     });
@@ -88,6 +205,8 @@ describe("Codex configuration", () => {
     expect(merged["agents"]).toBeUndefined();
     expect(merged["model"]).toBe("gpt-5.6-sol");
     expect(merged["model_reasoning_effort"]).toBe("high");
+    expect(merged["model_reasoning_summary"]).toBe("concise");
+    expect(merged["show_raw_agent_reasoning"]).toBe(false);
     expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
@@ -314,6 +433,8 @@ describe("Codex configuration", () => {
     expect(await mergedCodexConfig({})).toMatchObject({
       model: "gpt-5.6-sol",
       model_reasoning_effort: "xhigh",
+      model_reasoning_summary: "detailed",
+      show_raw_agent_reasoning: true,
       windows: {
         sandbox: "unelevated",
       },
