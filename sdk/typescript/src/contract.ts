@@ -1,15 +1,13 @@
 import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import {
-  dirname,
-  isAbsolute,
-  join,
-  posix,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+  lstat,
+  open,
+  readFile,
+  realpath,
+  type FileHandle,
+} from "node:fs/promises";
+import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { ContractValidationError } from "./errors.js";
 import type {
@@ -29,17 +27,6 @@ const DOCUMENTS = {
   "coverage.json": "coverage.schema.json",
 } as const;
 const PRODUCER_NAME = "codex-security-plugin";
-const MAX_CONTRACT_DOCUMENT_BYTES = {
-  "scan-manifest.json": 16 * 1024 * 1024,
-  "findings.json": 128 * 1024 * 1024,
-  "coverage.json": 32 * 1024 * 1024,
-} as const;
-const MAX_SCHEMA_DOCUMENT_BYTES = 4 * 1024 * 1024;
-const DOCUMENT_READ_CHUNK_BYTES = 64 * 1024;
-const MAX_JSON_DEPTH = 256;
-const MAX_SCHEMA_NODES = 8192;
-const MAX_SCHEMA_COLLECTION_ENTRIES = 4096;
-const MAX_SCHEMA_APPLICATOR_EDGES = 128;
 const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
   "scan",
   "target",
@@ -51,23 +38,10 @@ const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
   "coverage",
   "scope",
 ]);
-const SAFE_SCHEMA_PATTERNS = new Set([
-  "^(?![^:/?#]+://[^/?#]*@)[^?#]+$",
-  "^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$",
-  "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$",
-  "^[a-f0-9]{64}$",
-  "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$",
-  "^csf_[a-f0-9]{24}$",
-  "^occ_[a-f0-9]{24}$",
-  "^[a-z0-9][a-z0-9._/-]*$",
-  "^codex-security/v1:sha256:[a-f0-9]{64}$",
-  "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$",
-]);
 // Mirrors runtime.ts's MODEL_UNSAFE_PATH: the WHATWG URL parser silently
 // strips ASCII tab/newline/CR before parsing, so a `remote` carrying one
 // would validate against a different string than the one callers receive.
 const REMOTE_UNSAFE_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
-
 interface CheckedScanFile {
   path: string;
   metadata: Stats;
@@ -136,7 +110,6 @@ export async function loadContract(
       join(options.pluginRoot, "schemas", schemaName),
       options.signal,
     );
-    requireSchemaComplexity(schema, schemaName);
     let validate: ReturnType<typeof ajv.compile>;
     try {
       validate = ajv.compile(schema);
@@ -693,12 +666,7 @@ async function readScanJson(
     expectedRoot,
   );
   try {
-    const bytes = await readBoundedDocument(
-      file,
-      join(scanDir, relativePath),
-      MAX_CONTRACT_DOCUMENT_BYTES[relativePath],
-      signal,
-    );
+    const bytes = await file.readFile({ signal });
     documentDigests.set(
       relativePath,
       createHash("sha256").update(bytes).digest("hex"),
@@ -720,50 +688,8 @@ async function readJson(
   path: string,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  let bytes: Buffer;
-  let file: FileHandle | undefined;
   try {
-    const parent = dirname(path);
-    const parentMetadata = await lstat(parent);
-    const metadata = await lstat(path);
-    throwIfAborted(signal);
-    if (
-      !parentMetadata.isDirectory() ||
-      parentMetadata.isSymbolicLink() ||
-      !metadata.isFile() ||
-      metadata.isSymbolicLink()
-    ) {
-      throw new Error("not a regular schema file");
-    }
-    file = await open(
-      path,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const opened = await file.stat();
-    const currentParent = await lstat(parent);
-    const current = await lstat(path);
-    throwIfAborted(signal);
-    if (
-      !opened.isFile() ||
-      opened.dev !== metadata.dev ||
-      opened.ino !== metadata.ino ||
-      !currentParent.isDirectory() ||
-      currentParent.isSymbolicLink() ||
-      currentParent.dev !== parentMetadata.dev ||
-      currentParent.ino !== parentMetadata.ino ||
-      !current.isFile() ||
-      current.isSymbolicLink() ||
-      current.dev !== metadata.dev ||
-      current.ino !== metadata.ino
-    ) {
-      throw new Error("schema file changed before reading");
-    }
-    bytes = await readBoundedDocument(
-      file,
-      path,
-      MAX_SCHEMA_DOCUMENT_BYTES,
-      signal,
-    );
+    return parseJson(path, await readFile(path, { signal }));
   } catch (error) {
     throwIfAborted(signal);
     if (error instanceof ContractValidationError) throw error;
@@ -775,66 +701,7 @@ async function readJson(
     throw new ContractValidationError(`${path}: unreadable JSON document.`, {
       cause: error,
     });
-  } finally {
-    await file?.close();
   }
-  return parseJson(path, bytes);
-}
-
-async function requireDocumentSize(
-  file: FileHandle,
-  path: string,
-  maximum: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  const metadata = await file.stat();
-  throwIfAborted(signal);
-  if (metadata.size > maximum) {
-    throw new ContractValidationError(
-      `${path}: JSON document exceeds the ${maximum}-byte limit.`,
-    );
-  }
-}
-
-async function readBoundedDocument(
-  file: FileHandle,
-  path: string,
-  maximum: number,
-  signal?: AbortSignal,
-): Promise<Buffer> {
-  await requireDocumentSize(file, path, maximum, signal);
-  const chunks: Buffer[] = [];
-  let length = 0;
-  let exhausted = false;
-  while (length <= maximum && !exhausted) {
-    const chunk = Buffer.allocUnsafe(
-      Math.min(DOCUMENT_READ_CHUNK_BYTES, maximum + 1 - length),
-    );
-    let offset = 0;
-    while (offset < chunk.byteLength) {
-      throwIfAborted(signal);
-      const result = await file.read(
-        chunk,
-        offset,
-        chunk.byteLength - offset,
-        length,
-      );
-      throwIfAborted(signal);
-      if (result.bytesRead === 0) {
-        exhausted = true;
-        break;
-      }
-      offset += result.bytesRead;
-      length += result.bytesRead;
-      if (length > maximum) {
-        throw new ContractValidationError(
-          `${path}: JSON document exceeds the ${maximum}-byte limit.`,
-        );
-      }
-    }
-    if (offset > 0) chunks.push(chunk.subarray(0, offset));
-  }
-  return Buffer.concat(chunks, length);
 }
 
 function parseJson(path: string, bytes: Uint8Array): Record<string, unknown> {
@@ -846,7 +713,6 @@ function parseJson(path: string, bytes: Uint8Array): Record<string, unknown> {
       cause: error,
     });
   }
-  requireJsonNesting(text, path);
   let payload: unknown;
   try {
     payload = JSON.parse(text);
@@ -863,35 +729,7 @@ function parseJson(path: string, bytes: Uint8Array): Record<string, unknown> {
   return payload;
 }
 
-function requireJsonNesting(text: string, path: string): void {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (const character of text) {
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === '"') inString = false;
-      continue;
-    }
-    if (character === '"') inString = true;
-    else if (character === "{" || character === "[") {
-      depth += 1;
-      if (depth > MAX_JSON_DEPTH + 1) {
-        throw new ContractValidationError(
-          `${path}: JSON document exceeds the ${MAX_JSON_DEPTH}-level nesting limit.`,
-        );
-      }
-    } else if (character === "}" || character === "]") depth -= 1;
-  }
-}
-
-function validateParsedJson(value: unknown, context: string, depth = 0): void {
-  if (depth > MAX_JSON_DEPTH) {
-    throw new ContractValidationError(
-      `${context}: JSON document exceeds the ${MAX_JSON_DEPTH}-level nesting limit.`,
-    );
-  }
+function validateParsedJson(value: unknown, context: string): void {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
       throw new ContractValidationError(
@@ -915,7 +753,7 @@ function validateParsedJson(value: unknown, context: string, depth = 0): void {
   }
   if (Array.isArray(value)) {
     for (const [index, item] of value.entries()) {
-      validateParsedJson(item, `${context}[${index}]`, depth + 1);
+      validateParsedJson(item, `${context}[${index}]`);
     }
     return;
   }
@@ -926,7 +764,7 @@ function validateParsedJson(value: unknown, context: string, depth = 0): void {
           `${context}: expected well-formed Unicode JSON keys.`,
         );
       }
-      validateParsedJson(item, `${context}.<property>`, depth + 1);
+      validateParsedJson(item, `${context}.<property>`);
     }
   }
 }
@@ -945,132 +783,6 @@ function createValidator(): Ajv2020 {
     validate: validRfc3339DateTime,
   });
   return ajv;
-}
-
-function requireSchemaComplexity(
-  schema: Record<string, unknown>,
-  schemaName: string,
-): void {
-  const pending: Array<{ value: unknown; isSchema: boolean }> = [
-    { value: schema, isSchema: true },
-  ];
-  let nodes = 0;
-  let applicatorEdges = 0;
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    const value = current.value;
-    nodes += 1;
-    if (nodes > MAX_SCHEMA_NODES) {
-      throw new ContractValidationError(
-        `${schemaName}: JSON Schema exceeds the ${MAX_SCHEMA_NODES}-node complexity limit.`,
-      );
-    }
-    if (Array.isArray(value)) {
-      if (value.length > MAX_SCHEMA_COLLECTION_ENTRIES) {
-        throw new ContractValidationError(
-          `${schemaName}: JSON Schema exceeds the ${MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit.`,
-        );
-      }
-      for (const child of value) {
-        pending.push({ value: child, isSchema: current.isSchema });
-      }
-    } else if (isRecord(value)) {
-      const entries = Object.entries(value);
-      if (entries.length > MAX_SCHEMA_COLLECTION_ENTRIES) {
-        throw new ContractValidationError(
-          `${schemaName}: JSON Schema exceeds the ${MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit.`,
-        );
-      }
-      for (const [keyword, child] of entries) {
-        if (!current.isSchema) {
-          pending.push({ value: child, isSchema: false });
-          continue;
-        }
-        if (
-          keyword === "$async" ||
-          keyword === "$ref" ||
-          keyword === "$dynamicRef" ||
-          keyword === "$recursiveRef" ||
-          keyword === "prefixItems" ||
-          keyword === "patternProperties" ||
-          keyword === "propertyNames" ||
-          keyword === "dependentSchemas" ||
-          keyword === "dependencies" ||
-          keyword === "uniqueItems"
-        ) {
-          throw new ContractValidationError(
-            `${schemaName}: unsupported JSON Schema keyword.`,
-          );
-        }
-        let edges = 0;
-        if (
-          (keyword === "allOf" || keyword === "anyOf" || keyword === "oneOf") &&
-          Array.isArray(child)
-        ) {
-          edges = child.length;
-        } else if (
-          (keyword === "if" ||
-            keyword === "then" ||
-            keyword === "else" ||
-            keyword === "not" ||
-            keyword === "items" ||
-            keyword === "contains" ||
-            keyword === "additionalProperties" ||
-            keyword === "unevaluatedProperties" ||
-            keyword === "unevaluatedItems") &&
-          (typeof child === "boolean" || isRecord(child))
-        ) {
-          edges = 1;
-        } else if (
-          (keyword === "properties" ||
-            keyword === "$defs" ||
-            keyword === "definitions") &&
-          isRecord(child)
-        ) {
-          edges = Object.keys(child).length;
-        }
-        applicatorEdges += edges;
-        if (applicatorEdges > MAX_SCHEMA_APPLICATOR_EDGES) {
-          throw new ContractValidationError(
-            `${schemaName}: JSON Schema exceeds the ${MAX_SCHEMA_APPLICATOR_EDGES}-edge applicator limit.`,
-          );
-        }
-        if (
-          keyword === "pattern" &&
-          typeof child === "string" &&
-          !SAFE_SCHEMA_PATTERNS.has(child)
-        ) {
-          throw new ContractValidationError(
-            `${schemaName}: unsupported JSON Schema pattern.`,
-          );
-        }
-        if (
-          (keyword === "properties" ||
-            keyword === "$defs" ||
-            keyword === "definitions") &&
-          isRecord(child)
-        ) {
-          const schemas = Object.values(child);
-          if (schemas.length > MAX_SCHEMA_COLLECTION_ENTRIES) {
-            throw new ContractValidationError(
-              `${schemaName}: JSON Schema exceeds the ${MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit.`,
-            );
-          }
-          for (const childSchema of schemas) {
-            pending.push({ value: childSchema, isSchema: true });
-          }
-          continue;
-        }
-        const isSchema =
-          keyword !== "const" &&
-          keyword !== "enum" &&
-          keyword !== "default" &&
-          keyword !== "examples" &&
-          keyword !== "dependentRequired";
-        pending.push({ value: child, isSchema });
-      }
-    }
-  }
 }
 
 async function sha256ScanFile(
@@ -1235,7 +947,6 @@ function schemaError(
     segments.length === 0
       ? "<root>"
       : segments
-          .slice(0, MAX_JSON_DEPTH)
           .map((segment) => {
             if (/^(?:0|[1-9]\d{0,9})$/.test(segment)) return segment;
             return SAFE_SCHEMA_ERROR_PROPERTIES.has(segment)

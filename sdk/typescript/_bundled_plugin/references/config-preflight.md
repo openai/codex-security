@@ -2,6 +2,8 @@
 
 Codex Security top-level scan skills should run the read-only helper before substantive scan work:
 
+Load `desktop-config-preflight.md` only after the host explicitly identifies itself as the Codex desktop app.
+
 Resolve `<python_command>` to the configured Python interpreter (`$PYTHON` when one is provided), otherwise use `python` on Windows and `python3` on Unix-like hosts. Before constructing the first helper command, inspect the current tool surface once and use that discovery result for both the runtime checks and `<verified-multi-agent-runtime-arguments>`. Do not omit active runtime facts from the first invocation and wait for an `incomplete` result before supplying them. The command is written on one line so it works in PowerShell, Command Prompt, and POSIX shells:
 
 ```text
@@ -60,17 +62,15 @@ When the profile includes remediation patches, present the concrete config delta
 
 Some remediation patches have `kind = "host_setting"`. Present those as host-level setup guidance, not as edits to persistent Codex config.
 
-Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight requires native V2 but does not derive outer worker concurrency from the parent session cap or require parent delegation depth. When migrating a legacy V1 configuration for Deep Security Scan, remediation removes `agents.max_threads`, sets `features.multi_agent_v2.enabled = true`, and sets `features.multi_agent_v2.max_concurrent_threads_per_session = 4`. The coordinator overrides each child session's cap from the per-user deep-scan configuration. Codex rejects the legacy V1 thread setting and explicit V2 mode together.
+Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight does not require a particular parent delegation runtime, ownership, capacity, or depth. Discovery workers inherit the scan's model and run under the verified read-only worker sandbox.
 
 Do not warn merely because a user's value differs from the profile's suggested patch. Warn or block only when the evaluated capability requirement is unmet.
 
 If a runtime capability is `unknown`, establish it from the current tool surface and rerun the helper with an explicit `--runtime-check`. Do not treat an `incomplete` result or unknown value as evidence that the capability is available.
 
-## MCP App onboarding handoff
+## Durable scan handoff
 
-The onboarding workspace opens before capability preflight and does not display or enforce configuration capability results. If `open_codex_security_workspace` returns a workspace with `setup.submitted=false`, that is the app setup wait state. Do not run this helper, do not call `set_codex_security_capability_preflight`, do not create or adopt a scan goal, and do not reclassify the scan as terminal/chat fallback merely because no `scanId` exists yet. Stop and wait for the user to review setup and press Start scan.
-
-After the user submits setup and the app-generated handoff provides a `scanId`, load the authoritative scan context with `get_codex_security_scan_context`, then run this preflight for the validated target and selected scan mode. The dedicated preflight worker described above is allowed and should finish before goal setup, threat modeling, scan/discovery worker creation, or other substantive analysis.
+After a native handoff or direct conversation start provides a `scanId`, use its authoritative scan context and run this preflight for the validated target and selected scan mode. The dedicated preflight worker described above should finish before goal setup, threat modeling, scan/discovery worker creation, or other substantive analysis.
 
 For standard and diff scans, the app handoff starts preflight without an item count. After every structured helper result, call `update_codex_security_scan_progress` without changing phase and set `preflightChecks` to every entry from the helper's `results` array, projecting each entry to only `capability`, `reason`, `severity`, and `status`. Do not send `phaseItemsTotal`, `phaseItemsCompleted`, or `phaseProgressUnit` with `preflightChecks`: the server derives the total from the array length, counts `pass` and `fail` as completed, excludes `unknown` from completed, and derives the visible `block` or `warn` attention items. Send the full fresh results array after a clean rerun so stale issues disappear. Do not interpret item-count completion as readiness: remain in preflight for every blocked, incomplete, or error result while remediation or retry remains pending, even when every returned check was evaluated. Only after a `ready` result has published its fresh `preflightChecks` should a separate progress call advance to `threat_model`. These counts and issues belong to the current scan rather than the legacy setup-time workspace preflight, and remain visible after the scan advances. Deep Scan preflight and discovery progress remain owned by `start_codex_security_deep_scan`.
 
@@ -110,6 +110,6 @@ In a non-interactive Codex session, do not leave the run waiting for an answer i
 
 For any non-ready result, do not fail automatically. If an interactive chat fallback declines required remediation without choosing whether to cancel or leave the scan running, ask that follow-up before taking either action. If remediation is unavailable, the helper cannot run, the helper returns an error envelope, or a rerun remains blocked or incomplete, preserve a durable running scan and retry or hand off while recovery may still be possible. Call `fail_codex_security_scan` with the exact reasons only after the documented recovery path is exhausted and the blocker is confirmed unrecoverable, or when the user explicitly cancels.
 
-Present applicable remediation in the Codex thread. Ask before editing persistent user configuration in interactive sessions; use the narrow automatic-remediation path above in non-interactive sessions. Do not pass capability preflight to `open_codex_security_workspace`, depend on the setup UI to display it, or require `set_codex_security_capability_preflight` before the user can start a scan.
+Present applicable remediation in the Codex thread. Ask before editing persistent user configuration in interactive sessions; use the narrow automatic-remediation path above in non-interactive sessions.
 
-Codex CLI and hosts without MCP Apps use the same prompt-based preflight before substantive work. This fallback applies only when the host cannot use the setup app at all; once an app workspace has opened, remain on the app handoff path until the user submits setup or cancels it. Explain the exact reasons and remediation in chat. Interactive CLI sessions ask before editing persistent config; non-interactive CLI sessions use the narrow automatic-remediation path above and continue only after a `ready` rerun.
+Codex CLI and other hosts use the same prompt-based preflight before substantive work. Explain the exact reasons and remediation in chat. Interactive CLI sessions ask before editing persistent config; non-interactive CLI sessions use the narrow automatic-remediation path above and continue only after a `ready` rerun.
