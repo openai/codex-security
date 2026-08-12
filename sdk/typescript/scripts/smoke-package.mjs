@@ -314,6 +314,7 @@ try {
       "--prefer-offline",
       "--include=optional",
       "--ignore-scripts",
+      "--package-lock=false",
       "--no-audit",
       "--no-fund",
       archive,

@@ -698,6 +698,7 @@ describe("CLI workbench", () => {
                 subagents: 0,
                 stopAfterNoNew: 3,
                 maxDiscoveryRuns: 10,
+                maxTimeHours: 1.5,
               },
               config: savedConfig,
             },
@@ -718,6 +719,7 @@ describe("CLI workbench", () => {
       subagents: 0,
       stopAfterNoNew: 3,
       maxDiscoveryRuns: 10,
+      maxTimeHours: 1.5,
     });
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =

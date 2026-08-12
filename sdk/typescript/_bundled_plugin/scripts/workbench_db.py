@@ -1136,6 +1136,285 @@ def complete_scan(
         )
 
 
+def complete_budget_exhausted_scan(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    cost_json = parse_scan_cost(args.cost_json)
+    if cost_json is None:
+        raise SystemExit("Budget-exhausted scan completion requires the measured scan cost.")
+    with scan_completion_lock(scan_id):
+        scan = require_scan(connection, scan_id)
+        if scan["status"] != "running" or scan["mode"] != "deep" or scan["recipe_json"] is None:
+            raise SystemExit("Only a running CLI Deep Scan can complete after its cost limit.")
+        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        if not isinstance(recipe, dict) or recipe.get("mode") != "deep":
+            raise SystemExit("Budget-exhausted scan completion requires a Deep Scan launch recipe.")
+        cost = json.loads(cost_json)
+        measured = cost.get("cost", cost)
+        limit = recipe.get("maxCostUsd")
+        if (
+            not isinstance(limit, (int, float))
+            or isinstance(limit, bool)
+            or not isinstance(measured, dict)
+            or measured.get("estimatedUsd", 0) <= limit
+        ):
+            raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
+        run = connection.execute(
+            "SELECT status, terminal_reason, manifest_path FROM deep_scan_runs WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+        if (
+            run is None
+            or run["status"] != "succeeded"
+            or run["terminal_reason"] not in {"saturated", "capped"}
+            or not run["manifest_path"]
+        ):
+            raise SystemExit(
+                "Budget-exhausted scan completion requires successfully completed Deep Scan "
+                "discovery."
+            )
+        scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        candidates = budget_exhausted_candidates(scan, scan_dir)
+        warning = optional_text(args.message, maximum=2400)
+        if warning is None:
+            warning = (
+                f"Deep Scan reached its cost limit after an estimated "
+                f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
+            )
+        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        warnings = json.loads(scan["completion_warnings_json"])
+        if warning not in warnings:
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                (json.dumps([*warnings, warning]), scan_id),
+            )
+            connection.commit()
+        return complete_scan_locked(connection, scan_id, None, cost_json)
+
+
+def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
+    artifacts = deep_scan.canonical_discovery_artifacts(scan)
+    ledger = Path(artifacts["candidateLedgerPath"])
+    try:
+        inventory = Path(artifacts["inScopeFilesPath"])
+        inventory_descriptor = open_scan_local_file_descriptor(
+            scan_dir,
+            inventory.relative_to(scan_dir).as_posix(),
+            "Canonical Deep Scan in-scope inventory",
+        )
+        with os.fdopen(inventory_descriptor, "rb") as source:
+            lines = re.split(r"\r?\n", source.read().decode("utf-8"))
+            in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir,
+            ledger.relative_to(scan_dir).as_posix(),
+            "Canonical Deep Scan candidate ledger",
+        )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+            candidates = [
+                json.loads(line, parse_constant=reject_non_finite_json)
+                for line in source
+                if line.strip()
+            ]
+    except (ContractError, OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"Canonical Deep Scan candidate ledger is invalid: {exc}") from exc
+
+    candidate_ids: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise SystemExit("Canonical Deep Scan candidate ledger rows must be objects.")
+        candidate_id = candidate.get("candidate_id")
+        locations = candidate.get("locations")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.strip()
+            or candidate_id in {".", ".."}
+            or "/" in candidate_id
+            or "\\" in candidate_id
+            or candidate_id in candidate_ids
+            or not isinstance(candidate.get("summary"), str)
+            or not candidate["summary"].strip()
+            or not isinstance(candidate.get("evidence"), str)
+            or not candidate["evidence"].strip()
+            or not isinstance(locations, list)
+            or not locations
+        ):
+            raise SystemExit("Canonical Deep Scan candidate ledger contains an invalid candidate.")
+        candidate_ids.add(candidate_id)
+        for location in locations:
+            if not isinstance(location, dict):
+                raise SystemExit("Canonical Deep Scan candidate location must be an object.")
+            path = location.get("path")
+            if (
+                not isinstance(path, str)
+                or not path
+                or "\\" in path
+                or "\x00" in path
+                or re.match(r"^[A-Za-z]:", path)
+                or PurePosixPath(path).is_absolute()
+                or any(part in {".", "..", ""} for part in path.split("/"))
+            ):
+                raise SystemExit(
+                    "Canonical Deep Scan candidate location must be repository-relative."
+                )
+        if not any(location["path"] in in_scope for location in locations):
+            raise SystemExit(
+                "Canonical Deep Scan candidate must include a location in its in-scope inventory."
+            )
+    return candidates
+
+
+def budget_exhausted_draft(
+    scan: sqlite3.Row,
+    scan_dir: Path,
+    candidates: list[dict[str, Any]],
+    warning: str,
+) -> None:
+    documents: dict[str, dict[str, Any]] = {}
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        path = artifact_path(scan_dir, name, required=False)
+        if path is not None:
+            documents[name] = read_json_object(path)
+    if documents and len(documents) != 3:
+        raise SystemExit("Budget-exhausted scan contains an incomplete canonical scan draft.")
+
+    if documents:
+        manifest = documents["scan-manifest.json"]
+        findings = documents["findings.json"]
+        coverage = documents["coverage.json"]
+        if not isinstance(manifest.get("scan"), dict) or not isinstance(
+            findings.get("findings"), list
+        ):
+            raise SystemExit("Budget-exhausted scan contains an invalid canonical scan draft.")
+        for key in ("surfaces", "explicitExclusions", "deferred"):
+            if not isinstance(coverage.get(key), list):
+                raise SystemExit("Budget-exhausted scan contains invalid canonical coverage.")
+        if manifest["scan"].get("sealedAt") is not None or manifest["scan"].get("artifacts"):
+            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
+    else:
+        contract = scan_contract(scan)
+        target_contract = contract["target"]
+        target: dict[str, Any] = {
+            "kind": target_contract["allowedKinds"][0],
+            "targetId": target_contract["targetId"],
+            "displayName": target_contract["displayName"],
+        }
+        if scan["target_revision"] != "unversioned":
+            target["revision"] = scan["target_revision"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
+        manifest = {
+            "scan": {
+                "target": target,
+                "scope": {"limitations": [warning], "validationMode": "incomplete"},
+            }
+        }
+        findings = {"findings": []}
+        coverage = {
+            "completeness": "partial",
+            "inventoryStrategy": (
+                "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
+            ),
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        }
+
+    findings_by_candidate = {
+        candidate_id
+        for finding in findings["findings"]
+        if isinstance(finding, dict)
+        and isinstance(candidate_id := finding_candidate_id(finding), str)
+    }
+    existing_deferred = {
+        item.get("candidateId", item.get("id"))
+        for item in coverage["deferred"]
+        if isinstance(item, dict)
+        and isinstance(item.get("candidateId", item.get("id")), str)
+    }
+    existing_surfaces = {
+        item.get("id")
+        for item in coverage["surfaces"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for candidate in candidates:
+        candidate_id = candidate["candidate_id"]
+        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
+            continue
+        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
+        surface_id = f"candidate-{candidate_id}"
+        validation = candidate.get("validation")
+        validation = validation.get("disposition") if isinstance(validation, dict) else None
+        attack = candidate.get("attack_path")
+        attack = attack.get("decision") if isinstance(attack, dict) else None
+        disposition = (
+            "needs_follow_up"
+            if validation == "deferred" or attack == "deferred"
+            else "not_applicable"
+            if validation == "not_applicable"
+            else "rejected"
+            if validation == "suppressed" or attack == "ignore"
+            else "needs_follow_up"
+        )
+        if surface_id not in existing_surfaces:
+            coverage["surfaces"].append(
+                {
+                    "id": surface_id,
+                    "label": candidate["summary"],
+                    "disposition": disposition,
+                    "notes": candidate["evidence"],
+                    "receiptRefs": [],
+                }
+            )
+            existing_surfaces.add(surface_id)
+        if disposition != "needs_follow_up":
+            continue
+        coverage["deferred"].append(
+            {
+                "id": candidate_id,
+                "candidateId": candidate_id,
+                "reason": (
+                    "Validation was deferred because the scan reached its cost limit: "
+                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
+                ),
+                "paths": paths,
+                "surfaceIds": [surface_id],
+            }
+        )
+    if not any(
+        isinstance(item, dict)
+        and isinstance(reason := item.get("reason"), str)
+        and (
+            reason == "Validation was deferred because the scan reached its cost limit."
+            or reason.startswith(
+                "Validation was deferred because the scan reached its cost limit: "
+            )
+        )
+        for item in coverage["deferred"]
+    ):
+        coverage["deferred"].append(
+            {
+                "id": "scan-cost-limit",
+                "reason": "Validation was deferred because the scan reached its cost limit.",
+            }
+        )
+    coverage["completeness"] = "partial"
+    for name, payload in (
+        ("findings.json", findings),
+        ("coverage.json", coverage),
+        ("scan-manifest.json", manifest),
+    ):
+        try:
+            write_scan_local_bytes(
+                scan_dir,
+                name,
+                (json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except (ContractError, OSError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+
+
 def complete_scan_locked(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -3400,6 +3679,8 @@ def main() -> None:
             result = complete_scan(
                 connection, args, prepare_only=args.command == "prepare-scan-completion"
             )
+        elif args.command == "complete-budget-exhausted-scan":
+            result = complete_budget_exhausted_scan(connection, args)
         elif args.command == "cancel-scan":
             result = cancel_scan(connection, args)
         elif args.command == "fail-scan":

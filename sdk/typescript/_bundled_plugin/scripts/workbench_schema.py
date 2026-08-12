@@ -635,6 +635,14 @@ MIGRATIONS = (
         SET stop_after_consecutive_errors = stop_after_no_new;
         """,
     ),
+    (
+        28,
+        "persist deep scan discovery time limit",
+        """
+        ALTER TABLE deep_scan_runs
+        ADD COLUMN max_time_hours REAL NOT NULL DEFAULT 96;
+        """,
+    ),
 )
 
 
@@ -688,6 +696,13 @@ def apply_migrations(
                         "scans",
                         "completion_warnings_json",
                         "TEXT NOT NULL DEFAULT '[]'",
+                    )
+                elif version == 28:
+                    add_column_if_missing(
+                        connection,
+                        "deep_scan_runs",
+                        "max_time_hours",
+                        "REAL NOT NULL DEFAULT 96",
                     )
                 continue
             if version == 6:

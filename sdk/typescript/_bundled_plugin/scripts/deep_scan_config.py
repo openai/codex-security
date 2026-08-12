@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ DEFAULT_SUBAGENTS = 3
 DEFAULT_STOP_AFTER_NO_NEW = 6
 DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = 3
 DEFAULT_MAX_DISCOVERY_RUNS = 60
+DEFAULT_MAX_TIME_HOURS = 96
+MAX_TIME_HOURS = 96
 MAX_AUTOMATIC_WORKERS = 6
 CONFIG_KEYS = {
     "workers",
@@ -23,6 +26,7 @@ CONFIG_KEYS = {
     "stop_after_no_new",
     "stop_after_consecutive_errors",
     "max_discovery_runs",
+    "max_time_hours",
 }
 
 
@@ -34,7 +38,7 @@ def config_path() -> Path:
     return codex_home() / "codex-security" / "config.toml"
 
 
-def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int]:
+def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | float]:
     if isinstance(available_parallelism, bool) or available_parallelism < 1:
         raise SystemExit("Available parallelism must be a positive integer.")
     path = config_path()
@@ -87,6 +91,10 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int]:
             "deep_scan.max_discovery_runs",
             minimum=1,
         ),
+        "maxTimeHours": require_positive_number(
+            configured.get("max_time_hours", DEFAULT_MAX_TIME_HOURS),
+            "deep_scan.max_time_hours",
+        ),
     }
 
 
@@ -100,6 +108,18 @@ def require_integer(value: object, label: str, *, minimum: int) -> int:
             else f"an integer of at least {minimum}"
         )
         raise SystemExit(f"{label} must be {qualifier}.")
+    return value
+
+
+def require_positive_number(value: object, label: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite or value <= 0 or value > MAX_TIME_HOURS:
+        raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
     return value
 
 
