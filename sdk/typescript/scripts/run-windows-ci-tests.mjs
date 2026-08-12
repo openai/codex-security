@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const testsDirectory = new URL("../tests-ts/", import.meta.url);
@@ -7,13 +7,23 @@ const packageDirectory = fileURLToPath(new URL("../", import.meta.url));
 const tests = (await readdir(testsDirectory))
   .filter((file) => file.endsWith(".test.ts"))
   .sort();
-const slowApiTests = [
+const slowApiTestNames = [
   "keeps a private preflight snapshot isolated from persistent credentials",
   "reuses keyring-compatible credentials across separate scan clients",
   "serializes parallel scans sharing a managed credential home",
-  "recreates isolated and managed runtimes when scan authentication changes",
+  "reuses the managed runtime when scan authentication changes",
   "does not reimport ambient credentials after an explicit logout",
-].join("|");
+];
+const apiTestSource = await readFile(
+  new URL("../tests-ts/api.test.ts", import.meta.url),
+  "utf8",
+);
+for (const testName of slowApiTestNames) {
+  if (!apiTestSource.includes(`test("${testName}"`)) {
+    throw new Error("Windows CI slow API shard references a missing test.");
+  }
+}
+const slowApiTests = slowApiTestNames.join("|");
 const shardSeeds = [
   {
     files: ["api.test.ts"],
