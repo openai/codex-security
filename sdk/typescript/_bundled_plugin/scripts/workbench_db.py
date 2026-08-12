@@ -1382,7 +1382,17 @@ def budget_exhausted_draft(
                 "surfaceIds": [surface_id],
             }
         )
-    if not coverage["deferred"]:
+    if not any(
+        isinstance(item, dict)
+        and isinstance(reason := item.get("reason"), str)
+        and (
+            reason == "Validation was deferred because the scan reached its cost limit."
+            or reason.startswith(
+                "Validation was deferred because the scan reached its cost limit: "
+            )
+        )
+        for item in coverage["deferred"]
+    ):
         coverage["deferred"].append(
             {
                 "id": "scan-cost-limit",

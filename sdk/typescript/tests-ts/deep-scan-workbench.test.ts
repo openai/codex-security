@@ -226,9 +226,13 @@ describe("deep scan workbench ownership", () => {
     },
   );
 
-  test.each(["repository", "scoped_path"] as const)(
-    "returns an honest partial %s report when saturated discovery exceeds its cost limit",
-    async (inventoryStrategy) => {
+  test.each([
+    ["repository", false],
+    ["scoped_path", false],
+    ["repository", true],
+  ] as const)(
+    "returns an honest partial %s report with existing deferred work %s when saturated discovery exceeds its cost limit",
+    async (inventoryStrategy, existingDeferred) => {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "codex-security-deep-budget-recovery-")),
       );
@@ -293,6 +297,7 @@ describe("deep scan workbench ownership", () => {
         }),
       ]);
       const scanId = registration["scanId"] as string;
+      const targetId = registration["targetId"] as string;
       command([
         "begin-deep-scan",
         "--scan-id",
@@ -394,6 +399,51 @@ describe("deep scan workbench ownership", () => {
       expect(terminal.exitCode, new TextDecoder().decode(terminal.stderr)).toBe(
         0,
       );
+      if (existingDeferred) {
+        await Promise.all([
+          writeFile(
+            join(scanDir, "scan-manifest.json"),
+            JSON.stringify({
+              scan: {
+                target: {
+                  kind: "directory_snapshot",
+                  targetId,
+                  displayName: "repository",
+                },
+                scope: { limitations: [], validationMode: "incomplete" },
+              },
+            }),
+          ),
+          writeFile(
+            join(scanDir, "findings.json"),
+            JSON.stringify({ findings: [] }),
+          ),
+          writeFile(
+            join(scanDir, "coverage.json"),
+            JSON.stringify({
+              completeness: "partial",
+              inventoryStrategy,
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [
+                {
+                  id: "candidate-001",
+                  candidateId: "candidate-001",
+                  reason:
+                    "Existing candidate validation dependency was unavailable.",
+                  paths: ["src/source.py"],
+                },
+                {
+                  id: "candidate-deferred",
+                  candidateId: "candidate-deferred",
+                  reason: "Existing runtime policy could not be inspected.",
+                  paths: ["src/source.py"],
+                },
+              ],
+            }),
+          ),
+        ]);
+      }
       const warning =
         "Scan stopped: estimated cost $10.08 exceeded the $10.00 limit.";
       const completed = command([
@@ -428,22 +478,49 @@ describe("deep scan workbench ownership", () => {
         completeness: string;
         inventoryStrategy: string;
         includePaths: string[];
-        deferred: Array<{ id: string; reason: string; paths: string[] }>;
+        deferred: Array<{
+          id: string;
+          candidateId?: string;
+          reason: string;
+          paths?: string[];
+        }>;
         surfaces: Array<{ id: string; disposition: string }>;
       };
       expect(coverage).toMatchObject({
         completeness: "partial",
         inventoryStrategy,
         includePaths: scoped ? ["src"] : ["."],
-        deferred: [
+      });
+      if (existingDeferred) {
+        expect(coverage.deferred).toEqual([
           {
+            id: "candidate-001",
+            candidateId: "candidate-001",
+            reason: "Existing candidate validation dependency was unavailable.",
+            paths: ["src/source.py"],
+          },
+          {
+            id: "candidate-deferred",
+            candidateId: "candidate-deferred",
+            reason: "Existing runtime policy could not be inspected.",
+            paths: ["src/source.py"],
+          },
+          {
+            id: "scan-cost-limit",
+            reason:
+              "Validation was deferred because the scan reached its cost limit.",
+          },
+        ]);
+      } else {
+        expect(coverage.deferred).toEqual([
+          expect.objectContaining({
             id: "candidate-001",
             reason: expect.stringContaining("Possible missing authorization"),
             paths: scoped
               ? ["src/source.py", "shared/support.py"]
               : ["src/source.py"],
-          },
-          {
+          }),
+          expect.objectContaining({
             id: "candidate-deferred",
             reason: expect.stringContaining(
               "Authorization proof needs runtime evidence",
@@ -451,15 +528,19 @@ describe("deep scan workbench ownership", () => {
             paths: scoped
               ? ["src/source.py", "shared/support.py"]
               : ["src/source.py"],
-          },
-        ],
-      });
+          }),
+        ]);
+      }
       expect(coverage.surfaces).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({
-            id: "candidate-candidate-001",
-            disposition: "needs_follow_up",
-          }),
+          ...(existingDeferred
+            ? []
+            : [
+                expect.objectContaining({
+                  id: "candidate-candidate-001",
+                  disposition: "needs_follow_up",
+                }),
+              ]),
           expect.objectContaining({
             id: "candidate-candidate-suppressed",
             disposition: "rejected",
@@ -472,18 +553,31 @@ describe("deep scan workbench ownership", () => {
             id: "candidate-candidate-ignored",
             disposition: "rejected",
           }),
-          expect.objectContaining({
-            id: "candidate-candidate-deferred",
-            disposition: "needs_follow_up",
-          }),
+          ...(existingDeferred
+            ? []
+            : [
+                expect.objectContaining({
+                  id: "candidate-candidate-deferred",
+                  disposition: "needs_follow_up",
+                }),
+              ]),
         ]),
       );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
       expect(report).toContain(
         "No findings were validated before the scan reached its cost limit.",
       );
-      expect(report).toContain("Possible missing authorization");
-      expect(report).toContain("The request reaches a protected handler.");
+      if (existingDeferred) {
+        expect(report).toContain(
+          "Existing candidate validation dependency was unavailable.",
+        );
+        expect(report).toContain(
+          "Existing runtime policy could not be inspected.",
+        );
+      } else {
+        expect(report).toContain("Possible missing authorization");
+        expect(report).toContain("The request reaches a protected handler.");
+      }
       expect(report).toContain(
         "Authorization guard already protects the handler",
       );
