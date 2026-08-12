@@ -256,7 +256,7 @@ def list_unmatched_scan_pairs(
     }
     batches = []
     skipped = 0
-    backfilled: set[str] = set()
+    matching_findings: dict[str, list[dict[str, Any]]] = {}
     for index, after in enumerate(available):
         previous = [
             before
@@ -267,21 +267,19 @@ def list_unmatched_scan_pairs(
         if not previous:
             continue
         for scan in (*previous, after):
-            if scan["id"] not in backfilled:
+            if scan["id"] not in matching_findings:
                 backfill_finding_details(connection, scan)
-                backfilled.add(scan["id"])
+                matching_findings[scan["id"]] = [
+                    _matching_input(row)
+                    for row in _scan_findings(connection, scan["id"]).values()
+                ]
         batches.append(
             {
-                "afterFindings": [
-                    _matching_input(row) for row in _scan_findings(connection, after["id"]).values()
-                ],
+                "afterFindings": matching_findings[after["id"]],
                 "afterScanId": after["id"],
                 "beforeScans": [
                     {
-                        "findings": [
-                            _matching_input(row)
-                            for row in _scan_findings(connection, before["id"]).values()
-                        ],
+                        "findings": matching_findings[before["id"]],
                         "scanId": before["id"],
                     }
                     for before in previous

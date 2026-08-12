@@ -74,7 +74,6 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
     FINDINGS_PAGE_MAX,
     FINDINGS_RESULT_LIMIT,
-    PATCH_ARTIFACT_MAX_BYTES,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
 )
@@ -1433,6 +1432,16 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     }
 
 
+def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan = require_scan(connection, args.scan_id)
+    with connection:
+        connection.execute(
+            "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
+            (args.thread_id, now(), scan["id"]),
+        )
+    return {"scanId": scan["id"], "threadId": args.thread_id}
+
+
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
         raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
@@ -2446,16 +2455,10 @@ def require_scan_relative_file(scan: sqlite3.Row, value: str) -> str:
 def require_matching_patch_digest(scan: sqlite3.Row, patch_path: str, patch_digest: str) -> None:
     digest = hashlib.sha256()
     with open_scan_local_file(Path(scan["scan_dir"]), patch_path) as patch:
-        require_bounded_patch_artifact(patch)
         while chunk := patch.read(1024 * 1024):
             digest.update(chunk)
     if f"sha256:{digest.hexdigest()}" != patch_digest:
         raise SystemExit("Patch digest does not match the scan-local patch file.")
-
-
-def require_bounded_patch_artifact(patch: Any) -> None:
-    if os.fstat(patch.fileno()).st_size > PATCH_ARTIFACT_MAX_BYTES:
-        raise SystemExit("Patch artifact must be no larger than 2 MiB.")
 
 
 def open_scan_local_file(scan_dir: Path, relative_path: str) -> Any:
@@ -3154,7 +3157,6 @@ def patch_artifact_preview(
     at_line_start = True
     try:
         with open_scan_local_file(scan_dir, relative_path) as patch:
-            require_bounded_patch_artifact(patch)
             while chunk := patch.readline(1024 * 1024):
                 digest.update(chunk)
                 if len(preview) <= PATCH_PREVIEW_BYTES:
@@ -3366,6 +3368,8 @@ def main() -> None:
             )
         elif args.command == "register-cli-scan":
             result = register_cli_scan(connection, args)
+        elif args.command == "set-scan-thread":
+            result = set_scan_thread(connection, args)
         elif args.command == "get-scan-recipe":
             result = get_scan_recipe(connection, args)
         elif args.command == "compare-scans":

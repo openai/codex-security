@@ -1274,6 +1274,28 @@ def upsert_deep_scan_worker(
                 """,
                 (timestamp, scan_id),
             )
+        elif args.kind == "dedup" and args.status == "failed" and existing["status"] == "running":
+            connection.execute(
+                """
+                UPDATE deep_scan_workers
+                SET merge_state = 'buffered', updated_at = ?
+                WHERE scan_id = ? AND kind = 'discovery' AND status = 'succeeded'
+                    AND merge_state = 'merging'
+                    AND id IN (
+                        SELECT discovery_worker_id FROM deep_scan_dedup_inputs
+                        WHERE scan_id = ? AND dedup_worker_id = ?
+                    )
+                """,
+                (timestamp, scan_id, scan_id, worker_id),
+            )
+            connection.execute(
+                """
+                UPDATE deep_scan_runs
+                SET phase = 'discovery', updated_at = ?
+                WHERE scan_id = ?
+                """,
+                (timestamp, scan_id),
+            )
         completed_at = (
             timestamp
             if args.status in {"succeeded", "failed", "canceled"}

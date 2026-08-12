@@ -147,6 +147,10 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--archive-existing", action="store_true")
     register_cli_scan.add_argument("--archived-scan-dir")
 
+    set_scan_thread = subparsers.add_parser("set-scan-thread")
+    set_scan_thread.add_argument("--scan-id", required=True)
+    set_scan_thread.add_argument("--thread-id", required=True)
+
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
 

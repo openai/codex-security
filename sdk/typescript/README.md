@@ -53,6 +53,10 @@ Use `security.preflight()` to validate local inputs, `onWorkerStatus` and
 `onReconnect` to observe long-running scans, and an `AbortSignal` to cancel a
 scan.
 
+Successful results include open repository findings in `repositoryFindings`,
+when available; `findings` remains the current scan. Matching earlier findings
+can make one additional model call, including with a scan cost limit.
+
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
@@ -212,15 +216,18 @@ npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --su
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
+npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
 npx @openai/codex-security scans show SCAN_ID
+npx @openai/codex-security scans logs SCAN_ID
 npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings list /path/to/repository
 npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
@@ -399,7 +406,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics.                                            |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
@@ -450,11 +457,12 @@ token and worker counts, estimated cost, the results directory, and the next
 useful command.
 Progress and summaries use stderr; structured scan results remain on stdout.
 
-Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print redacted
+Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Credentials and provider identifiers remain redacted, and structured JSON
-results remain on stdout.
+Structured JSON results remain on stdout. Verbose diagnostics may contain
+sensitive data; review local logs before sharing them. The interactive
+dashboard omits activity containing recognizable credentials.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
@@ -463,9 +471,7 @@ including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit. Cost tracking accepts Codex
-session events up to 1 MiB; an oversized event stops the scan because its
-running cost can no longer be verified safely.
+already in progress can finish above the limit.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -477,6 +483,11 @@ repositories to scan, and confirm before scanning.
 Private checkouts reuse your GitHub CLI sign-in without changing your global Git
 configuration. The selected repositories are saved to
 `<output-dir>/repositories.csv` for review or resumption.
+
+Interactive discovery accepts the same `--workers`, `--mode`, `--max-attempts`,
+`--model`, `--effort`, `--plugin-path`, `--python`, and `--codex` settings as
+CSV-driven scans. It prompts for the output directory; `--output-dir` is only
+valid when a repository CSV is supplied.
 
 To use an existing repository list or run in CI, pass a CSV with required `id`,
 `repository`, and `revision` columns. Revisions must be full commit hashes;
@@ -490,7 +501,8 @@ service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef0123
 Use `--scan-prompt-file PATH` to add instructions to a scan or every bulk scan.
 Bulk scans append each repository's CSV `prompt` after the shared instructions.
 Use `--post-scan-prompt-file PATH` to run a follow-up in the same authenticated
-session after each completed scan has been validated.
+session after each scan, including incomplete or failed scans. Canceled scans
+and scans stopped at their configured cost limit do not start another turn.
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.
@@ -503,13 +515,17 @@ whose artifacts are under a particular root. `scans show SCAN_ID` includes the
 scan configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
+`scans logs SCAN_ID` shows complete session events from the scan and its
+workers, which can include source code and credentials.
+
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
 
 Scan history uses the existing Codex Security workbench database at
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
 `CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
-are never stored in the scan configuration.
+are never stored in the scan configuration. Recorded failure summaries and
+bulk-scan receipts omit messages that contain recognizable credentials.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the
@@ -580,11 +596,7 @@ text. Both commands operate on the current directory, use the scan model
 and reasoning defaults, ignore unrelated user configuration and plugins, and
 print the final response without the underlying Codex event stream. Override
 the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
-`--effort high` or `--codex 'model_reasoning_effort="high"'`. Inputs are
-limited to 64 items and 1 MiB total.
-
-Canonical scan documents are limited to 16 MiB for the manifest, 128 MiB for
-findings, and 32 MiB for coverage. Oversized scans are rejected before sealing.
+`--effort high` or `--codex 'model_reasoning_effort="high"'`.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
@@ -631,6 +643,10 @@ Reports and resumable scan results are written to `results/`; the reusable
 device login remains in `state/`. For unattended scans, set `OPENAI_API_KEY`
 or `CODEX_API_KEY` instead. Set `GH_TOKEN` or `GITHUB_TOKEN` for private
 GitHub repositories.
+
+The container accepts the repository CSV before or after bulk-scan options.
+Interactive repository discovery remains disabled, including when global CLI
+options appear before `bulk-scan`.
 
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
 can install the optional, narrowly scoped AppArmor profile once:

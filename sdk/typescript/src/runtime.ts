@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants, existsSync, type Stats } from "node:fs";
 import {
   chmod,
@@ -43,7 +43,7 @@ import {
   OutputDirectoryError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
-  redactedErrorMessage,
+  errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -57,10 +57,6 @@ const MAX_ZIP_ENTRIES = 4_096;
 const MAX_ZIP_CENTRAL_DIRECTORY = 16 * 1024 * 1024;
 const MAX_ZIP_ENTRY_SIZE = 128 * 1024 * 1024;
 const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
-const MAX_PLUGIN_MANIFEST_SIZE = 1024 * 1024;
-const MAX_PLUGIN_COPY_ENTRIES = 4_096;
-const MAX_PLUGIN_COPY_FILE_SIZE = 128 * 1024 * 1024;
-const MAX_PLUGIN_COPY_SIZE = 512 * 1024 * 1024;
 const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
@@ -283,11 +279,11 @@ function windowsCredentialAclFailure(error: unknown): string {
       : error instanceof Error
         ? error.message
         : String(error);
-  const sanitized = redactedErrorMessage(detail)
+  const normalized = errorMessage(detail)
     .replace(/\s+/gu, " ")
     .trim()
     .slice(0, 512);
-  return sanitized === "" ? "" : `. ${sanitized}`;
+  return normalized === "" ? "" : `. ${normalized}`;
 }
 
 const WINDOWS_SYSTEM_SID = "S-1-5-18";
@@ -1303,7 +1299,7 @@ export async function runWorkbench(
           ),
         ),
         encoding: "utf8",
-        maxBuffer: 4 * 1024 * 1024,
+        maxBuffer: Infinity,
         windowsHide: true,
         signal: options.signal,
       },
@@ -1979,137 +1975,6 @@ export async function createMarketplace(
   return marketplace;
 }
 
-async function pluginProjectionFingerprint(
-  root: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  throwIfSignalAborted(signal);
-  const canonical = await realpath(root);
-  const contractPath = join(
-    canonical,
-    ".internal",
-    "external-promotion",
-    "external-projection-contract.json",
-  );
-  let paths: string[];
-
-  if (
-    canonical === (await bundledPluginRoot()) &&
-    (await isRegularFile(contractPath))
-  ) {
-    let contract: unknown;
-    try {
-      contract = JSON.parse(await readFile(contractPath, "utf8"));
-    } catch (error) {
-      throw new PluginBootstrapError(
-        `Invalid plugin projection contract: ${contractPath}`,
-        { cause: error },
-      );
-    }
-    const shipped = isRecord(contract) ? contract["shippedExact"] : undefined;
-    if (
-      !Array.isArray(shipped) ||
-      !shipped.every((path) => typeof path === "string")
-    ) {
-      throw new PluginBootstrapError(
-        "Plugin projection contract must contain shippedExact paths.",
-      );
-    }
-    paths = [
-      ...new Set(
-        [".codex-plugin/plugin.json", ...shipped]
-          .filter((path) => !path.startsWith("sdk/"))
-          .map((path) => safeArchivePath(path)),
-      ),
-    ];
-  } else {
-    paths = [];
-    const pending = [canonical];
-    let entries = 1;
-    while (pending.length > 0) {
-      throwIfSignalAborted(signal);
-      const path = pending.pop()!;
-      const metadata = await lstat(path);
-      if (metadata.isSymbolicLink()) {
-        throw new PluginBootstrapError(
-          `Plugin contains an unsafe source path: ${path}`,
-        );
-      }
-      if (metadata.isDirectory()) {
-        for await (const entry of pluginDirectoryEntries(path, signal)) {
-          const child = join(path, entry);
-          if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
-            throw new PluginBootstrapError(
-              `Plugin source exceeds the copy entry limit: ${child}`,
-            );
-          }
-          pending.push(child);
-        }
-      } else if (metadata.isFile()) {
-        paths.push(relative(canonical, path).split(sep).join("/"));
-      } else {
-        throw new PluginBootstrapError(
-          `Plugin contains a non-regular file: ${path}`,
-        );
-      }
-    }
-  }
-
-  paths.sort();
-  const fingerprint = createHash("sha256");
-  let totalSize = 0;
-  for (const relativePath of paths) {
-    throwIfSignalAborted(signal);
-    const path = join(canonical, ...relativePath.split("/"));
-    const metadata = await lstat(path);
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new PluginBootstrapError(
-        `Plugin projection contains an unsafe source path: ${path}`,
-      );
-    }
-    if (metadata.size > MAX_PLUGIN_COPY_FILE_SIZE) {
-      throw new PluginBootstrapError(
-        `Plugin source exceeds the per-file safety limit: ${path}`,
-      );
-    }
-    totalSize += metadata.size;
-    if (totalSize > MAX_PLUGIN_COPY_SIZE) {
-      throw new PluginBootstrapError(
-        "Plugin source exceeds the copy safety limit.",
-      );
-    }
-    const handle = await open(
-      path,
-      constants.O_RDONLY |
-        (process.platform === "win32"
-          ? 0
-          : constants.O_NOFOLLOW | constants.O_NONBLOCK),
-    );
-    try {
-      if (!samePluginFile(metadata, await handle.stat())) {
-        throw new PluginBootstrapError(
-          `Plugin source changed before its integrity could be verified: ${path}`,
-        );
-      }
-      const contents = await readExactly(handle, metadata.size, 0, signal);
-      if (!samePluginFile(metadata, await handle.stat())) {
-        throw new PluginBootstrapError(
-          `Plugin source changed while its integrity was being verified: ${path}`,
-        );
-      }
-      fingerprint.update(relativePath);
-      fingerprint.update("\0");
-      fingerprint.update(String(metadata.size));
-      fingerprint.update("\0");
-      fingerprint.update(contents);
-      fingerprint.update("\0");
-    } finally {
-      await handle.close();
-    }
-  }
-  return fingerprint.digest("hex");
-}
-
 async function codexSecurityPluginRegistration(
   codexHome: string,
 ): Promise<{ marketplace: boolean; plugin: boolean }> {
@@ -2246,23 +2111,14 @@ export async function bootstrapPlugin(
   if (installedRoot !== null) {
     const installed = await pluginMetadata(installedRoot);
     if (installed.name === name && installed.version === version) {
-      const [selectedFingerprint, marketplaceFingerprint] = await Promise.all([
-        pluginProjectionFingerprint(root, options.signal),
-        pluginProjectionFingerprint(
-          join(existingMarketplace, "plugins", PLUGIN_NAME),
-          options.signal,
-        ),
-      ]);
-      if (selectedFingerprint === marketplaceFingerprint) {
-        return {
-          pluginRoot: root,
-          marketplaceRoot: existingMarketplace,
-          installedRoot,
-          marketplaceName: MARKETPLACE_NAME,
-          name,
-          version,
-        };
-      }
+      return {
+        pluginRoot: root,
+        marketplaceRoot: existingMarketplace,
+        installedRoot,
+        marketplaceName: MARKETPLACE_NAME,
+        name,
+        version,
+      };
     }
     upgradeExistingPlugin = true;
   }
@@ -2336,36 +2192,11 @@ export async function pluginMetadata(
   const manifestPath = join(root, ".codex-plugin", "plugin.json");
   let manifest: unknown;
   try {
-    const expected = await lstat(manifestPath);
-    if (
-      !expected.isFile() ||
-      expected.isSymbolicLink() ||
-      expected.size > MAX_PLUGIN_MANIFEST_SIZE
-    ) {
-      throw new Error("plugin manifest is not a bounded regular file");
+    const metadata = await lstat(manifestPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error("plugin manifest is not a regular file");
     }
-    const input = await open(
-      manifestPath,
-      constants.O_RDONLY |
-        (process.platform === "win32"
-          ? 0
-          : constants.O_NOFOLLOW | constants.O_NONBLOCK),
-    );
-    try {
-      const opened = await input.stat();
-      if (!samePluginFile(expected, opened)) {
-        throw new Error("plugin manifest changed before reading");
-      }
-      const bytes = await readExactly(input, expected.size, 0);
-      if (!samePluginFile(expected, await input.stat())) {
-        throw new Error("plugin manifest changed while reading");
-      }
-      manifest = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-      );
-    } finally {
-      await input.close();
-    }
+    manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
     throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
       cause: error,
@@ -2592,8 +2423,6 @@ async function copyPluginTree(
     { source, destination },
   ];
   const directories = new Map<string, Stats>();
-  let entries = 1;
-  let size = 0;
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   try {
     while (pending.length > 0) {
@@ -2612,11 +2441,6 @@ async function copyPluginTree(
           signal,
         )) {
           const childSource = join(current.source, entry);
-          if (++entries > MAX_PLUGIN_COPY_ENTRIES) {
-            throw new PluginBootstrapError(
-              `Plugin source exceeds the copy entry limit: ${childSource}`,
-            );
-          }
           pending.push({
             source: childSource,
             destination: join(current.destination, entry),
@@ -2635,17 +2459,6 @@ async function copyPluginTree(
       if (!metadata.isFile()) {
         throw new PluginBootstrapError(
           `Plugin contains a non-regular file: ${current.source}`,
-        );
-      }
-      if (metadata.size > MAX_PLUGIN_COPY_FILE_SIZE) {
-        throw new PluginBootstrapError(
-          `Plugin source exceeds the per-file safety limit: ${current.source}`,
-        );
-      }
-      size += metadata.size;
-      if (size > MAX_PLUGIN_COPY_SIZE) {
-        throw new PluginBootstrapError(
-          "Plugin source exceeds the copy safety limit.",
         );
       }
       const input = await open(

@@ -48,7 +48,8 @@ import {
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   type ProtectedScanPathKind,
-  redactedErrorMessage,
+  errorMessage,
+  safeErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -56,9 +57,17 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
-import { ScanResult, type TurnResultMetadata } from "./result.js";
+import {
+  ScanResult,
+  type RepositoryFinding,
+  type TurnResultMetadata,
+} from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
+import {
+  matchCompletedScan,
+  type matchScanFindings,
+} from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
@@ -71,6 +80,7 @@ import {
   bootstrapPlugin,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
+  codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
@@ -257,6 +267,12 @@ export interface CodexSecurityMetadata {
   executableVersion: string;
 }
 
+export type CodexSecuritySurface = "cli" | "sdk";
+
+interface CodexSecurityRuntimeOptions {
+  surface: CodexSecuritySurface;
+}
+
 interface ClientDependencies {
   createCodex(options: CodexOptions): CodexClientLike;
   environment: ProcessEnvironment;
@@ -269,6 +285,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  matchFindings?: typeof matchScanFindings;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -297,6 +314,7 @@ export class CodexSecurity {
   };
 
   readonly #dependencies: ClientDependencies;
+  readonly #surface: CodexSecuritySurface;
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -307,12 +325,20 @@ export class CodexSecurity {
   #closePromise: Promise<void> | null = null;
 
   public constructor(config?: CodexSecurityConfig);
+  /** @internal */
+  public constructor(
+    config: CodexSecurityConfig,
+    dependencies: ClientDependencies,
+    runtimeOptions: CodexSecurityRuntimeOptions,
+  );
   public constructor(
     config: CodexSecurityConfig = {},
     dependencies: ClientDependencies = DEFAULT_DEPENDENCIES,
+    runtimeOptions: CodexSecurityRuntimeOptions = { surface: "sdk" },
   ) {
     this.config = structuredClone(config);
     this.#dependencies = dependencies;
+    this.#surface = runtimeOptions.surface;
   }
 
   public async run(
@@ -393,6 +419,8 @@ export class CodexSecurity {
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
     let preparedTargetWarnings: string[] = [];
+    let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
+      null;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -465,10 +493,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
-      if (
-        authentication.method === "stored_credentials" &&
-        this.#dependencies.prepareRuntime === undefined
-      ) {
+      if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
           (path) =>
@@ -490,7 +515,6 @@ export class CodexSecurity {
       );
       if (
         runtime === previousRuntime &&
-        runtime.persistentCredentialHome === true &&
         this.#dependencies.prepareRuntime === undefined
       ) {
         await this.#refreshPersistentRuntime(runtime, scanEnvironment, signal);
@@ -499,7 +523,7 @@ export class CodexSecurity {
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(
           runtime.configPath,
-          scanPreflightCodexConfig(effectiveConfig, repo),
+          scanPreflightCodexConfig(effectiveConfig),
         );
       }
       const runtimeHome = await realpath(runtime.codexHome);
@@ -570,6 +594,10 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
+      if (authentication.method !== "stored_credentials") {
+        await releaseCredentialHome?.();
+        releaseCredentialHome = null;
+      }
       notifyObserver(
         "onAuthentication",
         options.onAuthentication,
@@ -635,14 +663,18 @@ export class CodexSecurity {
           `Shell-visible plugin root must be outside CODEX_HOME: ${canonicalShellPluginRoot}`,
         );
       }
-      const basePrompt = await scanPrompt(
-        shellPluginRoot,
-        normalized,
-        mode,
-        runtime.configPath !== undefined,
-        knowledgeBase !== null,
-        options.scanPrompt,
-      );
+      const skillName = skillNameFor(normalized, mode);
+      const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
+      const skillMetadata = await lstat(skillPath).catch(() => null);
+      if (
+        skillMetadata === null ||
+        !skillMetadata.isFile() ||
+        skillMetadata.isSymbolicLink()
+      ) {
+        throw new IncompleteScanError(
+          `Installed plugin is missing scan skill: ${skillName}`,
+        );
+      }
       checkOpen();
       const expectation: ScanExpectation = {
         repository: repo,
@@ -673,42 +705,63 @@ export class CodexSecurity {
           { ...progress, filesTotal: scopeFileCount },
         );
       };
+      const reportTrackingError = (error: unknown): void => {
+        if (options.maxCostUsd !== undefined) {
+          costAbortController.abort(error);
+          return;
+        }
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not track scan activity: ${errorMessage(error)}`,
+        );
+      };
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
         repository: repo,
         maxCostUsd: options.maxCostUsd,
-        onActivity: (activity) => {
-          notifyObserver(
-            "onActivity",
-            options.onActivity,
-            options.onObserverError,
-            activity,
-          );
-        },
-        onProgress: reportProgress,
-        onCost: (cost) => {
-          notifyObserver(
-            "onCost",
-            options.onCost,
-            options.onObserverError,
-            cost,
-          );
-          if (
-            options.maxCostUsd !== undefined &&
-            cost.estimatedUsd > options.maxCostUsd
-          ) {
-            costAbortController.abort(
-              new ScanCostLimitExceededError(options.maxCostUsd, cost, scanDir),
-            );
-          }
-        },
-        onError: (error) => costAbortController.abort(error),
+        onActivity:
+          options.onActivity === undefined
+            ? undefined
+            : (activity) =>
+                notifyObserver(
+                  "onActivity",
+                  options.onActivity,
+                  options.onObserverError,
+                  activity,
+                ),
+        onProgress:
+          options.onProgress === undefined ? undefined : reportProgress,
+        onCost:
+          options.onCost === undefined && options.maxCostUsd === undefined
+            ? undefined
+            : (cost) => {
+                notifyObserver(
+                  "onCost",
+                  options.onCost,
+                  options.onObserverError,
+                  cost,
+                );
+                if (
+                  options.maxCostUsd !== undefined &&
+                  cost.estimatedUsd > options.maxCostUsd
+                ) {
+                  costAbortController.abort(
+                    new ScanCostLimitExceededError(
+                      options.maxCostUsd,
+                      cost,
+                      scanDir,
+                    ),
+                  );
+                }
+              },
+        onError: reportTrackingError,
       });
       costTracker = tracker;
       const recipe = scanRecipe(
         repo,
-        protectedRoot,
         normalized,
         mode,
         expectation.repositoryRevision,
@@ -817,6 +870,16 @@ export class CodexSecurity {
       }
       activeScan = { id: scanId, options: workbenchOptions };
       checkOpen();
+      const basePrompt = scanPrompt(
+        normalized,
+        mode,
+        skillName,
+        scanId,
+        runtime.configPath !== undefined,
+        knowledgeBase !== null,
+        options.scanPrompt,
+      );
+      checkOpen();
       const feedback = await workbench(
         {
           ...workbenchOptions,
@@ -918,14 +981,20 @@ export class CodexSecurity {
         CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
       };
+      const sdkCodexConfig = scanPreflightCodexConfig(effectiveConfig);
+      delete sdkCodexConfig["projects"];
       const codex = this.#dependencies.createCodex({
         ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
         ),
         config: {
+          ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
+          responses_api_metadata: {
+            codex_security_surface: this.#surface,
+          },
         },
       });
       const thread = codex.startThread({
@@ -950,6 +1019,10 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       checkOpen();
+      const postScanPrompt = options.postScanPrompt;
+      if (postScanPrompt?.trim()) {
+        runPostScan = () => thread.runStreamed(postScanPrompt, { signal });
+      }
       const { events } = await thread.runStreamed(prompt, {
         signal,
       });
@@ -965,9 +1038,31 @@ export class CodexSecurity {
         authentication,
         workbenchValidated: true,
         model,
-        onThreadStarted: (threadId) => tracker.start(threadId),
+        onThreadStarted: async (threadId) => {
+          tracker.start(threadId);
+          try {
+            await workbench(workbenchOptions, [
+              "set-scan-thread",
+              "--scan-id",
+              scanId,
+              "--thread-id",
+              threadId,
+            ]);
+          } catch (error) {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not save scan session: ${safeErrorMessage(error)}`,
+            );
+          }
+        },
         onFinalize: async (usage) => {
-          const snapshot = await tracker.stop(usage);
+          const snapshot = await tracker.stop(usage).catch((error: unknown) => {
+            if (options.maxCostUsd !== undefined) throw error;
+            reportTrackingError(error);
+            return { usage, cost: estimateScanCost(model, usage) };
+          });
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
             notifyObserver(
@@ -1044,16 +1139,12 @@ export class CodexSecurity {
           }
         }
       }
-      if (
-        options.postScanPrompt?.trim() &&
-        result.coverage.completeness === "complete"
-      ) {
-        const followUp = await thread.runStreamed(options.postScanPrompt, {
-          signal,
-        });
+      if (runPostScan !== null) {
+        const followUp = runPostScan;
+        runPostScan = null;
         await runScanEvents({
           thread,
-          events: followUp.events,
+          events: (await followUp()).events,
           signal,
           scanDir,
           pluginRoot: runtime.plugin.installedRoot,
@@ -1064,6 +1155,44 @@ export class CodexSecurity {
           onObserverError: options.onObserverError,
         });
         checkOpen();
+      }
+      try {
+        const runWorkbench = (args: readonly string[]) =>
+          workbench(workbenchOptions, args);
+        const previousFindings = await listRepositoryFindings(
+          runWorkbench,
+          targetId,
+          "all",
+        );
+        if (previousFindings !== undefined) {
+          await matchCompletedScan({
+            scanId,
+            repository: repo,
+            previousFindings: previousFindings.filter(
+              (finding) =>
+                finding["scanId"] !== scanId &&
+                finding["targetId"] === targetId,
+            ),
+            falsePositives: falsePositiveExamples as Record<string, unknown>[],
+            findings: result.findings.findings,
+            workbench: runWorkbench,
+            matchFindings: this.#dependencies.matchFindings,
+            environment,
+            model,
+            signal,
+          });
+          result.repositoryFindings = (await listRepositoryFindings(
+            runWorkbench,
+            targetId,
+          )) as RepositoryFinding[] | undefined;
+        }
+      } catch (error) {
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not update repository findings: ${errorMessage(error)}`,
+        );
       }
       return result;
     } catch (error) {
@@ -1081,15 +1210,30 @@ export class CodexSecurity {
             "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Redact before truncating: the stored message is read back by
-            // `scans show` and travels inside the results directory.
+            // Scan history can be shared; never persist credential-bearing failures.
             "--message",
-            redactedErrorMessage(failure).slice(0, 2400),
+            safeErrorMessage(failure).slice(0, 2400),
             ...(snapshot?.cost
               ? ["--cost-json", JSON.stringify(snapshot.cost)]
               : []),
           ]);
         } catch {}
+      }
+      if (runPostScan !== null && !signal.aborted) {
+        try {
+          for await (const event of (await runPostScan()).events) {
+            if (event.type === "turn.failed") {
+              throw new CodexSecurityError(turnFailureMessage(event["error"]));
+            }
+          }
+        } catch (postScanError) {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not run post-scan instructions: ${errorMessage(postScanError)}`,
+          );
+        }
       }
       if (this.#closed) this.#requireOpen();
       if (signal.aborted && !(failure instanceof ScanInterruptedError)) {
@@ -1336,23 +1480,7 @@ export class CodexSecurity {
     modelProvider?: unknown,
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
-    if (this.#runtime !== null) {
-      const usePersistentCredentials =
-        scanAuthentication(this.#dependencies.environment, auth, modelProvider)
-          .method === "stored_credentials";
-      if (
-        this.#dependencies.prepareRuntime !== undefined ||
-        this.#runtime.persistentCredentialHome === undefined ||
-        this.#runtime.persistentCredentialHome === usePersistentCredentials
-      ) {
-        return this.#runtime;
-      }
-      await this.#cleanupRuntime(this.#runtime);
-      this.#runtime = null;
-      this.#runtimePromise = null;
-      this.#runtimeCredentialSource = null;
-      this.#requireOpen();
-    }
+    if (this.#runtime !== null) return this.#runtime;
     if (this.#runtimePromise === null) {
       const runtimePromise = this.#prepareRuntime(
         signal ?? this.#abortController.signal,
@@ -1479,15 +1607,10 @@ export class CodexSecurity {
       auth,
       modelProvider,
     );
-    const persistentCredentialHome =
-      scanAuthentication(this.#dependencies.environment, auth, modelProvider)
-        .method === "stored_credentials";
-    const codexHome = persistentCredentialHome
-      ? await prepareCodexSecurityCredentialHome(
-          processEnvironment,
-          validateLocation,
-        )
-      : await createIsolatedHome(temporaryRoot, validateLocation);
+    const codexHome =
+      validateLocation === undefined
+        ? await prepareCodexSecurityCredentialHome(processEnvironment)
+        : await realpath(codexSecurityCredentialHome(processEnvironment));
     let bootstrapWorkspace: string | undefined;
     try {
       throwIfAborted(signal);
@@ -1512,7 +1635,7 @@ export class CodexSecurity {
         scanRuntimeCodexConfig(
           mergedConfig,
           codexSecurityStateDirectory(processEnvironment),
-          persistentCredentialHome ? codexHome : undefined,
+          codexHome,
         ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
@@ -1537,7 +1660,7 @@ export class CodexSecurity {
             );
       return {
         codexHome,
-        persistentCredentialHome,
+        persistentCredentialHome: true,
         bootstrapWorkspace,
         configPath,
         plugin,
@@ -1551,20 +1674,16 @@ export class CodexSecurity {
         effectiveConfig: mergedConfig,
       };
     } catch (error) {
-      const cleanupResults = await Promise.allSettled(
-        [bootstrapWorkspace, persistentCredentialHome ? undefined : codexHome]
-          .filter((path): path is string => path !== undefined)
-          .map((path) => cleanupSdkDirectory(path)),
-      );
-      const cleanupFailures = cleanupResults.flatMap((result) =>
-        result.status === "rejected" ? [result.reason] : [],
-      );
-      if (cleanupFailures.length > 0) {
-        throw new AggregateError(
-          [error, ...cleanupFailures],
-          "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
-          { cause: error },
-        );
+      if (bootstrapWorkspace !== undefined) {
+        try {
+          await cleanupSdkDirectory(bootstrapWorkspace);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "Codex Security runtime preparation failed and its isolated runtime could not be cleaned up.",
+            { cause: error },
+          );
+        }
       }
       throw error;
     }
@@ -1573,6 +1692,29 @@ export class CodexSecurity {
   #requireOpen(): void {
     if (this.#closed) throw new CodexSecurityError("CodexSecurity is closed.");
   }
+}
+
+export async function listRepositoryFindings(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  targetId: string,
+  status: "open" | "all" = "open",
+): Promise<JsonObject[] | undefined> {
+  const findings: JsonObject[] = [];
+  let offset: number | undefined;
+  do {
+    const page = await workbench([
+      "list-global-findings",
+      "--target-id",
+      targetId,
+      ...(status === "open" ? ["--status", "open"] : []),
+      ...(offset === undefined ? [] : ["--offset", String(offset)]),
+    ]);
+    if (!Array.isArray(page["findings"])) return undefined;
+    findings.push(...(page["findings"] as JsonObject[]));
+    offset =
+      typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;
+  } while (offset !== undefined);
+  return findings;
 }
 
 function deepScanOptions(options: ScanOptions): DeepScanOptions {
@@ -1646,6 +1788,19 @@ async function prepareDeepScanConfig(
   );
 }
 
+export function createSecurity(
+  config: CodexSecurityConfig = {},
+): CodexSecurity {
+  return createSecurityInternal(config, { surface: "sdk" });
+}
+
+export function createSecurityInternal(
+  config: CodexSecurityConfig = {},
+  runtimeOptions: CodexSecurityRuntimeOptions,
+): CodexSecurity {
+  return new CodexSecurity(config, DEFAULT_DEPENDENCIES, runtimeOptions);
+}
+
 export async function initialCredentialsAvailable(
   environment: ProcessEnvironment,
   ambientHome: string,
@@ -1662,7 +1817,7 @@ export async function initialCredentialsAvailable(
 
 // Reports a cleanup failure without letting it decide the result of the scan. Only the
 // message is forwarded, and it reaches the onWarning observer alone: unlike the fail-scan
-// path it is never written to the workbench, so it adds no persisted, unredacted text.
+// path it is never written to the workbench, so it adds no persisted warning text.
 function warnCleanupFailed(
   options: Pick<ScanOptions, "onWarning" | "onObserverError">,
   reason: unknown,
@@ -1705,7 +1860,7 @@ interface ScanEventRunOptions {
   model?: string;
   expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
-  onThreadStarted?: (threadId: string) => void;
+  onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onReconnect?: (
@@ -1790,7 +1945,7 @@ export async function runScanEvents(
         const startedThreadId = event["thread_id"];
         if (typeof startedThreadId === "string") {
           threadId = startedThreadId;
-          options.onThreadStarted?.(startedThreadId);
+          await options.onThreadStarted?.(startedThreadId);
         }
         if (!scanStarted) {
           scanStarted = true;
@@ -1976,32 +2131,25 @@ function trustedAccessWarning(
   return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${action} or apply at ${applicationUrl}.`;
 }
 
-async function scanPrompt(
-  pluginRoot: string,
+function scanPrompt(
   target: NormalizedTarget,
   mode: ScanMode,
+  skillName: string,
+  scanId: string,
   hasConfigPath = false,
   hasKnowledgeBase = false,
   additionalPrompt?: string,
-): Promise<string> {
-  const skillName = skillNameFor(target, mode);
-  const skillPath = join(pluginRoot, "skills", skillName, "SKILL.md");
-  const metadata = await lstat(skillPath).catch(() => null);
-  if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new IncompleteScanError(
-      `Installed plugin is missing scan skill: ${skillName}`,
-    );
-  }
+): string {
   return [
     `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
     ...(mode === "deep"
       ? [
-          'The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }; never pass targetPath or create another scan.',
+          `The SDK has already registered this scan. Call start_codex_security_deep_scan with ${JSON.stringify({ scanId })}; never pass targetPath or create another scan.`,
         ]
       : skillName === "security-scan"
         ? [
-            'The SDK has already registered this scan. Use exactly "$CODEX_SECURITY_SCAN_ID" and "$CODEX_SECURITY_SCAN_DIR"; never call a scan-start or completion tool, and leave finalization to the SDK.',
+            `The SDK has already registered this scan. Use exactly ${JSON.stringify(scanId)} and "$CODEX_SECURITY_SCAN_DIR"; never call a scan-start or completion tool, and leave finalization to the SDK.`,
           ]
         : []),
     ...(skillName === "security-scan"
@@ -2017,7 +2165,7 @@ async function scanPrompt(
     'Use "$PYTHON" as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.',
     'Repository root: "$CODEX_SECURITY_REPOSITORY"',
     'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
-    'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
+    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
     'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
     'Use exactly "$CODEX_SECURITY_TARGET_DISPLAY_NAME" as scan.target.displayName; do not infer a display name from the Git remote.',
     'Use exactly "$CODEX_SECURITY_TARGET_KIND" as scan.target.kind; do not infer the target kind from the checkout.',
@@ -2077,7 +2225,6 @@ function targetInstruction(target: NormalizedTarget): string {
 
 function scanRecipe(
   repository: string,
-  activeProjectPath: string,
   target: NormalizedTarget,
   mode: ScanMode,
   repositoryRevision: string | null,
@@ -2101,7 +2248,7 @@ function scanRecipe(
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
-    config: scanPreflightCodexConfig(effectiveConfig, activeProjectPath),
+    config: scanPreflightCodexConfig(effectiveConfig),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
@@ -2360,8 +2507,8 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
 //
 // Only `error.message` is reused, because that is the single shape the previous
 // code already surfaced. No other shape is forwarded or stringified: this message
-// reaches `fail-scan --message` and is stored in `scans.failure_message` without
-// redaction, so widening what is copied out of the payload would add a new
+// reaches `fail-scan --message` and is stored unchanged in `scans.failure_message`,
+// so widening what is copied out of the payload would add a new
 // credential-disclosure path to persistent scan history.
 function turnFailureMessage(error: unknown): string {
   if (isRecord(error) && typeof error["message"] === "string") {
@@ -2446,25 +2593,15 @@ export function scanRuntimeCodexConfig(
   };
 }
 
-export function scanPreflightCodexConfig(
-  config: JsonObject,
-  activeProjectPath?: string,
-): JsonObject {
-  const safeString = (value: unknown, maxLength: number): value is string =>
+export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
+  const safeString = (value: unknown): value is string =>
     typeof value === "string" &&
     value.length > 0 &&
-    value.length <= maxLength &&
-    !/[\u0000-\u001f\u007f]/u.test(value) &&
-    !/(?:^|[^a-z0-9])(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|key|secret|token|env|mcp|set|password|passwd|credential|authorization|bearer)(?:[^a-z0-9]|$)/iu.test(
-      value,
-    );
+    !/[\u0000-\u001f\u007f]/u.test(value);
   const safeProfileName = (value: unknown): value is string =>
-    safeString(value, 128) && /^[A-Za-z0-9_-]+$/u.test(value);
+    safeString(value) && /^[A-Za-z0-9_-]+$/u.test(value);
   const safeInteger = (value: unknown): value is number =>
-    typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value >= 0 &&
-    value <= 1_000_000;
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   const capabilityFeatures = (value: unknown): JsonObject => {
     if (!isRecord(value)) return {};
     const result: JsonObject = {};
@@ -2498,7 +2635,7 @@ export function scanPreflightCodexConfig(
       "service_tier",
     ]) {
       const value = source[key];
-      if (safeString(value, 512)) result[key] = value;
+      if (safeString(value)) result[key] = value;
     }
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
@@ -2519,20 +2656,6 @@ export function scanPreflightCodexConfig(
     }
     return result;
   };
-  const prioritizedEntries = (
-    value: Record<string, unknown>,
-    priority: string | undefined,
-  ): [string, unknown][] => {
-    const entries = Object.entries(value);
-    if (priority === undefined || !Object.hasOwn(value, priority)) {
-      return entries;
-    }
-    return [
-      [priority, value[priority]],
-      ...entries.filter(([key]) => key !== priority),
-    ];
-  };
-
   const result = executionConfig(config);
   const selectedProfile = safeProfileName(config["profile"])
     ? config["profile"]
@@ -2543,17 +2666,11 @@ export function scanPreflightCodexConfig(
   const profiles = config["profiles"];
   if (isRecord(profiles)) {
     const sanitized: JsonObject = {};
-    let accepted = 0;
-    for (const [name, profile] of prioritizedEntries(
-      profiles,
-      selectedProfile,
-    )) {
+    for (const [name, profile] of Object.entries(profiles)) {
       if (!safeProfileName(name) || !isRecord(profile)) continue;
       const projected = executionConfig(profile as JsonObject);
       if (Object.keys(projected).length === 0) continue;
       sanitized[name] = projected;
-      accepted += 1;
-      if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
   }
@@ -2570,7 +2687,7 @@ export function scanPreflightCodexConfig(
       const sanitized: JsonObject = {};
       for (const key of ["region", "profile"]) {
         const value = aws[key];
-        if (safeString(value, 512)) sanitized[key] = value;
+        if (safeString(value)) sanitized[key] = value;
       }
       if (Object.keys(sanitized).length > 0) {
         result["model_providers"] = {
@@ -2581,48 +2698,20 @@ export function scanPreflightCodexConfig(
   }
   const rootMarkers = config["project_root_markers"];
   if (Array.isArray(rootMarkers)) {
-    result["project_root_markers"] = rootMarkers
-      .filter((value): value is string => safeString(value, 256))
-      .slice(0, 64);
+    result["project_root_markers"] = rootMarkers.filter(safeString);
   }
   const projects = config["projects"];
   if (isRecord(projects)) {
     const sanitized: JsonObject = {};
-    let accepted = 0;
-    const activeProjectRoot =
-      activeProjectPath === undefined
-        ? undefined
-        : Object.keys(projects)
-            .filter((path) => {
-              if (!safeString(path, 4096) || !isAbsolute(path)) return false;
-              const remaining = relative(path, activeProjectPath);
-              return (
-                remaining === "" ||
-                (remaining !== ".." &&
-                  !remaining.startsWith(`..${sep}`) &&
-                  !isAbsolute(remaining))
-              );
-            })
-            .sort((left, right) => right.length - left.length)[0];
-    for (const [path, project] of prioritizedEntries(
-      projects,
-      activeProjectRoot ?? activeProjectPath,
-    )) {
-      if (!safeString(path, 4096) || !isAbsolute(path) || !isRecord(project)) {
+    for (const [path, project] of Object.entries(projects)) {
+      if (!safeString(path) || !isAbsolute(path) || !isRecord(project)) {
         continue;
       }
       const trust = project["trust_level"];
       if (trust !== "trusted" && trust !== "untrusted") continue;
       sanitized[path] = { trust_level: trust };
-      accepted += 1;
-      if (accepted === 256) break;
     }
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
-  }
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") > 256 * 1024) {
-    throw new CodexSecurityError(
-      "The sanitized Codex Security preflight config exceeds the size limit.",
-    );
   }
   return result;
 }

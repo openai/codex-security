@@ -8,6 +8,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   truncate,
   utimes,
   writeFile,
@@ -19,7 +20,7 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
-import { redactedErrorMessage } from "./errors.js";
+import { safeErrorMessage } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -246,7 +247,7 @@ async function runCampaign(
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
-          failure = redactedErrorMessage(error);
+          failure = safeErrorMessage(error);
         } finally {
           await rm(checkout, { recursive: true, force: true });
         }
@@ -341,16 +342,45 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     if (!existing.stale) {
       throw new Error("A multiscan supervisor is already running.");
     }
-    await recoverLock(output, path, existing.owner);
-    return await acquireLock(output);
+    const stale = await recoverLock(output, path, existing.owner);
+    try {
+      return await acquireLock(output);
+    } finally {
+      await rm(stale, { recursive: true, force: true });
+    }
   }
+  const createdLock = await lstat(path);
   const owner = `${JSON.stringify({
     pid: process.pid,
     ownerId: randomUUID(),
     hostname: hostname(),
     processStartedAt: performance.timeOrigin,
   })}\n`;
-  await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
+  try {
+    await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    const currentLock = await lstat(path).catch(
+      (cleanup: NodeJS.ErrnoException) => {
+        if (cleanup.code !== "ENOENT") throw cleanup;
+        return undefined;
+      },
+    );
+    if (
+      currentLock?.dev === createdLock.dev &&
+      currentLock.ino === createdLock.ino
+    ) {
+      await rmdir(path).catch((cleanup: NodeJS.ErrnoException) => {
+        if (
+          cleanup.code !== "ENOENT" &&
+          cleanup.code !== "ENOTEMPTY" &&
+          cleanup.code !== "EEXIST"
+        ) {
+          throw cleanup;
+        }
+      });
+    }
+    throw error;
+  }
 
   let heartbeat = Promise.resolve();
   const timer = setInterval(() => {
@@ -451,7 +481,7 @@ async function recoverLock(
   output: string,
   path: string,
   expectedOwner: string | undefined,
-): Promise<void> {
+): Promise<string> {
   const recoveryPath = join(path, ".recovering");
   let claim;
   try {
@@ -480,7 +510,7 @@ async function recoverLock(
     const stale = join(output, `.lock.stale-${randomUUID()}`);
     await rename(path, stale);
     moved = true;
-    await rm(stale, { recursive: true });
+    return stale;
   } finally {
     if (!moved) await rm(recoveryPath, { force: true });
   }

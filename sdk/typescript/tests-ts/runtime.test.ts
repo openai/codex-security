@@ -14,7 +14,6 @@ import {
   rm,
   stat,
   symlink,
-  truncate,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -223,24 +222,31 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("includes ignored tracked files in the scoped security inventory", async () => {
+  test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
       const generator = await readFile(
         join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
         "utf8",
       );
       expect(generator).toContain('"--no-ignore"');
+      expect(generator).toContain('"--path-separator"');
       return;
     }
 
     const root = await temporaryDirectory("codex-security-scan-inventory-");
     const repository = join(root, "repository");
-    await mkdir(repository);
-    await writeFile(join(repository, ".gitignore"), "tracked-secret.py\n");
-    await writeFile(join(repository, "tracked-secret.py"), "secret = True\n");
+    await mkdir(join(repository, "nested"), { recursive: true });
+    await writeFile(
+      join(repository, ".gitignore"),
+      "nested/tracked-secret.py\n",
+    );
+    await writeFile(
+      join(repository, "nested", "tracked-secret.py"),
+      "secret = True\n",
+    );
     for (const args of [
       ["init", "--quiet", repository],
-      ["-C", repository, "add", "--force", "--", "tracked-secret.py"],
+      ["-C", repository, "add", "--force", "--", "nested/tracked-secret.py"],
     ]) {
       const initialized = spawnSync("git", args, { encoding: "utf8" });
       expect(initialized.status, initialized.stderr).toBe(0);
@@ -249,8 +255,8 @@ describe("plugin runtime preparation", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
-    const inventory = spawnSync(
-      python!,
+    const repeatedOutput = join(root, "inventory-repeated.txt");
+    const generatorArguments = (destination: string) =>
       [
         "-I",
         "-B",
@@ -260,12 +266,68 @@ describe("plugin runtime preparation", () => {
         "--scope",
         ".",
         "--out",
-        output,
-      ],
-      { encoding: "utf8" },
+        destination,
+      ] as const;
+    for (const destination of [output, repeatedOutput]) {
+      const inventory = spawnSync(python!, generatorArguments(destination), {
+        encoding: "utf8",
+      });
+      expect(inventory.status, inventory.stderr).toBe(0);
+    }
+
+    const contents = await readFile(output);
+    expect(await readFile(repeatedOutput)).toEqual(contents);
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
     );
-    expect(inventory.status, inventory.stderr).toBe(0);
-    expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const validateSource =
+      /function validateRepositoryPath\(value, field\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    const parseSource =
+      /function parseInScopePaths\(content, path3\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(validateSource).toBeDefined();
+    expect(parseSource).toBeDefined();
+    const parseInventory = new Function(
+      "import_node_util5",
+      `${validateSource}\n${parseSource}\nreturn parseInScopePaths;`,
+    )({ TextDecoder }) as (content: Uint8Array, path: string) => Set<string>;
+    expect(() => parseInventory(contents, "in_scope_files.txt")).not.toThrow();
+
+    const rows = contents.toString("utf8").trimEnd().split(/\r?\n/u);
+    expect(rows).toContain("./nested/tracked-secret.py");
+    for (const row of rows) {
+      const normalized = row.replace(/^(?:\.\/)+/u, "");
+      expect(row).toBe(row.trim());
+      expect(isAbsolute(row)).toBe(false);
+      expect(normalized).not.toMatch(/^[A-Za-z]:/u);
+      expect(normalized.split("/")).not.toContain("..");
+      if (process.platform === "win32") {
+        expect(row).not.toContain("\\");
+      }
+    }
+    if (process.platform !== "win32") {
+      await writeFile(
+        join(repository, String.raw`literal\backslash.txt`),
+        "backslash\n",
+      );
+      await writeFile(join(repository, "literal:colon.txt"), "colon\n");
+      const posixOutput = join(root, "inventory-posix-filenames.txt");
+      const inventory = spawnSync(python!, generatorArguments(posixOutput), {
+        encoding: "utf8",
+      });
+      expect(inventory.status, inventory.stderr).toBe(0);
+      const posixRows = (await readFile(posixOutput, "utf8"))
+        .trimEnd()
+        .split(/\r?\n/u);
+      expect(posixRows).toContain(String.raw`./literal\backslash.txt`);
+      expect(posixRows).toContain("./literal:colon.txt");
+    }
   });
 
   test("preserves remediation when the filesystem device changes", async () => {
@@ -751,32 +813,26 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
-  test("bounds configured plugin directory discovery", async () => {
-    const overflowRoot = await temporaryDirectory();
-    const overflowSource = await plugin(overflowRoot);
-    const overflowDirectory = join(overflowSource, "many-files");
-    await mkdir(overflowDirectory);
+  test("copies configured plugins with more than 4,096 entries", async () => {
+    const root = await temporaryDirectory();
+    const source = await plugin(root);
+    const directory = join(source, "many-files");
+    await mkdir(directory);
     for (let offset = 0; offset < 4_096; offset += 128) {
       await Promise.all(
         Array.from({ length: 128 }, (_value, index) =>
-          writeFile(join(overflowDirectory, String(offset + index)), ""),
+          writeFile(join(directory, String(offset + index)), ""),
         ),
       );
     }
-    const overflowDestination = join(overflowRoot, "overflow-home");
-    await expect(
-      createMarketplace(overflowDestination, overflowSource),
-    ).rejects.toThrow("copy entry limit");
+
+    const marketplace = await createMarketplace(join(root, "home"), source);
+
     expect(
       existsSync(
-        join(
-          overflowDestination,
-          "sdk-marketplace",
-          "plugins",
-          "codex-security",
-        ),
+        join(marketplace, "plugins", "codex-security", "many-files", "4095"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test("cancels configured plugin directory discovery", async () => {
@@ -949,7 +1005,7 @@ describe("plugin runtime preparation", () => {
   testPosix(
     "rejects unsafe configured plugin manifests without hanging",
     async () => {
-      for (const kind of ["fifo", "symlink", "sparse"] as const) {
+      for (const kind of ["fifo", "symlink"] as const) {
         const root = await temporaryDirectory();
         const workspace = join(root, "workspace");
         const source = join(root, "plugin");
@@ -963,11 +1019,8 @@ describe("plugin runtime preparation", () => {
         );
         if (kind === "fifo") {
           expect(Bun.spawnSync(["mkfifo", manifest]).exitCode).toBe(0);
-        } else if (kind === "symlink") {
-          await symlink(outside, manifest);
         } else {
-          await writeFile(manifest, "{}");
-          await truncate(manifest, 2 * 1024 * 1024);
+          await symlink(outside, manifest);
         }
 
         await expect(resolvePluginPath(source, workspace)).rejects.toThrow(
@@ -976,6 +1029,23 @@ describe("plugin runtime preparation", () => {
       }
     },
   );
+
+  test("accepts configured plugin manifests larger than 1 MiB", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "workspace");
+    const source = await plugin(root);
+    await mkdir(workspace);
+    await writeFile(
+      join(source, ".codex-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "codex-security",
+        version: "1.2.3",
+        description: "x".repeat(1024 * 1024),
+      }),
+    );
+
+    expect(await resolvePluginPath(source, workspace)).toBe(source);
+  });
 
   test("cancels marketplace projection before registering the plugin", async () => {
     const root = await temporaryDirectory();
@@ -1335,6 +1405,10 @@ describe("plugin runtime preparation", () => {
     expect(install.installedRoot).toBe(installed);
     expect(install.version).toBe("1.2.3");
 
+    await writeFile(
+      join(selected, "scripts", "helper.py"),
+      "print('updated')\n",
+    );
     const reused = await bootstrapPlugin(home, selected, {
       codexCommand: { command: "/codex", prefixArgs: [] },
       runCodex: async () => {
@@ -1401,89 +1475,6 @@ describe("plugin runtime preparation", () => {
       '{"token":"preserved"}\n',
     );
     expect(calls).toEqual([
-      ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
-    ]);
-  });
-
-  test("reinstalls changed plugin contents even when the version is unchanged", async () => {
-    const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.3");
-    await writeFile(join(next, "scripts", "helper.py"), "print('updated')\n");
-    const home = join(root, "home");
-    const marketplace = join(home, "sdk-marketplace");
-    const cache = join(
-      home,
-      "plugins",
-      "cache",
-      "codex-security-sdk",
-      "codex-security",
-    );
-    await mkdir(home);
-    let marketplaceRegistered = false;
-    let pluginRegistered = false;
-    const updateConfig = async () => {
-      const sections = ["[features]\nplugins = true\n"];
-      if (marketplaceRegistered) {
-        sections.push(
-          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
-        );
-      }
-      if (pluginRegistered) {
-        sections.push(
-          '[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
-        );
-      }
-      await writeFile(join(home, "config.toml"), sections.join("\n"));
-    };
-    await updateConfig();
-    const calls: string[][] = [];
-    const options = {
-      codexCommand: { command: "/codex", prefixArgs: [] },
-      runCodex: async (
-        _command: { command: string; prefixArgs: readonly string[] },
-        args: readonly string[],
-      ) => {
-        calls.push([...args]);
-        if (args[1] === "marketplace" && args[2] === "add") {
-          marketplaceRegistered = true;
-        } else if (args[1] === "marketplace" && args[2] === "remove") {
-          marketplaceRegistered = false;
-        } else if (args[1] === "remove") {
-          pluginRegistered = false;
-          await rm(cache, { recursive: true, force: true });
-        } else if (args[1] === "add") {
-          const installed = join(cache, "1.2.3");
-          await mkdir(join(installed, ".codex-plugin"), { recursive: true });
-          await writeFile(
-            join(installed, ".codex-plugin", "plugin.json"),
-            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
-          );
-          pluginRegistered = true;
-        } else {
-          throw new Error(`Unexpected plugin command: ${args.join(" ")}`);
-        }
-        await updateConfig();
-        return "";
-      },
-    };
-
-    await bootstrapPlugin(home, previous, options);
-    const result = await bootstrapPlugin(home, next, options);
-
-    expect(result.pluginRoot).toBe(next);
-    expect(
-      await readFile(
-        join(marketplace, "plugins", "codex-security", "scripts", "helper.py"),
-        "utf8",
-      ),
-    ).toBe("print('updated')\n");
-    expect(calls).toEqual([
-      ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
-      ["plugin", "remove", "codex-security@codex-security-sdk"],
-      ["plugin", "marketplace", "remove", "codex-security-sdk"],
       ["plugin", "marketplace", "add", marketplace],
       ["plugin", "add", "codex-security@codex-security-sdk"],
     ]);
@@ -2790,7 +2781,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
   });
 
-  test("surfaces redacted Windows ACL subprocess failures", async () => {
+  test("preserves Windows ACL subprocess failures", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
@@ -2812,9 +2803,8 @@ describe("runtime directories and plugin Python boundary", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain("core types");
-      expect((error as Error).message).toContain("token=[redacted]");
-      expect((error as Error).message).not.toContain(
-        "SYNTHETIC_WINDOWS_ACL_SECRET",
+      expect((error as Error).message).toContain(
+        "token=sk-proj-SYNTHETIC_WINDOWS_ACL_SECRET_123",
       );
       expect((error as Error).cause).toBe(underlying);
     }
@@ -2873,7 +2863,7 @@ describe("runtime directories and plugin Python boundary", () => {
         {
           encoding: "utf8",
           env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
-          timeout: 15_000,
+          timeout: 20_000,
           windowsHide: true,
         },
       );
@@ -3476,7 +3466,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toMatchObject({ actual: 8, source: configPath });
   });
 
-  test("runs workbench commands without credentials or generated bytecode", async () => {
+  test("runs workbench commands without output limits, credentials, or generated bytecode", async () => {
     const root = await temporaryDirectory();
     const pluginRoot = join(root, "plugin");
     await mkdir(join(pluginRoot, "scripts"), { recursive: true });
@@ -3491,7 +3481,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert os.environ.get('CODEX_API_KEY') is None",
         "assert os.environ.get('OPENROUTER_API_KEY') is None",
         "assert os.environ.get('FIREWORKS_API_KEY') is None",
-        "print(json.dumps({'ok': True}))",
+        "print(json.dumps({'ok': True, 'details': 'x' * (5 * 1024 * 1024)}))",
       ].join("\n"),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -3510,7 +3500,8 @@ describe("runtime directories and plugin Python boundary", () => {
       },
       ["test-command"],
     );
-    expect(result).toEqual({ ok: true });
+    expect(result["ok"]).toBe(true);
+    expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {

@@ -883,6 +883,11 @@ describe("multiscan", () => {
 
     expect(summary).toMatchObject({ completed: 1, failed: 0 });
     await expect(access(lock)).rejects.toThrow();
+    expect(
+      (await readdir(paths.output)).some((name) =>
+        name.startsWith(".lock.stale-"),
+      ),
+    ).toBe(false);
   });
 
   test("preserves an active legacy supervisor lock", async () => {
@@ -1170,21 +1175,15 @@ describe("multiscan", () => {
     ).toEqual(replacement);
   });
 
-  test("never removes a replacement owner's lock when owner creation fails", async () => {
+  test("removes an empty supervisor lock when owner creation fails", async () => {
     const paths = await fixture();
-    const source = await repository(paths.root, "owner-creation-race");
+    const source = await repository(paths.root, "owner-creation-failure");
     await writeFile(
       paths.input,
-      `id,repository,revision\nrace,${source.path},${source.revision}\n`,
+      `id,repository,revision\nfailure,${source.path},${source.revision}\n`,
     );
     const lock = join(paths.output, ".lock");
     const ownerPath = join(lock, "owner.json");
-    const replacement = JSON.stringify({
-      pid: process.pid,
-      ownerId: "replacement-supervisor",
-      hostname: hostname(),
-      processStartedAt: performance.timeOrigin,
-    });
     const originalWriteFile = filesystem.writeFile;
     const writeOwner = spyOn(filesystem, "writeFile").mockImplementation(
       async (path, data, options) => {
@@ -1192,31 +1191,83 @@ describe("multiscan", () => {
           return await originalWriteFile(path, data, options);
         }
         writeOwner.mockRestore();
-        await rename(lock, join(paths.output, ".lock.stale-owner-creation"));
-        await mkdir(lock, { mode: 0o700 });
-        await originalWriteFile(ownerPath, replacement, { mode: 0o600 });
-        throw Object.assign(new Error("replacement already owns the lock"), {
-          code: "EEXIST",
+        throw Object.assign(new Error("could not publish lock owner"), {
+          code: "EACCES",
         });
       },
     );
+    const security = client(async (_repository, scanOptions = {}) =>
+      completedScan(scanOptions.outputDir!),
+    );
 
     try {
+      await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+        "could not publish lock owner",
+      );
+      await expect(access(lock)).rejects.toThrow();
       await expect(
-        runMultiscan(
-          options(
-            paths,
-            client(async (_repository, scanOptions = {}) =>
-              completedScan(scanOptions.outputDir!),
-            ),
-          ),
-        ),
-      ).rejects.toThrow("replacement already owns the lock");
-      expect(await readFile(ownerPath, "utf8")).toBe(replacement);
+        runMultiscan(options(paths, security)),
+      ).resolves.toMatchObject({ completed: 1 });
     } finally {
       writeOwner.mockRestore();
     }
   });
+
+  test.each([false, true])(
+    "never removes a replacement lock when owner creation fails (owner published: %s)",
+    async (ownerPublished) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "owner-creation-race");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrace,${source.path},${source.revision}\n`,
+      );
+      const lock = join(paths.output, ".lock");
+      const ownerPath = join(lock, "owner.json");
+      const replacement = JSON.stringify({
+        pid: process.pid,
+        ownerId: "replacement-supervisor",
+        hostname: hostname(),
+        processStartedAt: performance.timeOrigin,
+      });
+      const originalWriteFile = filesystem.writeFile;
+      const writeOwner = spyOn(filesystem, "writeFile").mockImplementation(
+        async (path, data, options) => {
+          if (String(path) !== ownerPath) {
+            return await originalWriteFile(path, data, options);
+          }
+          writeOwner.mockRestore();
+          await rename(lock, join(paths.output, ".lock.stale-owner-creation"));
+          await mkdir(lock, { mode: 0o700 });
+          if (ownerPublished) {
+            await originalWriteFile(ownerPath, replacement, { mode: 0o600 });
+          }
+          throw Object.assign(new Error("replacement already owns the lock"), {
+            code: "EEXIST",
+          });
+        },
+      );
+
+      try {
+        await expect(
+          runMultiscan(
+            options(
+              paths,
+              client(async (_repository, scanOptions = {}) =>
+                completedScan(scanOptions.outputDir!),
+              ),
+            ),
+          ),
+        ).rejects.toThrow("replacement already owns the lock");
+        await access(lock);
+        if (ownerPublished) {
+          expect(await readFile(ownerPath, "utf8")).toBe(replacement);
+        }
+      } finally {
+        writeOwner.mockRestore();
+      }
+    },
+  );
 
   test("retries a failed attempt and records both durable receipts", async () => {
     const paths = await fixture();
@@ -1269,22 +1320,8 @@ describe("multiscan", () => {
       { id: "retry", status: "completed", attempt: 2 },
     ]);
     const ledger = await readFile(summary.resultsPath, "utf8");
-    expect(ledger).not.toContain(secret);
-    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_PASSWORD");
-    expect(ledger).not.toContain("SYNTHETIC_MULTISCAN_QUERY_123");
-    expect(ledger).not.toContain(suffixedSecret);
-    expect(ledger).not.toContain(suffixedToken);
-    expect(ledger).not.toContain(suffixedQuery);
-    expect(ledger).not.toContain(quotedSecret);
-    expect(ledger).not.toContain(opaqueAuthorization);
-    expect(ledger).not.toContain(npmAuthorization);
-    expect(ledger).not.toContain(customAuthorization);
-    expect(ledger).not.toContain(suffixedAuthorization);
-    expect(ledger).not.toContain(paddedAuthorization);
-    expect(ledger).not.toContain(keyedAuthorization);
-    expect(ledger).not.toContain(camelCaseSecret);
-    expect(ledger).not.toContain(shortAuthorization);
-    expect(ledger).toContain("https://[redacted]@proxy.test/v1/responses");
+    expect(ledger).toContain('"error":"[redacted]"');
+    expect(ledger).not.toContain("SYNTHETIC");
   });
 
   test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
