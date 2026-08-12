@@ -206,6 +206,59 @@ describe("compact diff scan", () => {
     ]);
   });
 
+  test("excludes committed symlinks using their selected revision modes", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/handler.py", "value = 1\n");
+    writeSource(repository, "src/deleted-link.py", "handler.py");
+    git(repository, "add", ".");
+    const deletedLink = git(repository, "hash-object", "src/deleted-link.py");
+    git(
+      repository,
+      "update-index",
+      "--cacheinfo",
+      `120000,${deletedLink},src/deleted-link.py`,
+    );
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+
+    rmSync(join(repository, "src", "deleted-link.py"));
+    writeSource(repository, "src/handler.py", "value = 2\n");
+    writeSource(repository, "src/added-link.py", "handler.py");
+    git(repository, "add", ".");
+    const addedLink = git(repository, "hash-object", "src/added-link.py");
+    git(
+      repository,
+      "update-index",
+      "--cacheinfo",
+      `120000,${addedLink},src/added-link.py`,
+    );
+    git(repository, "commit", "-qm", "selected changes");
+    const head = git(repository, "rev-parse", "HEAD");
+    const output = join(root, "in-scope.txt");
+
+    const result = python(
+      "generate_in_scope_files.py",
+      "--repo",
+      repository,
+      "--scope",
+      ".",
+      "--diff-base",
+      base,
+      "--diff-head",
+      head,
+      "--out",
+      output,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(output, "utf8").split("\n").filter(Boolean)).toEqual([
+      "src/handler.py",
+    ]);
+    expect(readFileSync(join(repository, "src", "added-link.py"), "utf8")).toBe(
+      "handler.py",
+    );
+  });
+
   test("includes staged, unstaged, and untracked working-tree changes", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");

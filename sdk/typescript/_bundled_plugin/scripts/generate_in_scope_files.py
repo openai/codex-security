@@ -144,6 +144,24 @@ def generate_diff_in_scope_files(
             relative = path.relative_to(repository)
             if path_is_excluded(relative) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
                 continue
+            if mode == "revisions":
+                revision = base if status == "D" else head
+                entry = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repository),
+                        "ls-tree",
+                        "-z",
+                        revision,
+                        "--",
+                        relative.as_posix(),
+                    ],
+                    capture_output=True,
+                    check=True,
+                ).stdout
+                if entry.startswith(b"120000 "):
+                    continue
             if status != "D":
                 if mode == "revisions":
                     contents = subprocess.run(
