@@ -46,6 +46,7 @@ import {
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
+  codexSecurityCredentialAllowsAmbientImport,
   runWorkbench,
   setCodexSecurityCredentialLogout,
 } from "../src/runtime.js";
@@ -4844,6 +4845,113 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("authenticates without initializing the plugin runtime", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    const codexHome = join(stateDirectory, "codex-home");
+    const fakeCodex = join(root, "codex.mjs");
+    const commandsPath = join(root, "commands.jsonl");
+    await writeFile(
+      fakeCodex,
+      `
+import { appendFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2);
+const authPath = join(process.env.CODEX_HOME, "auth.json");
+appendFileSync(${JSON.stringify(commandsPath)}, JSON.stringify({ args, home: process.env.CODEX_HOME }) + "\\n");
+if (args.join(" ") === "login status") {
+  if (existsSync(authPath)) console.log("Logged in using ChatGPT");
+  else {
+    console.error("Not logged in");
+    process.exitCode = 1;
+  }
+} else if (args.join(" ") === "login --with-api-key") {
+  let input = "";
+  for await (const chunk of process.stdin) input += chunk;
+  if (input.trim() !== "synthetic-test-key") process.exitCode = 2;
+  else writeFileSync(authPath, JSON.stringify({ auth_mode: "apikey" }));
+} else if (args[0] === "login") {
+  writeFileSync(authPath, JSON.stringify({ auth_mode: "chatgpt" }));
+  console.error("Open https://auth.example.test/device");
+  if (args.includes("--device-auth")) console.error("User code: ABCD-EFGH");
+} else if (args[0] === "logout") {
+  rmSync(authPath, { force: true });
+} else {
+  process.exitCode = 3;
+}
+`,
+    );
+    let runtimeInitializations = 0;
+    const client = new TestClient(
+      { pluginPath: join(root, "missing-plugin") },
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+        prepareRuntime: async () => {
+          runtimeInitializations += 1;
+          throw new Error("authentication must not initialize the plugin");
+        },
+        resolveCodexCommand: () => ({
+          command: process.execPath,
+          prefixArgs: [fakeCodex],
+        }),
+      },
+    );
+
+    try {
+      await expect(client.account()).resolves.toMatchObject({
+        authenticated: false,
+      });
+      await client.loginApiKey("synthetic-test-key");
+      await expect(client.account()).resolves.toMatchObject({
+        authenticated: true,
+      });
+      await client.logout();
+      expect(await codexSecurityCredentialAllowsAmbientImport(codexHome)).toBe(
+        false,
+      );
+
+      const login = await client.loginChatGPTDeviceCode();
+      expect(login.verificationUrl).toBe("https://auth.example.test/device");
+      expect(login.userCode).toBe("ABCD-EFGH");
+      await expect(login.wait()).resolves.toMatchObject({ success: true });
+      expect(await codexSecurityCredentialAllowsAmbientImport(codexHome)).toBe(
+        true,
+      );
+
+      await client.logout();
+      const browserLogin = await client.loginChatGPT();
+      expect(browserLogin.authUrl).toBe("https://auth.example.test/device");
+      await expect(browserLogin.wait()).resolves.toMatchObject({
+        success: true,
+      });
+
+      expect(runtimeInitializations).toBe(0);
+      expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
+      expect(existsSync(join(codexHome, "sdk-marketplace"))).toBe(false);
+      const commands = (await readFile(commandsPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { args: string[]; home: string });
+      expect(commands.every((command) => command.home === codexHome)).toBe(
+        true,
+      );
+      expect(commands.map(({ args }) => args)).toEqual([
+        ["login", "status"],
+        ["login", "--with-api-key"],
+        ["login", "status"],
+        ["logout"],
+        ["login", "--device-auth"],
+        ["logout"],
+        ["login"],
+      ]);
+    } finally {
+      await client.close();
+    }
+
+    expect(existsSync(codexHome)).toBe(true);
+  });
+
   test("passes environment API keys transiently without native login or keyring persistence", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -5571,23 +5679,31 @@ if (process.argv.slice(2).join(" ") !== "login status") {
 
   test("cleans the bootstrap workspace when credential-home cleanup fails", async () => {
     const root = await temporaryDirectory();
+    const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const bootstrapWorkspace = join(root, "bootstrap-workspace");
+    await mkdir(repository);
     await mkdir(codexHome);
     await mkdir(bootstrapWorkspace);
     const client = new TestClient(
       {},
       {
-        environment: { OPENAI_API_KEY: "ambient-key" },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          OPENAI_API_KEY: "ambient-key",
+        },
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
           bootstrapWorkspace,
         }),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: () => {
+          throw new Error("scan reached");
+        },
       },
     );
-    await expect(client.account()).resolves.toMatchObject({
-      authenticated: true,
-    });
+    await expect(client.run(repository)).rejects.toThrow("scan reached");
     const originalRm = fsPromises.rm;
     const attempted: string[] = [];
     mock.module("node:fs/promises", () => ({
@@ -5682,7 +5798,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await writeFile(
       fakeCodex,
       'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n',
@@ -5690,7 +5806,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     const client = new TestClient(
       {},
       {
-        environment: {},
+        environment: { CODEX_SECURITY_STATE_DIR: root },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -5740,7 +5856,7 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     const keyLog = join(root, "api-keys");
     const scanDir = join(root, "scan");
     await mkdir(repository);
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(
       fakeCodex,
@@ -5768,7 +5884,10 @@ if (args === "login --with-api-key") {
     const client = new TestClient(
       {},
       {
-        environment: { OPENAI_API_KEY: "ambient-key" },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          OPENAI_API_KEY: "ambient-key",
+        },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -5788,7 +5907,7 @@ if (args === "login --with-api-key") {
           credentialsAvailable: false,
         }),
         resolveCodexCommand: () => ({
-          command: "node",
+          command: process.execPath,
           prefixArgs: [fakeCodex],
         }),
         resolvePluginPython: async () => "/managed/python",
@@ -5831,7 +5950,7 @@ if (args === "login --with-api-key") {
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
     const ready = join(root, "ready");
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await writeFile(
       fakeCodex,
       `
@@ -5848,7 +5967,7 @@ setInterval(() => {}, 1000);
     const client = new TestClient(
       {},
       {
-        environment: {},
+        environment: { CODEX_SECURITY_STATE_DIR: root },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -5887,6 +6006,6 @@ setInterval(() => {}, 1000);
     await expect(login).rejects.toThrow();
     await expect(
       import("node:fs/promises").then(({ stat }) => stat(codexHome)),
-    ).rejects.toThrow();
+    ).resolves.toBeDefined();
   });
 });

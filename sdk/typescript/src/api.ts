@@ -148,6 +148,11 @@ interface PreparedRuntime {
   effectiveConfig?: JsonObject;
 }
 
+type AuthenticationContext = Pick<
+  PreparedRuntime,
+  "codexHome" | "environment" | "persistentCredentialHome"
+>;
+
 export interface DeepScanOptions {
   workers?: number;
   subagents?: number;
@@ -1277,80 +1282,49 @@ export class CodexSecurity {
   }
 
   public async loginApiKey(apiKey: string): Promise<void> {
-    const { result, runtime } = await this.#runOperation(
-      async (preparedRuntime, signal) => ({
-        runtime: preparedRuntime,
-        result: await persistApiKey(
-          this.#codexCommand(),
-          preparedRuntime.environment,
-          apiKey,
-          signal,
-        ),
-      }),
-      "chatgpt",
-    );
-    if (!result.success) {
-      throw new CodexSecurityError(
-        `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
+    await this.#runAuthenticationOperation(async (authentication, signal) => {
+      const result = await persistApiKey(
+        this.#codexCommand(),
+        authentication.environment,
+        apiKey,
+        signal,
       );
-    }
-    if (runtime.persistentCredentialHome === true) {
-      await setCodexSecurityCredentialLogout(runtime.codexHome, false);
-    }
-    runtime.credentialsAvailable = true;
-    this.#runtimeCredentialSource = "api_key";
+      if (!result.success) {
+        throw new CodexSecurityError(
+          `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
+        );
+      }
+      await this.#recordLogin(authentication, "api_key");
+    });
   }
 
   public async loginChatGPT(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime(
-      undefined,
-      undefined,
-      undefined,
-      "chatgpt",
-    );
-    this.#requireOpen();
-    const handle = this.#trackLoginHandle(
-      new CodexLoginHandle(
-        this.#codexCommand(),
-        ["login"],
-        runtime.environment,
-        () => {
-          runtime.credentialsAvailable = true;
-          this.#runtimeCredentialSource = "stored_credentials";
-        },
-      ),
-    );
-    await handle.waitForInstructions();
-    this.#requireOpen();
-    return handle;
+    return await this.#startLogin(false);
   }
 
   public async loginChatGPTDeviceCode(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime(
-      undefined,
-      undefined,
-      undefined,
-      "chatgpt",
-    );
+    return await this.#startLogin(true);
+  }
+
+  async #startLogin(deviceCode: boolean): Promise<CodexLoginHandle> {
+    const authentication = await this.#prepareAuthenticationContext();
     this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
         this.#codexCommand(),
-        ["login", "--device-auth"],
-        runtime.environment,
-        () => {
-          runtime.credentialsAvailable = true;
-          this.#runtimeCredentialSource = "stored_credentials";
-        },
+        deviceCode ? ["login", "--device-auth"] : ["login"],
+        authentication.environment,
+        async () =>
+          await this.#recordLogin(authentication, "stored_credentials"),
       ),
     );
-    await handle.waitForInstructions({ deviceCode: true });
+    await handle.waitForInstructions({ deviceCode });
     this.#requireOpen();
     return handle;
   }
 
   public async account(): Promise<AccountStatus> {
-    return await this.#runOperation(async (runtime, signal) => {
+    return await this.#trackOperation(async () => {
       const apiKey = environmentApiKey(this.#dependencies.environment);
       if (apiKey !== null) {
         return {
@@ -1358,31 +1332,29 @@ export class CodexSecurity {
           details: "Authenticated with an API key.",
         };
       }
+      const authentication = await this.#prepareAuthenticationContext();
+      this.#requireOpen();
       return await accountStatus(
         this.#codexCommand(),
-        runtime.environment,
-        signal,
+        authentication.environment,
+        this.#abortController.signal,
       );
     });
   }
 
   public async logout(): Promise<void> {
-    const runtime = await this.#runOperation(
-      async (preparedRuntime, signal) => {
-        await codexLogout(
-          this.#codexCommand(),
-          preparedRuntime.environment,
-          signal,
-        );
-        return preparedRuntime;
-      },
-      "chatgpt",
-    );
-    if (runtime.persistentCredentialHome === true) {
-      await setCodexSecurityCredentialLogout(runtime.codexHome, true);
-    }
-    runtime.credentialsAvailable = false;
-    this.#runtimeCredentialSource = null;
+    await this.#runAuthenticationOperation(async (authentication, signal) => {
+      await codexLogout(
+        this.#codexCommand(),
+        authentication.environment,
+        signal,
+      );
+      if (authentication.persistentCredentialHome === true) {
+        await setCodexSecurityCredentialLogout(authentication.codexHome, true);
+      }
+      if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
+      this.#runtimeCredentialSource = null;
+    });
   }
 
   public async close(): Promise<void> {
@@ -1435,23 +1407,62 @@ export class CodexSecurity {
     await this.close();
   }
 
-  async #runOperation<T>(
-    operation: (runtime: PreparedRuntime, signal: AbortSignal) => Promise<T>,
-    auth: ScanAuthMode = "auto",
+  async #runAuthenticationOperation<T>(
+    operation: (
+      authentication: AuthenticationContext,
+      signal: AbortSignal,
+    ) => Promise<T>,
   ): Promise<T> {
     return await this.#trackOperation(async () => {
       const signal = this.#abortController.signal;
-      const runtime = await this.#ensureRuntime(
-        signal,
-        undefined,
-        undefined,
-        auth,
-      );
+      const authentication = await this.#prepareAuthenticationContext();
       this.#requireOpen();
-      const result = await operation(runtime, signal);
+      const result = await operation(authentication, signal);
       this.#requireOpen();
       return result;
     });
+  }
+
+  async #prepareAuthenticationContext(): Promise<AuthenticationContext> {
+    this.#requireOpen();
+    if (this.#runtime !== null) {
+      return {
+        codexHome: this.#runtime.codexHome,
+        environment: {
+          ...withoutCodexHome(
+            selectedScanEnvironment(this.#runtime.environment, "chatgpt"),
+          ),
+          CODEX_HOME: this.#runtime.codexHome,
+        },
+        persistentCredentialHome: this.#runtime.persistentCredentialHome,
+      };
+    }
+
+    const environment = selectedScanEnvironment(
+      this.#dependencies.environment,
+      "chatgpt",
+    );
+    const codexHome = await prepareCodexSecurityCredentialHome(environment);
+    return {
+      codexHome,
+      environment: {
+        ...withoutCodexHome(environment),
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
+      },
+      persistentCredentialHome: true,
+    };
+  }
+
+  async #recordLogin(
+    authentication: AuthenticationContext,
+    source: "api_key" | "stored_credentials",
+  ): Promise<void> {
+    if (authentication.persistentCredentialHome === true) {
+      await setCodexSecurityCredentialLogout(authentication.codexHome, false);
+    }
+    if (this.#runtime !== null) this.#runtime.credentialsAvailable = true;
+    this.#runtimeCredentialSource = source;
   }
 
   async #trackOperation<T>(operation: () => Promise<T>): Promise<T> {

@@ -4,7 +4,6 @@ import { PluginBootstrapError } from "./errors.js";
 import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
-type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
 
 export interface LoginResult {
   success: boolean;
@@ -31,13 +30,10 @@ export class CodexLoginHandle {
   #deviceReadySettled = false;
   #canceled = false;
   #forcedTermination: ReturnType<typeof setTimeout> | undefined;
-  #forceCompletion: (() => void) | null = null;
   #stdout = "";
   #stderr = "";
   #stdoutInstructionTail = "";
   #stderrInstructionTail = "";
-  #stdoutTerminalState: TerminalEscapeState = "text";
-  #stderrTerminalState: TerminalEscapeState = "text";
   #stdoutAuthUrl: string | null = null;
   #stderrAuthUrl: string | null = null;
   #stdoutUserCode: string | null = null;
@@ -47,7 +43,7 @@ export class CodexLoginHandle {
     command: CodexCommand,
     args: readonly string[],
     environment: ProcessEnvironment,
-    onSuccess: () => void,
+    onSuccess: () => void | Promise<void>,
   ) {
     this.#urlReady = new Promise<void>((resolve, reject) => {
       this.#resolveUrlReady = resolve;
@@ -74,15 +70,10 @@ export class CodexLoginHandle {
       this.#recordOutput("stderr", chunk);
     });
     this.#completion = new Promise((resolve, reject) => {
-      let fallback: ReturnType<typeof setTimeout> | undefined;
-      let completed = false;
-      const complete = (exitCode: number | null): void => {
-        if (completed) return;
-        completed = true;
-        if (fallback !== undefined) clearTimeout(fallback);
-        this.#clearForcedTermination();
-        this.#forceCompletion = null;
-        this.#destroyPipes();
+      this.#child.once("close", (exitCode) => {
+        if (this.#forcedTermination !== undefined) {
+          clearTimeout(this.#forcedTermination);
+        }
         if (!this.#canceled) {
           this.#flushInstructionTails();
         }
@@ -93,17 +84,16 @@ export class CodexLoginHandle {
           stderr: this.#stderr,
         };
         this.#settleInstructionWaiters(result);
-        if (result.success) onSuccess();
-        resolve(result);
-      };
-      this.#forceCompletion = () => complete(this.#child.exitCode);
+        if (result.success) {
+          Promise.resolve(onSuccess()).then(() => resolve(result), reject);
+        } else {
+          resolve(result);
+        }
+      });
       this.#child.once("error", (error) => {
-        if (completed) return;
-        completed = true;
-        if (fallback !== undefined) clearTimeout(fallback);
-        this.#clearForcedTermination();
-        this.#forceCompletion = null;
-        this.#destroyPipes();
+        if (this.#forcedTermination !== undefined) {
+          clearTimeout(this.#forcedTermination);
+        }
         this.#settleInstructionWaiters({
           success: false,
           exitCode: null,
@@ -111,13 +101,6 @@ export class CodexLoginHandle {
           stderr: error.message,
         });
         reject(error);
-      });
-      this.#child.once("close", complete);
-      this.#child.once("exit", (exitCode) => {
-        fallback = setTimeout(() => {
-          this.#destroyPipes();
-          complete(exitCode);
-        }, LOGIN_CHILD_TERMINATION_GRACE_MS);
       });
     });
   }
@@ -150,41 +133,15 @@ export class CodexLoginHandle {
 
   public cancel(): void {
     this.#canceled = true;
-    this.#requestTermination();
-  }
-
-  #requestTermination(): void {
-    if (
-      this.#child.exitCode !== null ||
-      this.#child.signalCode !== null ||
-      this.#forceCompletion === null
-    ) {
-      this.#destroyPipes();
-      this.#forceCompletion?.();
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null)
       return;
-    }
     this.#child.kill("SIGTERM");
     if (this.#forcedTermination !== undefined) return;
     this.#forcedTermination = setTimeout(() => {
-      this.#forcedTermination = undefined;
       if (this.#child.exitCode === null && this.#child.signalCode === null) {
         this.#child.kill("SIGKILL");
       }
-      this.#destroyPipes();
-      this.#forceCompletion?.();
     }, LOGIN_CHILD_TERMINATION_GRACE_MS);
-  }
-
-  #clearForcedTermination(): void {
-    if (this.#forcedTermination === undefined) return;
-    clearTimeout(this.#forcedTermination);
-    this.#forcedTermination = undefined;
-  }
-
-  #destroyPipes(): void {
-    this.#child.stdin.destroy();
-    this.#child.stdout.destroy();
-    this.#child.stderr.destroy();
   }
 
   #recordOutput(stream: "stdout" | "stderr", chunk: string): void {
@@ -198,33 +155,22 @@ export class CodexLoginHandle {
       stream === "stdout"
         ? this.#stdoutInstructionTail
         : this.#stderrInstructionTail;
-    const visible = visibleTerminalChunk(
-      chunk,
-      stream === "stdout"
-        ? this.#stdoutTerminalState
-        : this.#stderrTerminalState,
-    );
-    const lastDelimiter = visible.text.lastIndexOf("\n");
+    const output = `${tail}${chunk.replaceAll("\r", "\n")}`;
+    const lastDelimiter = output.lastIndexOf("\n");
     const completed =
-      lastDelimiter === -1
-        ? ""
-        : `${tail}${visible.text.slice(0, lastDelimiter + 1)}`;
+      lastDelimiter === -1 ? "" : output.slice(0, lastDelimiter + 1);
     const url = preferredAuthUrl(completed);
     const userCode = userCodeFromOutput(completed);
     const nextTail =
-      lastDelimiter === -1
-        ? `${tail}${visible.text}`
-        : visible.text.slice(lastDelimiter + 1);
+      lastDelimiter === -1 ? output : output.slice(lastDelimiter + 1);
     if (stream === "stdout") {
       this.#stdoutAuthUrl ??= url;
       this.#stdoutUserCode ??= userCode;
       this.#stdoutInstructionTail = nextTail;
-      this.#stdoutTerminalState = visible.state;
     } else {
       this.#stderrAuthUrl ??= url;
       this.#stderrUserCode ??= userCode;
       this.#stderrInstructionTail = nextTail;
-      this.#stderrTerminalState = visible.state;
     }
     this.#notifyInstructions();
   }
@@ -455,45 +401,4 @@ function plainTerminalText(value: string): string {
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
-}
-
-function visibleTerminalChunk(
-  value: string,
-  initialState: TerminalEscapeState,
-): { text: string; state: TerminalEscapeState } {
-  let state = initialState;
-  let text = "";
-  for (const character of value) {
-    if (state === "text") {
-      if (character === "\u001b") {
-        state = "escape";
-      } else {
-        text += character === "\r" ? "\n" : character;
-      }
-      continue;
-    }
-    if (state === "escape") {
-      if (character === "[") {
-        state = "csi";
-      } else if (character === "]") {
-        state = "osc";
-      } else {
-        text += `\u001b${character}`;
-        state = "text";
-      }
-      continue;
-    }
-    if (state === "csi") {
-      if (character >= "@" && character <= "~") state = "text";
-      continue;
-    }
-    if (state === "osc") {
-      if (character === "\u0007") state = "text";
-      else if (character === "\u001b") state = "osc-escape";
-      continue;
-    }
-    if (character === "\\" || character === "\u0007") state = "text";
-    else if (character !== "\u001b") state = "osc";
-  }
-  return { text, state };
 }
