@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -344,5 +351,275 @@ describe("deep scan workbench ownership", () => {
     );
     expect(staleProgress["status"]).not.toBe(0);
     expect(staleProgress["stderr"]).toContain("newer generation");
+  });
+
+  test("requeues a failed reducer's inputs and completes without losing findings", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-reducer-recovery-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const stateDir = join(root, "state");
+    const codexHome = join(root, "codex-home");
+    const configDir = join(codexHome, "codex-security");
+    await mkdir(repository);
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(repository, "source.py"), "# source fixture\n");
+    await writeFile(
+      join(configDir, "config.toml"),
+      "[deep_scan]\nworkers = 3\nmax_discovery_runs = 5\n",
+    );
+
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const command = (args: string[]): Record<string, unknown> => {
+      const result = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          ...args,
+        ],
+        {
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDir,
+            CODEX_HOME: codexHome,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
+        string,
+        unknown
+      >;
+    };
+    const state = (result: Record<string, unknown>) =>
+      result["deepScan"] as Record<string, unknown>;
+    const initial = state(
+      command([
+        "begin-deep-scan",
+        "--thread-id",
+        "thread-deep-scan",
+        "--target-path",
+        repository,
+        "--scope",
+        ".",
+        "--scan-root",
+        join(root, "scans"),
+        "--available-parallelism",
+        "4",
+      ]),
+    );
+    const scanId = initial["scanId"] as string;
+    const scanDir = initial["scanDir"] as string;
+    const discoveryDir = join(scanDir, "artifacts", "02_discovery");
+    const ledgerPath = join(discoveryDir, "candidate_ledger.jsonl");
+    const existingFinding = '{"candidate":"previously committed"}\n';
+    await mkdir(discoveryDir, { recursive: true });
+    await writeFile(join(discoveryDir, "in_scope_files.txt"), "source.py\n");
+    await writeFile(ledgerPath, existingFinding);
+
+    const workerPaths = async (workerId: string) => {
+      const artifactDir = join(
+        scanDir,
+        "artifacts",
+        "deep_discovery",
+        workerId,
+      );
+      const promptPath = join(artifactDir, "prompt.md");
+      const resultPath = join(artifactDir, "result.json");
+      await mkdir(artifactDir, { recursive: true });
+      await writeFile(promptPath, "Review the source.\n");
+      return { artifactDir, promptPath, resultPath };
+    };
+    const discoveryIds = [
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000002",
+      "10000000-0000-4000-8000-000000000003",
+      "10000000-0000-4000-8000-000000000004",
+      "10000000-0000-4000-8000-000000000005",
+    ];
+    for (const workerId of discoveryIds) {
+      const paths = await workerPaths(workerId);
+      const args = [
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scanId,
+        "--worker-id",
+        workerId,
+        "--kind",
+        "discovery",
+        "--prompt-path",
+        paths.promptPath,
+        "--artifact-dir",
+        paths.artifactDir,
+        "--attempt",
+        "1",
+      ];
+      command([...args, "--status", "running"]);
+      await writeFile(paths.resultPath, "{}\n");
+      command([
+        ...args,
+        "--status",
+        "succeeded",
+        "--result-manifest-path",
+        paths.resultPath,
+      ]);
+    }
+
+    const startReducer = async (workerId: string, inputIds: string[]) => {
+      const paths = await workerPaths(workerId);
+      command([
+        "claim-deep-scan-dedup",
+        "--scan-id",
+        scanId,
+        "--worker-id",
+        workerId,
+        "--prompt-path",
+        paths.promptPath,
+        "--artifact-dir",
+        paths.artifactDir,
+        ...inputIds.flatMap((inputId) => ["--input-worker-id", inputId]),
+      ]);
+      const args = [
+        "upsert-deep-scan-worker",
+        "--scan-id",
+        scanId,
+        "--worker-id",
+        workerId,
+        "--kind",
+        "dedup",
+        "--prompt-path",
+        paths.promptPath,
+        "--artifact-dir",
+        paths.artifactDir,
+        "--attempt",
+        "1",
+      ];
+      command([...args, "--status", "running"]);
+      return { args, ...paths };
+    };
+    const commitReducer = async (
+      workerId: string,
+      resultPath: string,
+      newFindingsCount: number,
+    ) => {
+      await writeFile(resultPath, "{}\n");
+      return state(
+        command([
+          "commit-deep-scan-dedup",
+          "--scan-id",
+          scanId,
+          "--worker-id",
+          workerId,
+          "--result-manifest-path",
+          resultPath,
+          "--new-findings-count",
+          String(newFindingsCount),
+        ]),
+      );
+    };
+    const previousReducerId = "20000000-0000-4000-8000-000000000001";
+    const previous = await startReducer(
+      previousReducerId,
+      discoveryIds.slice(0, 2),
+    );
+    await commitReducer(previousReducerId, previous.resultPath, 1);
+
+    const failedReducerId = "20000000-0000-4000-8000-000000000002";
+    const claimedInputs = discoveryIds.slice(2, 4);
+    const failedReducer = await startReducer(failedReducerId, claimedInputs);
+    const failureArgs = [
+      ...failedReducer.args,
+      "--status",
+      "failed",
+      "--error-message",
+      "reducer exhausted its attempts",
+    ];
+    const failed = state(command(failureArgs));
+    const workersById = (result: Record<string, unknown>) =>
+      new Map(
+        (result["workers"] as Record<string, unknown>[]).map((worker) => [
+          worker["id"] as string,
+          worker,
+        ]),
+      );
+    const failedWorkers = workersById(failed);
+    expect(failed).toMatchObject({
+      status: "running",
+      phase: "discovery",
+      dispatchedCount: 5,
+      consecutiveErrors: 0,
+    });
+    for (const workerId of discoveryIds.slice(0, 2)) {
+      expect(failedWorkers.get(workerId)).toMatchObject({
+        status: "succeeded",
+        mergeState: "merged",
+      });
+    }
+    for (const workerId of discoveryIds.slice(2)) {
+      expect(failedWorkers.get(workerId)).toMatchObject({
+        status: "succeeded",
+        mergeState: "buffered",
+      });
+    }
+    expect(failedWorkers.get(failedReducerId)).toMatchObject({
+      status: "failed",
+      error: "reducer exhausted its attempts",
+    });
+    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
+
+    const replacementReducerId = "20000000-0000-4000-8000-000000000003";
+    const replacementInputs = discoveryIds.slice(2);
+    const replacement = await startReducer(
+      replacementReducerId,
+      replacementInputs,
+    );
+    const replayed = state(command(failureArgs));
+    expect(replayed["phase"]).toBe("reducing");
+    for (const workerId of replacementInputs) {
+      expect(workersById(replayed).get(workerId)?.["mergeState"]).toBe(
+        "merging",
+      );
+    }
+
+    const committed = await commitReducer(
+      replacementReducerId,
+      replacement.resultPath,
+      0,
+    );
+    for (const workerId of discoveryIds) {
+      expect(workersById(committed).get(workerId)?.["mergeState"]).toBe(
+        "merged",
+      );
+    }
+    expect(workersById(committed).get(failedReducerId)?.["status"]).toBe(
+      "failed",
+    );
+    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
+
+    const manifestPath = join(scanDir, "coordinator-manifest.json");
+    await writeFile(manifestPath, "{}\n");
+    const completed = state(
+      command([
+        "finish-deep-scan",
+        "--scan-id",
+        scanId,
+        "--terminal-reason",
+        "capped",
+        "--manifest-path",
+        manifestPath,
+      ]),
+    );
+    expect(completed).toMatchObject({
+      status: "succeeded",
+      terminalReason: "capped",
+      consecutiveErrors: 0,
+    });
+    expect(await readFile(ledgerPath, "utf8")).toBe(existingFinding);
   });
 });

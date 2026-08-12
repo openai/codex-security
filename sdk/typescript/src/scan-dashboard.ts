@@ -361,6 +361,7 @@ export class ScanDashboard {
       value: string,
       kind: DashboardActivityLine["kind"],
     ): void => {
+      value = this.#options.sanitize?.(value) ?? value;
       if (kind !== "message" && kind !== "reasoning") {
         for (const text of wrapActivity(prefix, value, width)) {
           lines.push({ text, kind });

@@ -1432,6 +1432,16 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     }
 
 
+def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    scan = require_scan(connection, args.scan_id)
+    with connection:
+        connection.execute(
+            "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
+            (args.thread_id, now(), scan["id"]),
+        )
+    return {"scanId": scan["id"], "threadId": args.thread_id}
+
+
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
     if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
         raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
@@ -3354,6 +3364,8 @@ def main() -> None:
             )
         elif args.command == "register-cli-scan":
             result = register_cli_scan(connection, args)
+        elif args.command == "set-scan-thread":
+            result = set_scan_thread(connection, args)
         elif args.command == "get-scan-recipe":
             result = get_scan_recipe(connection, args)
         elif args.command == "compare-scans":
