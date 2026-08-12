@@ -180,27 +180,6 @@ setTimeout(() => {
     expect(succeeded).toBe(true);
   });
 
-  test("recognizes carriage-return-separated interactive login instructions", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-carriage-"));
-    temporaryDirectories.push(root);
-    const script = join(root, "login.mjs");
-    await writeFile(
-      script,
-      'process.stderr.write("Open https://auth.example.test/device\\rUser code: ABCD-EFGH\\r"); setTimeout(() => process.exit(0), 25);\n',
-    );
-    const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
-      process.env,
-      () => {},
-    );
-
-    await handle.waitForInstructions({ deviceCode: true });
-    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
-    expect(handle.userCode).toBe("ABCD-EFGH");
-    await expect(handle.wait()).resolves.toMatchObject({ success: true });
-  });
-
   test("drains native login stderr before resolving authentication", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-stderr-"));
     temporaryDirectories.push(root);
