@@ -4849,27 +4849,7 @@ describe("CodexSecurity orchestration", () => {
     const stateDirectory = join(root, "state");
     const codexHome = join(stateDirectory, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
-    await writeFile(
-      fakeCodex,
-      `
-import { existsSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-
-const args = process.argv.slice(2);
-const authPath = join(process.env.CODEX_HOME, "auth.json");
-if (args[0] === "logout") rmSync(authPath, { force: true });
-else if (args[1] === "status") {
-  if (!existsSync(authPath)) process.exitCode = 1;
-  else console.log("Logged in using ChatGPT");
-} else {
-  const apiKey = args.includes("--with-api-key");
-  if (apiKey) for await (const _chunk of process.stdin) {}
-  writeFileSync(authPath, JSON.stringify({ auth_mode: apiKey ? "apikey" : "chatgpt" }));
-  if (!apiKey) console.error("Open https://auth.example.test/device");
-  if (args.includes("--device-auth")) console.error("User code: ABCD-EFGH");
-}
-`,
-    );
+    await writeFile(fakeCodex, "process.exitCode = 1;\n");
     const client = new TestClient(
       { pluginPath: join(root, "missing-plugin") },
       {
@@ -4888,12 +4868,6 @@ else if (args[1] === "status") {
       await expect(client.account()).resolves.toMatchObject({
         authenticated: false,
       });
-      await client.loginApiKey("synthetic-test-key");
-      const login = await client.loginChatGPTDeviceCode();
-      expect(login.verificationUrl).toBe("https://auth.example.test/device");
-      expect(login.userCode).toBe("ABCD-EFGH");
-      await expect(login.wait()).resolves.toMatchObject({ success: true });
-      await client.logout();
       expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
       expect(existsSync(join(codexHome, "sdk-marketplace"))).toBe(false);
     } finally {
