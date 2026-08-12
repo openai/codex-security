@@ -13,16 +13,13 @@ import {
 import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { prepareKnowledgeBase } from "../src/knowledge-base.js";
+import { expandHome } from "../src/runtime.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
-// `mock.module` mutates the live `node:os` namespace, so the original exports
-// have to be snapshotted before the first mock to be restorable afterwards.
-const nodeOs = { ...os };
-const realHomeDirectory = os.homedir();
 
 afterEach(async () => {
   await Promise.all(
@@ -115,7 +112,8 @@ describe("scan knowledge bases", () => {
     const documents = join(home, "docs");
     await mkdir(documents, { recursive: true });
     await writeFile(join(documents, "scope.md"), "Review the payment service.");
-    mock.module("node:os", () => ({ ...nodeOs, homedir: () => home }));
+    const realHomeDirectory = os.homedir();
+    const homeSpy = spyOn(os, "homedir").mockImplementation(() => home);
     try {
       const expanded = await prepareKnowledgeBase(["~/docs"]);
       temporaryDirectories.push(expanded.path);
@@ -129,13 +127,9 @@ describe("scan knowledge bases", () => {
       temporaryDirectories.push(absolute.path);
       expect(absolute.sources).toEqual([documents]);
 
-      // Another account's home cannot be resolved portably, so `~other` stays a
-      // literal path segment under the working directory.
-      await expect(prepareKnowledgeBase(["~other/docs"])).rejects.toThrow(
-        /~other/u,
-      );
+      expect(expandHome("~other/docs")).toBe("~other/docs");
     } finally {
-      mock.module("node:os", () => nodeOs);
+      homeSpy.mockRestore();
     }
     expect(os.homedir()).toBe(realHomeDirectory);
   });
