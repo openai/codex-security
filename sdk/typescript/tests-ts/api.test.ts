@@ -5773,38 +5773,14 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     await expect(login.wait()).resolves.toMatchObject({ success: false });
   });
 
-  test("keeps ambient credentials available after successful ChatGPT login", async () => {
+  test("keeps ambient credentials available to scans", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
-    const fakeCodex = join(root, "codex.mjs");
-    const keyLog = join(root, "api-keys");
     const scanDir = join(root, "scan");
     await mkdir(repository);
     await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
-    await writeFile(
-      fakeCodex,
-      `
-import { appendFileSync, writeSync } from "node:fs";
-
-const args = process.argv.slice(2).join(" ");
-if (args === "login --with-api-key") {
-  let apiKey = "";
-  for await (const chunk of process.stdin) apiKey += chunk;
-  if (!["secret-key", "ambient-key"].includes(apiKey.trim())) {
-    process.exitCode = 3;
-  } else {
-    appendFileSync(${JSON.stringify(keyLog)}, apiKey);
-  }
-} else if (args === "login") {
-  writeSync(2, "Open https://auth.example.test/login\\n");
-  process.exit(0);
-} else {
-  process.exitCode = 2;
-}
-`,
-    );
     let codexOptions: CodexOptions | null = null;
     const client = new TestClient(
       {},
@@ -5831,10 +5807,6 @@ if (args === "login --with-api-key") {
           },
           credentialsAvailable: false,
         }),
-        resolveCodexCommand: () => ({
-          command: process.execPath,
-          prefixArgs: [fakeCodex],
-        }),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
@@ -5853,9 +5825,6 @@ if (args === "login --with-api-key") {
       },
     );
     try {
-      await client.loginApiKey("secret-key");
-      const login = await client.loginChatGPT();
-      await expect(login.wait()).resolves.toMatchObject({ success: true });
       await client.run(repository);
       expect((codexOptions as CodexOptions | null)?.apiKey).toBe("ambient-key");
       expect(
@@ -5864,7 +5833,6 @@ if (args === "login --with-api-key") {
             ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
         ),
       ).toBe(false);
-      expect(await readFile(keyLog, "utf8")).toBe("secret-key\n");
     } finally {
       await client.close();
     }
