@@ -68,7 +68,18 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
-    command = ["rg", "--files", "--hidden", "--no-ignore", "--glob", "!.git/**", "--", scope]
+    command = [
+        "rg",
+        "--files",
+        "--hidden",
+        "--no-ignore",
+        "--path-separator",
+        "/",
+        "--glob",
+        "!.git/**",
+        "--",
+        scope,
+    ]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(
@@ -91,6 +102,88 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         inventory.seek(0)
         rows = sorted(inventory)
 
+    return write_inventory(output, rows)
+
+
+def generate_diff_in_scope_files(
+    repository: Path,
+    base: str,
+    head: str,
+    mode: str,
+    output: Path,
+) -> int:
+    """Reuse the existing diff selection without generating previews or duplicate worklists."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from generate_rank_input import git_changed_paths, path_is_excluded, run_git_changed_paths
+    from rank_preview import (
+        DEFAULT_PREVIEW_BYTES,
+        TEXT_CODE_EXTENSIONS,
+        is_binary_sample,
+        preview_for,
+    )
+
+    rows: list[bytes] = []
+    try:
+        if mode == "local-patch":
+            changed = run_git_changed_paths(repository, [base])
+            untracked = subprocess.run(
+                ["git", "-C", str(repository), "ls-files", "--others", "--exclude-standard", "-z"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            changed.extend(
+                (repository / relative, "A")
+                for relative in untracked.stdout.split("\0")
+                if relative
+            )
+        else:
+            changed = git_changed_paths(repository, base, head, mode)
+
+        for path, status in changed:
+            relative = path.relative_to(repository)
+            if path_is_excluded(relative) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
+                continue
+            if status != "D":
+                if mode == "revisions":
+                    contents = subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(repository),
+                            "cat-file",
+                            "blob",
+                            f"{head}:{relative.as_posix()}",
+                        ],
+                        capture_output=True,
+                        check=True,
+                    ).stdout
+                    if is_binary_sample(contents):
+                        continue
+                elif (
+                    path.is_symlink()
+                    or not path.is_file()
+                    or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
+                ):
+                    continue
+            relative_path = relative.as_posix()
+            if "\n" in relative_path or "\r" in relative_path:
+                raise InventoryError(
+                    "Git changes contain a path that cannot fit in the file inventory"
+                )
+            rows.append(f"{relative_path}\n".encode())
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = getattr(error, "stderr", None)
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        message = detail.strip() if isinstance(detail, str) and detail.strip() else str(error)
+        raise InventoryError(f"could not resolve the selected Git changes: {message}") from error
+
+    return write_inventory(output, sorted(set(rows)))
+
+
+def write_inventory(output: Path, rows: list[bytes]) -> int:
+    """Replace a complete inventory atomically, keeping failures from corrupting the old one."""
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     try:
@@ -116,13 +209,32 @@ def main() -> None:
     parser.add_argument("--repo", required=True, help="Repository root.")
     parser.add_argument("--scope", required=True, help="File or directory within the repository.")
     parser.add_argument("--out", required=True, help="Destination for the file inventory.")
+    parser.add_argument("--diff-base", help="Authoritative Git base for a changed-file inventory.")
+    parser.add_argument("--diff-head", default="HEAD", help="Authoritative Git head revision.")
+    parser.add_argument(
+        "--diff-mode",
+        choices=("revisions", "local-patch"),
+        default="revisions",
+        help="Use committed revisions or the current staged and unstaged patch.",
+    )
     args = parser.parse_args()
 
     try:
         repository = resolve_repository(args.repo)
         scope = resolve_scope(repository, args.scope)
         output = resolve_output(args.out)
-        count = generate_in_scope_files(repository, scope, output)
+        if args.diff_base is None:
+            count = generate_in_scope_files(repository, scope, output)
+        elif scope not in (".", "./"):
+            raise InventoryError("--scope: diff scans must use the repository root")
+        else:
+            count = generate_diff_in_scope_files(
+                repository,
+                args.diff_base,
+                args.diff_head,
+                args.diff_mode,
+                output,
+            )
     except (OSError, ValueError) as error:
         print(f"generate_in_scope_files: {error}", file=sys.stderr)
         raise SystemExit(2) from error

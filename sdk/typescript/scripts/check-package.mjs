@@ -158,6 +158,7 @@ const distFiles = new Set(
     "scan-comparison",
     "scan-dashboard",
     "scan-history-renderer",
+    "scan-logs",
     "targets",
     "trusted-executable",
     "version",
