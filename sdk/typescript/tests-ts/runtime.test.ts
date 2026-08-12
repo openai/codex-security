@@ -1526,20 +1526,10 @@ describe("plugin runtime preparation", () => {
     await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
     await writeFile(join(home, "unrelated-state"), "preserved\n");
 
-    let marketplaceRegistered = false;
-    const updateConfig = async () => {
-      const sections = [
-        "[features]\nplugins = true\n",
-        `[projects.${JSON.stringify(join(root, "unrelated-project"))}]\ntrust_level = "trusted"\n`,
-      ];
-      if (marketplaceRegistered) {
-        sections.push(
-          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
-        );
-      }
-      await writeFile(configPath, sections.join("\n"));
-    };
-    await updateConfig();
+    await writeFile(
+      configPath,
+      `[features]\nplugins = true\n\n[projects.${JSON.stringify(join(root, "unrelated-project"))}]\ntrust_level = "trusted"\n`,
+    );
 
     const calls: string[][] = [];
     const runCodex: NonNullable<
@@ -1549,8 +1539,11 @@ describe("plugin runtime preparation", () => {
       calls.push([...args]);
 
       if (args[1] === "marketplace" && args[2] === "add") {
-        marketplaceRegistered = true;
-        await updateConfig();
+        await writeFile(
+          configPath,
+          `\n[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+          { flag: "a" },
+        );
         return "";
       } else if (args[1] === "add") {
         const manifest = JSON.parse(

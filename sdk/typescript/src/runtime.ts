@@ -1967,35 +1967,6 @@ export async function createMarketplace(
   return marketplace;
 }
 
-async function codexSecurityMarketplaceRegistered(
-  codexHome: string,
-  marketplace: string,
-): Promise<boolean> {
-  let config: unknown;
-  try {
-    config = parse(await readFile(join(codexHome, "config.toml"), "utf8"));
-  } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") {
-      return false;
-    }
-    throw new PluginBootstrapError(
-      "Unable to inspect the existing Codex Security marketplace.",
-      { cause: error },
-    );
-  }
-  const marketplaces = isRecord(config) ? config["marketplaces"] : undefined;
-  const registration = isRecord(marketplaces)
-    ? marketplaces[MARKETPLACE_NAME]
-    : undefined;
-  const source = isRecord(registration) ? registration["source"] : undefined;
-  return (
-    isRecord(registration) &&
-    registration["source_type"] === "local" &&
-    typeof source === "string" &&
-    (await sameFile(source, marketplace))
-  );
-}
-
 export function resolveCodexCommand(): CodexCommand {
   const { packageName, targetTriple } = codexPlatformPackage();
   let packageJson: string;
@@ -2081,10 +2052,7 @@ export async function bootstrapPlugin(
     if (nodeErrorCode(error) === "ENOENT") return null;
     throw error;
   });
-  if (
-    existing !== null &&
-    (!existing.isDirectory() || existing.isSymbolicLink())
-  ) {
+  if (existing !== null && !existing.isDirectory()) {
     throw new PluginBootstrapError(
       `Codex Security marketplace is not a safe directory: ${marketplace}`,
     );
@@ -2102,7 +2070,22 @@ export async function bootstrapPlugin(
     }
     await createMarketplace(codexHome, root, options.signal);
   }
-  if (!(await codexSecurityMarketplaceRegistered(codexHome, marketplace))) {
+  const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
+    (error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return "";
+      throw error;
+    },
+  );
+  const marketplaces = parse(config)["marketplaces"];
+  const registration = isRecord(marketplaces)
+    ? marketplaces[MARKETPLACE_NAME]
+    : undefined;
+  if (
+    !isRecord(registration) ||
+    registration["source_type"] !== "local" ||
+    typeof registration["source"] !== "string" ||
+    !(await sameFile(registration["source"], marketplace))
+  ) {
     await run(
       command,
       ["plugin", "marketplace", "add", marketplace],
@@ -2315,12 +2298,10 @@ async function copyPluginTree(
     await cp(source, destination, {
       recursive: true,
       force: false,
-      errorOnExist: true,
       filter: async (path) => {
         throwIfSignalAborted(signal);
         const metadata = await lstat(path);
         if (
-          metadata.isSymbolicLink() ||
           (!metadata.isDirectory() && !metadata.isFile()) ||
           (await realpath(path)) !== path
         ) {
