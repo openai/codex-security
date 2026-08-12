@@ -125,6 +125,9 @@ export class CodexLoginHandle {
       if (this.#child.exitCode === null && this.#child.signalCode === null) {
         this.#child.kill("SIGKILL");
       }
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
     }, LOGIN_CHILD_TERMINATION_GRACE_MS);
   }
 
