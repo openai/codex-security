@@ -679,7 +679,7 @@ def git_changed_paths(
             path = fields[index]
             index += 1
             selected_mode = metadata[0].removeprefix(":") if status == "D" else metadata[1]
-            if selected_mode != "120000":
+            if selected_mode in {"100644", "100755"}:
                 changed.append((repo / path, status))
                 if revision_blob_ids is not None and status != "D":
                     revision_blob_ids[path] = metadata[3]
@@ -693,31 +693,45 @@ def git_changed_paths(
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
-def committed_blob_contents(repo: Path, blob_ids: dict[str, str]) -> dict[str, bytes]:
+def committed_blob_previews(
+    repo: Path, blob_ids: dict[str, str], preview_bytes: int
+) -> dict[str, str | None]:
     if not blob_ids:
         return {}
 
-    requested = "".join(f"{object_id}\n" for object_id in blob_ids.values()).encode("ascii")
-    result = subprocess.run(
+    previews: dict[str, str | None] = {}
+    with subprocess.Popen(
         ["git", "-C", str(repo), "cat-file", "--batch"],
-        input=requested,
-        capture_output=True,
-        check=True,
-    )
-    contents: dict[str, bytes] = {}
-    offset = 0
-    for path in blob_ids:
-        header_end = result.stdout.index(b"\n", offset)
-        header = result.stdout[offset:header_end].split()
-        if len(header) != 3 or header[1] != b"blob":
-            raise ValueError("Git returned an unexpected object for a changed source file")
-        data_start = header_end + 1
-        data_end = data_start + int(header[2])
-        if result.stdout[data_end : data_end + 1] != b"\n":
-            raise ValueError("Git returned incomplete changed source contents")
-        contents[path] = result.stdout[data_start:data_end]
-        offset = data_end + 1
-    return contents
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        for path, object_id in blob_ids.items():
+            process.stdin.write(f"{object_id}\n".encode("ascii"))
+            process.stdin.flush()
+            header = process.stdout.readline().split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise ValueError("Git returned an unexpected object for a changed source file")
+            size = int(header[2])
+            contents = process.stdout.read(size)
+            if len(contents) != size or process.stdout.read(1) != b"\n":
+                raise ValueError("Git returned incomplete changed source contents")
+            if is_binary_sample(contents):
+                previews[path] = None
+                continue
+            text = contents.decode("utf-8", errors="ignore")
+            outline = structural_outline(repo / path, text)
+            previews[path] = fit_preview_lines(
+                select_preview_lines(outline or text.splitlines()), preview_bytes
+            )
+        process.stdin.close()
+        stderr = process.stderr.read()
+        if (returncode := process.wait()) != 0:
+            raise subprocess.CalledProcessError(returncode, process.args, stderr=stderr)
+    return previews
 
 
 def make_diff_rank_input(args: argparse.Namespace) -> None:
@@ -739,8 +753,8 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         if not path_is_excluded(path.relative_to(repo))
         and path.suffix.lower() in TEXT_CODE_EXTENSIONS
     ]
-    committed_contents = (
-        committed_blob_contents(
+    committed_previews = (
+        committed_blob_previews(
             repo,
             {
                 path.relative_to(repo).as_posix(): revision_blob_ids[
@@ -749,6 +763,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 for path, status in selected
                 if status != "D"
             },
+            args.preview_bytes,
         )
         if args.mode == "revisions"
         else {}
@@ -760,14 +775,10 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         if status == "D":
             preview = ""
         elif args.mode == "revisions":
-            contents = committed_contents[rel.as_posix()]
-            if is_binary_sample(contents):
+            selected_preview = committed_previews[rel.as_posix()]
+            if selected_preview is None:
                 continue
-            text = contents.decode("utf-8", errors="ignore")
-            outline = structural_outline(path, text)
-            preview = fit_preview_lines(
-                select_preview_lines(outline or text.splitlines()), args.preview_bytes
-            )
+            preview = selected_preview
         elif path.is_symlink():
             continue
         elif path.is_file():

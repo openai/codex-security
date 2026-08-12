@@ -260,6 +260,13 @@ describe("compact diff scan", () => {
       "--cacheinfo",
       `120000,${addedLink},src/added-link.py`,
     );
+    git(
+      repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${base},src/nested-module.py`,
+    );
     git(repository, "commit", "-qm", "selected changes");
     const head = git(repository, "rev-parse", "HEAD");
     const output = join(root, "in-scope.txt");
