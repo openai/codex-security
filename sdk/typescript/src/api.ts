@@ -420,6 +420,12 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
+    let budgetRecovery: {
+      expectation: ScanExpectation;
+      pluginRoot: string;
+      model: string;
+      threadId: string | null;
+    } | null = null;
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
@@ -689,6 +695,14 @@ export class CodexSecurity {
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model);
+      if (mode === "deep" && options.maxCostUsd !== undefined) {
+        budgetRecovery = {
+          expectation,
+          pluginRoot: runtime.plugin.installedRoot,
+          model,
+          threadId: null,
+        };
+      }
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
       const reportProgress = (progress: ScanProgress): void => {
@@ -1041,6 +1055,7 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
+          if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
           tracker.start(threadId);
           try {
             await workbench(workbenchOptions, [
@@ -1206,6 +1221,81 @@ export class CodexSecurity {
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
           : error;
+      if (
+        failure instanceof ScanCostLimitExceededError &&
+        budgetRecovery !== null &&
+        budgetRecovery.threadId !== null &&
+        activeScan !== null &&
+        !this.#abortController.signal.aborted &&
+        options.signal?.aborted !== true
+      ) {
+        try {
+          const completion = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              "complete-budget-exhausted-scan",
+              "--scan-id",
+              activeScan.id,
+              "--cost-json",
+              JSON.stringify(snapshot?.cost ?? failure.cost),
+              "--message",
+              failure.message.slice(0, 2400),
+            ],
+          );
+          activeScan = null;
+          runPostScan = null;
+          const result = await collectResult(
+            {
+              status: "completed",
+              model: budgetRecovery.model,
+              usage: snapshot?.usage ?? null,
+            },
+            budgetRecovery.threadId,
+            scanDir,
+            budgetRecovery.pluginRoot,
+            budgetRecovery.expectation,
+            AbortSignal.any([
+              this.#abortController.signal,
+              ...(options.signal === undefined ? [] : [options.signal]),
+            ]),
+            true,
+          );
+          if (result.coverage.completeness !== "partial") {
+            throw new IncompleteScanError(
+              "Budget-exhausted scan recovery did not report partial coverage.",
+            );
+          }
+          const completedScan = completion["scan"];
+          const targetWarnings = new Set(
+            Array.isArray(completion["targetWarnings"])
+              ? completion["targetWarnings"].filter(
+                  (warning): warning is string => typeof warning === "string",
+                )
+              : [],
+          );
+          const warnings =
+            isRecord(completedScan) && Array.isArray(completedScan["warnings"])
+              ? completedScan["warnings"].filter(
+                  (warning): warning is string => typeof warning === "string",
+                )
+              : [];
+          for (const warning of warnings.length > 0
+            ? warnings
+            : [failure.message]) {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              warning,
+              targetWarnings.has(warning)
+                ? { kind: "target_changed" }
+                : undefined,
+            );
+          }
+          scanFailure = false;
+          return result;
+        } catch {}
+      }
       if (activeScan !== null) {
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [

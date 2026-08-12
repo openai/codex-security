@@ -226,6 +226,194 @@ describe("deep scan workbench ownership", () => {
     },
   );
 
+  test.each(["repository", "scoped_path"] as const)(
+    "returns an honest partial %s report when saturated discovery exceeds its cost limit",
+    async (inventoryStrategy) => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-deep-budget-recovery-")),
+      );
+      temporaryDirectories.push(root);
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      const stateDir = join(root, "state");
+      await mkdir(join(repository, "src"), { recursive: true });
+      await mkdir(join(repository, "shared"), { recursive: true });
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(
+        join(repository, "src", "source.py"),
+        "# source fixture\n",
+      );
+      await writeFile(
+        join(repository, "shared", "support.py"),
+        "# supporting context\n",
+      );
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const command = (args: string[]): Record<string, unknown> => {
+        const result = Bun.spawnSync(
+          [
+            python!,
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+            ...args,
+          ],
+          {
+            env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(
+          0,
+        );
+        return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
+          string,
+          unknown
+        >;
+      };
+      const scoped = inventoryStrategy === "scoped_path";
+      const registration = command([
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "deep",
+          repository,
+          target: {
+            kind: scoped ? "paths" : "repository",
+            paths: scoped ? ["src"] : [],
+          },
+          maxCostUsd: 10,
+        }),
+      ]);
+      const scanId = registration["scanId"] as string;
+      command([
+        "begin-deep-scan",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        "budget-recovery-thread",
+        "--scan-root",
+        join(root, "scans"),
+        "--available-parallelism",
+        "4",
+        "--workflow-version",
+        "deep-scan-mcp/v1",
+      ]);
+      const discoveryDir = join(scanDir, "artifacts", "02_discovery");
+      await mkdir(discoveryDir, { recursive: true });
+      await writeFile(
+        join(discoveryDir, "in_scope_files.txt"),
+        "src/source.py\n",
+      );
+      await writeFile(
+        join(discoveryDir, "candidate_ledger.jsonl"),
+        `${JSON.stringify({
+          candidate_id: "candidate-001",
+          cwe_ids: ["CWE-862"],
+          locations: [
+            { path: "src/source.py", start_line: 1, end_line: 1, role: "sink" },
+            ...(scoped
+              ? [
+                  {
+                    path: "shared/support.py",
+                    start_line: 1,
+                    end_line: 1,
+                    role: "evidence",
+                  },
+                ]
+              : []),
+          ],
+          summary: "Possible missing authorization",
+          evidence: "The request reaches a protected handler.",
+        })}\n`,
+      );
+      const terminalManifest = join(scanDir, "coordinator-manifest.json");
+      await writeFile(terminalManifest, "{}\n");
+      const terminal = Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          "-c",
+          "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); connection.execute(\"UPDATE deep_scan_runs SET status='succeeded', phase='terminal', terminal_reason='saturated', manifest_path=? WHERE scan_id=?\",sys.argv[2:]); connection.commit()",
+          join(stateDir, "workbench.sqlite3"),
+          terminalManifest,
+          scanId,
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(terminal.exitCode, new TextDecoder().decode(terminal.stderr)).toBe(
+        0,
+      );
+      const warning =
+        "Scan stopped: estimated cost $10.08 exceeded the $10.00 limit.";
+      const completed = command([
+        "complete-budget-exhausted-scan",
+        "--scan-id",
+        scanId,
+        "--cost-json",
+        JSON.stringify({
+          model: "gpt-5.6-sol",
+          inputTokens: 1_000,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 100,
+          estimatedUsd: 10.08,
+        }),
+        "--message",
+        warning,
+      ]);
+      const scan = completed["scan"] as {
+        progress: { status: string };
+        warnings: string[];
+      };
+      expect(scan.progress.status).toBe("complete");
+      expect(scan.warnings).toContain(warning);
+      const findings = JSON.parse(
+        await readFile(join(scanDir, "findings.json"), "utf8"),
+      ) as { findings: unknown[] };
+      expect(findings.findings).toEqual([]);
+      const coverage = JSON.parse(
+        await readFile(join(scanDir, "coverage.json"), "utf8"),
+      ) as {
+        completeness: string;
+        inventoryStrategy: string;
+        includePaths: string[];
+        deferred: Array<{ id: string; reason: string; paths: string[] }>;
+      };
+      expect(coverage).toMatchObject({
+        completeness: "partial",
+        inventoryStrategy,
+        includePaths: scoped ? ["src"] : ["."],
+        deferred: [
+          {
+            id: "candidate-001",
+            reason: expect.stringContaining("Possible missing authorization"),
+            paths: scoped
+              ? ["src/source.py", "shared/support.py"]
+              : ["src/source.py"],
+          },
+        ],
+      });
+      const report = await readFile(join(scanDir, "report.md"), "utf8");
+      expect(report).toContain(
+        "No findings were validated before the scan reached its cost limit.",
+      );
+      expect(report).toContain("Possible missing authorization");
+      expect(report).toContain("The request reaches a protected handler.");
+      expect(report).not.toContain(
+        "No reportable findings survived the canonical discovery, validation",
+      );
+    },
+  );
+
   test.each([
     ["a malformed continuation token", null, "not-a-valid-token"],
     ["an unexpected token for a legacy delivery", null, originalClaimToken],

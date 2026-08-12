@@ -480,8 +480,11 @@ scan history, and bulk-scan receipt. Estimates use
 including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
-running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit.
+running cost exceeds the limit. If a Deep Scan has already finished discovery,
+it returns a sealed partial report with any completed findings and lists
+unvalidated candidates as follow-up work. Requests already in progress can
+finish above the limit; preparing the partial report makes no additional model
+requests. Incomplete coverage retains its existing exit code.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.

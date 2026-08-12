@@ -3368,6 +3368,143 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each(["partial", "invalid", "unavailable"] as const)(
+    "recovers exhausted deep-scan budget when completion is %s",
+    async (completion) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+      ]);
+      const commands: Array<readonly string[]> = [];
+      const warnings: string[] = [];
+      let turns = 0;
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            commands.push(args);
+            if (args[0] !== "complete-budget-exhausted-scan") {
+              return mockWorkbench(args);
+            }
+            if (completion === "unavailable") {
+              throw new Error("Deep Scan discovery has not completed.");
+            }
+            await copyCompletedScan(root);
+            const coveragePath = join(scanDir, "coverage.json");
+            const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+            coverage.mode = "deep_repository";
+            coverage.completeness =
+              completion === "invalid" ? "complete" : "partial";
+            if (completion === "partial") {
+              coverage.deferred.push({
+                id: "budget-exhausted",
+                reason: "The scan reached its configured cost limit.",
+              });
+            }
+            const coverageBytes = `${JSON.stringify(coverage)}\n`;
+            await writeFile(coveragePath, coverageBytes);
+            const manifestPath = join(scanDir, "scan-manifest.json");
+            const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+            const artifact = manifest.scan.artifacts.find(
+              (item: { path: string }) => item.path === "coverage.json",
+            );
+            artifact.sha256 = createHash("sha256")
+              .update(coverageBytes)
+              .digest("hex");
+            await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+            return {
+              scan: { warnings: [args[args.indexOf("--message") + 1]] },
+            };
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(
+                _input: string,
+                options: { signal: AbortSignal },
+              ) {
+                turns += 1;
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  yield { type: "thread.started", thread_id: "scan-thread" };
+                  await writeUsageSession(codexHome, "scan-thread", {
+                    input_tokens: 1_250,
+                    cached_input_tokens: 200,
+                    output_tokens: 30,
+                  });
+                  await new Promise<void>((resolve) => {
+                    if (options.signal.aborted) resolve();
+                    else {
+                      options.signal.addEventListener(
+                        "abort",
+                        () => resolve(),
+                        {
+                          once: true,
+                        },
+                      );
+                    }
+                  });
+                  throw new DOMException("aborted", "AbortError");
+                }
+                return { events: events() };
+              },
+            }),
+          }),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      try {
+        const result = client.run(repository, {
+          mode: "deep",
+          maxCostUsd: 0.005,
+          postScanPrompt: "Do not spend another model turn.",
+          onWarning: (warning) => warnings.push(warning),
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (completion === "unavailable" || completion === "invalid") {
+          await expect(result).rejects.toBeInstanceOf(
+            ScanCostLimitExceededError,
+          );
+          if (completion === "unavailable") {
+            expect(commands.at(-1)?.[0]).toBe("fail-scan");
+          } else {
+            expect(commands.some((args) => args[0] === "fail-scan")).toBe(
+              false,
+            );
+          }
+        } else {
+          const recovered = await result;
+          expect(recovered.coverage.completeness).toBe(completion);
+          expect(recovered.findings.findings).toHaveLength(1);
+          expect(recovered.threadId).toBe("scan-thread");
+          expect(recovered.cost?.estimatedUsd).toBe(0.00625);
+          expect(warnings).toEqual([
+            `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+          ]);
+          expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+        }
+        expect(turns).toBe(1);
+        const recovery = commands.find(
+          (args) => args[0] === "complete-budget-exhausted-scan",
+        );
+        expect(recovery?.includes("--cost-json")).toBe(true);
+        expect(recovery?.includes("--message")).toBe(true);
+      } finally {
+        clearTimeout(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
   test("saves a budgeted scan with a warning when token usage is unavailable", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

@@ -739,11 +739,28 @@ def build_report_markdown(
             else:
                 lines.extend(["", *_finding_section(number, finding)])
     else:
+        deferred = coverage.get("deferred", [])
+        budget_exhausted = (
+            coverage.get("completeness") == "partial"
+            and isinstance(deferred, list)
+            and any(
+                isinstance(item, dict)
+                and isinstance(item.get("reason"), str)
+                and any(term in item["reason"].casefold() for term in ("cost limit", "budget"))
+                for item in deferred
+            )
+        )
         lines.extend(
             [
                 "### No findings",
                 "",
-                "No reportable findings survived the canonical discovery, validation, and reportability gates.",
+                (
+                    "No findings were validated before the scan reached its cost limit. "
+                    "Review the deferred candidates in Open Questions And Follow Up."
+                    if budget_exhausted
+                    else "No reportable findings survived the canonical discovery, validation, "
+                    "and reportability gates."
+                ),
             ]
         )
     if hardening_portfolio_path is not None:
