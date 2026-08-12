@@ -1,20 +1,23 @@
 import { spawnSync } from "node:child_process";
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 
 const temporaryDirectories: string[] = [];
+const testPosix = process.platform === "win32" ? test.skip : test;
 
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -78,6 +81,33 @@ async function writeSession(
     ].join("\n"),
   );
   return path;
+}
+
+function failingOpen(
+  path: string,
+  code: string,
+): { attempts: () => number; restore: () => void } {
+  const originalOpen = fsPromises.open;
+  let attempts = 0;
+  mock.module("node:fs/promises", () => ({
+    ...fsPromises,
+    open: async (...parameters: Parameters<typeof originalOpen>) => {
+      if (String(parameters[0]) !== path) return originalOpen(...parameters);
+      attempts += 1;
+      throw Object.assign(new Error(`${code}: simulated open failure`), {
+        code,
+      });
+    },
+  }));
+  return {
+    attempts: () => attempts,
+    restore: () => {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        open: originalOpen,
+      }));
+    },
+  };
 }
 
 async function appendSessionItem(
@@ -1441,6 +1471,41 @@ describe("live scan cost tracking", () => {
     expect((await tracker.stop()).cost?.inputTokens).toBe(250);
   });
 
+  testPosix(
+    "keeps tracking after an unreadable unrelated session is reported",
+    async () => {
+      const home = await codexHome();
+      const unrelated = await writeSession(home, "unrelated-thread", {
+        input_tokens: 99,
+        output_tokens: 1,
+      });
+      await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      await chmod(unrelated, 0o000);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+      });
+      tracker.start("scan-thread");
+
+      try {
+        await expect(tracker.refresh()).rejects.toThrow();
+        expect((await tracker.refresh()).cost).toMatchObject({
+          inputTokens: 100,
+          outputTokens: 10,
+        });
+        expect((await tracker.stop()).cost).toMatchObject({
+          inputTokens: 100,
+          outputTokens: 10,
+        });
+      } finally {
+        await chmod(unrelated, 0o600);
+      }
+    },
+  );
+
   test("reports a changed running cost only once", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
@@ -1482,4 +1547,212 @@ describe("live scan cost tracking", () => {
       },
     });
   });
+
+  test("prefers the completed turn when the final refresh fails", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const updates: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      onCost: (cost) => updates.push(cost.estimatedUsd),
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00032);
+
+    await appendFile(path, "x".repeat(1 * 1_024 * 1_024 + 1));
+    const usage = { input_tokens: 1_000, output_tokens: 100 };
+
+    expect(await tracker.stop(usage)).toEqual({
+      usage,
+      cost: {
+        model: "gpt-5.6-terra",
+        inputTokens: 1_000,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 100,
+        estimatedUsd: 0.0032,
+      },
+    });
+    expect(updates).toEqual([0.00032, 0.0032]);
+  });
+
+  test("keeps the observed usage when the completed turn charges less", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const updates: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      onCost: (cost) => updates.push(cost.estimatedUsd),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+
+    await appendFile(path, "x".repeat(1 * 1_024 * 1_024 + 1));
+
+    expect(
+      (await tracker.stop({ input_tokens: 10, output_tokens: 1 })).cost,
+    ).toMatchObject({ inputTokens: 100, outputTokens: 10 });
+    expect(updates).toEqual([0.00032]);
+  });
+
+  test("retries a session log after a transient open failure", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+    const open = failingOpen(path, "EMFILE");
+
+    try {
+      await expect(tracker.refresh()).rejects.toThrow("EMFILE");
+      await expect(tracker.refresh()).rejects.toThrow("EMFILE");
+      expect(open.attempts()).toBe(2);
+    } finally {
+      open.restore();
+    }
+
+    expect((await tracker.refresh()).cost).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 10,
+    });
+  });
+
+  test("stops reopening a session log after a permanent open failure", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+    const open = failingOpen(path, "EACCES");
+
+    try {
+      await expect(tracker.refresh()).rejects.toThrow("EACCES");
+      expect((await tracker.refresh()).cost).toBeNull();
+      expect(open.attempts()).toBe(1);
+    } finally {
+      open.restore();
+    }
+  });
+
+  test("retires a session log that keeps failing to open", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+    const open = failingOpen(path, "EBUSY");
+
+    try {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(tracker.refresh()).rejects.toThrow("EBUSY");
+      }
+      expect((await tracker.refresh()).cost).toBeNull();
+      expect((await tracker.refresh()).cost).toBeNull();
+      expect(open.attempts()).toBe(5);
+    } finally {
+      open.restore();
+    }
+  });
+
+  test("counts open failures per outage rather than for the whole scan", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    for (const code of ["EMFILE", "ENFILE"]) {
+      const open = failingOpen(path, code);
+      try {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await expect(tracker.refresh()).rejects.toThrow(code);
+        }
+      } finally {
+        open.restore();
+      }
+      expect((await tracker.refresh()).cost).toMatchObject({
+        inputTokens: 100,
+      });
+    }
+
+    await appendFile(
+      path,
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 250, output_tokens: 20 },
+          },
+        },
+      })}\n`,
+    );
+
+    expect((await tracker.refresh()).cost).toMatchObject({
+      inputTokens: 250,
+      outputTokens: 20,
+    });
+  });
+
+  testPosix(
+    "falls back to the completed turn when session logs cannot be read",
+    async () => {
+      const home = await codexHome();
+      const unrelated = await writeSession(home, "unrelated-thread", {
+        input_tokens: 99,
+        output_tokens: 1,
+      });
+      await chmod(unrelated, 0o000);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-luna",
+      });
+      const usage = { input_tokens: 1_000, output_tokens: 20 };
+      tracker.start("scan-thread");
+
+      try {
+        expect(await tracker.stop(usage)).toEqual({
+          usage,
+          cost: {
+            model: "gpt-5.6-luna",
+            inputTokens: 1_000,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 20,
+            estimatedUsd: 0.000224,
+          },
+        });
+      } finally {
+        await chmod(unrelated, 0o600);
+      }
+    },
+  );
 });

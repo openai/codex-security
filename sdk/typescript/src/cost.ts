@@ -45,6 +45,7 @@ interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
   pendingLineBytes: number;
+  openFailures: number;
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
@@ -85,6 +86,22 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
   "gpt-5.6-luna": [200, 20, 250, 1_200],
 };
+
+// Open failures that cannot succeed again until the file itself changes, so
+// retrying them only wastes a syscall per poll. Every other code (EMFILE,
+// ENFILE, EBUSY, EIO and friends) may clear on its own and is retried.
+const PERMANENT_ACCESS_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EPERM",
+  "EISDIR",
+  "ELOOP",
+  "ENAMETOOLONG",
+  "ENOTDIR",
+]);
+
+// A retryable code that never clears must still stop somewhere, otherwise the
+// "reported once, then skipped" guarantee holds only for the codes listed above.
+const MAX_SESSION_OPEN_ATTEMPTS = 5;
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
@@ -162,9 +179,23 @@ export class ScanCostTracker {
       clearInterval(this.#timer);
       this.#timer = null;
     }
-    await this.refresh();
-    if (this.#snapshot.usage !== null) return this.#snapshot;
+    let refreshed = true;
+    try {
+      await this.refresh();
+    } catch {
+      refreshed = false;
+    }
+    if (refreshed && this.#snapshot.usage !== null) return this.#snapshot;
+    // This refresh failed, so the snapshot predates the completed turn. The
+    // caller's own usage is authoritative for the scan thread, so it has to be
+    // able to win; keeping the stale snapshot would hide spend from `onCost`.
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
+    if (
+      this.#snapshot.usage !== null &&
+      !chargesMore(cost, this.#snapshot.cost)
+    ) {
+      return this.#snapshot;
+    }
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
     this.#reportCost(cost);
     return this.#snapshot;
@@ -182,6 +213,7 @@ export class ScanCostTracker {
           offset: 0,
           pendingLine: [],
           pendingLineBytes: 0,
+          openFailures: 0,
           unreadable: false,
           threadId: null,
           parentThreadId: null,
@@ -340,8 +372,20 @@ async function readSessionUsage(
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
+    // A process-wide shortage such as EMFILE clears on its own, so quarantining
+    // on the first failure would stop observing this session's usage for the
+    // rest of the scan. A file-specific access failure cannot clear on its own,
+    // and anything else is retried a few times before it is retired.
+    session.openFailures += 1;
+    if (
+      isPermanentAccessError(error) ||
+      session.openFailures >= MAX_SESSION_OPEN_ATTEMPTS
+    ) {
+      quarantineSession(session);
+    }
     throw error;
   }
+  session.openFailures = 0;
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
@@ -356,15 +400,19 @@ async function readSessionUsage(
       try {
         readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
       } catch (error) {
-        session.unreadable = true;
-        session.pendingLine = [];
-        session.pendingLineBytes = 0;
+        quarantineSession(session);
         throw error;
       }
     }
   } finally {
     await file.close();
   }
+}
+
+function quarantineSession(session: SessionUsage): void {
+  session.unreadable = true;
+  session.pendingLine = [];
+  session.pendingLineBytes = 0;
 }
 
 function readSessionChunk(
@@ -783,6 +831,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function isPermanentAccessError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const code = error["code"];
+  return typeof code === "string" && PERMANENT_ACCESS_ERROR_CODES.has(code);
+}
+
+function chargesMore(
+  cost: ScanCost | null,
+  previous: ScanCost | null,
+): boolean {
+  if (cost === null) return false;
+  return previous === null || cost.estimatedUsd > previous.estimatedUsd;
 }
 
 export function estimateScanCost(
