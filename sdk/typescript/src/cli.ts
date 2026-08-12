@@ -6,10 +6,18 @@ import {
   constants,
   existsSync,
   lstatSync,
+  readdirSync,
   realpathSync,
   writeSync,
 } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -2539,6 +2547,24 @@ function isOutsidePath(path: string): boolean {
   return path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path);
 }
 
+async function hasPartialOutput(path: string): Promise<boolean> {
+  try {
+    return (await readdir(path)).length > 0;
+  } catch {
+    // Keep the path in the diagnostic when it disappeared or cannot be read.
+    // Only suppress the message when emptiness was confirmed.
+    return true;
+  }
+}
+
+function hasPartialOutputSync(path: string): boolean {
+  try {
+    return readdirSync(path).length > 0;
+  } catch {
+    return true;
+  }
+}
+
 async function runExport(
   arguments_: ExportArguments,
   output: Writable,
@@ -3150,12 +3176,17 @@ async function runScan(
   }
 
   if (requestedSignal !== null) {
+    const partialOutput = scanDir !== null && hasPartialOutputSync(scanDir);
     diagnostic("scan.interrupted", {
       signal: requestedSignal,
-      partial_output: scanDir !== null,
+      partial_output: partialOutput,
     });
     return {
-      exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
+      exitCode: interruptedExit(
+        requestedSignal,
+        partialOutput ? scanDir : null,
+        errorOutput,
+      ),
       error:
         requestedSignal === "SIGINT"
           ? "Scan canceled by Ctrl-C."
@@ -3163,6 +3194,7 @@ async function runScan(
     };
   }
   if (failed) {
+    const partialOutput = scanDir !== null && (await hasPartialOutput(scanDir));
     const costLimitFailure =
       failure instanceof ScanCostLimitExceededError ? failure : undefined;
     const message =
@@ -3176,7 +3208,7 @@ async function runScan(
           : isLocalScanFailure(failure)
             ? "local"
             : classifyConnectionFailure(failure),
-      partial_output: scanDir !== null,
+      partial_output: partialOutput,
       max_cost_usd: costLimitFailure?.maxCostUsd,
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
     });
@@ -3184,7 +3216,7 @@ async function runScan(
     if (failure instanceof ScanInterruptedError) {
       return { exitCode: 2, error: message };
     }
-    if (scanDir !== null) {
+    if (partialOutput && scanDir !== null) {
       errorOutput.write(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );

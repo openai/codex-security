@@ -4876,6 +4876,47 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("codex-security:");
   });
 
+  test("does not claim partial output when the output directory is empty", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-empty-output-"));
+    try {
+      for (const [name, populate, expectsPartial] of [
+        ["empty", false, false],
+        ["partial", true, true],
+      ] as const) {
+        const scanDir = join(root, name);
+        await mkdir(scanDir);
+        if (populate)
+          await writeFile(join(scanDir, "progress.log"), "partial\n");
+
+        const stdout = capture();
+        const stderr = capture();
+        const failing = dependencies();
+        failing.createSecurity = () => ({
+          run: async (_repository, options) => {
+            options?.onOutputDirReady?.(scanDir);
+            throw new Error("SYNTHETIC_SCAN_FAILURE");
+          },
+          close: async () => {},
+          preflight: async () => fakePreflight(),
+        });
+
+        expect(
+          await main(["scan", "."], stdout.stream, stderr.stream, failing),
+        ).toBe(2);
+        expect(stderr.text()).toContain("SYNTHETIC_SCAN_FAILURE");
+        if (expectsPartial) {
+          expect(stderr.text()).toContain(
+            `Partial output was kept at ${scanDir}.`,
+          );
+        } else {
+          expect(stderr.text()).not.toContain("Partial output was kept");
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("preserves complete protected-root diagnostics", async () => {
     const stdout = capture();
     const stderr = capture();
