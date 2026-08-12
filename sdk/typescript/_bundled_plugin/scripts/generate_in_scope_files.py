@@ -105,6 +105,39 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     return write_inventory(output, rows)
 
 
+def committed_changed_paths(repository: Path, base: str, head: str) -> list[tuple[Path, str]]:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "diff",
+            "--raw",
+            "-z",
+            "--diff-filter=ACMRD",
+            f"{base}..{head}",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    fields = result.stdout.split("\0")
+    changed: list[tuple[Path, str]] = []
+    index = 0
+    while index < len(fields) - 1:
+        metadata = fields[index].split()
+        status = metadata[-1][0]
+        index += 1
+        if status in {"C", "R"}:
+            index += 1
+        path = fields[index]
+        index += 1
+        selected_mode = metadata[0].removeprefix(":") if status == "D" else metadata[1]
+        if selected_mode != "120000":
+            changed.append((repository / path, status))
+    return changed
+
+
 def generate_diff_in_scope_files(
     repository: Path,
     base: str,
@@ -114,7 +147,7 @@ def generate_diff_in_scope_files(
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from generate_rank_input import git_changed_paths, path_is_excluded, run_git_changed_paths
+    from generate_rank_input import path_is_excluded, run_git_changed_paths
     from rank_preview import (
         DEFAULT_PREVIEW_BYTES,
         TEXT_CODE_EXTENSIONS,
@@ -138,10 +171,10 @@ def generate_diff_in_scope_files(
                 if relative
             )
         else:
-            changed = git_changed_paths(repository, base, head, mode)
+            changed = committed_changed_paths(repository, base, head)
 
         for path, status in changed:
-            relative = path if mode == "revisions" else path.relative_to(repository)
+            relative = path.relative_to(repository)
             if path_is_excluded(relative) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
                 continue
             if status != "D":

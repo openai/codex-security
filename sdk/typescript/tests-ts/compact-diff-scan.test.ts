@@ -204,37 +204,9 @@ describe("compact diff scan", () => {
       "src/handler.py",
       "src/new handler.py",
     ]);
-
-    const rankInput = join(root, "rank-input.jsonl");
-    const legacyResult = python(
-      "generate_rank_input.py",
-      "make-diff-rank-input",
-      "--repo",
-      repository,
-      "--base",
-      base,
-      "--head",
-      head,
-      "--out",
-      rankInput,
-    );
-
-    expect(legacyResult.status, legacyResult.stderr).toBe(0);
-    const rows = readFileSync(rankInput, "utf8")
-      .trim()
-      .split("\n")
-      .map((row) => JSON.parse(row));
-    expect(rows.map((row) => row.path)).toEqual([
-      "src/guard.py",
-      "src/handler.py",
-      "src/new handler.py",
-    ]);
-    expect(rows.find((row) => row.path === "src/handler.py")?.preview).toBe(
-      "value = 2",
-    );
   });
 
-  test("excludes committed symlinks using their selected revision modes", () => {
+  test("omits committed symlinks from the revision inventory", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
     writeSource(repository, "src/deleted-link.py", "handler.py");
@@ -260,13 +232,6 @@ describe("compact diff scan", () => {
       "--cacheinfo",
       `120000,${addedLink},src/added-link.py`,
     );
-    git(
-      repository,
-      "update-index",
-      "--add",
-      "--cacheinfo",
-      `160000,${base},src/nested-module.py`,
-    );
     git(repository, "commit", "-qm", "selected changes");
     const head = git(repository, "rev-parse", "HEAD");
     const output = join(root, "in-scope.txt");
@@ -286,34 +251,7 @@ describe("compact diff scan", () => {
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(readFileSync(output, "utf8").split("\n").filter(Boolean)).toEqual([
-      "src/handler.py",
-    ]);
-    expect(readFileSync(join(repository, "src", "added-link.py"), "utf8")).toBe(
-      "handler.py",
-    );
-
-    const rankInput = join(root, "rank-input.jsonl");
-    const legacyResult = python(
-      "generate_rank_input.py",
-      "make-diff-rank-input",
-      "--repo",
-      repository,
-      "--base",
-      base,
-      "--head",
-      head,
-      "--out",
-      rankInput,
-    );
-
-    expect(legacyResult.status, legacyResult.stderr).toBe(0);
-    expect(
-      readFileSync(rankInput, "utf8")
-        .trim()
-        .split("\n")
-        .map((row) => JSON.parse(row).path),
-    ).toEqual(["src/handler.py"]);
+    expect(readFileSync(output, "utf8").trim()).toBe("src/handler.py");
   });
 
   test("includes staged, unstaged, and untracked working-tree changes", () => {

@@ -33,19 +33,11 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rank_preview import (
-    DEFAULT_PREVIEW_BYTES,
-    TEXT_CODE_EXTENSIONS,
-    fit_preview_lines,
-    is_binary_sample,
-    preview_for,
-    select_preview_lines,
-    structural_outline,
-)
+from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
 from workbench_target import git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
@@ -288,7 +280,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def path_is_excluded(path: Path | PurePosixPath) -> bool:
+def path_is_excluded(path: Path) -> bool:
     if any(part in EXCLUDED_DIRS for part in path.parts):
         return True
     if path.name in EXCLUDED_FILENAMES:
@@ -643,47 +635,9 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     return changed
 
 
-def git_changed_paths(
-    repo: Path,
-    base: str,
-    head: str,
-    mode: str,
-    *,
-    revision_blob_ids: dict[str, str] | None = None,
-) -> list[tuple[Path | PurePosixPath, str]]:
+def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo),
-                "diff",
-                "--raw",
-                "-z",
-                "--diff-filter=ACMRD",
-                f"{base}..{head}",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        fields = result.stdout.split("\0")
-        changed: list[tuple[Path | PurePosixPath, str]] = []
-        index = 0
-        while index < len(fields) - 1:
-            metadata = fields[index].split()
-            status = metadata[-1][0]
-            index += 1
-            if status in {"C", "R"}:
-                index += 1
-            path = fields[index]
-            index += 1
-            selected_mode = metadata[0].removeprefix(":") if status == "D" else metadata[1]
-            if selected_mode in {"100644", "100755"}:
-                changed.append((PurePosixPath(path), status))
-                if revision_blob_ids is not None and status != "D":
-                    revision_blob_ids[path] = metadata[3]
-        return changed
+        return run_git_changed_paths(repo, [f"{base}..{head}"])
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -693,92 +647,19 @@ def git_changed_paths(
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
-def committed_blob_previews(
-    repo: Path, blob_ids: dict[str, str], preview_bytes: int
-) -> dict[str, str | None]:
-    if not blob_ids:
-        return {}
-
-    previews: dict[str, str | None] = {}
-    with subprocess.Popen(
-        ["git", "-C", str(repo), "cat-file", "--batch"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    ) as process:
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
-        for path, object_id in blob_ids.items():
-            process.stdin.write(f"{object_id}\n".encode("ascii"))
-            process.stdin.flush()
-            header = process.stdout.readline().split()
-            if len(header) != 3 or header[1] != b"blob":
-                raise ValueError("Git returned an unexpected object for a changed source file")
-            size = int(header[2])
-            contents = process.stdout.read(size)
-            if len(contents) != size or process.stdout.read(1) != b"\n":
-                raise ValueError("Git returned incomplete changed source contents")
-            if is_binary_sample(contents):
-                previews[path] = None
-                continue
-            text = contents.decode("utf-8", errors="ignore")
-            outline = structural_outline(PurePosixPath(path), text)
-            previews[path] = fit_preview_lines(
-                select_preview_lines(outline or text.splitlines()), preview_bytes
-            )
-        process.stdin.close()
-        stderr = process.stderr.read()
-        if (returncode := process.wait()) != 0:
-            raise subprocess.CalledProcessError(returncode, process.args, stderr=stderr)
-    return previews
-
-
 def make_diff_rank_input(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
-    revision_blob_ids: dict[str, str] = {}
-    changed = git_changed_paths(
-        repo,
-        args.base,
-        args.head,
-        args.mode,
-        revision_blob_ids=revision_blob_ids,
-    )
-    selected = [
-        (path, status)
-        for path, status in changed
-        if not path_is_excluded(path if args.mode == "revisions" else path.relative_to(repo))
-        and path.suffix.lower() in TEXT_CODE_EXTENSIONS
-    ]
-    committed_previews = (
-        committed_blob_previews(
-            repo,
-            {
-                path.as_posix(): revision_blob_ids[path.as_posix()]
-                for path, status in selected
-                if status != "D"
-            },
-            args.preview_bytes,
-        )
-        if args.mode == "revisions"
-        else {}
-    )
-
     rows: list[JsonRow] = []
-    for path, status in selected:
-        rel = path if args.mode == "revisions" else path.relative_to(repo)
+    for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
+        rel = path.relative_to(repo)
+        if path_is_excluded(rel) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
+            continue
+
         if status == "D":
             preview = ""
-        elif args.mode == "revisions":
-            selected_preview = committed_previews[rel.as_posix()]
-            if selected_preview is None:
-                continue
-            preview = selected_preview
-        elif path.is_symlink():
-            continue
         elif path.is_file():
             preview, is_binary = preview_for(path, args.preview_bytes)
             if is_binary:
