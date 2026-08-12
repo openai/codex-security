@@ -37,8 +37,13 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
-from workbench_target import git_directory_snapshot_paths
+from rank_preview import (
+    DEFAULT_PREVIEW_BYTES,
+    TEXT_CODE_EXTENSIONS,
+    preview_for,
+    preview_for_bytes,
+)
+from workbench_target import git_bytes, git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -660,6 +665,15 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
 
         if status == "D":
             preview = ""
+        elif args.mode == "revisions":
+            content = git_bytes(repo, "cat-file", "blob", f"{args.head}:{rel.as_posix()}")
+            if content is None:
+                raise SystemExit(
+                    f"Unable to read committed diff blob: {args.head}:{rel.as_posix()}"
+                )
+            preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
+            if is_binary:
+                continue
         elif path.is_file():
             preview, is_binary = preview_for(path, args.preview_bytes)
             if is_binary:
