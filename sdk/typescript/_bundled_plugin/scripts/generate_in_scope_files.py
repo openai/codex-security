@@ -105,7 +105,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     return write_inventory(output, rows)
 
 
-def committed_symlink_paths(repository: Path, base: str, head: str) -> set[Path]:
+def committed_symlink_paths(repository: Path, base: str, head: str) -> set[str]:
     """Read selected Git modes together without interpreting changed paths."""
     result = subprocess.run(
         [
@@ -123,7 +123,7 @@ def committed_symlink_paths(repository: Path, base: str, head: str) -> set[Path]
         check=True,
     )
     fields = result.stdout.split("\0")
-    symlinks: set[Path] = set()
+    symlinks: set[str] = set()
     index = 0
     while index < len(fields) - 1:
         metadata = fields[index].split()
@@ -131,7 +131,7 @@ def committed_symlink_paths(repository: Path, base: str, head: str) -> set[Path]
         index += 1
         if status in {"C", "R"}:
             index += 1
-        path = repository / fields[index]
+        path = fields[index]
         index += 1
         selected_mode = metadata[0].removeprefix(":") if status == "D" else metadata[1]
         if selected_mode == "120000":
@@ -171,7 +171,7 @@ def generate_diff_in_scope_files(
                 for relative in untracked.stdout.split("\0")
                 if relative
             )
-            symlinks: set[Path] = set()
+            symlinks: set[str] = set()
         else:
             changed = git_changed_paths(repository, base, head, mode)
             symlinks = committed_symlink_paths(repository, base, head)
@@ -179,7 +179,7 @@ def generate_diff_in_scope_files(
         for path, status in changed:
             relative = path.relative_to(repository)
             if (
-                path in symlinks
+                relative.as_posix() in symlinks
                 or path_is_excluded(relative)
                 or path.suffix.lower() not in TEXT_CODE_EXTENSIONS
             ):
