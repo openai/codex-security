@@ -1,7 +1,12 @@
 import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
-export type HistoryCommand = "list" | "show" | "compare" | "match-all";
+export type HistoryCommand =
+  | "list"
+  | "show"
+  | "findings"
+  | "compare"
+  | "match-all";
 type RendererOptions = {
   columns?: number;
   color?: boolean;
@@ -65,6 +70,7 @@ export function renderScanHistory(
   const labels: Record<HistoryCommand, string> = {
     list: "SCAN HISTORY",
     show: "SCAN DETAILS",
+    findings: "REPOSITORY FINDINGS",
     compare: "SCAN COMPARISON",
     "match-all": "MATCH RESULTS",
   };
@@ -115,6 +121,7 @@ export function renderScanHistory(
     const location = (entry["locations"] as JsonObject[] | undefined)?.[0];
     const path =
       entry["path"] ??
+      entry["locationPath"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
     lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
     const showLinkedFindings = command !== "show" || options.showLinkedFindings;
@@ -201,6 +208,18 @@ export function renderScanHistory(
           `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
         );
       }
+    }
+  } else if (command === "findings") {
+    const findings = result["findings"] as JsonObject[];
+    lines.push(
+      `  ${strong(clean(basename(result["repository"] as string)))}  ${accent("·")}  ${findings.length} open finding${findings.length === 1 ? "" : "s"}`,
+    );
+    for (const entry of findings) {
+      lines.push(
+        "",
+        `  ${strong(entry["confirmedInLatestScan"] ? "Seen this scan" : "Not confirmed in latest scan")}`,
+      );
+      finding(entry);
     }
   } else if (command === "show") {
     const status = clean((result["progress"] as JsonObject)["status"]);

@@ -88,7 +88,6 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
-const MAX_SESSION_EVENT_BYTES = 1 * 1_024 * 1_024;
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
@@ -312,7 +311,7 @@ export class ScanCostTracker {
   }
 }
 
-async function* sessionFiles(directory: string): AsyncGenerator<string> {
+export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -379,9 +378,6 @@ function readSessionChunk(
     const lineEnd = newline === -1 ? contents.length : newline;
     const fragment = contents.subarray(lineStart, lineEnd);
     const lineBytes = session.pendingLineBytes + fragment.length;
-    if (lineBytes > MAX_SESSION_EVENT_BYTES) {
-      throw new Error("Codex session event exceeds the 1 MiB safety limit.");
-    }
 
     if (newline === -1) {
       if (fragment.length > 0) {
