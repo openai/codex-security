@@ -6,6 +6,7 @@ import { ScanResult } from "../src/index.js";
 import type {
   CoverageDocument,
   FindingsDocument,
+  RepositoryFinding,
   ScanManifest,
 } from "../src/index.js";
 
@@ -50,6 +51,17 @@ const coverage = {
 
 describe("ScanResult", () => {
   test("exposes canonical paths and machine serialization", () => {
+    const repositoryFinding = {
+      findingId: "finding",
+      occurrenceId: "occurrence",
+      scanId: "scan",
+      targetId: "id",
+      title: "Unsafe route",
+      summary: "The route is not protected.",
+      severity: { level: "high" },
+      status: "open",
+      confirmedInLatestScan: true,
+    } satisfies RepositoryFinding;
     const result = new ScanResult({
       manifest,
       findings,
@@ -57,6 +69,7 @@ describe("ScanResult", () => {
       scanDir: "/scan",
       threadId: "thread",
       turnResult: { id: "turn", status: "completed" },
+      repositoryFindings: [repositoryFinding],
     });
     expect(result.pluginVersion).toBe("0.1.14");
     expect(result.manifestPath).toBe(join("/scan", "scan-manifest.json"));
@@ -66,6 +79,7 @@ describe("ScanResult", () => {
       threadId: "thread",
       cost: null,
       warnings: [],
+      repositoryFindings: [repositoryFinding],
     });
   });
 
@@ -79,6 +93,7 @@ describe("ScanResult", () => {
       scanDir: "/scan",
       threadId: "thread",
       turnResult: { id: "turn", status: "completed" },
+      repositoryFindings: [],
     });
 
     expect(result.warnings).toEqual([]);
@@ -94,7 +109,10 @@ describe("ScanResult", () => {
       scanDir: result.scanDir,
       threadId: result.threadId,
       sarifPath: result.sarifPath,
+      repositoryFindings: [],
     });
+    expect(warned.repositoryFindings).toEqual([]);
+    expect(result.findings).toBe(findings);
   });
 
   test("includes the model and estimated cost in machine-readable results", () => {

@@ -1,4 +1,6 @@
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget } from "../src/index.js";
@@ -6,11 +8,73 @@ import { main } from "../src/cli.js";
 import {
   capture,
   dependencies,
-  REDACTED_CREDENTIALS,
+  fakeResult,
   SYNTHETIC_CREDENTIALS,
 } from "./support/cli.js";
 
 describe("CLI workbench", () => {
+  test("lists and summarizes open findings for the current repository", async () => {
+    const repository = resolve("/current/repository");
+    const stdout = capture();
+    const calls: Array<readonly string[]> = [];
+    const responses: JsonObject[] = [
+      {
+        repositories: [
+          { targetId: "other", targetPath: `${repository}-clone` },
+          { targetId: "selected", targetPath: repository },
+        ],
+      },
+      { findings: [{ title: "Finding 1" }], nextOffset: 1 },
+      { findings: [{ title: "Finding 2" }], nextOffset: null },
+    ];
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => responses[calls.push(args) - 1]!,
+        }),
+      ),
+    ).toBe(0);
+    expect(calls[0]).toEqual(["list-repositories"]);
+    expect(calls[1]).toEqual([
+      "list-global-findings",
+      "--target-id",
+      "selected",
+      "--status",
+      "open",
+    ]);
+    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
+    expect(JSON.parse(stdout.text())).toEqual({
+      repository,
+      findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
+    });
+    for (const confirmed of [[true, false], []]) {
+      const result = fakeResult(["high"]);
+      Object.assign(result, {
+        repositoryFindings: confirmed.map((confirmedInLatestScan) => ({
+          severity: { level: "high" },
+          confirmedInLatestScan,
+        })),
+      });
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan"],
+          capture().stream,
+          stderr.stream,
+          dependencies({ result }),
+        ),
+      ).toBe(0);
+      expect(stderr.text()).toContain(
+        confirmed.length
+          ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
+          : "FINDINGS  0\n",
+      );
+    }
+  });
+
   test("lists repository and scan-root history without starting Codex", async () => {
     const repository = resolve("/current/repository");
     const cases: Array<[string[], string[]]> = [
@@ -169,6 +233,87 @@ describe("CLI workbench", () => {
       expect(calls).toEqual([expected]);
       expect(JSON.parse(stdout.text())).toEqual(output);
     }
+  });
+
+  test("shows saved scan activity without starting Codex", async () => {
+    const state = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-cli-logs-")),
+    );
+    try {
+      const sessions = join(state, "codex-home", "sessions", "2026", "08");
+      await mkdir(sessions, { recursive: true });
+      await writeFile(
+        join(sessions, "rollout-thread-1.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: { id: "thread-1" },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "function_call",
+              call_id: "call-1",
+              name: "exec_command",
+              arguments: JSON.stringify({
+                cmd: "OPENAI_API_KEY=sk-proj-SYNTHETIC_KEY_123 pytest",
+              }),
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
+
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_STATE_DIR: state },
+        onWorkbench: (args) => {
+          calls.push(args);
+          return {
+            scan: {
+              scanId: "scan-1",
+              continuationThreadId: "thread-1",
+            },
+          };
+        },
+      });
+      deps.createSecurity = () => {
+        throw new Error("logs must not initialize Codex");
+      };
+      expect(
+        await main(
+          ["scans", "logs", "scan-1", "--json"],
+          stdout.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
+      expect(stdout.text()).toContain("SYNTHETIC_KEY");
+    } finally {
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("explains when a saved scan has no associated session", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["scans", "logs", "scan-1"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            scan: { scanId: "scan-1", targetPath: "/repo" },
+          }),
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "No session is associated with scan scan-1.",
+    );
   });
 
   test("matches findings before matching or comparing scans", async () => {
@@ -619,7 +764,7 @@ describe("CLI workbench", () => {
     }
   });
 
-  test("redacts workbench failures and does not initialize Codex", async () => {
+  test("preserves workbench failures and does not initialize Codex", async () => {
     const stderr = capture();
     let started = false;
     expect(
@@ -637,8 +782,8 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(2);
-    expect(stderr.text()).toContain(REDACTED_CREDENTIALS);
-    expect(stderr.text()).not.toContain("SYNTHETIC_KEY_123");
+    expect(stderr.text()).toContain(SYNTHETIC_CREDENTIALS);
+    expect(stderr.text()).toContain("SYNTHETIC_KEY_123");
     expect(started).toBe(false);
   });
 });

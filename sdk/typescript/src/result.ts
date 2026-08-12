@@ -2,6 +2,7 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   CoverageDocument,
+  Finding,
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
@@ -17,6 +18,21 @@ export interface TurnResultMetadata {
   [key: string]: unknown;
 }
 
+export interface RepositoryFinding
+  extends Pick<
+    Finding,
+    "findingId" | "occurrenceId" | "title" | "summary" | "severity"
+  > {
+  scanId: string;
+  targetId: string;
+  status: "open" | "closed";
+  confirmedInLatestScan: boolean;
+  knownSince?: string;
+  knownScanIds?: string[];
+  matchedFindingIds?: string[];
+  [key: string]: unknown;
+}
+
 export interface ScanResultOptions {
   manifest: ScanManifest;
   findings: FindingsDocument;
@@ -26,6 +42,7 @@ export interface ScanResultOptions {
   turnResult: TurnResultMetadata;
   sarifPath?: string | null;
   warnings?: readonly string[];
+  repositoryFindings?: readonly RepositoryFinding[];
 }
 
 export class ScanResult {
@@ -38,6 +55,7 @@ export class ScanResult {
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
   public readonly warnings: readonly string[];
+  public repositoryFindings: readonly RepositoryFinding[] | undefined;
 
   public constructor(options: ScanResultOptions) {
     this.manifest = options.manifest;
@@ -47,6 +65,7 @@ export class ScanResult {
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
     this.warnings = options.warnings ?? [];
+    this.repositoryFindings = options.repositoryFindings;
     this.cost = estimateScanCost(
       options.turnResult.model,
       options.turnResult.usage,
@@ -110,12 +129,14 @@ export class ScanResult {
       turnResult: this.turnResult,
       sarifPath: this.sarifPath,
       warnings: [...this.warnings, ...warnings],
+      repositoryFindings: this.repositoryFindings,
     });
   }
 
   public toJSON(): Record<string, unknown> {
     return {
       manifest: this.manifest,
+      repositoryFindings: this.repositoryFindings,
       findings: this.findings,
       coverage: this.coverage,
       scanDir: this.scanDir,

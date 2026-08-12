@@ -598,6 +598,34 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
+  test("sanitizes complete activity descriptions before line wrapping", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 50, rows: 18 },
+      {
+        repository: "/code/juice-shop",
+        color: false,
+        clock: fakeClock(),
+        sanitize: (value) =>
+          value.includes("client_secret=") ? "[redacted]" : value,
+      },
+    );
+
+    dashboard.start();
+    dashboard.record({
+      id: "wrapped-secret",
+      kind: "command",
+      status: "completed",
+      description:
+        "Checking request configuration client_secret= SYNTHETIC_SECRET_VALUE",
+      paths: [],
+    });
+
+    expect(lastFrame(stderr)).toContain("[redacted]");
+    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET_VALUE");
+    dashboard.stop();
+  });
+
   test("colors important activity while keeping prose readable across terminal themes", () => {
     const stderr = capture(true);
     const dashboard = new ScanDashboard(stderr.stream, {
