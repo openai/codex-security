@@ -77,7 +77,7 @@ export interface CodexCommand {
   command: string;
 }
 
-export interface CodexCommandResult {
+interface CodexCommandResult {
   success: boolean;
   exitCode: number | null;
   stdout: string;
@@ -2306,7 +2306,7 @@ export async function runCodexCommand(
   });
   let stdout = "";
   let stderr = "";
-  let processError: Error | null = null;
+  let processError: Error | undefined;
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
@@ -2317,25 +2317,21 @@ export async function runCodexCommand(
   });
   const completion = new Promise<CodexCommandResult>((resolve, reject) => {
     child.once("error", (error) => {
-      processError ??= error;
+      processError = error;
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
       if (
-        error.code !== "EPIPE" &&
-        error.code !== "ECONNRESET" &&
-        error.code !== "EOF" &&
-        error.code !== "ERR_STREAM_DESTROYED"
-      ) {
-        processError ??= error;
-      }
+        !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
+          error.code ?? "",
+        )
+      )
+        processError = error;
     });
-    child.once("close", (exitCode) => {
-      if (processError !== null) {
-        reject(processError);
-      } else {
-        resolve({ success: exitCode === 0, exitCode, stdout, stderr });
-      }
-    });
+    child.once("close", (exitCode) =>
+      processError === undefined
+        ? resolve({ success: exitCode === 0, exitCode, stdout, stderr })
+        : reject(processError),
+    );
   });
   child.stdin.end(input);
   return await completion;
@@ -2348,21 +2344,21 @@ async function runPluginCommand(
   signal?: AbortSignal,
 ): Promise<string> {
   try {
-    const result = await runCodexCommand(
+    const { success, exitCode, stdout, stderr } = await runCodexCommand(
       command,
       args,
       environment,
       undefined,
       signal,
     );
-    if (!result.success) {
+    if (!success) {
       throw new Error(
-        result.stderr.trim() ||
-          result.stdout.trim() ||
-          `Codex exited with status ${result.exitCode}.`,
+        stderr.trim() ||
+          stdout.trim() ||
+          `Codex exited with status ${exitCode}.`,
       );
     }
-    return result.stdout;
+    return stdout;
   } catch (error) {
     const detail = processErrorDetail(error);
     throw new PluginBootstrapError(`Codex plugin bootstrap failed: ${detail}`, {

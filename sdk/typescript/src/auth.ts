@@ -7,8 +7,6 @@ import {
   type ProcessEnvironment,
 } from "./runtime.js";
 
-export { runCodexCommand as runCodex } from "./runtime.js";
-
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
 

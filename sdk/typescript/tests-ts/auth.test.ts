@@ -10,9 +10,9 @@ import {
   CodexLoginHandle,
   loginApiKey,
   logout,
-  runCodex,
 } from "../src/auth.js";
 import { PluginBootstrapError } from "../src/index.js";
+import { runCodexCommand } from "../src/runtime.js";
 import type { CodexCommand } from "../src/index.js";
 
 const temporaryDirectories: string[] = [];
@@ -108,7 +108,7 @@ describe("Codex authentication process boundary", () => {
     const script = join(root, "exit.mjs");
     await writeFile(script, "process.exit(1);\n");
     await expect(
-      runCodex(
+      runCodexCommand(
         { command: process.execPath },
         [script],
         process.env,
@@ -127,7 +127,7 @@ describe("Codex authentication process boundary", () => {
         script,
         `process.${stream}.write(${JSON.stringify(output)}, () => process.exit(0));\n`,
       );
-      const result = await runCodex(
+      const result = await runCodexCommand(
         { command: process.execPath },
         [script],
         process.env,
