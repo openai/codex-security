@@ -660,16 +660,17 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
 
         if status == "D":
             preview = ""
+        elif path.is_symlink():
+            preview = ""
         elif path.is_file():
             try:
-                if path.is_symlink():
-                    continue
                 path.resolve(strict=True).relative_to(repo)
             except (OSError, ValueError):
-                continue
-            preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary:
-                continue
+                preview = ""
+            else:
+                preview, is_binary = preview_for(path, args.preview_bytes)
+                if is_binary:
+                    continue
         else:
             preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})

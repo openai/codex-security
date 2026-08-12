@@ -46,15 +46,31 @@ test("diff previews stay inside the selected repository", () => {
   git(repository, "init", "-q");
   writeFileSync(join(repository, "src", "handler.py"), "value = 1\n");
   writeFileSync(join(repository, "src", "deleted.py"), "removed = True\n");
+  writeFileSync(join(repository, "src", "entry.py"), "handler.py");
   writeFileSync(join(nested, "linked.py"), "value = 1\n");
   git(repository, "add", ".");
+  const originalLink = git(repository, "hash-object", "src/entry.py");
+  git(
+    repository,
+    "update-index",
+    "--cacheinfo",
+    `120000,${originalLink},src/entry.py`,
+  );
   git(repository, "commit", "-qm", "base");
   const base = git(repository, "rev-parse", "HEAD");
 
   writeFileSync(join(repository, "src", "handler.py"), "value = 2\n");
+  writeFileSync(join(repository, "src", "entry.py"), "nested/linked.py");
   writeFileSync(join(nested, "linked.py"), "value = 2\n");
   rmSync(join(repository, "src", "deleted.py"));
   git(repository, "add", ".");
+  const updatedLink = git(repository, "hash-object", "src/entry.py");
+  git(
+    repository,
+    "update-index",
+    "--cacheinfo",
+    `120000,${updatedLink},src/entry.py`,
+  );
   git(repository, "commit", "-qm", "selected changes");
   const head = git(repository, "rev-parse", "HEAD");
 
@@ -92,9 +108,14 @@ test("diff previews stay inside the selected repository", () => {
     .map((row) => JSON.parse(row) as { path: string; preview: string });
   expect(rows.map((row) => row.path)).toEqual([
     "src/deleted.py",
+    "src/entry.py",
     "src/handler.py",
+    "src/nested/linked.py",
   ]);
   expect(rows.find((row) => row.path === "src/handler.py")?.preview).toBe(
     "value = 2",
+  );
+  expect(rows.find((row) => row.path === "src/nested/linked.py")?.preview).toBe(
+    "",
   );
 });
