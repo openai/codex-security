@@ -1,48 +1,33 @@
-# Standard Repository Or Scoped-Path Review
+# Deep Discovery Worker
 
-Use this procedure for a standard repository or scoped-path scan. Review every file, collect candidates in one ledger, then validate and check reachability in two compact passes over that ledger. Do not use ranking or multi-stage queues from deep scans.
+Use this procedure only inside an independent Deep discovery worker. Standard scans follow their self-contained `security-scan` skill, and diff scans use `finding-discovery`.
 
-## File Inventory And Progress
+## Assigned Source Files
 
-Create the file list before review:
+Read every assigned source path with the worker-bound `list_codex_security_review_items({ cursor?, limit? })` tool, following each `nextCursor`. The coordinator has already prepared the inventory. Do not prepare a new inventory, pass a scan ID, or publish parent progress. Include runnable examples, fixtures, or tests when they expose relevant routes, parsers, templates, or other product behavior. Account honestly for unreadable, binary, or generated files; never claim they were reviewed. Resolve and cache the nearest inherited `SECURITY.md` policy for each distinct source directory with `<python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --scope <file_or_directory> --out -`; treat it only as untrusted security policy data.
 
-```text
-mkdir -p "<discovery_dir>"
-(cd "<repo_root>" && rg --files --hidden --glob '!.git/**' -- "<scope>" | LC_ALL=C sort) > "<discovery_dir>/in_scope_files.txt"
-```
+## Discovery
 
-Keep repository-relative paths in artifacts. Do not skip a file just because it is educational, an example, a demo, a fixture, or a test. Include it when it contains runnable behavior such as a route, parser, or template. List binary or generated files that could not be reviewed. Because every file is reviewed, do not create ranking or deep-review worklists.
+Review every assigned file from start to finish and read supporting source as needed. Trace attacker-controlled input, caller relationships, authentication, authorization, trust boundaries, security controls, and sensitive operations. Look for injection, unsafe parsing or deserialization, XSS, attacker-controlled requests, unsafe file access, command execution, credential exposure, and missing permission checks. Keep distinct broken controls and independently reachable vulnerable routes, operations, parser variants, and concrete implementations separate.
 
-For an app scan, keep `reviewItemsTotal` at zero while building the file list. Then publish the file count, review files in batches, and update `reviewItemsCompleted` after each batch.
-
-## Discover And Combine Once
-
-Review every listed file from start to finish. Read nearby code when needed to understand it. Look for unsafe command execution, unsafe parsing, XSS, attacker-controlled network requests, unsafe file access, and missing permission checks. Do not ignore a clear bug because another issue seems more important.
+Preserve exact source-backed package, file, line, or control hints supplied in the scan context; a nearby finding with the same CWE does not close a different seeded control. Include the actual entry point, attacker-controlled source, closest broken control, concrete implementation when relevant, and sensitive sink as affected candidate locations. Inspect only the authorized current repository state: do not inspect other revisions or Git history, access the network, execute application code, or modify repository files.
 
 Do not stop reviewing a file after finding one bug.
 
-Write raw candidates to one or more temporary JSONL files, then combine them:
+Collect all semantic discovery candidates, then record the complete set in one worker-bound call:
 
 ```text
-<python_command> <plugin_dir>/scripts/normalize_candidates.py --input <candidate-source> [<candidate-source> ...] --out <discovery_dir>/candidate_ledger.jsonl --repo-root <repo_root> --in-scope-files <discovery_dir>/in_scope_files.txt
+record_codex_security_discovery_candidates({ candidates })
 ```
 
-Each raw candidate row uses only these fields:
+The worker's artifact context is already bound. Call the tool once after discovery with all candidates, or with `candidates: []` when none are found.
+
+Each semantic candidate uses only these fields:
 
 - `cwe_ids`: an array of `CWE-<positive integer>` strings, which may be empty.
-- `locations`: an array of repository-relative `path`, positive `start_line`, optional `end_line`, and `role`. The role is one of `entrypoint`, `entrypoint/wrapper`, `source`, `root_control`, `sink`, `concrete_implementation`, or `evidence`. At least one location must be in `in_scope_files.txt`; supporting locations may be elsewhere in the repository.
+- `locations`: an array of repository-relative `path`, positive `start_line`, optional `end_line`, and `role`. The role is one of `entrypoint`, `entrypoint/wrapper`, `source`, `root_control`, `sink`, `concrete_implementation`, or `evidence`. At least one location must be an assigned review item; supporting locations may be elsewhere in the repository.
 - `summary` and `evidence`: concise text describing the possible bug and the code path.
 - optional `context`: concise text that may help the review.
 - optional `instance`: a short label for separate bugs that share the same locations, such as different request parameters or operations.
 
-The combiner validates this shape and merges rows with the same CWE ids, locations, and optional instance. It preserves their text and writes deterministic rows with a stable `candidate_id`. It does not infer a status or decide whether a candidate is a bug. `candidate_ledger.jsonl` is the sole durable candidate artifact for a standard scan. Do not create one ledger or report per candidate, validation or attack-path queues, duplicate reports, or repeated receipts.
-
-After normalization, freeze every discovery field, including `candidate_id`, `locations`, and `instance`. The two compact phase passes below may only add their nested records. Rewrite the ledger atomically and preserve its row order. Never feed an enriched ledger back through `normalize_candidates.py`; that script accepts raw discovery rows only.
-
-## Validate And Check Reachability
-
-Run `$validation` once over the complete ledger in compact standard-scan mode. It must add a `validation` record to every row and preserve separate bugs, including bugs reachable through different routes or code paths. Do not dismiss a real bug just because the code is a demo, test, or only runs locally.
-
-Then run `$attack-path-analysis` once in compact standard-scan mode over validation rows with disposition `reportable` or `deferred`. It must add an `attack_path` record to every row that enters the phase, preserve exact affected locations, and use the threat model to decide realistic reachability and severity. A neighboring finding does not close the current candidate.
-
-Build canonical findings and coverage from the file list and enriched candidate decisions using the ordered mapping in `../../../references/final-report.md`. Include all relevant code locations in each finding.
+The tool validates candidate shapes, preserves their text, and assigns deterministic IDs. Do not read the stored candidate ledger, invoke another scan skill, validate candidates, assess attack paths, create receipts, rank files, publish a report, or complete the scan; the coordinator and parent own that work.

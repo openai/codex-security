@@ -379,8 +379,121 @@ describe("CLI authentication", () => {
     }
   });
 
+  test("reports Amazon Bedrock authentication without exposing AWS credentials", async () => {
+    for (const [environment, source] of [
+      [
+        { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
+        "AWS_BEARER_TOKEN_BEDROCK",
+      ],
+      [
+        {
+          AWS_ACCESS_KEY_ID: "synthetic-aws-access-key",
+          AWS_SECRET_ACCESS_KEY: "synthetic-aws-secret-key",
+        },
+        "AWS_ACCESS_KEY_ID",
+      ],
+      [{ AWS_PROFILE: "synthetic-bedrock-profile" }, "AWS_PROFILE"],
+      [{}, "default_credential_chain"],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture(false);
+      const deps = dependencies({ environment });
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onAuthentication?.({
+            method: "aws_credentials",
+            source,
+            verified: false,
+          });
+          return fakeResult();
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          [
+            "scan",
+            "--provider",
+            "amazon-bedrock",
+            "--model",
+            "openai.gpt-5.6-luna",
+            "--json",
+            "--verbose",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+      expect(stderr.text()).toContain(
+        `Authentication: AWS credentials from ${source}.`,
+      );
+      expect(stderr.text()).toContain(
+        `method="aws_credentials" source="${source}"`,
+      );
+      expect(stderr.text()).not.toContain("synthetic-");
+      expect(stderr.text()).not.toContain("stored Codex credentials");
+      expect(stderr.text()).not.toContain("--auth chatgpt");
+    }
+  });
+
+  test("provides provider-aware Amazon Bedrock authentication failure guidance", async () => {
+    for (const [detail, expected] of [
+      [
+        "401 invalid credentials for org-private",
+        "Check your Amazon Bedrock bearer token",
+      ],
+      [
+        "403 model access denied for org-private",
+        "Check your AWS identity and Bedrock model permissions",
+      ],
+    ] as const) {
+      const stderr = capture(false);
+      const deps = dependencies({
+        environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
+      });
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onAuthentication?.({
+            method: "aws_credentials",
+            source: "AWS_BEARER_TOKEN_BEDROCK",
+            verified: false,
+          });
+          throw new CodexSecurityError(detail);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          ["scan", "--codex", 'model_provider="amazon-bedrock"'],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).toContain("AWS_BEARER_TOKEN_BEDROCK");
+      expect(stderr.text()).not.toContain("synthetic-");
+      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).not.toContain("--auth chatgpt");
+    }
+  });
+
   test("offers the existing interactive prompt when both sign-ins are available", async () => {
-    for (const selection of ["chatgpt", "api-key"] as const) {
+    for (const [argv, selection] of [
+      [["scan"], "chatgpt"],
+      [["scan"], "api-key"],
+      [["scans", "rerun", "scan-original", "--verbose", "--json"], "chatgpt"],
+      [
+        ["scans", "rerun", "scan-original", "--verbose", "--format", "jsonl"],
+        "chatgpt",
+      ],
+    ] as const) {
       const stderr = capture(true);
       let selected: ScanOptions["auth"];
       let question = "";
@@ -390,6 +503,14 @@ describe("CLI authentication", () => {
         onTurn: (_repository, options) => {
           selected = (options as ScanOptions).auth;
         },
+        onWorkbench: () => ({
+          recipe: {
+            repository: "/original/repository",
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+          },
+        }),
       });
       deps.hasStoredChatGPTSignIn = async () => true;
       deps.scanAuthenticationPrompt = {
@@ -404,9 +525,7 @@ describe("CLI authentication", () => {
         },
       };
 
-      expect(await main(["scan"], capture().stream, stderr.stream, deps)).toBe(
-        0,
-      );
+      expect(await main(argv, capture().stream, stderr.stream, deps)).toBe(0);
       expect(selected).toBe(selection);
       expect(question).toBe("How would you like to authenticate this scan?");
       expect(choices).toEqual([
@@ -683,7 +802,7 @@ describe("CLI authentication", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 60_000);
 
   test("reports selected scan credentials without contaminating JSON output", async () => {
     const stdout = capture();
