@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
+import { expandHome } from "./runtime.js";
 
 const SUPPORTED_EXTENSIONS = new Set([
   ".md",
@@ -37,7 +38,7 @@ export async function prepareKnowledgeBase(
     signal?.throwIfAborted();
     if (!requested.trim())
       throw new Error("Knowledge base paths cannot be empty.");
-    const path = resolve(requested);
+    const path = resolve(expandHome(requested));
     const metadata = await lstat(path);
     if (metadata.isSymbolicLink()) {
       throw new Error(`Knowledge base paths cannot be symbolic links: ${path}`);

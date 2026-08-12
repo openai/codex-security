@@ -43,7 +43,7 @@ import {
   OutputDirectoryError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
-  redactedErrorMessage,
+  errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -279,11 +279,11 @@ function windowsCredentialAclFailure(error: unknown): string {
       : error instanceof Error
         ? error.message
         : String(error);
-  const sanitized = redactedErrorMessage(detail)
+  const normalized = errorMessage(detail)
     .replace(/\s+/gu, " ")
     .trim()
     .slice(0, 512);
-  return sanitized === "" ? "" : `. ${sanitized}`;
+  return normalized === "" ? "" : `. ${normalized}`;
 }
 
 const WINDOWS_SYSTEM_SID = "S-1-5-18";
