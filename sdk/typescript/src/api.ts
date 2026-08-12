@@ -983,7 +983,12 @@ export class CodexSecurity {
       };
       const sdkCodexConfig = scanPreflightCodexConfig(effectiveConfig);
       delete sdkCodexConfig["projects"];
+      const codexPathOverride = environmentValue(
+        this.#dependencies.environment,
+        "CODEX_CLI_PATH",
+      )?.trim();
       const codex = this.#dependencies.createCodex({
+        ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
         ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
@@ -1515,7 +1520,10 @@ export class CodexSecurity {
   }
 
   #codexCommand(): CodexCommand {
-    return (this.#dependencies.resolveCodexCommand ?? resolveCodexCommand)();
+    return (
+      this.#dependencies.resolveCodexCommand?.() ??
+      resolveCodexCommand(this.#dependencies.environment)
+    );
   }
 
   async #refreshPersistentRuntime(
@@ -1544,6 +1552,7 @@ export class CodexSecurity {
       runtime.codexHome,
       runtime.plugin.pluginRoot,
       {
+        codexCommand: this.#codexCommand(),
         environment: withoutCodexHome(environment),
         signal,
       },
@@ -1646,6 +1655,7 @@ export class CodexSecurity {
       );
       throwIfAborted(signal);
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
+        codexCommand: this.#codexCommand(),
         environment: withoutCodexHome(processEnvironment),
         signal,
       });

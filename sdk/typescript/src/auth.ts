@@ -1,7 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
 import { PluginBootstrapError } from "./errors.js";
-import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
+import {
+  runCodexCommand,
+  type CodexCommand,
+  type ProcessEnvironment,
+} from "./runtime.js";
+
+export { runCodexCommand as runCodex } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
 type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
@@ -59,7 +65,7 @@ export class CodexLoginHandle {
     });
     void this.#urlReady.catch(() => undefined);
     void this.#deviceReady.catch(() => undefined);
-    this.#child = spawn(command.command, [...command.prefixArgs, ...args], {
+    this.#child = spawn(command.command, [...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -289,7 +295,7 @@ export async function loginApiKey(
   if (apiKey.trim().length === 0) {
     throw new PluginBootstrapError("The API key must be non-empty.");
   }
-  return await runCodex(
+  return await runCodexCommand(
     command,
     ["login", "--with-api-key"],
     environment,
@@ -303,7 +309,7 @@ export async function accountStatus(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<AccountStatus> {
-  const result = await runCodex(
+  const result = await runCodexCommand(
     command,
     ["login", "status"],
     environment,
@@ -325,7 +331,7 @@ export async function logout(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<void> {
-  const result = await runCodex(
+  const result = await runCodexCommand(
     command,
     ["logout"],
     environment,
@@ -337,81 +343,6 @@ export async function logout(
       `Codex logout failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
     );
   }
-}
-
-export async function runCodex(
-  command: CodexCommand,
-  args: readonly string[],
-  environment: ProcessEnvironment,
-  input?: string,
-  signal?: AbortSignal,
-): Promise<LoginResult> {
-  const child = spawn(command.command, [...command.prefixArgs, ...args], {
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    signal,
-  });
-  let stdout = "";
-  let stderr = "";
-  let processError: Error | null = null;
-  let forcedTermination: ReturnType<typeof setTimeout> | undefined;
-  const terminate = (): void => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      child.stdin.destroy();
-      child.stdout.destroy();
-      child.stderr.destroy();
-      return;
-    }
-    child.kill("SIGTERM");
-    if (forcedTermination !== undefined) return;
-    forcedTermination = setTimeout(() => {
-      forcedTermination = undefined;
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-      }
-      child.stdin.destroy();
-      child.stdout.destroy();
-      child.stderr.destroy();
-    }, LOGIN_CHILD_TERMINATION_GRACE_MS);
-  };
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  const completion = new Promise<LoginResult>((resolve, reject) => {
-    child.once("error", (error) => {
-      processError ??= error;
-      terminate();
-    });
-    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-      // A short-lived command can close stdin before Node flushes the input.
-      // Its exit status remains authoritative; the stream error must not escape
-      // as an uncaught exception.
-      if (
-        error.code !== "EPIPE" &&
-        error.code !== "ECONNRESET" &&
-        error.code !== "EOF" &&
-        error.code !== "ERR_STREAM_DESTROYED"
-      ) {
-        processError ??= error;
-      }
-    });
-    child.once("close", (exitCode) => {
-      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
-      if (processError !== null) {
-        reject(processError);
-      } else {
-        resolve({ success: exitCode === 0, exitCode, stdout, stderr });
-      }
-    });
-  });
-  child.stdin.end(input);
-  return await completion;
 }
 
 function preferredAuthUrl(value: string): string | null {

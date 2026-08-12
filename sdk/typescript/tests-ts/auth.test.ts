@@ -1,8 +1,9 @@
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   accountStatus,
@@ -24,14 +25,19 @@ afterEach(async () => {
   );
 });
 
-async function fakeCodex(): Promise<CodexCommand> {
+async function fakeCodex(): Promise<{
+  command: CodexCommand;
+  environment: NodeJS.ProcessEnv;
+}> {
   const root = await mkdtemp(join(tmpdir(), "codex-security-auth-"));
   temporaryDirectories.push(root);
   const script = join(root, "codex.mjs");
   await writeFile(
     script,
     `
-const args = process.argv.slice(2);
+import { basename } from "node:path";
+
+const args = [basename(process.argv[1]), ...process.argv.slice(2)];
 if (args.join(" ") === "login --with-api-key") {
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
@@ -66,19 +72,30 @@ if (args.join(" ") === "login --with-api-key") {
   console.error("unexpected args: " + args.join(" "));
   process.exitCode = 3;
 }
+process.exit(process.exitCode ?? 0);
 `,
   );
-  return { command: process.execPath, prefixArgs: [script] };
+  return {
+    command: {
+      command: execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim(),
+    },
+    environment: {
+      ...process.env,
+      NODE_OPTIONS: `--import=${pathToFileURL(script).href}`,
+    },
+  };
 }
 
 describe("Codex authentication process boundary", () => {
   test("persists API keys through the exact public Codex executable", async () => {
-    const command = await fakeCodex();
-    await expect(loginApiKey(command, process.env, "")).rejects.toBeInstanceOf(
+    const { command, environment } = await fakeCodex();
+    await expect(loginApiKey(command, environment, "")).rejects.toBeInstanceOf(
       PluginBootstrapError,
     );
     await expect(
-      loginApiKey(command, process.env, "secret-key"),
+      loginApiKey(command, environment, "secret-key"),
     ).resolves.toMatchObject({
       success: true,
       exitCode: 0,
@@ -92,8 +109,8 @@ describe("Codex authentication process boundary", () => {
     await writeFile(script, "process.exit(1);\n");
     await expect(
       runCodex(
-        { command: process.execPath, prefixArgs: [script] },
-        [],
+        { command: process.execPath },
+        [script],
         process.env,
         "x".repeat(16 * 1024 * 1024),
       ),
@@ -111,8 +128,8 @@ describe("Codex authentication process boundary", () => {
         `process.${stream}.write(${JSON.stringify(output)}, () => process.exit(0));\n`,
       );
       const result = await runCodex(
-        { command: process.execPath, prefixArgs: [script] },
-        [],
+        { command: process.execPath },
+        [script],
         process.env,
       );
       expect(result.success).toBe(true);
@@ -121,21 +138,21 @@ describe("Codex authentication process boundary", () => {
   });
 
   test("reports account state and performs logout", async () => {
-    const command = await fakeCodex();
-    await expect(accountStatus(command, process.env)).resolves.toMatchObject({
+    const { command, environment } = await fakeCodex();
+    await expect(accountStatus(command, environment)).resolves.toMatchObject({
       authenticated: true,
       details: "Logged in using ChatGPT",
     });
-    await expect(logout(command, process.env)).resolves.toBeUndefined();
+    await expect(logout(command, environment)).resolves.toBeUndefined();
   });
 
   test("captures quoted interactive login metadata and completion", async () => {
-    const command = await fakeCodex();
+    const { command, environment } = await fakeCodex();
     let succeeded = false;
     const handle = new CodexLoginHandle(
       command,
       ["login", "--device-auth"],
-      process.env,
+      environment,
       () => {
         succeeded = true;
       },
@@ -164,8 +181,8 @@ setTimeout(() => {
     );
     let succeeded = false;
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
+      { command: process.execPath },
+      [script, "login", "--device-auth"],
       process.env,
       () => {
         succeeded = true;
@@ -197,8 +214,8 @@ setTimeout(() => {
 `,
     );
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
+      { command: process.execPath },
+      [script, "login", "--device-auth"],
       process.env,
       () => {},
     );
@@ -225,8 +242,8 @@ setTimeout(() => {
 `,
     );
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
+      { command: process.execPath },
+      [script, "login", "--device-auth"],
       process.env,
       () => {},
     );
@@ -246,8 +263,8 @@ setTimeout(() => {
       'process.stderr.write("Open https://auth.example.test/device\\rUser code: ABCD-EFGH\\r"); setTimeout(() => process.exit(0), 25);\n',
     );
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
+      { command: process.execPath },
+      [script, "login", "--device-auth"],
       process.env,
       () => {},
     );
@@ -267,8 +284,8 @@ setTimeout(() => {
       'process.stderr.write("Open https://auth.example.test/device " + "x".repeat(128 * 1024), () => process.stderr.write("\\nUser code: ABCD-EFGH\\n", () => process.exit(0)));\n',
     );
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
+      { command: process.execPath },
+      [script, "login", "--device-auth"],
       process.env,
       () => {},
     );
@@ -290,8 +307,8 @@ setTimeout(() => {
     );
 
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login"],
+      { command: process.execPath },
+      [script, "login"],
       process.env,
       () => {},
     );
@@ -374,8 +391,8 @@ grandchild.once("error", (error) => {
       );
 
       const handle = new CodexLoginHandle(
-        { command: process.execPath, prefixArgs: [script] },
-        ["login"],
+        { command: process.execPath },
+        [script, "login"],
         process.env,
         () => {},
       );
@@ -459,8 +476,8 @@ grandchild.once("error", (error) => {
     let handle: CodexLoginHandle;
     try {
       handle = new CodexLoginHandle(
-        { command: process.execPath, prefixArgs: [script] },
-        ["login"],
+        { command: process.execPath },
+        [script, "login"],
         process.env,
         () => {},
       );
@@ -554,8 +571,8 @@ setInterval(() => {}, 1000);
     );
     let succeeded = false;
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
+      { command: process.execPath },
+      [script, "login", "--device-auth"],
       process.env,
       () => {
         succeeded = true;
@@ -589,8 +606,8 @@ setInterval(() => {}, 1000);
     );
     let succeeded = false;
     const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
+      { command: process.execPath },
+      [script, "login", "--device-auth"],
       process.env,
       () => {
         succeeded = true;
