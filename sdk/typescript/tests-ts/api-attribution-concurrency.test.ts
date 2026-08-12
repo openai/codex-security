@@ -119,7 +119,9 @@ describe("delegated scan attribution", () => {
 
       try {
         const results = await Promise.allSettled(
-          clients.map((client) => client.run(repository, { mode })),
+          clients.map((client) =>
+            client.run(repository, { mode }).finally(releaseConcurrentScans),
+          ),
         );
         for (const result of results) {
           expect(result).toMatchObject({
