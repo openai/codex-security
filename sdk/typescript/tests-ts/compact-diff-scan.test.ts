@@ -204,6 +204,34 @@ describe("compact diff scan", () => {
       "src/handler.py",
       "src/new handler.py",
     ]);
+
+    const rankInput = join(root, "rank-input.jsonl");
+    const legacyResult = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--out",
+      rankInput,
+    );
+
+    expect(legacyResult.status, legacyResult.stderr).toBe(0);
+    const rows = readFileSync(rankInput, "utf8")
+      .trim()
+      .split("\n")
+      .map((row) => JSON.parse(row));
+    expect(rows.map((row) => row.path)).toEqual([
+      "src/guard.py",
+      "src/handler.py",
+      "src/new handler.py",
+    ]);
+    expect(rows.find((row) => row.path === "src/handler.py")?.preview).toBe(
+      "value = 2",
+    );
   });
 
   test("excludes committed symlinks using their selected revision modes", () => {

@@ -37,7 +37,15 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
+from rank_preview import (
+    DEFAULT_PREVIEW_BYTES,
+    TEXT_CODE_EXTENSIONS,
+    fit_preview_lines,
+    is_binary_sample,
+    preview_for,
+    select_preview_lines,
+    structural_outline,
+)
 from workbench_target import git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
@@ -635,7 +643,14 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     return changed
 
 
-def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
+def git_changed_paths(
+    repo: Path,
+    base: str,
+    head: str,
+    mode: str,
+    *,
+    revision_blob_ids: dict[str, str] | None = None,
+) -> list[tuple[Path, str]]:
     if mode == "revisions":
         result = subprocess.run(
             [
@@ -666,6 +681,8 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             selected_mode = metadata[0].removeprefix(":") if status == "D" else metadata[1]
             if selected_mode != "120000":
                 changed.append((repo / path, status))
+                if revision_blob_ids is not None and status != "D":
+                    revision_blob_ids[path] = metadata[3]
         return changed
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
@@ -676,19 +693,81 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
+def committed_blob_contents(repo: Path, blob_ids: dict[str, str]) -> dict[str, bytes]:
+    if not blob_ids:
+        return {}
+
+    requested = "".join(f"{object_id}\n" for object_id in blob_ids.values()).encode("ascii")
+    result = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "--batch"],
+        input=requested,
+        capture_output=True,
+        check=True,
+    )
+    contents: dict[str, bytes] = {}
+    offset = 0
+    for path in blob_ids:
+        header_end = result.stdout.index(b"\n", offset)
+        header = result.stdout[offset:header_end].split()
+        if len(header) != 3 or header[1] != b"blob":
+            raise ValueError("Git returned an unexpected object for a changed source file")
+        data_start = header_end + 1
+        data_end = data_start + int(header[2])
+        if result.stdout[data_end : data_end + 1] != b"\n":
+            raise ValueError("Git returned incomplete changed source contents")
+        contents[path] = result.stdout[data_start:data_end]
+        offset = data_end + 1
+    return contents
+
+
 def make_diff_rank_input(args: argparse.Namespace) -> None:
     repo = Path(args.repo).expanduser().resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
-    rows: list[JsonRow] = []
-    for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
-        rel = path.relative_to(repo)
-        if path_is_excluded(rel) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
-            continue
+    revision_blob_ids: dict[str, str] = {}
+    changed = git_changed_paths(
+        repo,
+        args.base,
+        args.head,
+        args.mode,
+        revision_blob_ids=revision_blob_ids,
+    )
+    selected = [
+        (path, status)
+        for path, status in changed
+        if not path_is_excluded(path.relative_to(repo))
+        and path.suffix.lower() in TEXT_CODE_EXTENSIONS
+    ]
+    committed_contents = (
+        committed_blob_contents(
+            repo,
+            {
+                path.relative_to(repo).as_posix(): revision_blob_ids[
+                    path.relative_to(repo).as_posix()
+                ]
+                for path, status in selected
+                if status != "D"
+            },
+        )
+        if args.mode == "revisions"
+        else {}
+    )
 
+    rows: list[JsonRow] = []
+    for path, status in selected:
+        rel = path.relative_to(repo)
         if status == "D":
             preview = ""
+        elif args.mode == "revisions":
+            contents = committed_contents[rel.as_posix()]
+            if is_binary_sample(contents):
+                continue
+            text = contents.decode("utf-8", errors="ignore")
+            outline = structural_outline(path, text)
+            preview = fit_preview_lines(
+                select_preview_lines(outline or text.splitlines()), args.preview_bytes
+            )
         elif path.is_symlink():
             continue
         elif path.is_file():
