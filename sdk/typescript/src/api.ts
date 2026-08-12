@@ -663,6 +663,19 @@ export class CodexSecurity {
           `Shell-visible plugin root must be outside CODEX_HOME: ${canonicalShellPluginRoot}`,
         );
       }
+      const skillName = skillNameFor(normalized, mode);
+      const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
+      const skillMetadata = await lstat(skillPath).catch(() => null);
+      if (
+        skillMetadata === null ||
+        !skillMetadata.isFile() ||
+        skillMetadata.isSymbolicLink()
+      ) {
+        throw new IncompleteScanError(
+          `Installed plugin is missing scan skill: ${skillName}`,
+        );
+      }
+      checkOpen();
       const expectation: ScanExpectation = {
         repository: repo,
         repositoryRevision: await (
@@ -857,10 +870,10 @@ export class CodexSecurity {
       }
       activeScan = { id: scanId, options: workbenchOptions };
       checkOpen();
-      const basePrompt = await scanPrompt(
-        shellPluginRoot,
+      const basePrompt = scanPrompt(
         normalized,
         mode,
+        skillName,
         scanId,
         runtime.configPath !== undefined,
         knowledgeBase !== null,
@@ -2118,29 +2131,21 @@ function trustedAccessWarning(
   return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${action} or apply at ${applicationUrl}.`;
 }
 
-async function scanPrompt(
-  pluginRoot: string,
+function scanPrompt(
   target: NormalizedTarget,
   mode: ScanMode,
+  skillName: string,
   scanId: string,
   hasConfigPath = false,
   hasKnowledgeBase = false,
   additionalPrompt?: string,
-): Promise<string> {
-  const skillName = skillNameFor(target, mode);
-  const skillPath = join(pluginRoot, "skills", skillName, "SKILL.md");
-  const metadata = await lstat(skillPath).catch(() => null);
-  if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new IncompleteScanError(
-      `Installed plugin is missing scan skill: ${skillName}`,
-    );
-  }
+): string {
   return [
     `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
     ...(mode === "deep"
       ? [
-          `The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: ${JSON.stringify(scanId)} }; never pass targetPath or create another scan.`,
+          `The SDK has already registered this scan. Call start_codex_security_deep_scan with ${JSON.stringify({ scanId })}; never pass targetPath or create another scan.`,
         ]
       : skillName === "security-scan"
         ? [
