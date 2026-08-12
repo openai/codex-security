@@ -3833,9 +3833,6 @@ describe("CodexSecurity orchestration", () => {
                   await readFile(join(codexHome!, "config.toml"), "utf8"),
                 ),
               ).toMatchObject({
-                responses_api_metadata: {
-                  codex_security_surface: "sdk",
-                },
                 permissions: {
                   codex_security_scan: {
                     filesystem: {
@@ -3858,6 +3855,7 @@ describe("CodexSecurity orchestration", () => {
                 join(codexHome!, "config.toml"),
                 "utf8",
               );
+              expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(codexConfig).toContain(
                 'model_reasoning_summary = "detailed"',
               );

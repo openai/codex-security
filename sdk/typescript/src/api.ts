@@ -595,7 +595,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
-      if (authentication.method !== "stored_credentials" && mode !== "deep") {
+      if (authentication.method !== "stored_credentials") {
         await releaseCredentialHome?.();
         releaseCredentialHome = null;
       }
@@ -945,6 +945,7 @@ export class CodexSecurity {
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
         CODEX_SECURITY_STATE_DIR: stateDirectory,
+        CODEX_SECURITY_SURFACE: this.#surface,
         CODEX_SECURITY_SCAN_ID: scanId,
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
@@ -1537,7 +1538,6 @@ export class CodexSecurity {
         mergedConfig,
         codexSecurityStateDirectory(environment),
         runtime.codexHome,
-        this.#surface,
       ),
     );
     await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
@@ -1643,7 +1643,6 @@ export class CodexSecurity {
           mergedConfig,
           codexSecurityStateDirectory(processEnvironment),
           codexHome,
-          this.#surface,
         ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
@@ -2575,7 +2574,6 @@ export function scanRuntimeCodexConfig(
   config: JsonObject,
   stateDirectory: string,
   protectedCredentialHome?: string,
-  surface?: CodexSecuritySurface,
 ): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
@@ -2586,16 +2584,6 @@ export function scanRuntimeCodexConfig(
     ...hardened,
     allow_login_shell: false,
     default_permissions: SCAN_PERMISSION_PROFILE,
-    ...(surface === undefined
-      ? {}
-      : {
-          responses_api_metadata: {
-            ...(isRecord(hardened["responses_api_metadata"])
-              ? hardened["responses_api_metadata"]
-              : {}),
-            codex_security_surface: surface,
-          },
-        }),
     permissions: {
       ...configuredPermissions,
       [SCAN_PERMISSION_PROFILE]: {
