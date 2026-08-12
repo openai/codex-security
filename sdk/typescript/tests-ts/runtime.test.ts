@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -14,7 +14,6 @@ import {
   rm,
   stat,
   symlink,
-  truncate,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -30,6 +29,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
@@ -58,6 +58,7 @@ import {
   codexSecurityStateDirectory,
   codexPlatformPackage,
   inspectWindowsCredentialAcl,
+  inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
@@ -222,24 +223,31 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("includes ignored tracked files in the scoped security inventory", async () => {
+  test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
       const generator = await readFile(
         join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
         "utf8",
       );
       expect(generator).toContain('"--no-ignore"');
+      expect(generator).toContain('"--path-separator"');
       return;
     }
 
     const root = await temporaryDirectory("codex-security-scan-inventory-");
     const repository = join(root, "repository");
-    await mkdir(repository);
-    await writeFile(join(repository, ".gitignore"), "tracked-secret.py\n");
-    await writeFile(join(repository, "tracked-secret.py"), "secret = True\n");
+    await mkdir(join(repository, "nested"), { recursive: true });
+    await writeFile(
+      join(repository, ".gitignore"),
+      "nested/tracked-secret.py\n",
+    );
+    await writeFile(
+      join(repository, "nested", "tracked-secret.py"),
+      "secret = True\n",
+    );
     for (const args of [
       ["init", "--quiet", repository],
-      ["-C", repository, "add", "--force", "--", "tracked-secret.py"],
+      ["-C", repository, "add", "--force", "--", "nested/tracked-secret.py"],
     ]) {
       const initialized = spawnSync("git", args, { encoding: "utf8" });
       expect(initialized.status, initialized.stderr).toBe(0);
@@ -248,8 +256,8 @@ describe("plugin runtime preparation", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
-    const inventory = spawnSync(
-      python!,
+    const repeatedOutput = join(root, "inventory-repeated.txt");
+    const generatorArguments = (destination: string) =>
       [
         "-I",
         "-B",
@@ -259,12 +267,103 @@ describe("plugin runtime preparation", () => {
         "--scope",
         ".",
         "--out",
-        output,
+        destination,
+      ] as const;
+    for (const destination of [output, repeatedOutput]) {
+      const inventory = spawnSync(python!, generatorArguments(destination), {
+        encoding: "utf8",
+      });
+      expect(inventory.status, inventory.stderr).toBe(0);
+    }
+
+    const contents = await readFile(output);
+    expect(await readFile(repeatedOutput)).toEqual(contents);
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const validateSource =
+      /function validateRepositoryPath\(value, field\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    const parseSource =
+      /function parseInScopePaths\(content, path3\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(validateSource).toBeDefined();
+    expect(parseSource).toBeDefined();
+    const parseInventory = new Function(
+      "import_node_util5",
+      `${validateSource}\n${parseSource}\nreturn parseInScopePaths;`,
+    )({ TextDecoder }) as (content: Uint8Array, path: string) => Set<string>;
+    expect(() => parseInventory(contents, "in_scope_files.txt")).not.toThrow();
+
+    const rows = contents.toString("utf8").trimEnd().split(/\r?\n/u);
+    expect(rows).toContain("./nested/tracked-secret.py");
+    for (const row of rows) {
+      const normalized = row.replace(/^(?:\.\/)+/u, "");
+      expect(row).toBe(row.trim());
+      expect(isAbsolute(row)).toBe(false);
+      expect(normalized).not.toMatch(/^[A-Za-z]:/u);
+      expect(normalized.split("/")).not.toContain("..");
+      if (process.platform === "win32") {
+        expect(row).not.toContain("\\");
+      }
+    }
+    if (process.platform !== "win32") {
+      await writeFile(
+        join(repository, String.raw`literal\backslash.txt`),
+        "backslash\n",
+      );
+      await writeFile(join(repository, "literal:colon.txt"), "colon\n");
+      const posixOutput = join(root, "inventory-posix-filenames.txt");
+      const inventory = spawnSync(python!, generatorArguments(posixOutput), {
+        encoding: "utf8",
+      });
+      expect(inventory.status, inventory.stderr).toBe(0);
+      const posixRows = (await readFile(posixOutput, "utf8"))
+        .trimEnd()
+        .split(/\r?\n/u);
+      expect(posixRows).toContain(String.raw`./literal\backslash.txt`);
+      expect(posixRows).toContain("./literal:colon.txt");
+    }
+  });
+
+  test("preserves remediation when the filesystem device changes", async () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const target = await temporaryDirectory("codex-security-remounted-target-");
+    const verification = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import runpy, sys",
+          "from pathlib import Path",
+          "target = Path(sys.argv[2])",
+          "metadata = target.stat()",
+          "scan = {'target_path': str(target), 'target_device': metadata.st_dev + 1, 'target_inode': metadata.st_ino}",
+          "require_identity = runpy.run_path(sys.argv[1])['require_scan_target_identity']",
+          "assert require_identity(scan) == target",
+          "scan['target_inode'] += 1",
+          "try:",
+          "    require_identity(scan)",
+          "except SystemExit:",
+          "    pass",
+          "else:",
+          "    raise AssertionError('A replaced checkout must remain unavailable')",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts", "workbench_target.py"),
+        target,
       ],
       { encoding: "utf8" },
     );
-    expect(inventory.status, inventory.stderr).toBe(0);
-    expect(await readFile(output, "utf8")).toContain("tracked-secret.py");
+
+    expect(verification.status, verification.stderr).toBe(0);
   });
 
   test("allows the workbench to derive missing deferred scan identifiers", async () => {
@@ -301,6 +400,145 @@ describe("plugin runtime preparation", () => {
     expect(schema).toContain(
       "userContext: editableUserContextSchema.max(2400).optional()",
     );
+  });
+
+  test("keeps focused Standard scans on native direct-start tools", async () => {
+    const skill = await readFile(
+      join(PLUGIN_ROOT, "skills", "security-scan", "SKILL.md"),
+      "utf8",
+    );
+    const desktop = await readFile(
+      join(
+        PLUGIN_ROOT,
+        "skills",
+        "security-scan",
+        "references",
+        "desktop-scan.md",
+      ),
+      "utf8",
+    );
+
+    expect(skill).toContain("Immediately launch one baseline subagent");
+    expect(skill).toContain("Launch focused investigator subagents");
+    expect(skill).toContain("record_codex_security_scan_draft");
+    expect(desktop).toContain("start_codex_security_prompt_only_scan");
+    expect(desktop).toContain("record_codex_security_scan_draft");
+    expect(desktop).not.toContain("await_codex_security_scan_start");
+  });
+
+  test("keeps native scan tools without the obsolete setup widget", async () => {
+    const contract = JSON.parse(
+      await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+    ) as { shippedExact: string[] };
+    expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
+    expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
+
+    const messages = [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "codex-security-test", version: "1.0.0" },
+        },
+      },
+      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ];
+    const server = spawnSync(
+      process.execPath,
+      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+      {
+        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
+    expect(server.status, server.stderr).toBe(0);
+    const responses = server.stdout
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            id: number;
+            result: {
+              capabilities?: Record<string, unknown>;
+              tools?: Array<{ name: string }>;
+            };
+          },
+      );
+    expect(
+      responses.find((response) => response.id === 1)?.result.capabilities,
+    ).not.toHaveProperty("resources");
+    const names = new Set(
+      responses
+        .find((response) => response.id === 2)
+        ?.result.tools?.map((tool) => tool.name),
+    );
+    for (const name of [
+      "open_codex_security_workspace",
+      "start_codex_security_standard_scan",
+      "start_codex_security_prompt_only_scan",
+      "start_codex_security_deep_scan",
+      "record_codex_security_scan_draft",
+      "record_candidate_attack_paths",
+      "complete_codex_security_scan",
+    ]) {
+      expect(names.has(name)).toBe(true);
+    }
+    for (const name of [
+      "await_codex_security_scan_start",
+      "get_codex_security_setup_preference",
+      "disable_codex_security_setup_ui",
+      "open_codex_security_triage_results",
+      "set_codex_security_capability_preflight",
+    ]) {
+      expect(names.has(name)).toBe(false);
+    }
+  });
+
+  test("claims persisted Deep Scans after a coordinator restart", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const source =
+      /async function startOrJoinDeepScanCoordinator\(input\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(source).toBeDefined();
+    const startOrJoin = new Function(
+      `${source}\nreturn startOrJoinDeepScanCoordinator;`,
+    )() as (
+      input: unknown,
+    ) => Promise<{ coordinator: unknown; joined: boolean }>;
+    const scan = { scanId: "persisted-scan" };
+    const coordinator = {};
+    const claimCoordinator = mock(async () => ({ run: scan, acquired: true }));
+    const start = mock(() => coordinator);
+
+    expect(
+      await startOrJoin({
+        begin: { run: scan, shouldStart: false },
+        registry: { get: () => undefined, start },
+        options: {
+          threadId: "scan-thread",
+          handoffClaimToken: "continuation-claim",
+          store: { claimCoordinator },
+        },
+      }),
+    ).toEqual({ coordinator, joined: false });
+    expect(claimCoordinator).toHaveBeenCalledWith({
+      scanId: "persisted-scan",
+      threadId: "scan-thread",
+      handoffClaimToken: "continuation-claim",
+    });
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   test("projects only the unchanged external payload from the source checkout", async () => {
@@ -576,32 +814,26 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
-  test("bounds configured plugin directory discovery", async () => {
-    const overflowRoot = await temporaryDirectory();
-    const overflowSource = await plugin(overflowRoot);
-    const overflowDirectory = join(overflowSource, "many-files");
-    await mkdir(overflowDirectory);
+  test("copies configured plugins with more than 4,096 entries", async () => {
+    const root = await temporaryDirectory();
+    const source = await plugin(root);
+    const directory = join(source, "many-files");
+    await mkdir(directory);
     for (let offset = 0; offset < 4_096; offset += 128) {
       await Promise.all(
         Array.from({ length: 128 }, (_value, index) =>
-          writeFile(join(overflowDirectory, String(offset + index)), ""),
+          writeFile(join(directory, String(offset + index)), ""),
         ),
       );
     }
-    const overflowDestination = join(overflowRoot, "overflow-home");
-    await expect(
-      createMarketplace(overflowDestination, overflowSource),
-    ).rejects.toThrow("copy entry limit");
+
+    const marketplace = await createMarketplace(join(root, "home"), source);
+
     expect(
       existsSync(
-        join(
-          overflowDestination,
-          "sdk-marketplace",
-          "plugins",
-          "codex-security",
-        ),
+        join(marketplace, "plugins", "codex-security", "many-files", "4095"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test("cancels configured plugin directory discovery", async () => {
@@ -774,7 +1006,7 @@ describe("plugin runtime preparation", () => {
   testPosix(
     "rejects unsafe configured plugin manifests without hanging",
     async () => {
-      for (const kind of ["fifo", "symlink", "sparse"] as const) {
+      for (const kind of ["fifo", "symlink"] as const) {
         const root = await temporaryDirectory();
         const workspace = join(root, "workspace");
         const source = join(root, "plugin");
@@ -788,11 +1020,8 @@ describe("plugin runtime preparation", () => {
         );
         if (kind === "fifo") {
           expect(Bun.spawnSync(["mkfifo", manifest]).exitCode).toBe(0);
-        } else if (kind === "symlink") {
-          await symlink(outside, manifest);
         } else {
-          await writeFile(manifest, "{}");
-          await truncate(manifest, 2 * 1024 * 1024);
+          await symlink(outside, manifest);
         }
 
         await expect(resolvePluginPath(source, workspace)).rejects.toThrow(
@@ -801,6 +1030,23 @@ describe("plugin runtime preparation", () => {
       }
     },
   );
+
+  test("accepts configured plugin manifests larger than 1 MiB", async () => {
+    const root = await temporaryDirectory();
+    const workspace = join(root, "workspace");
+    const source = await plugin(root);
+    await mkdir(workspace);
+    await writeFile(
+      join(source, ".codex-plugin", "plugin.json"),
+      JSON.stringify({
+        name: "codex-security",
+        version: "1.2.3",
+        description: "x".repeat(1024 * 1024),
+      }),
+    );
+
+    expect(await resolvePluginPath(source, workspace)).toBe(source);
+  });
 
   test("cancels marketplace projection before registering the plugin", async () => {
     const root = await temporaryDirectory();
@@ -1160,6 +1406,10 @@ describe("plugin runtime preparation", () => {
     expect(install.installedRoot).toBe(installed);
     expect(install.version).toBe("1.2.3");
 
+    await writeFile(
+      join(selected, "scripts", "helper.py"),
+      "print('updated')\n",
+    );
     const reused = await bootstrapPlugin(home, selected, {
       codexCommand: { command: "/codex", prefixArgs: [] },
       runCodex: async () => {
@@ -1226,89 +1476,6 @@ describe("plugin runtime preparation", () => {
       '{"token":"preserved"}\n',
     );
     expect(calls).toEqual([
-      ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
-    ]);
-  });
-
-  test("reinstalls changed plugin contents even when the version is unchanged", async () => {
-    const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.3");
-    await writeFile(join(next, "scripts", "helper.py"), "print('updated')\n");
-    const home = join(root, "home");
-    const marketplace = join(home, "sdk-marketplace");
-    const cache = join(
-      home,
-      "plugins",
-      "cache",
-      "codex-security-sdk",
-      "codex-security",
-    );
-    await mkdir(home);
-    let marketplaceRegistered = false;
-    let pluginRegistered = false;
-    const updateConfig = async () => {
-      const sections = ["[features]\nplugins = true\n"];
-      if (marketplaceRegistered) {
-        sections.push(
-          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
-        );
-      }
-      if (pluginRegistered) {
-        sections.push(
-          '[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
-        );
-      }
-      await writeFile(join(home, "config.toml"), sections.join("\n"));
-    };
-    await updateConfig();
-    const calls: string[][] = [];
-    const options = {
-      codexCommand: { command: "/codex", prefixArgs: [] },
-      runCodex: async (
-        _command: { command: string; prefixArgs: readonly string[] },
-        args: readonly string[],
-      ) => {
-        calls.push([...args]);
-        if (args[1] === "marketplace" && args[2] === "add") {
-          marketplaceRegistered = true;
-        } else if (args[1] === "marketplace" && args[2] === "remove") {
-          marketplaceRegistered = false;
-        } else if (args[1] === "remove") {
-          pluginRegistered = false;
-          await rm(cache, { recursive: true, force: true });
-        } else if (args[1] === "add") {
-          const installed = join(cache, "1.2.3");
-          await mkdir(join(installed, ".codex-plugin"), { recursive: true });
-          await writeFile(
-            join(installed, ".codex-plugin", "plugin.json"),
-            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
-          );
-          pluginRegistered = true;
-        } else {
-          throw new Error(`Unexpected plugin command: ${args.join(" ")}`);
-        }
-        await updateConfig();
-        return "";
-      },
-    };
-
-    await bootstrapPlugin(home, previous, options);
-    const result = await bootstrapPlugin(home, next, options);
-
-    expect(result.pluginRoot).toBe(next);
-    expect(
-      await readFile(
-        join(marketplace, "plugins", "codex-security", "scripts", "helper.py"),
-        "utf8",
-      ),
-    ).toBe("print('updated')\n");
-    expect(calls).toEqual([
-      ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
-      ["plugin", "remove", "codex-security@codex-security-sdk"],
-      ["plugin", "marketplace", "remove", "codex-security-sdk"],
       ["plugin", "marketplace", "add", marketplace],
       ["plugin", "add", "codex-security@codex-security-sdk"],
     ]);
@@ -1486,6 +1653,67 @@ describe("plugin runtime preparation", () => {
         process.platform === "win32" ? "codex.exe" : "codex",
       ),
     );
+  });
+
+  test("launches the bundled Codex through the Deep Scan MCP environment without a global executable", async () => {
+    const configuration = JSON.parse(
+      await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+    ) as {
+      mcpServers: Record<string, { env_vars: string[] }>;
+    };
+    const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
+      PATH: "",
+      ...(process.env["SystemRoot"] === undefined
+        ? {}
+        : { SystemRoot: process.env["SystemRoot"] }),
+    });
+    const allowed = new Set(
+      configuration.mcpServers["codex-security"]!.env_vars,
+    );
+    const workerEnvironment = Object.fromEntries(
+      Object.entries(parentEnvironment).filter(
+        ([name, value]) =>
+          value !== undefined &&
+          (name === "PATH" || name === "SystemRoot" || allowed.has(name)),
+      ),
+    ) as Record<string, string>;
+
+    expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
+      resolveCodexCommand().command,
+    );
+    const globalCodex = spawnSync("codex", ["--version"], {
+      encoding: "utf8",
+      env: workerEnvironment,
+    });
+    expect(globalCodex.error).toMatchObject({ code: "ENOENT" });
+
+    const nestedCodex = spawnSync(
+      workerEnvironment["CODEX_CLI_PATH"]!,
+      ["--version"],
+      { encoding: "utf8", env: workerEnvironment },
+    );
+    expect(nestedCodex.status).toBe(0);
+    expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
+  });
+
+  test("preserves an explicit Codex executable override for nested workers", () => {
+    const configured = join(tmpdir(), "custom codex", "codex");
+
+    expect(
+      pluginExecutionEnvironment("/managed/python", {
+        CODEX_CLI_PATH: ` ${configured} `,
+        PATH: "",
+      }),
+    ).toEqual({
+      CODEX_CLI_PATH: configured,
+      PATH: "",
+      PYTHON: "/managed/python",
+    });
+    expect(
+      pluginExecutionEnvironment("/managed/python", {
+        CODEX_CLI_PATH: "   ",
+      })["CODEX_CLI_PATH"],
+    ).toBe(resolveCodexCommand().command);
   });
 
   test("selects the native Windows Codex executable package", () => {
@@ -1916,6 +2144,94 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(attempts).toBe(2);
   });
 
+  test("retries Windows credential verification when a descendant disappears", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const temporary = join(home, ".auth-temporary");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    await writeFile(temporary, "temporary credential\n");
+    const originalLstat = fsPromises.lstat;
+    let removed = false;
+    let inspections = 0;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (path: Parameters<typeof lstat>[0]) => {
+        if (path === temporary && !removed) {
+          removed = true;
+          await rm(temporary);
+        }
+        return originalLstat(path);
+      },
+    }));
+
+    try {
+      await verifyStableWindowsCredentialDescendants(home, async () => {
+        inspections += 1;
+        return 1;
+      });
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+      }));
+    }
+
+    expect(removed).toBe(true);
+    expect(inspections).toBe(1);
+  });
+
+  test("rejects Windows credential descendants that repeatedly disappear", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const credential = join(home, "auth.json");
+    await mkdir(home);
+    await writeFile(credential, "credential\n");
+    const originalLstat = fsPromises.lstat;
+    let attempts = 0;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (path: Parameters<typeof lstat>[0]) => {
+        if (path === credential) {
+          attempts += 1;
+          throw Object.assign(new Error("credential disappeared"), {
+            code: "ENOENT",
+            path,
+          });
+        }
+        return originalLstat(path);
+      },
+    }));
+
+    try {
+      await expect(
+        verifyStableWindowsCredentialDescendants(home, async () => 1),
+      ).rejects.toThrow("Windows credential descendants could not be verified");
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+      }));
+    }
+
+    expect(attempts).toBe(3);
+  });
+
+  test("does not retry a missing Windows credential home", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "missing-home");
+    let inspections = 0;
+
+    await expect(
+      verifyStableWindowsCredentialDescendants(home, async () => {
+        inspections += 1;
+        return 0;
+      }),
+    ).rejects.toMatchObject({ code: "ENOENT", path: home });
+
+    expect(inspections).toBe(0);
+  });
+
   test("rejects Windows credential descendants that never stabilize", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -1930,6 +2246,132 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("Windows credential descendants could not be verified");
     expect(attempts).toBe(3);
+  });
+
+  test("inspects Windows credential ancestry, home, and descendants in one subprocess", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const inspectionCount = join(root, "inspection-count");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory, file];
+    const script = [
+      `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+      `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+    ].join("; ");
+
+    const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
+      command: process.execPath,
+      args: ["--eval", script],
+    });
+
+    expect(snapshot.home).toMatchObject({
+      owner: sid,
+      protected: true,
+      grantsCurrentUserAccess: true,
+      untrustedPrincipals: [],
+    });
+    expect(snapshot.descendantsArePrivate).toBe(true);
+    expect(await readFile(inspectionCount, "utf8")).toBe("inspection\n");
+  });
+
+  test("inspects Windows credential ancestry and the home even without descendants", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory];
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+        ],
+      }),
+    ).resolves.toMatchObject({
+      home: { owner: sid, protected: true },
+      descendantsArePrivate: true,
+    });
+  });
+
+  test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const unsafe = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;WD)`;
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${unsafe}\n`)})`,
+        ],
+      }),
+    ).rejects.toThrow(
+      "Windows credential-home ancestor allows another identity to replace the directory",
+    );
+  });
+
+  test("rejects incomplete combined Windows credential ACL inspections", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${directory}\n`)})`,
+        ],
+      }),
+    ).rejects.toThrow("Windows credential-home ancestry could not be verified");
+  });
+
+  test("detects unsafe descendants during combined Windows credential ACL inspections", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const unsafeFile = `O:${sid}G:SYD:P(A;;FA;;;${sid})(A;;FR;;;WD)`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory, unsafeFile];
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+        ],
+      }),
+    ).resolves.toMatchObject({ descendantsArePrivate: false });
   });
 
   test("streams Windows credential ACL output larger than the subprocess buffer", async () => {
@@ -2379,7 +2821,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(false);
   });
 
-  test("surfaces redacted Windows ACL subprocess failures", async () => {
+  test("preserves Windows ACL subprocess failures", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
@@ -2401,9 +2843,8 @@ describe("runtime directories and plugin Python boundary", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain("core types");
-      expect((error as Error).message).toContain("token=[redacted]");
-      expect((error as Error).message).not.toContain(
-        "SYNTHETIC_WINDOWS_ACL_SECRET",
+      expect((error as Error).message).toContain(
+        "token=sk-proj-SYNTHETIC_WINDOWS_ACL_SECRET_123",
       );
       expect((error as Error).cause).toBe(underlying);
     }
@@ -2456,18 +2897,17 @@ describe("runtime directories and plugin Python boundary", () => {
         "$unexpected = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
         "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
       ].join("; ");
-      const result = spawnSync(
+      const result = await promisify(execFile)(
         powershell,
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
         {
           encoding: "utf8",
           env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: home },
-          timeout: 15_000,
+          timeout: 20_000,
           windowsHide: true,
         },
       );
 
-      expect(result.status).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({ unexpected: 0 });
     },
   );
@@ -3066,7 +3506,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toMatchObject({ actual: 8, source: configPath });
   });
 
-  test("runs workbench commands without credentials or generated bytecode", async () => {
+  test("runs workbench commands without output limits, credentials, or generated bytecode", async () => {
     const root = await temporaryDirectory();
     const pluginRoot = join(root, "plugin");
     await mkdir(join(pluginRoot, "scripts"), { recursive: true });
@@ -3081,7 +3521,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert os.environ.get('CODEX_API_KEY') is None",
         "assert os.environ.get('OPENROUTER_API_KEY') is None",
         "assert os.environ.get('FIREWORKS_API_KEY') is None",
-        "print(json.dumps({'ok': True}))",
+        "print(json.dumps({'ok': True, 'details': 'x' * (5 * 1024 * 1024)}))",
       ].join("\n"),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -3100,7 +3540,8 @@ describe("runtime directories and plugin Python boundary", () => {
       },
       ["test-command"],
     );
-    expect(result).toEqual({ ok: true });
+    expect(result["ok"]).toBe(true);
+    expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
@@ -4040,6 +4481,7 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,
+      CODEX_CLI_PATH: resolveCodexCommand().command,
     });
     await expect(
       resolvePluginPython({

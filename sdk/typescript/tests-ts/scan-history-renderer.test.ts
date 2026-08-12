@@ -3,6 +3,25 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("separates current repository findings from earlier observations", () => {
+    const text = renderScanHistory(
+      {
+        repository: "/repo",
+        findings: [true, false].map((confirmed) => ({
+          title: confirmed ? "Current finding" : "Earlier finding",
+          severity: { level: "high" },
+          locationPath: "source.ts",
+          confirmedInLatestScan: confirmed,
+        })),
+      },
+      "findings",
+      { color: false },
+    );
+    expect(text).toMatch(
+      /Seen this scan[\s\S]*Current finding[\s\S]*Not confirmed in latest scan[\s\S]*Earlier finding/,
+    );
+  });
+
   test("leads comparisons with the outcome and groups root causes", () => {
     const text = stripVTControlCharacters(
       renderScanHistory(

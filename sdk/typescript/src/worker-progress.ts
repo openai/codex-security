@@ -1,5 +1,3 @@
-const MAX_WORKER_STATUS_BYTES = 64 * 1024;
-const MAX_WORKER_COUNT = 1024;
 const WORKER_STATUS_PREFIX = "CODEX_SECURITY_WORKER_STATUS ";
 const SCAN_PROGRESS_PREFIX = "CODEX_SECURITY_SCAN_PROGRESS ";
 const PREFLIGHT_COMMAND = /(?:^|[\\/])config_preflight\.py(?=$|["'\s])/u;
@@ -68,12 +66,7 @@ export function scanProgressUpdatesFromEvent(
       : item["type"] === "command_execution"
         ? item["aggregated_output"]
         : null;
-  if (
-    typeof output !== "string" ||
-    Buffer.byteLength(output, "utf8") > MAX_WORKER_STATUS_BYTES
-  ) {
-    return [];
-  }
+  if (typeof output !== "string") return [];
   const updates: ScanProgress[] = [];
   let codeFence = false;
   for (const line of output.split(/\r?\n/u)) {
@@ -82,15 +75,8 @@ export function scanProgressUpdatesFromEvent(
       continue;
     }
     if (codeFence || !line.startsWith(SCAN_PROGRESS_PREFIX)) continue;
-    if (
-      updates.length === MAX_WORKER_COUNT ||
-      (item["type"] === "agent_message" && updates.length > 0)
-    ) {
-      return [];
-    }
     const progress = scanProgressFromMarker(line);
-    if (progress === null) return [];
-    updates.push(progress);
+    if (progress !== null) updates.push(progress);
   }
   return updates;
 }
@@ -104,7 +90,6 @@ function scanProgressFromMarker(marker: string): ScanProgress | null {
   }
   if (
     !isRecord(payload) ||
-    Object.keys(payload).length !== 3 ||
     !isScanPhase(payload["phase"]) ||
     !isProgressCount(payload["filesCompleted"]) ||
     !isProgressCount(payload["filesTotal"]) ||
@@ -125,9 +110,7 @@ function preflightStatus(
   if (
     typeof item["command"] !== "string" ||
     !PREFLIGHT_COMMAND.test(item["command"]) ||
-    typeof item["aggregated_output"] !== "string" ||
-    Buffer.byteLength(item["aggregated_output"], "utf8") >
-      MAX_WORKER_STATUS_BYTES
+    typeof item["aggregated_output"] !== "string"
   ) {
     return null;
   }
@@ -172,7 +155,7 @@ function preflightStatus(
   const configuredSlots =
     capacity.length === 1 &&
     capacityResult !== undefined &&
-    isWorkerCount(capacityResult["actual"])
+    isProgressCount(capacityResult["actual"])
       ? capacityResult["actual"]
       : null;
   return { kind: "preflight", delegation, configuredSlots };
@@ -181,12 +164,7 @@ function preflightStatus(
 function dispatchStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
-  if (
-    typeof item["text"] !== "string" ||
-    Buffer.byteLength(item["text"], "utf8") > MAX_WORKER_STATUS_BYTES
-  ) {
-    return null;
-  }
+  if (typeof item["text"] !== "string") return null;
   const markers = item["text"]
     .split(/\r?\n/u)
     .filter((line) => line.startsWith(WORKER_STATUS_PREFIX));
@@ -200,11 +178,10 @@ function dispatchStatus(
   }
   if (
     !isRecord(payload) ||
-    Object.keys(payload).length !== 3 ||
     typeof payload["phase"] !== "string" ||
     !WORKER_PHASES.has(payload["phase"]) ||
-    !isWorkerCount(payload["planned"]) ||
-    !isWorkerCount(payload["started"]) ||
+    !isProgressCount(payload["planned"]) ||
+    !isProgressCount(payload["started"]) ||
     payload["started"] > payload["planned"]
   ) {
     return null;
@@ -215,15 +192,6 @@ function dispatchStatus(
     planned: payload["planned"],
     started: payload["started"],
   };
-}
-
-function isWorkerCount(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value >= 0 &&
-    value <= MAX_WORKER_COUNT
-  );
 }
 
 function isProgressCount(value: unknown): value is number {
