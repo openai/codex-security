@@ -4910,6 +4910,40 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("authenticates without initializing the plugin runtime", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    const codexHome = join(stateDirectory, "codex-home");
+    const fakeCodex = join(root, "codex.mjs");
+    await writeFile(fakeCodex, "process.exitCode = 1;\n");
+    const fakeCommand = nodeCodex(fakeCodex);
+    const client = new TestClient(
+      { pluginPath: join(root, "missing-plugin") },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          ...fakeCommand.environment,
+        },
+        prepareRuntime: async () => {
+          throw new Error("authentication must not initialize the plugin");
+        },
+        resolveCodexCommand: () => fakeCommand.command,
+      },
+    );
+
+    try {
+      await expect(client.account()).resolves.toMatchObject({
+        authenticated: false,
+      });
+      expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
+      expect(existsSync(join(codexHome, "sdk-marketplace"))).toBe(false);
+    } finally {
+      await client.close();
+    }
+
+    expect(existsSync(codexHome)).toBe(true);
+  });
+
   test("passes environment API keys transiently without native login or keyring persistence", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -5637,23 +5671,31 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
 
   test("cleans the bootstrap workspace when credential-home cleanup fails", async () => {
     const root = await temporaryDirectory();
+    const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const bootstrapWorkspace = join(root, "bootstrap-workspace");
+    await mkdir(repository);
     await mkdir(codexHome);
     await mkdir(bootstrapWorkspace);
     const client = new TestClient(
       {},
       {
-        environment: { OPENAI_API_KEY: "ambient-key" },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          OPENAI_API_KEY: "ambient-key",
+        },
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
           bootstrapWorkspace,
         }),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: () => {
+          throw new Error("scan reached");
+        },
       },
     );
-    await expect(client.account()).resolves.toMatchObject({
-      authenticated: true,
-    });
+    await expect(client.run(repository)).rejects.toThrow("scan reached");
     const originalRm = fsPromises.rm;
     const attempted: string[] = [];
     mock.module("node:fs/promises", () => ({
@@ -5748,7 +5790,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await writeFile(
       fakeCodex,
       'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n',
@@ -5757,7 +5799,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const client = new TestClient(
       {},
       {
-        environment: {},
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          ...fakeCommand.environment,
+        },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -5796,46 +5841,22 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await expect(login.wait()).resolves.toMatchObject({ success: false });
   });
 
-  test("keeps ambient credentials available after successful ChatGPT login", async () => {
+  test("keeps ambient credentials available to scans", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
-    const fakeCodex = join(root, "codex.mjs");
-    const keyLog = join(root, "api-keys");
     const scanDir = join(root, "scan");
     await mkdir(repository);
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
-    await writeFile(
-      fakeCodex,
-      `
-import { appendFileSync, writeSync } from "node:fs";
-import { basename } from "node:path";
-
-const args = [basename(process.argv[1]), ...process.argv.slice(2)].join(" ");
-if (args === "login --with-api-key") {
-  let apiKey = "";
-  for await (const chunk of process.stdin) apiKey += chunk;
-  if (!["secret-key", "ambient-key"].includes(apiKey.trim())) {
-    process.exit(3);
-  } else {
-    appendFileSync(${JSON.stringify(keyLog)}, apiKey);
-    process.exit(0);
-  }
-} else if (args === "login") {
-  writeSync(2, "Open https://auth.example.test/login\\n");
-  process.exit(0);
-} else {
-  process.exit(2);
-}
-`,
-    );
-    const fakeCommand = nodeCodex(fakeCodex);
     let codexOptions: CodexOptions | null = null;
     const client = new TestClient(
       {},
       {
-        environment: { OPENAI_API_KEY: "ambient-key" },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          OPENAI_API_KEY: "ambient-key",
+        },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -5851,11 +5872,9 @@ if (args === "login --with-api-key") {
             CODEX_HOME: codexHome,
             OPENAI_API_KEY: "ambient-key",
             CODEX_API_KEY: "secondary-ambient-key",
-            ...fakeCommand.environment,
           },
           credentialsAvailable: false,
         }),
-        resolveCodexCommand: () => fakeCommand.command,
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
@@ -5874,9 +5893,6 @@ if (args === "login --with-api-key") {
       },
     );
     try {
-      await client.loginApiKey("secret-key");
-      const login = await client.loginChatGPT();
-      await expect(login.wait()).resolves.toMatchObject({ success: true });
       await client.run(repository);
       expect((codexOptions as CodexOptions | null)?.apiKey).toBe("ambient-key");
       expect(
@@ -5885,7 +5901,6 @@ if (args === "login --with-api-key") {
             ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
         ),
       ).toBe(false);
-      expect(await readFile(keyLog, "utf8")).toBe("secret-key\n");
     } finally {
       await client.close();
     }
@@ -5896,7 +5911,7 @@ if (args === "login --with-api-key") {
     const codexHome = join(root, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
     const ready = join(root, "ready");
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await writeFile(
       fakeCodex,
       `
@@ -5914,7 +5929,10 @@ setInterval(() => {}, 1000);
     const client = new TestClient(
       {},
       {
-        environment: {},
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          ...fakeCommand.environment,
+        },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -5950,6 +5968,6 @@ setInterval(() => {}, 1000);
     await expect(login).rejects.toThrow();
     await expect(
       import("node:fs/promises").then(({ stat }) => stat(codexHome)),
-    ).rejects.toThrow();
+    ).resolves.toBeDefined();
   });
 });

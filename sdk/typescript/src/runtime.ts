@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, type Stats } from "node:fs";
 import {
   chmod,
+  cp,
   copyFile,
   link,
   lstat,
@@ -21,16 +22,7 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import {
-  basename,
-  dirname,
-  extname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -103,21 +95,26 @@ export interface WorkbenchCommandOptions {
   failureMessage?: string;
 }
 
+function environmentValue(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested]?.trim();
+  if (exact) return exact;
+  return Object.entries(environment)
+    .find(
+      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
+    )?.[1]
+    ?.trim();
+}
+
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
-  const environmentValue = (requested: string): string | undefined => {
-    const exact = environment[requested]?.trim();
-    if (exact) return exact;
-    return Object.entries(environment)
-      .find(
-        ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-      )?.[1]
-      ?.trim();
-  };
-  const configured = environmentValue("CODEX_SECURITY_STATE_DIR");
+  const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
   if (configured !== undefined) return resolve(expandHome(configured));
-  const codexHome = environmentValue("CODEX_HOME") ?? join(homedir(), ".codex");
+  const codexHome =
+    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
   return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
 }
 
@@ -1981,37 +1978,11 @@ export async function createMarketplace(
   return marketplace;
 }
 
-async function codexSecurityPluginRegistration(
-  codexHome: string,
-): Promise<{ marketplace: boolean; plugin: boolean }> {
-  let config: unknown;
-  try {
-    config = parse(await readFile(join(codexHome, "config.toml"), "utf8"));
-  } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") {
-      return { marketplace: false, plugin: false };
-    }
-    throw new PluginBootstrapError(
-      "Unable to inspect the existing Codex Security plugin registration.",
-      { cause: error },
-    );
-  }
-  const marketplaces = isRecord(config) ? config["marketplaces"] : undefined;
-  const plugins = isRecord(config) ? config["plugins"] : undefined;
-  return {
-    marketplace:
-      isRecord(marketplaces) && isRecord(marketplaces[MARKETPLACE_NAME]),
-    plugin:
-      isRecord(plugins) &&
-      isRecord(plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]),
-  };
-}
-
 export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
-  const configured = environment["CODEX_CLI_PATH"]?.trim();
-  if (configured) return { command: configured };
+  const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  if (configured) return { command: resolve(configured) };
 
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
@@ -2063,55 +2034,7 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const existingMarketplace = join(codexHome, "sdk-marketplace");
-  let upgradeExistingPlugin = false;
-  let repairIncompletePlugin = false;
-  let installedRoot: string | null = null;
-  try {
-    await verifyPluginRegistration(codexHome, existingMarketplace);
-    installedRoot = await findInstalledPlugin(codexHome);
-  } catch (error) {
-    throwIfSignalAborted(options.signal);
-    if (
-      !(error instanceof PluginBootstrapError) &&
-      nodeErrorCode(error) !== "ENOENT"
-    ) {
-      throw error;
-    }
-    const marketplace = await lstat(existingMarketplace).catch(
-      (failure: unknown) => {
-        if (nodeErrorCode(failure) === "ENOENT") return null;
-        throw failure;
-      },
-    );
-    if (
-      marketplace !== null &&
-      (!marketplace.isDirectory() || marketplace.isSymbolicLink())
-    ) {
-      throw new PluginBootstrapError(
-        `Codex Security marketplace is not a safe directory: ${existingMarketplace}`,
-      );
-    }
-    const registration = await codexSecurityPluginRegistration(codexHome);
-    repairIncompletePlugin =
-      marketplace !== null || registration.marketplace || registration.plugin;
-  }
-
-  if (installedRoot !== null) {
-    const installed = await pluginMetadata(installedRoot);
-    if (installed.name === name && installed.version === version) {
-      return {
-        pluginRoot: root,
-        marketplaceRoot: existingMarketplace,
-        installedRoot,
-        marketplaceName: MARKETPLACE_NAME,
-        name,
-        version,
-      };
-    }
-    upgradeExistingPlugin = true;
-  }
-
+  const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
   const command =
     options.codexCommand ?? resolveCodexCommand(options.environment);
@@ -2120,56 +2043,79 @@ export async function bootstrapPlugin(
     CODEX_HOME: codexHome,
   };
   const run = options.runCodex ?? runPluginCommand;
-  if (upgradeExistingPlugin || repairIncompletePlugin) {
-    const registration = await codexSecurityPluginRegistration(codexHome);
-    if (registration.plugin) {
-      await run(
-        command,
-        ["plugin", "remove", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
-        environment,
-        options.signal,
-      );
-      throwIfSignalAborted(options.signal);
-    }
-    if (registration.marketplace) {
-      await run(
-        command,
-        ["plugin", "marketplace", "remove", MARKETPLACE_NAME],
-        environment,
-        options.signal,
-      );
-      throwIfSignalAborted(options.signal);
-    }
-    throwIfSignalAborted(options.signal);
-    await rm(existingMarketplace, { recursive: true, force: true });
-    throwIfSignalAborted(options.signal);
+  const existing = await lstat(marketplace).catch((error: unknown) => {
+    if (nodeErrorCode(error) === "ENOENT") return null;
+    throw error;
+  });
+  if (existing !== null && !existing.isDirectory()) {
+    throw new PluginBootstrapError(
+      `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
+    );
   }
 
-  const marketplace = await createMarketplace(codexHome, root, options.signal);
-  await run(
+  const staged =
+    existing === null
+      ? null
+      : await pluginMetadata(join(marketplace, "plugins", PLUGIN_NAME)).catch(
+          () => null,
+        );
+  if (staged?.version !== version) {
+    if (existing !== null) {
+      await rm(marketplace, { recursive: true, force: true });
+    }
+    await createMarketplace(codexHome, root, options.signal);
+  }
+  const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
+    (error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return "";
+      throw error;
+    },
+  );
+  const marketplaces = parse(config)["marketplaces"];
+  const registration = isRecord(marketplaces)
+    ? marketplaces[MARKETPLACE_NAME]
+    : undefined;
+  if (
+    !isRecord(registration) ||
+    registration["source_type"] !== "local" ||
+    typeof registration["source"] !== "string" ||
+    !(await sameFile(registration["source"], marketplace))
+  ) {
+    await run(
+      command,
+      ["plugin", "marketplace", "add", marketplace],
+      environment,
+      options.signal,
+    );
+  }
+  const output = await run(
     command,
-    ["plugin", "marketplace", "add", marketplace],
+    ["plugin", "add", "--json", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
     environment,
     options.signal,
   );
-  await run(
-    command,
-    ["plugin", "add", `${PLUGIN_NAME}@${MARKETPLACE_NAME}`],
-    environment,
-    options.signal,
-  );
-  await verifyPluginRegistration(codexHome, marketplace);
-  const verifiedInstalledRoot = await findInstalledPlugin(codexHome);
-  const installed = await pluginMetadata(verifiedInstalledRoot);
-  if (installed.name !== name || installed.version !== version) {
+  let installed: unknown;
+  try {
+    installed = JSON.parse(output);
+  } catch (error) {
     throw new PluginBootstrapError(
-      "Installed Codex Security plugin metadata does not match the selected plugin.",
+      "Codex plugin install did not return a valid JSON result.",
+      { cause: error },
+    );
+  }
+  if (
+    !isRecord(installed) ||
+    typeof installed["installedPath"] !== "string" ||
+    installed["version"] !== version
+  ) {
+    throw new PluginBootstrapError(
+      "Codex plugin install did not return the selected plugin path and version.",
     );
   }
   return {
     pluginRoot: root,
     marketplaceRoot: marketplace,
-    installedRoot: verifiedInstalledRoot,
+    installedRoot: installed["installedPath"],
     marketplaceName: MARKETPLACE_NAME,
     name,
     version,
@@ -2367,31 +2313,6 @@ async function runPluginCommand(
   }
 }
 
-async function findInstalledPlugin(codexHome: string): Promise<string> {
-  const root = join(
-    codexHome,
-    "plugins",
-    "cache",
-    MARKETPLACE_NAME,
-    PLUGIN_NAME,
-  );
-  const candidates: string[] = [];
-  for (const entry of await readdir(root, { withFileTypes: true }).catch(
-    () => [],
-  )) {
-    if (entry.isDirectory()) {
-      const candidate = join(root, entry.name);
-      if (await hasPluginManifest(candidate)) candidates.push(candidate);
-    }
-  }
-  if (candidates.length !== 1) {
-    throw new PluginBootstrapError(
-      "Codex plugin install did not produce one installed Codex Security plugin.",
-    );
-  }
-  return await realpath(candidates[0]!);
-}
-
 async function discoverPluginRoot(root: string): Promise<string> {
   if (await hasPluginManifest(root)) return await validatePluginRoot(root);
   const children = (await readdir(root, { withFileTypes: true })).filter(
@@ -2412,215 +2333,35 @@ async function validatePluginRoot(root: string): Promise<string> {
   return await realpath(root);
 }
 
-async function verifyPluginRegistration(
-  codexHome: string,
-  marketplace: string,
-): Promise<void> {
-  const configPath = join(codexHome, "config.toml");
-  let config: unknown;
-  try {
-    config = parse(await readFile(configPath, "utf8"));
-  } catch (error) {
-    throw new PluginBootstrapError(
-      "Codex plugin bootstrap produced an unreadable config.toml.",
-      {
-        cause: error,
-      },
-    );
-  }
-  const marketplaces = isRecord(config) ? config["marketplaces"] : undefined;
-  const plugins = isRecord(config) ? config["plugins"] : undefined;
-  const marketplaceConfig = isRecord(marketplaces)
-    ? marketplaces[MARKETPLACE_NAME]
-    : undefined;
-  const pluginConfig = isRecord(plugins)
-    ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
-    : undefined;
-  if (!isRecord(marketplaceConfig) || !isRecord(pluginConfig)) {
-    throw new PluginBootstrapError(
-      "Codex plugin bootstrap did not preserve plugin registration.",
-    );
-  }
-  const registeredSource = String(marketplaceConfig["source"] ?? "");
-  if (!(await sameFile(registeredSource, marketplace))) {
-    throw new PluginBootstrapError(
-      "Codex plugin marketplace registration has the wrong source.",
-    );
-  }
-  if (pluginConfig["enabled"] !== true) {
-    throw new PluginBootstrapError(
-      "Codex Security plugin is not enabled after bootstrap.",
-    );
-  }
-}
-
 async function copyPluginTree(
   source: string,
   destination: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const pending: Array<{ source: string; destination: string }> = [
-    { source, destination },
-  ];
-  const directories = new Map<string, Stats>();
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   try {
-    while (pending.length > 0) {
-      throwIfSignalAborted(signal);
-      const current = pending.pop()!;
-      await requirePluginAncestors(source, current.source, directories, signal);
-      const metadata = await lstat(current.source);
-      if (metadata.isSymbolicLink()) {
-        throw new PluginBootstrapError(
-          `Plugin contains an unsafe source path: ${current.source}`,
-        );
-      }
-      if (metadata.isDirectory()) {
-        for await (const entry of pluginDirectoryEntries(
-          current.source,
-          signal,
-        )) {
-          const childSource = join(current.source, entry);
-          pending.push({
-            source: childSource,
-            destination: join(current.destination, entry),
-          });
-        }
-        const afterRead = await lstat(current.source);
-        if (!samePluginFile(metadata, afterRead)) {
+    await cp(source, destination, {
+      recursive: true,
+      force: false,
+      filter: async (path) => {
+        throwIfSignalAborted(signal);
+        const metadata = await lstat(path);
+        if (
+          (!metadata.isDirectory() && !metadata.isFile()) ||
+          (await realpath(path)) !== path
+        ) {
           throw new PluginBootstrapError(
-            `Plugin directory changed while it was being copied: ${current.source}`,
+            `Plugin contains an unsafe source path: ${path}`,
           );
         }
-        directories.set(current.source, afterRead);
-        await mkdir(current.destination, { mode: 0o700 });
-        continue;
-      }
-      if (!metadata.isFile()) {
-        throw new PluginBootstrapError(
-          `Plugin contains a non-regular file: ${current.source}`,
-        );
-      }
-      const input = await open(
-        current.source,
-        constants.O_RDONLY |
-          (process.platform === "win32"
-            ? 0
-            : constants.O_NOFOLLOW | constants.O_NONBLOCK),
-      );
-      let output: Awaited<ReturnType<typeof open>> | undefined;
-      try {
-        if (!samePluginFile(metadata, await input.stat())) {
-          throw new PluginBootstrapError(
-            `Plugin source changed before it could be copied: ${current.source}`,
-          );
-        }
-        await requirePluginAncestors(
-          source,
-          current.source,
-          directories,
-          signal,
-        );
-        const bytes = await readExactly(input, metadata.size, 0, signal);
-        if (!samePluginFile(metadata, await input.stat())) {
-          throw new PluginBootstrapError(
-            `Plugin source changed while it was being copied: ${current.source}`,
-          );
-        }
-        await requirePluginAncestors(
-          source,
-          current.source,
-          directories,
-          signal,
-        );
-        output = await open(
-          current.destination,
-          constants.O_WRONLY |
-            constants.O_CREAT |
-            constants.O_EXCL |
-            (process.platform === "win32" ? 0 : constants.O_NOFOLLOW),
-          0o600,
-        );
-        await output.writeFile(bytes);
-        await output.chmod(metadata.mode & 0o777);
-      } finally {
-        await output?.close();
-        await input.close();
-      }
-    }
+        throwIfSignalAborted(signal);
+        return true;
+      },
+    });
   } catch (error) {
     await rm(destination, { recursive: true, force: true });
     throw error;
   }
-}
-
-async function* pluginDirectoryEntries(
-  path: string,
-  signal?: AbortSignal,
-): AsyncGenerator<string> {
-  throwIfSignalAborted(signal);
-  const directory = await opendir(path);
-  try {
-    for (;;) {
-      throwIfSignalAborted(signal);
-      const entry = await directory.read();
-      throwIfSignalAborted(signal);
-      if (entry === null) return;
-      yield entry.name;
-    }
-  } finally {
-    await directory.close();
-  }
-}
-
-async function requirePluginAncestors(
-  root: string,
-  path: string,
-  directories: ReadonlyMap<string, Stats>,
-  signal?: AbortSignal,
-): Promise<void> {
-  const relativePath = relative(root, path);
-  if (
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
-  ) {
-    throw new PluginBootstrapError(
-      `Plugin source path escapes its root: ${path}`,
-    );
-  }
-  if (relativePath === "") return;
-
-  let ancestor = root;
-  const parents = ["", ...relativePath.split(sep).slice(0, -1)];
-  for (const component of parents) {
-    throwIfSignalAborted(signal);
-    if (component !== "") ancestor = join(ancestor, component);
-    const expected = directories.get(ancestor);
-    const actual = await lstat(ancestor);
-    if (
-      expected === undefined ||
-      actual.isSymbolicLink() ||
-      !actual.isDirectory() ||
-      !samePluginFile(expected, actual)
-    ) {
-      throw new PluginBootstrapError(
-        `Plugin source directory changed while it was being copied: ${ancestor}`,
-      );
-    }
-  }
-}
-
-function samePluginFile(first: Stats, second: Stats): boolean {
-  return (
-    first.dev === second.dev &&
-    first.ino === second.ino &&
-    first.size === second.size &&
-    first.mtimeMs === second.mtimeMs &&
-    first.mode === second.mode &&
-    first.isFile() === second.isFile() &&
-    first.isDirectory() === second.isDirectory()
-  );
 }
 
 async function readExactly(
