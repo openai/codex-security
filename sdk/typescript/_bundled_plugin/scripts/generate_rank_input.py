@@ -33,7 +33,7 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -288,7 +288,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def path_is_excluded(path: Path) -> bool:
+def path_is_excluded(path: Path | PurePosixPath) -> bool:
     if any(part in EXCLUDED_DIRS for part in path.parts):
         return True
     if path.name in EXCLUDED_FILENAMES:
@@ -650,7 +650,7 @@ def git_changed_paths(
     mode: str,
     *,
     revision_blob_ids: dict[str, str] | None = None,
-) -> list[tuple[Path, str]]:
+) -> list[tuple[Path | PurePosixPath, str]]:
     if mode == "revisions":
         result = subprocess.run(
             [
@@ -668,7 +668,7 @@ def git_changed_paths(
             text=True,
         )
         fields = result.stdout.split("\0")
-        changed: list[tuple[Path, str]] = []
+        changed: list[tuple[Path | PurePosixPath, str]] = []
         index = 0
         while index < len(fields) - 1:
             metadata = fields[index].split()
@@ -680,7 +680,7 @@ def git_changed_paths(
             index += 1
             selected_mode = metadata[0].removeprefix(":") if status == "D" else metadata[1]
             if selected_mode in {"100644", "100755"}:
-                changed.append((repo / path, status))
+                changed.append((PurePosixPath(path), status))
                 if revision_blob_ids is not None and status != "D":
                     revision_blob_ids[path] = metadata[3]
         return changed
@@ -723,7 +723,7 @@ def committed_blob_previews(
                 previews[path] = None
                 continue
             text = contents.decode("utf-8", errors="ignore")
-            outline = structural_outline(repo / path, text)
+            outline = structural_outline(PurePosixPath(path), text)
             previews[path] = fit_preview_lines(
                 select_preview_lines(outline or text.splitlines()), preview_bytes
             )
@@ -750,16 +750,14 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     selected = [
         (path, status)
         for path, status in changed
-        if not path_is_excluded(path.relative_to(repo))
+        if not path_is_excluded(path if args.mode == "revisions" else path.relative_to(repo))
         and path.suffix.lower() in TEXT_CODE_EXTENSIONS
     ]
     committed_previews = (
         committed_blob_previews(
             repo,
             {
-                path.relative_to(repo).as_posix(): revision_blob_ids[
-                    path.relative_to(repo).as_posix()
-                ]
+                path.as_posix(): revision_blob_ids[path.as_posix()]
                 for path, status in selected
                 if status != "D"
             },
@@ -771,7 +769,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
 
     rows: list[JsonRow] = []
     for path, status in selected:
-        rel = path.relative_to(repo)
+        rel = path if args.mode == "revisions" else path.relative_to(repo)
         if status == "D":
             preview = ""
         elif args.mode == "revisions":

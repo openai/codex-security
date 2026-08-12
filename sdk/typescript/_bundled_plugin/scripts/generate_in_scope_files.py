@@ -141,7 +141,7 @@ def generate_diff_in_scope_files(
             changed = git_changed_paths(repository, base, head, mode)
 
         for path, status in changed:
-            relative = path.relative_to(repository)
+            relative = path if mode == "revisions" else path.relative_to(repository)
             if path_is_excluded(relative) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
                 continue
             if status != "D":
