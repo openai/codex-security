@@ -673,59 +673,58 @@ describe("malformed scan artifact recovery", () => {
     expect(coverage.deferred).toHaveLength(4);
   });
 
-  test("retains the strongest duplicate finding regardless of input order", async () => {
-    const cases = [
-      {
-        name: "severity ascending",
-        candidates: [
-          ["informational", "high", 1],
-          ["critical", "high", 1],
-        ],
-        expected: ["critical", "high", 1],
-      },
-      {
-        name: "severity descending",
-        candidates: [
-          ["critical", "high", 1],
-          ["informational", "high", 1],
-        ],
-        expected: ["critical", "high", 1],
-      },
-      {
-        name: "confidence ascending",
-        candidates: [
-          ["critical", "low", 1],
-          ["critical", "high", 1],
-        ],
-        expected: ["critical", "high", 1],
-      },
-      {
-        name: "confidence descending",
-        candidates: [
-          ["critical", "high", 1],
-          ["critical", "low", 1],
-        ],
-        expected: ["critical", "high", 1],
-      },
-      {
-        name: "evidence ascending",
-        candidates: [
-          ["critical", "high", 1],
-          ["critical", "high", 2],
-        ],
-        expected: ["critical", "high", 2],
-      },
-      {
-        name: "evidence descending",
-        candidates: [
-          ["critical", "high", 2],
-          ["critical", "high", 1],
-        ],
-        expected: ["critical", "high", 2],
-      },
-    ] as const;
-
-    for (const { name, candidates, expected } of cases) {
+  test.each([
+    {
+      name: "severity ascending",
+      candidates: [
+        ["informational", "high", 1],
+        ["critical", "high", 1],
+      ],
+      expected: ["critical", "high", 1],
+    },
+    {
+      name: "severity descending",
+      candidates: [
+        ["critical", "high", 1],
+        ["informational", "high", 1],
+      ],
+      expected: ["critical", "high", 1],
+    },
+    {
+      name: "confidence ascending",
+      candidates: [
+        ["critical", "low", 1],
+        ["critical", "high", 1],
+      ],
+      expected: ["critical", "high", 1],
+    },
+    {
+      name: "confidence descending",
+      candidates: [
+        ["critical", "high", 1],
+        ["critical", "low", 1],
+      ],
+      expected: ["critical", "high", 1],
+    },
+    {
+      name: "evidence ascending",
+      candidates: [
+        ["critical", "high", 1],
+        ["critical", "high", 2],
+      ],
+      expected: ["critical", "high", 2],
+    },
+    {
+      name: "evidence descending",
+      candidates: [
+        ["critical", "high", 2],
+        ["critical", "high", 1],
+      ],
+      expected: ["critical", "high", 2],
+    },
+  ] as const)(
+    "retains the strongest duplicate finding with $name input order",
+    async ({ name, candidates, expected }) => {
       const fixture = await startDraftScan();
       const path = join(fixture.scanDir, "findings.json");
       const document = await readJson<FindingsDocument>(path);
@@ -777,8 +776,8 @@ describe("malformed scan artifact recovery", () => {
       expect(sarif.runs[0]?.results[0]?.properties.severity, name).toBe(
         "critical",
       );
-    }
-  });
+    },
+  );
 
   test("completes scans when every draft finding is malformed", async () => {
     const fixture = await startDraftScan();

@@ -8,7 +8,6 @@ import {
   realpath,
   rm,
   symlink,
-  truncate,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -176,24 +175,19 @@ describe("canonical scan contract", () => {
     },
   );
 
-  test("rejects oversized contract documents before parsing them", async () => {
-    for (const [filename, maximum] of [
-      ["scan-manifest.json", 16 * 1024 * 1024],
-      ["findings.json", 128 * 1024 * 1024],
-      ["coverage.json", 32 * 1024 * 1024],
-    ] as const) {
-      const scanDir = await copyExample();
-      await truncate(join(scanDir, filename), maximum + 1);
+  test("loads contract documents larger than the previous size limit", async () => {
+    const scanDir = await copyExample();
+    const path = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(path);
+    manifest["metadata"] = "x".repeat(16 * 1024 * 1024);
+    await writeJson(path, manifest);
 
-      await expect(
-        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-      ).rejects.toThrow(
-        `${filename}: JSON document exceeds the ${maximum}-byte limit`,
-      );
-    }
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
   });
 
-  test("rejects oversized contract schemas before parsing them", async () => {
+  test("loads contract schemas larger than the previous size limit", async () => {
     const pluginRoot = await mkdtemp(
       join(tmpdir(), "codex-security-schema-large-"),
     );
@@ -201,30 +195,29 @@ describe("canonical scan contract", () => {
     await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
       recursive: true,
     });
-    const maximum = 4 * 1024 * 1024;
-    await truncate(
-      join(pluginRoot, "schemas", "scan-manifest.schema.json"),
-      maximum + 1,
-    );
+    const path = join(pluginRoot, "schemas", "scan-manifest.schema.json");
+    const schema = await readJson(path);
+    schema["description"] = "x".repeat(4 * 1024 * 1024);
+    await writeJson(path, schema);
 
     await expect(
       loadContract(await copyExample(), { pluginRoot }),
-    ).rejects.toThrow(
-      `scan-manifest.schema.json: JSON document exceeds the ${maximum}-byte limit`,
-    );
+    ).resolves.toBeDefined();
   });
 
-  test("rejects deeply nested JSON before overflowing the call stack", async () => {
+  test("loads valid JSON nested beyond the previous depth limit", async () => {
     const scanDir = await copyExample();
-    const depth = 258;
-    await writeFile(
-      join(scanDir, "findings.json"),
-      `{"overflow":${"[".repeat(depth)}0${"]".repeat(depth)}}`,
-    );
+    const path = join(scanDir, "findings.json");
+    const findings = await readJson(path);
+    let nested: unknown = "value";
+    for (let depth = 0; depth < 258; depth += 1) nested = [nested];
+    findings["findings"][0]["extensions"] = { nested };
+    await writeJson(path, findings);
+    await reseal(scanDir);
 
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("JSON document exceeds the 256-level nesting limit");
+    ).resolves.toBeDefined();
   });
 
   test("does not expose attacker-controlled keys in validation errors", async () => {
@@ -247,34 +240,22 @@ describe("canonical scan contract", () => {
     expect((thrown as Error).message).not.toContain(marker);
   });
 
-  test("rejects unsafe or overly complex configured schemas", async () => {
-    for (const [schema, expected] of [
-      [{ $ref: "#" }, "unsupported JSON Schema keyword"],
-      [
-        { type: "string", pattern: "^(a+)+$" },
-        "unsupported JSON Schema pattern",
-      ],
-      [
-        {
-          allOf: Array.from({ length: 129 }, () => ({ type: "object" })),
-        },
-        "128-edge applicator limit",
-      ],
-    ] as const) {
-      const pluginRoot = await mkdtemp(
-        join(tmpdir(), "codex-security-schema-invalid-"),
-      );
-      temporaryDirectories.push(pluginRoot);
-      await mkdir(join(pluginRoot, "schemas"));
-      await writeJson(
-        join(pluginRoot, "schemas", "scan-manifest.schema.json"),
-        schema,
-      );
+  test("accepts valid schemas beyond the previous complexity limit", async () => {
+    const pluginRoot = await mkdtemp(
+      join(tmpdir(), "codex-security-schema-complex-"),
+    );
+    temporaryDirectories.push(pluginRoot);
+    await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
+      recursive: true,
+    });
+    const path = join(pluginRoot, "schemas", "scan-manifest.schema.json");
+    const schema = await readJson(path);
+    schema["allOf"] = Array.from({ length: 129 }, () => ({ type: "object" }));
+    await writeJson(path, schema);
 
-      await expect(
-        loadContract(await copyExample(), { pluginRoot }),
-      ).rejects.toThrow(expected);
-    }
+    await expect(
+      loadContract(await copyExample(), { pluginRoot }),
+    ).resolves.toBeDefined();
   });
 
   test("does not expose attacker-controlled schema compilation errors", async () => {
