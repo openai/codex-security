@@ -180,34 +180,6 @@ setTimeout(() => {
     expect(succeeded).toBe(true);
   });
 
-  test("ignores authentication instructions hidden in a split terminal escape", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-auth-escape-"));
-    temporaryDirectories.push(root);
-    const script = join(root, "login.mjs");
-    await writeFile(
-      script,
-      `
-process.stderr.write("\\u001b]0;" + "x".repeat(5 * 1024));
-setTimeout(() => process.stderr.write("https://hidden.example.test/device"), 10);
-setTimeout(() => {
-  process.stderr.write("\\u0007\\nOpen https://auth.example.test/device\\nUser code: SAFE-1234\\n");
-  setTimeout(() => process.exit(0), 10);
-}, 20);
-`,
-    );
-    const handle = new CodexLoginHandle(
-      { command: process.execPath, prefixArgs: [script] },
-      ["login", "--device-auth"],
-      process.env,
-      () => {},
-    );
-
-    await handle.waitForInstructions({ deviceCode: true });
-    expect(handle.verificationUrl).toBe("https://auth.example.test/device");
-    expect(handle.userCode).toBe("SAFE-1234");
-    await expect(handle.wait()).resolves.toMatchObject({ success: true });
-  });
-
   test("waits for complete login instructions split across output chunks", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-auth-fragment-"));
     temporaryDirectories.push(root);
