@@ -637,7 +637,36 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
 
 def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple[Path, str]]:
     if mode == "revisions":
-        return run_git_changed_paths(repo, [f"{base}..{head}"])
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "diff",
+                "--raw",
+                "-z",
+                "--diff-filter=ACMRD",
+                f"{base}..{head}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        fields = result.stdout.split("\0")
+        changed: list[tuple[Path, str]] = []
+        index = 0
+        while index < len(fields) - 1:
+            metadata = fields[index].split()
+            status = metadata[-1][0]
+            index += 1
+            if status in {"C", "R"}:
+                index += 1
+            path = fields[index]
+            index += 1
+            selected_mode = metadata[0].removeprefix(":") if status == "D" else metadata[1]
+            if selected_mode != "120000":
+                changed.append((repo / path, status))
+        return changed
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
@@ -660,6 +689,8 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
 
         if status == "D":
             preview = ""
+        elif path.is_symlink():
+            continue
         elif path.is_file():
             preview, is_binary = preview_for(path, args.preview_bytes)
             if is_binary:

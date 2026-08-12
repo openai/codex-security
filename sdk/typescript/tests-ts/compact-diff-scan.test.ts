@@ -257,6 +257,28 @@ describe("compact diff scan", () => {
     expect(readFileSync(join(repository, "src", "added-link.py"), "utf8")).toBe(
       "handler.py",
     );
+
+    const rankInput = join(root, "rank-input.jsonl");
+    const legacyResult = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--out",
+      rankInput,
+    );
+
+    expect(legacyResult.status, legacyResult.stderr).toBe(0);
+    expect(
+      readFileSync(rankInput, "utf8")
+        .trim()
+        .split("\n")
+        .map((row) => JSON.parse(row).path),
+    ).toEqual(["src/handler.py"]);
   });
 
   test("includes staged, unstaged, and untracked working-tree changes", () => {
