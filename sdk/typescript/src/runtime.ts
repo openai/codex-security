@@ -2054,7 +2054,7 @@ export async function bootstrapPlugin(
   });
   if (existing !== null && !existing.isDirectory()) {
     throw new PluginBootstrapError(
-      `Codex Security marketplace is not a safe directory: ${marketplace}`,
+      `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
 
