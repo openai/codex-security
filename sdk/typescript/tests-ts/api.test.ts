@@ -3833,6 +3833,9 @@ describe("CodexSecurity orchestration", () => {
                   await readFile(join(codexHome!, "config.toml"), "utf8"),
                 ),
               ).toMatchObject({
+                responses_api_metadata: {
+                  codex_security_surface: "sdk",
+                },
                 permissions: {
                   codex_security_scan: {
                     filesystem: {

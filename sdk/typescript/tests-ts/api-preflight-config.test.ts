@@ -106,6 +106,24 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
+  test.each(["cli", "sdk"] as const)(
+    "persists %s attribution for delegated Codex workers",
+    (surface) => {
+      const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+      const credentialHome = join(stateDirectory, "codex-home");
+      const config = scanRuntimeCodexConfig(
+        { responses_api_metadata: { codex_security_surface: "spoofed" } },
+        stateDirectory,
+        credentialHome,
+        surface,
+      );
+
+      expect(config).toMatchObject({
+        responses_api_metadata: { codex_security_surface: surface },
+      });
+    },
+  );
+
   test("projects only capability and trust metadata into the readable preflight config", async () => {
     const root = await temporaryDirectory();
     const configPath = join(root, "config-preflight.toml");

@@ -66,6 +66,7 @@ import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
+  matchScanFindingsInternal,
   type matchScanFindings,
 } from "./scan-comparison.js";
 import {
@@ -1176,7 +1177,12 @@ export class CodexSecurity {
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
             workbench: runWorkbench,
-            matchFindings: this.#dependencies.matchFindings,
+            matchFindings:
+              this.#dependencies.matchFindings ??
+              ((input, comparisonOptions) =>
+                matchScanFindingsInternal(input, comparisonOptions, {
+                  surface: this.#surface,
+                })),
             environment,
             model,
             signal,
@@ -1531,6 +1537,7 @@ export class CodexSecurity {
         mergedConfig,
         codexSecurityStateDirectory(environment),
         runtime.codexHome,
+        this.#surface,
       ),
     );
     await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
@@ -1636,6 +1643,7 @@ export class CodexSecurity {
           mergedConfig,
           codexSecurityStateDirectory(processEnvironment),
           codexHome,
+          this.#surface,
         ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
@@ -2567,6 +2575,7 @@ export function scanRuntimeCodexConfig(
   config: JsonObject,
   stateDirectory: string,
   protectedCredentialHome?: string,
+  surface?: CodexSecuritySurface,
 ): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
@@ -2577,6 +2586,9 @@ export function scanRuntimeCodexConfig(
     ...hardened,
     allow_login_shell: false,
     default_permissions: SCAN_PERMISSION_PROFILE,
+    ...(surface === undefined
+      ? {}
+      : { responses_api_metadata: { codex_security_surface: surface } }),
     permissions: {
       ...configuredPermissions,
       [SCAN_PERMISSION_PROFILE]: {

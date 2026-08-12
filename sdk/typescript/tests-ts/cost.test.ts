@@ -243,6 +243,18 @@ describe("scan cost", () => {
     ).toBe(0.0051);
   });
 
+  test("preserves legacy cache writes after SDK normalization adds zero", () => {
+    expect(
+      estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
+        cache_write_tokens: 200,
+        output_tokens: 10,
+      }),
+    ).toMatchObject({ cacheWriteInputTokens: 200, estimatedUsd: 0.0051 });
+  });
+
   test("does not double-charge reasoning tokens included in output", () => {
     expect(
       estimateScanCost("gpt-5.6-sol", {

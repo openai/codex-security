@@ -718,8 +718,14 @@ function tokenUsage(value: unknown): ScanTokenUsage | null {
   if (!isRecord(value)) return null;
   const input = value["input_tokens"];
   const cached = value["cached_input_tokens"] ?? 0;
+  const canonicalCacheWrite = value["cache_write_input_tokens"];
+  const legacyCacheWrite = value["cache_write_tokens"];
   const cacheWrite =
-    value["cache_write_input_tokens"] ?? value["cache_write_tokens"] ?? 0;
+    canonicalCacheWrite === 0 &&
+    isTokenCount(legacyCacheWrite) &&
+    legacyCacheWrite > 0
+      ? legacyCacheWrite
+      : canonicalCacheWrite ?? legacyCacheWrite ?? 0;
   const output = value["output_tokens"];
   const reasoning = value["reasoning_output_tokens"] ?? 0;
   if (
