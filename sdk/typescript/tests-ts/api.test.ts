@@ -4488,7 +4488,7 @@ describe("CodexSecurity orchestration", () => {
       ...Array.from(
         { length: 1024 },
         (_, index) =>
-          `scope-${String(index).padStart(4, "0")}-${"a".repeat(120)}.ts`,
+          `scope-${String(index).padStart(4, "0")}-${"a".repeat(115)}.ts`,
       ),
     );
     await mkdir(repository);
