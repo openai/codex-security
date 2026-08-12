@@ -57,9 +57,17 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
-import { ScanResult, type TurnResultMetadata } from "./result.js";
+import {
+  ScanResult,
+  type RepositoryFinding,
+  type TurnResultMetadata,
+} from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
+import {
+  matchCompletedScan,
+  type matchScanFindings,
+} from "./scan-comparison.js";
 import {
   scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
@@ -277,6 +285,7 @@ interface ClientDependencies {
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
+  matchFindings?: typeof matchScanFindings;
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
@@ -654,14 +663,18 @@ export class CodexSecurity {
           `Shell-visible plugin root must be outside CODEX_HOME: ${canonicalShellPluginRoot}`,
         );
       }
-      const basePrompt = await scanPrompt(
-        shellPluginRoot,
-        normalized,
-        mode,
-        runtime.configPath !== undefined,
-        knowledgeBase !== null,
-        options.scanPrompt,
-      );
+      const skillName = skillNameFor(normalized, mode);
+      const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
+      const skillMetadata = await lstat(skillPath).catch(() => null);
+      if (
+        skillMetadata === null ||
+        !skillMetadata.isFile() ||
+        skillMetadata.isSymbolicLink()
+      ) {
+        throw new IncompleteScanError(
+          `Installed plugin is missing scan skill: ${skillName}`,
+        );
+      }
       checkOpen();
       const expectation: ScanExpectation = {
         repository: repo,
@@ -856,6 +869,16 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      checkOpen();
+      const basePrompt = scanPrompt(
+        normalized,
+        mode,
+        skillName,
+        scanId,
+        runtime.configPath !== undefined,
+        knowledgeBase !== null,
+        options.scanPrompt,
+      );
       checkOpen();
       const feedback = await workbench(
         {
@@ -1132,6 +1155,44 @@ export class CodexSecurity {
           onObserverError: options.onObserverError,
         });
         checkOpen();
+      }
+      try {
+        const runWorkbench = (args: readonly string[]) =>
+          workbench(workbenchOptions, args);
+        const previousFindings = await listRepositoryFindings(
+          runWorkbench,
+          targetId,
+          "all",
+        );
+        if (previousFindings !== undefined) {
+          await matchCompletedScan({
+            scanId,
+            repository: repo,
+            previousFindings: previousFindings.filter(
+              (finding) =>
+                finding["scanId"] !== scanId &&
+                finding["targetId"] === targetId,
+            ),
+            falsePositives: falsePositiveExamples as Record<string, unknown>[],
+            findings: result.findings.findings,
+            workbench: runWorkbench,
+            matchFindings: this.#dependencies.matchFindings,
+            environment,
+            model,
+            signal,
+          });
+          result.repositoryFindings = (await listRepositoryFindings(
+            runWorkbench,
+            targetId,
+          )) as RepositoryFinding[] | undefined;
+        }
+      } catch (error) {
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          `Could not update repository findings: ${errorMessage(error)}`,
+        );
       }
       return result;
     } catch (error) {
@@ -1633,6 +1694,29 @@ export class CodexSecurity {
   }
 }
 
+export async function listRepositoryFindings(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  targetId: string,
+  status: "open" | "all" = "open",
+): Promise<JsonObject[] | undefined> {
+  const findings: JsonObject[] = [];
+  let offset: number | undefined;
+  do {
+    const page = await workbench([
+      "list-global-findings",
+      "--target-id",
+      targetId,
+      ...(status === "open" ? ["--status", "open"] : []),
+      ...(offset === undefined ? [] : ["--offset", String(offset)]),
+    ]);
+    if (!Array.isArray(page["findings"])) return undefined;
+    findings.push(...(page["findings"] as JsonObject[]));
+    offset =
+      typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;
+  } while (offset !== undefined);
+  return findings;
+}
+
 function deepScanOptions(options: ScanOptions): DeepScanOptions {
   const selected: DeepScanOptions = {};
   for (const [name, , minimum] of DEEP_SCAN_SETTINGS) {
@@ -2047,32 +2131,25 @@ function trustedAccessWarning(
   return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${action} or apply at ${applicationUrl}.`;
 }
 
-async function scanPrompt(
-  pluginRoot: string,
+function scanPrompt(
   target: NormalizedTarget,
   mode: ScanMode,
+  skillName: string,
+  scanId: string,
   hasConfigPath = false,
   hasKnowledgeBase = false,
   additionalPrompt?: string,
-): Promise<string> {
-  const skillName = skillNameFor(target, mode);
-  const skillPath = join(pluginRoot, "skills", skillName, "SKILL.md");
-  const metadata = await lstat(skillPath).catch(() => null);
-  if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new IncompleteScanError(
-      `Installed plugin is missing scan skill: ${skillName}`,
-    );
-  }
+): string {
   return [
     `Use the installed $codex-security:${skillName} skill at "$CODEX_SECURITY_PLUGIN_ROOT/skills/${skillName}/SKILL.md".`,
     "Run this Codex Security scan non-interactively.",
     ...(mode === "deep"
       ? [
-          'The SDK has already registered this scan. Call start_codex_security_deep_scan with { scanId: "$CODEX_SECURITY_SCAN_ID" }; never pass targetPath or create another scan.',
+          `The SDK has already registered this scan. Call start_codex_security_deep_scan with ${JSON.stringify({ scanId })}; never pass targetPath or create another scan.`,
         ]
       : skillName === "security-scan"
         ? [
-            'The SDK has already registered this scan. Use exactly "$CODEX_SECURITY_SCAN_ID" and "$CODEX_SECURITY_SCAN_DIR"; never call a scan-start or completion tool, and leave finalization to the SDK.',
+            `The SDK has already registered this scan. Use exactly ${JSON.stringify(scanId)} and "$CODEX_SECURITY_SCAN_DIR"; never call a scan-start or completion tool, and leave finalization to the SDK.`,
           ]
         : []),
     ...(skillName === "security-scan"
@@ -2088,7 +2165,7 @@ async function scanPrompt(
     'Use "$PYTHON" as <python_command> for every plugin helper; replace any literal python or python3 helper invocation with this exact interpreter.',
     'Repository root: "$CODEX_SECURITY_REPOSITORY"',
     'Use this exact scan directory for all scan output: "$CODEX_SECURITY_SCAN_DIR"',
-    'Use exactly "$CODEX_SECURITY_SCAN_ID" as the scan ID in the manifest, findings, and coverage.',
+    `Use exactly ${JSON.stringify(scanId)} as the scan ID in the manifest, findings, and coverage.`,
     'Use exactly "$CODEX_SECURITY_TARGET_ID" as scan.target.targetId; do not derive a different target ID.',
     'Use exactly "$CODEX_SECURITY_TARGET_DISPLAY_NAME" as scan.target.displayName; do not infer a display name from the Git remote.',
     'Use exactly "$CODEX_SECURITY_TARGET_KIND" as scan.target.kind; do not infer the target kind from the checkout.',

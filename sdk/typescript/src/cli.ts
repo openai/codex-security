@@ -33,6 +33,7 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   createSecurityInternal,
+  listRepositoryFindings,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -822,6 +823,44 @@ export async function main(
         "--note",
         options.reason,
       ]);
+    },
+  });
+  findingFeedback.command("list", {
+    description: "List open findings for a repository across its scans.",
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .optional()
+        .describe("Repository to inspect (default: current directory)."),
+    }),
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, format }) {
+      const repository = resolve(
+        dependencies.currentDirectory(),
+        args.repository ?? ".",
+      );
+      return presentHistory(
+        await history(
+          ["list-repositories"],
+          async (value): Promise<JsonObject> => {
+            const target = (value["repositories"] as JsonObject[]).find(
+              (entry) => entry["targetPath"] === repository,
+            );
+            const findings =
+              target === undefined
+                ? []
+                : await listRepositoryFindings(
+                    dependencies.runWorkbench,
+                    target["targetId"] as string,
+                  );
+            return { repository, findings: findings ?? [] };
+          },
+        ),
+        "findings",
+        format,
+        { repository },
+      );
     },
   });
   const scanHistory = Cli.create("scans", {
@@ -3360,8 +3399,10 @@ function printScanSummary(
 ): void {
   const paint = (value: string, code: number | string): string =>
     color ? `\u001B[${code}m${value}\u001B[0m` : value;
+  const repositoryFindings = result.repositoryFindings;
+  const findings = repositoryFindings ?? result.findings.findings;
   const severities = new Map<SeverityLevel, number>();
-  for (const finding of result.findings.findings) {
+  for (const finding of findings) {
     severities.set(
       finding.severity.level,
       (severities.get(finding.severity.level) ?? 0) + 1,
@@ -3386,7 +3427,13 @@ function printScanSummary(
     elapsed < 60
       ? `${elapsed}s`
       : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-  const findingCount = result.findings.findings.length;
+  const findingCount = findings.length;
+  const confirmedCount =
+    repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
+      .length ?? 0;
+  const findingSummary = repositoryFindings?.length
+    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    : severitySummary;
   const findingColor =
     findingCount === 0
       ? 32
@@ -3397,7 +3444,7 @@ function printScanSummary(
           : 36;
   errorOutput.write(
     `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
-      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${severitySummary === "" ? "" : ` (${severitySummary})`}`, findingColor)}\n` +
+      `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
       `  ${paint("ELAPSED", 1)}   ${duration}\n`,
   );

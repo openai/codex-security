@@ -53,6 +53,10 @@ Use `security.preflight()` to validate local inputs, `onWorkerStatus` and
 `onReconnect` to observe long-running scans, and an `AbortSignal` to cancel a
 scan.
 
+Successful results include open repository findings in `repositoryFindings`,
+when available; `findings` remains the current scan. Matching earlier findings
+can make one additional model call, including with a scan cost limit.
+
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
@@ -223,6 +227,7 @@ npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings list /path/to/repository
 npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
