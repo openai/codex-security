@@ -294,7 +294,7 @@ export async function validateCommittedDiffCheckout(
   );
   if (status.length !== 0) {
     throw new InvalidTargetError(
-      "Committed-diff scans require a clean repository checkout. Commit or stash local changes and retry.",
+      "Committed-diff scans require a clean repository checkout. Commit, stash, or remove local changes and retry. Use `git stash --include-untracked` to stash untracked files.",
     );
   }
 }
