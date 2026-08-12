@@ -1344,17 +1344,32 @@ def budget_exhausted_draft(
             continue
         paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
         surface_id = f"candidate-{candidate_id}"
+        validation = candidate.get("validation")
+        validation = validation.get("disposition") if isinstance(validation, dict) else None
+        attack = candidate.get("attack_path")
+        attack = attack.get("decision") if isinstance(attack, dict) else None
+        disposition = (
+            "needs_follow_up"
+            if validation == "deferred" or attack == "deferred"
+            else "not_applicable"
+            if validation == "not_applicable"
+            else "rejected"
+            if validation == "suppressed" or attack == "ignore"
+            else "needs_follow_up"
+        )
         if surface_id not in existing_surfaces:
             coverage["surfaces"].append(
                 {
                     "id": surface_id,
                     "label": candidate["summary"],
-                    "disposition": "needs_follow_up",
+                    "disposition": disposition,
                     "notes": candidate["evidence"],
                     "receiptRefs": [],
                 }
             )
             existing_surfaces.add(surface_id)
+        if disposition != "needs_follow_up":
+            continue
         coverage["deferred"].append(
             {
                 "id": candidate_id,

@@ -746,7 +746,13 @@ def build_report_markdown(
             and any(
                 isinstance(item, dict)
                 and isinstance(item.get("reason"), str)
-                and any(term in item["reason"].casefold() for term in ("cost limit", "budget"))
+                and (
+                    item["reason"]
+                    == "Validation was deferred because the scan reached its cost limit."
+                    or item["reason"].startswith(
+                        "Validation was deferred because the scan reached its cost limit: "
+                    )
+                )
                 for item in deferred
             )
         )

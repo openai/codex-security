@@ -312,27 +312,69 @@ describe("deep scan workbench ownership", () => {
         join(discoveryDir, "in_scope_files.txt"),
         "src/source.py\n",
       );
-      await writeFile(
-        join(discoveryDir, "candidate_ledger.jsonl"),
-        `${JSON.stringify({
+      const candidateLocations = [
+        { path: "src/source.py", start_line: 1, end_line: 1, role: "sink" },
+        ...(scoped
+          ? [
+              {
+                path: "shared/support.py",
+                start_line: 1,
+                end_line: 1,
+                role: "evidence",
+              },
+            ]
+          : []),
+      ];
+      const candidates = [
+        {
           candidate_id: "candidate-001",
           cwe_ids: ["CWE-862"],
-          locations: [
-            { path: "src/source.py", start_line: 1, end_line: 1, role: "sink" },
-            ...(scoped
-              ? [
-                  {
-                    path: "shared/support.py",
-                    start_line: 1,
-                    end_line: 1,
-                    role: "evidence",
-                  },
-                ]
-              : []),
-          ],
+          locations: candidateLocations,
           summary: "Possible missing authorization",
           evidence: "The request reaches a protected handler.",
-        })}\n`,
+        },
+        {
+          candidate_id: "candidate-suppressed",
+          cwe_ids: ["CWE-862"],
+          locations: candidateLocations,
+          summary: "Authorization guard already protects the handler",
+          evidence: "The request is rejected by the existing policy.",
+          validation: { disposition: "suppressed" },
+        },
+        {
+          candidate_id: "candidate-not-applicable",
+          cwe_ids: ["CWE-862"],
+          locations: candidateLocations,
+          summary: "Handler cannot receive external requests",
+          evidence: "The handler is only reachable from trusted callers.",
+          validation: { disposition: "not_applicable" },
+        },
+        {
+          candidate_id: "candidate-ignored",
+          cwe_ids: ["CWE-862"],
+          locations: candidateLocations,
+          summary: "Attack path does not cross the trust boundary",
+          evidence: "An attacker cannot reach the authorization sink.",
+          validation: { disposition: "reportable" },
+          attack_path: { decision: "ignore" },
+        },
+        {
+          candidate_id: "candidate-deferred",
+          cwe_ids: ["CWE-862"],
+          locations: candidateLocations,
+          summary: "Authorization proof needs runtime evidence",
+          evidence: "The runtime permission policy could not be inspected.",
+          validation: {
+            disposition: "deferred",
+            remaining_uncertainty:
+              "Runtime policy configuration is unavailable.",
+          },
+          attack_path: { decision: "ignore" },
+        },
+      ];
+      await writeFile(
+        join(discoveryDir, "candidate_ledger.jsonl"),
+        `${candidates.map((candidate) => JSON.stringify(candidate)).join("\n")}\n`,
       );
       const terminalManifest = join(scanDir, "coordinator-manifest.json");
       await writeFile(terminalManifest, "{}\n");
@@ -387,6 +429,7 @@ describe("deep scan workbench ownership", () => {
         inventoryStrategy: string;
         includePaths: string[];
         deferred: Array<{ id: string; reason: string; paths: string[] }>;
+        surfaces: Array<{ id: string; disposition: string }>;
       };
       expect(coverage).toMatchObject({
         completeness: "partial",
@@ -400,17 +443,122 @@ describe("deep scan workbench ownership", () => {
               ? ["src/source.py", "shared/support.py"]
               : ["src/source.py"],
           },
+          {
+            id: "candidate-deferred",
+            reason: expect.stringContaining(
+              "Authorization proof needs runtime evidence",
+            ),
+            paths: scoped
+              ? ["src/source.py", "shared/support.py"]
+              : ["src/source.py"],
+          },
         ],
       });
+      expect(coverage.surfaces).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "candidate-candidate-001",
+            disposition: "needs_follow_up",
+          }),
+          expect.objectContaining({
+            id: "candidate-candidate-suppressed",
+            disposition: "rejected",
+          }),
+          expect.objectContaining({
+            id: "candidate-candidate-not-applicable",
+            disposition: "not_applicable",
+          }),
+          expect.objectContaining({
+            id: "candidate-candidate-ignored",
+            disposition: "rejected",
+          }),
+          expect.objectContaining({
+            id: "candidate-candidate-deferred",
+            disposition: "needs_follow_up",
+          }),
+        ]),
+      );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
       expect(report).toContain(
         "No findings were validated before the scan reached its cost limit.",
       );
       expect(report).toContain("Possible missing authorization");
       expect(report).toContain("The request reaches a protected handler.");
+      expect(report).toContain(
+        "Authorization guard already protects the handler",
+      );
+      expect(report).toContain("Handler cannot receive external requests");
+      expect(report).toContain("Attack path does not cross the trust boundary");
       expect(report).not.toContain(
         "No reportable findings survived the canonical discovery, validation",
       );
+    },
+  );
+
+  test.each([
+    [
+      "a deferred discovery candidate",
+      "Validation was deferred because the scan reached its cost limit: candidate evidence.",
+      true,
+    ],
+    [
+      "a cost-limited scan without candidates",
+      "Validation was deferred because the scan reached its cost limit.",
+      true,
+    ],
+    [
+      "an unrelated retry budget",
+      "The retry budget was exhausted while checking the service.",
+      false,
+    ],
+    [
+      "an unrelated resource budget",
+      "Validation exceeded the container resource budget.",
+      false,
+    ],
+    [
+      "an unrelated service cost limit",
+      "A dependent service reached its configured cost limit.",
+      false,
+    ],
+    [
+      "a similar non-workbench cost limit",
+      "Validation was deferred because the scan reached its cost limit elsewhere.",
+      false,
+    ],
+  ] as const)(
+    "only describes an exhausted scan cost limit for %s",
+    (_description, reason, exhausted) => {
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const script = [
+        "import json, pathlib, runpy, sys",
+        "plugin = pathlib.Path(sys.argv[1])",
+        "examples = plugin / 'examples' / 'completed-scan'",
+        "documents = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
+        "manifest, findings, coverage = documents",
+        "findings['findings'] = []",
+        "coverage['completeness'] = 'partial'",
+        "coverage['deferred'] = [{'id': 'candidate-example', 'reason': sys.argv[2]}]",
+        "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
+        "print(projection['build_report_markdown'](manifest, findings, coverage))",
+      ].join("\n");
+      const result = Bun.spawnSync(
+        [python!, "-I", "-B", "-c", script, PLUGIN_ROOT, reason],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+      const report = new TextDecoder().decode(result.stdout);
+      expect(
+        report.includes(
+          "No findings were validated before the scan reached its cost limit.",
+        ),
+      ).toBe(exhausted);
+      expect(
+        report.includes(
+          "No reportable findings survived the canonical discovery, validation, and reportability gates.",
+        ),
+      ).toBe(!exhausted);
     },
   );
 
