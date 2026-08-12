@@ -21,10 +21,42 @@ export interface ScanModelConfiguration {
   reasoningEffort: string;
 }
 
+export const OPENROUTER_CODEX_PROVIDER = {
+  name: "OpenRouter",
+  base_url: "https://openrouter.ai/api/v1",
+  env_key: "OPENROUTER_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const FIREWORKS_CODEX_PROVIDER = {
+  name: "Fireworks AI",
+  base_url: "https://api.fireworks.ai/inference/v1",
+  env_key: "FIREWORKS_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+export const EXTERNAL_CODEX_PROVIDERS = {
+  openrouter: OPENROUTER_CODEX_PROVIDER,
+  fireworks: FIREWORKS_CODEX_PROVIDER,
+} as const;
+
+export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
+
+export function isExternalModelProvider(
+  provider: unknown,
+): provider is ExternalModelProvider {
+  return (
+    typeof provider === "string" &&
+    Object.hasOwn(EXTERNAL_CODEX_PROVIDERS, provider)
+  );
+}
+
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
   cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
   model_reasoning_effort: "xhigh",
+  model_reasoning_summary: "detailed",
+  show_raw_agent_reasoning: true,
   features: {
     plugins: true,
     goals: true,
@@ -44,17 +76,7 @@ deepFreezeJson(DEFAULT_CODEX_CONFIG);
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
 ): ScanModelConfiguration {
-  const profileName = config["profile"];
-  const profiles = config["profiles"];
-  const configuredProfile =
-    typeof profileName === "string" &&
-    isObject(profiles) &&
-    Object.hasOwn(profiles, profileName)
-      ? profiles[profileName]
-      : undefined;
-  const selectedProfile = isObject(configuredProfile)
-    ? configuredProfile
-    : undefined;
+  const selectedProfile = selectedScanProfile(config);
   const model =
     selectedProfile !== undefined && Object.hasOwn(selectedProfile, "model")
       ? selectedProfile["model"]
@@ -78,6 +100,28 @@ export function scanModelConfiguration(
     );
   }
   return { model, reasoningEffort };
+}
+
+export function scanModelProvider(config: Readonly<JsonObject>): unknown {
+  const selectedProfile = selectedScanProfile(config);
+  return selectedProfile !== undefined &&
+    Object.hasOwn(selectedProfile, "model_provider")
+    ? selectedProfile["model_provider"]
+    : config["model_provider"];
+}
+
+function selectedScanProfile(
+  config: Readonly<JsonObject>,
+): Record<string, JsonValue> | undefined {
+  const profileName = config["profile"];
+  const profiles = config["profiles"];
+  const configuredProfile =
+    typeof profileName === "string" &&
+    isObject(profiles) &&
+    Object.hasOwn(profiles, profileName)
+      ? profiles[profileName]
+      : undefined;
+  return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
 export async function mergedCodexConfig(

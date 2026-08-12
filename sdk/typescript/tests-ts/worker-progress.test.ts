@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { workerStatusFromEvent } from "../src/worker-progress.js";
+import {
+  scanProgressUpdatesFromEvent,
+  workerStatusFromEvent,
+} from "../src/worker-progress.js";
 
 function commandEvent(
   command: string,
@@ -96,7 +99,7 @@ describe("worker progress events", () => {
     });
   });
 
-  test("reads a bounded dispatch marker from the agent message", () => {
+  test("reads a dispatch marker from the agent message", () => {
     expect(
       workerStatusFromEvent(
         messageEvent(
@@ -118,7 +121,148 @@ describe("worker progress events", () => {
     ).toEqual({ kind: "dispatch", phase: "ranking", planned: 6, started: 0 });
   });
 
-  test("ignores unrelated, malformed, conflicting, or oversized events", () => {
+  test("reads the current phase and fully reviewed file counts", () => {
+    expect(
+      scanProgressUpdatesFromEvent(
+        messageEvent(
+          'Reviewing the file inventory.\nCODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+        ),
+      ),
+    ).toEqual([{ phase: "discovery", filesCompleted: 3, filesTotal: 8 }]);
+    expect(
+      scanProgressUpdatesFromEvent(
+        messageEvent(
+          'CODEX_SECURITY_SCAN_PROGRESS {"phase":"validation","filesCompleted":8,"filesTotal":8}',
+        ),
+      ),
+    ).toEqual([{ phase: "validation", filesCompleted: 8, filesTotal: 8 }]);
+  });
+
+  test("reads every file update from a completed review command", () => {
+    const output = [
+      "--- inventory ---",
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":2}',
+      "--- commands.py ---",
+      "import subprocess",
+      "--- server.py ---",
+      "from http.server import HTTPServer",
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":2,"filesTotal":2}',
+    ].join("\n");
+
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent("review the full inventory", output),
+      ),
+    ).toEqual([
+      { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
+      { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
+    ]);
+  });
+
+  test("keeps valid progress when another update is invalid", () => {
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "review the full inventory",
+          [
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":2}',
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":2}',
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":2,"filesTotal":2}',
+          ].join("\n"),
+        ),
+      ),
+    ).toEqual([
+      { phase: "discovery", filesCompleted: 0, filesTotal: 2 },
+      { phase: "discovery", filesCompleted: 2, filesTotal: 2 },
+    ]);
+  });
+
+  test("accepts additional progress fields, multiple markers, and verbose output", () => {
+    expect(
+      scanProgressUpdatesFromEvent(
+        messageEvent(
+          [
+            "x".repeat(65 * 1024),
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8,"path":"/repository"}',
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":4,"filesTotal":8}',
+          ].join("\n"),
+        ),
+      ),
+    ).toEqual([
+      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+      { phase: "discovery", filesCompleted: 4, filesTotal: 8 },
+    ]);
+  });
+
+  test("accepts verbose worker status and more than 1,024 workers", () => {
+    expect(
+      workerStatusFromEvent(
+        commandEvent(
+          "python3 /plugin/scripts/config_preflight.py",
+          JSON.stringify({
+            profile: "security_scan",
+            details: "x".repeat(65 * 1024),
+            results: [
+              { capability: "delegated_workers", status: "pass" },
+              {
+                capability: "usable_worker_slots_2048",
+                status: "pass",
+                actual: 2048,
+              },
+            ],
+          }),
+        ),
+      ),
+    ).toEqual({
+      kind: "preflight",
+      delegation: "available",
+      configuredSlots: 2048,
+    });
+    expect(
+      workerStatusFromEvent(
+        messageEvent(
+          `${"x".repeat(65 * 1024)}\nCODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":2048,"started":1025,"timestamp":1}`,
+        ),
+      ),
+    ).toEqual({
+      kind: "dispatch",
+      phase: "ranking",
+      planned: 2048,
+      started: 1025,
+    });
+  });
+
+  test("does not mistake documented examples for real scan progress", () => {
+    expect(
+      scanProgressUpdatesFromEvent(
+        commandEvent(
+          "read the scan workflow",
+          [
+            "Example progress:",
+            "```text",
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+            "```",
+          ].join("\n"),
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("rejects malformed or overstated file progress", () => {
+    for (const text of [
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":9,"filesTotal":8}',
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":-1,"filesTotal":8}',
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":1.5,"filesTotal":8}',
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"unknown","filesCompleted":3,"filesTotal":8}',
+    ]) {
+      expect(scanProgressUpdatesFromEvent(messageEvent(text))).toEqual([]);
+    }
+    expect(
+      scanProgressUpdatesFromEvent(commandEvent("rg scan progress", "{}")),
+    ).toEqual([]);
+  });
+
+  test("ignores unrelated, malformed, or conflicting events", () => {
     const preflight = JSON.stringify({
       profile: "security_scan",
       results: [{ capability: "delegated_workers", status: "pass" }],
@@ -150,10 +294,6 @@ describe("worker progress events", () => {
           ],
         }),
       ),
-      commandEvent(
-        "python3 /plugin/scripts/config_preflight.py",
-        `${preflight}${" ".repeat(65 * 1024)}`,
-      ),
       messageEvent(
         'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":2,"started":3}',
       ),
@@ -162,9 +302,6 @@ describe("worker progress events", () => {
       ),
       messageEvent(
         'CODEX_SECURITY_WORKER_STATUS {"phase":"discovery","planned":2,"started":1}',
-      ),
-      messageEvent(
-        'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":2,"started":1,"path":"/repository"}',
       ),
       messageEvent(
         'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":2,"started":1}\nCODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":2,"started":0}',
