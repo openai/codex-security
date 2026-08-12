@@ -112,14 +112,22 @@ describe("CodexSecurity preflight configuration", () => {
       const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
       const credentialHome = join(stateDirectory, "codex-home");
       const config = scanRuntimeCodexConfig(
-        { responses_api_metadata: { codex_security_surface: "spoofed" } },
+        {
+          responses_api_metadata: {
+            request_trace: "preserve-configured-metadata",
+            codex_security_surface: "spoofed",
+          },
+        },
         stateDirectory,
         credentialHome,
         surface,
       );
 
       expect(config).toMatchObject({
-        responses_api_metadata: { codex_security_surface: surface },
+        responses_api_metadata: {
+          request_trace: "preserve-configured-metadata",
+          codex_security_surface: surface,
+        },
       });
     },
   );

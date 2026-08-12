@@ -595,7 +595,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
-      if (authentication.method !== "stored_credentials") {
+      if (authentication.method !== "stored_credentials" && mode !== "deep") {
         await releaseCredentialHome?.();
         releaseCredentialHome = null;
       }
@@ -2588,7 +2588,14 @@ export function scanRuntimeCodexConfig(
     default_permissions: SCAN_PERMISSION_PROFILE,
     ...(surface === undefined
       ? {}
-      : { responses_api_metadata: { codex_security_surface: surface } }),
+      : {
+          responses_api_metadata: {
+            ...(isRecord(hardened["responses_api_metadata"])
+              ? hardened["responses_api_metadata"]
+              : {}),
+            codex_security_surface: surface,
+          },
+        }),
     permissions: {
       ...configuredPermissions,
       [SCAN_PERMISSION_PROFILE]: {

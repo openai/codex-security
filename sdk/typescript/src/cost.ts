@@ -722,8 +722,11 @@ function tokenUsage(value: unknown): ScanTokenUsage | null {
   const legacyCacheWrite = value["cache_write_tokens"];
   const cacheWrite =
     canonicalCacheWrite === 0 &&
+    isTokenCount(input) &&
+    isTokenCount(cached) &&
     isTokenCount(legacyCacheWrite) &&
-    legacyCacheWrite > 0
+    legacyCacheWrite > 0 &&
+    cached + legacyCacheWrite <= input
       ? legacyCacheWrite
       : canonicalCacheWrite ?? legacyCacheWrite ?? 0;
   const output = value["output_tokens"];
