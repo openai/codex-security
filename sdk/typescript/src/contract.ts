@@ -793,11 +793,12 @@ async function sha256ScanFile(
   try {
     throwIfAborted(signal);
     const digest = createHash("sha256");
-    for await (const chunk of file.createReadStream({
-      signal,
-      autoClose: false,
-    })) {
-      digest.update(chunk);
+    const buffer = Buffer.alloc(64 * 1024);
+    while (true) {
+      throwIfAborted(signal);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      digest.update(buffer.subarray(0, bytesRead));
     }
     throwIfAborted(signal);
     return digest.digest("hex");

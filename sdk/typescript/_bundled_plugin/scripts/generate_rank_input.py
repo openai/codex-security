@@ -37,8 +37,13 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
-from workbench_target import git_directory_snapshot_paths
+from rank_preview import (
+    DEFAULT_PREVIEW_BYTES,
+    TEXT_CODE_EXTENSIONS,
+    preview_for,
+    preview_for_bytes,
+)
+from workbench_target import git_blob_bytes, git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -652,14 +657,42 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
+    changed = [
+        (path, status)
+        for path, status in git_changed_paths(repo, args.base, args.head, args.mode)
+        if not path_is_excluded(path.relative_to(repo))
+        and path.suffix.lower() in TEXT_CODE_EXTENSIONS
+    ]
+    revision_paths = [
+        path.relative_to(repo)
+        for path, status in changed
+        if args.mode == "revisions" and status != "D"
+    ]
+    revision_blobs = dict(
+        zip(
+            revision_paths,
+            git_blob_bytes(
+                repo,
+                [f"{args.head}:{path.as_posix()}" for path in revision_paths],
+            ),
+        )
+    )
+
     rows: list[JsonRow] = []
-    for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
+    for path, status in changed:
         rel = path.relative_to(repo)
-        if path_is_excluded(rel) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
-            continue
 
         if status == "D":
             preview = ""
+        elif args.mode == "revisions":
+            content = revision_blobs[rel]
+            if content is None:
+                raise SystemExit(
+                    f"Unable to read committed diff blob: {args.head}:{rel.as_posix()}"
+                )
+            preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
+            if is_binary:
+                continue
         elif path.is_file():
             preview, is_binary = preview_for(path, args.preview_bytes)
             if is_binary:

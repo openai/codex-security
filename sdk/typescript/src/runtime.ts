@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, type Stats } from "node:fs";
+import { constants, existsSync, readdirSync, type Stats } from "node:fs";
 import {
   chmod,
   cp,
@@ -67,7 +67,13 @@ export interface PluginInstall {
 
 export interface CodexCommand {
   command: string;
-  prefixArgs: readonly string[];
+}
+
+interface CodexCommandResult {
+  success: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
 }
 
 export type ProcessEnvironment = Record<string, string | undefined>;
@@ -89,21 +95,26 @@ export interface WorkbenchCommandOptions {
   failureMessage?: string;
 }
 
+function environmentValue(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested]?.trim();
+  if (exact) return exact;
+  return Object.entries(environment)
+    .find(
+      ([name, value]) => name.toUpperCase() === requested && value?.trim(),
+    )?.[1]
+    ?.trim();
+}
+
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
-  const environmentValue = (requested: string): string | undefined => {
-    const exact = environment[requested]?.trim();
-    if (exact) return exact;
-    return Object.entries(environment)
-      .find(
-        ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-      )?.[1]
-      ?.trim();
-  };
-  const configured = environmentValue("CODEX_SECURITY_STATE_DIR");
+  const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
   if (configured !== undefined) return resolve(expandHome(configured));
-  const codexHome = environmentValue("CODEX_HOME") ?? join(homedir(), ".codex");
+  const codexHome =
+    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
   return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
 }
 
@@ -1967,8 +1978,14 @@ export async function createMarketplace(
   return marketplace;
 }
 
-export function resolveCodexCommand(): CodexCommand {
-  const { packageName, targetTriple } = codexPlatformPackage();
+export function resolveCodexCommand(
+  environment: ProcessEnvironment = process.env,
+): CodexCommand {
+  const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  if (configured) return { command: resolve(configured) };
+
+  const platform = process.platform === "android" ? "linux" : process.platform;
+  const packageName = `@openai/codex-${platform}-${process.arch}`;
   let packageJson: string;
   try {
     const require = createRequire(import.meta.url);
@@ -1982,45 +1999,22 @@ export function resolveCodexCommand(): CodexCommand {
       { cause: error },
     );
   }
+  const vendor = join(dirname(packageJson), "vendor");
+  const target = readdirSync(vendor, { withFileTypes: true }).find((entry) =>
+    entry.isDirectory(),
+  );
   const command = join(
-    dirname(packageJson),
-    "vendor",
-    targetTriple,
+    vendor,
+    target?.name ?? "",
     "bin",
     process.platform === "win32" ? "codex.exe" : "codex",
   );
-  if (!existsSync(command)) {
+  if (target === undefined || !existsSync(command)) {
     throw new PluginBootstrapError(
-      `The ${packageName} package does not contain the Codex executable for ${targetTriple}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
+      `The ${packageName} package does not contain the Codex executable. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
     );
   }
-  return { command, prefixArgs: [] };
-}
-
-export function codexPlatformPackage(
-  platform: NodeJS.Platform = process.platform,
-  architecture: string = process.arch,
-): { packageName: string; targetTriple: string } {
-  const key = `${platform}:${architecture}`;
-  const target: readonly [string, string] | undefined = {
-    "android:arm64": [
-      "@openai/codex-linux-arm64",
-      "aarch64-unknown-linux-musl",
-    ],
-    "android:x64": ["@openai/codex-linux-x64", "x86_64-unknown-linux-musl"],
-    "darwin:arm64": ["@openai/codex-darwin-arm64", "aarch64-apple-darwin"],
-    "darwin:x64": ["@openai/codex-darwin-x64", "x86_64-apple-darwin"],
-    "linux:arm64": ["@openai/codex-linux-arm64", "aarch64-unknown-linux-musl"],
-    "linux:x64": ["@openai/codex-linux-x64", "x86_64-unknown-linux-musl"],
-    "win32:arm64": ["@openai/codex-win32-arm64", "aarch64-pc-windows-msvc"],
-    "win32:x64": ["@openai/codex-win32-x64", "x86_64-pc-windows-msvc"],
-  }[key] as readonly [string, string] | undefined;
-  if (target === undefined) {
-    throw new PluginBootstrapError(
-      `Codex does not support this platform: ${platform} (${architecture}).`,
-    );
-  }
-  return { packageName: target[0], targetTriple: target[1] };
+  return { command };
 }
 
 export async function bootstrapPlugin(
@@ -2042,12 +2036,13 @@ export async function bootstrapPlugin(
   const { name, version } = await pluginMetadata(root);
   const marketplace = join(codexHome, "sdk-marketplace");
   throwIfSignalAborted(options.signal);
-  const command = options.codexCommand ?? resolveCodexCommand();
+  const command =
+    options.codexCommand ?? resolveCodexCommand(options.environment);
   const environment = {
     ...(options.environment ?? process.env),
     CODEX_HOME: codexHome,
   };
-  const run = options.runCodex ?? runCodex;
+  const run = options.runCodex ?? runPluginCommand;
   const existing = await lstat(marketplace).catch((error: unknown) => {
     if (nodeErrorCode(error) === "ENOENT") return null;
     throw error;
@@ -2234,8 +2229,7 @@ export function pluginExecutionEnvironment(
   return {
     ...environment,
     PYTHON: python,
-    CODEX_CLI_PATH:
-      environment["CODEX_CLI_PATH"]?.trim() || resolveCodexCommand().command,
+    CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
 }
 
@@ -2243,22 +2237,73 @@ export async function cleanupSdkDirectory(path: string): Promise<void> {
   await rm(path, { recursive: true, force: true });
 }
 
-async function runCodex(
+export async function runCodexCommand(
+  command: CodexCommand,
+  args: readonly string[],
+  environment: ProcessEnvironment,
+  input?: string,
+  signal?: AbortSignal,
+): Promise<CodexCommandResult> {
+  const child = spawn(command.command, [...args], {
+    env: environment,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+    signal,
+  });
+  let stdout = "";
+  let stderr = "";
+  let processError: Error | undefined;
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const completion = new Promise<CodexCommandResult>((resolve, reject) => {
+    child.once("error", (error) => {
+      processError = error;
+    });
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+      if (
+        !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
+          error.code ?? "",
+        )
+      )
+        processError = error;
+    });
+    child.once("close", (exitCode) =>
+      processError === undefined
+        ? resolve({ success: exitCode === 0, exitCode, stdout, stderr })
+        : reject(processError),
+    );
+  });
+  child.stdin.end(input);
+  return await completion;
+}
+
+async function runPluginCommand(
   command: CodexCommand,
   args: readonly string[],
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<string> {
   try {
-    const { stdout } = await execFile(
-      command.command,
-      [...command.prefixArgs, ...args],
-      {
-        env: environment,
-        encoding: "utf8",
-        signal,
-      },
+    const { success, exitCode, stdout, stderr } = await runCodexCommand(
+      command,
+      args,
+      environment,
+      undefined,
+      signal,
     );
+    if (!success) {
+      throw new Error(
+        stderr.trim() ||
+          stdout.trim() ||
+          `Codex exited with status ${exitCode}.`,
+      );
+    }
     return stdout;
   } catch (error) {
     const detail = processErrorDetail(error);
