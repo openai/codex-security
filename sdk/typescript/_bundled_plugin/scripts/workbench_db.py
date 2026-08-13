@@ -110,6 +110,7 @@ from workbench_target import (
     git_submodule_paths,
     git_target_metadata,
     git_worktree_context,
+    immutable_diff_content_digest,
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
@@ -337,12 +338,22 @@ def require_diff_target(
             )
             if supplied_base != parent:
                 raise SystemExit("Commit base revision must match the selected commit's parent.")
-        return {"kind": kind, "baseRevision": parent, "headRevision": head}
+        return {
+            "kind": kind,
+            "baseRevision": parent,
+            "headRevision": head,
+            "contentDigest": immutable_diff_content_digest(kind, parent, head),
+        }
     base = resolve_git_commit(target, base_revision or "", "Base revision")
     head = resolve_git_commit(target, head_revision or "", "Head revision")
     if base == head:
         raise SystemExit("Base and head revisions must identify different commits.")
-    return {"kind": kind, "baseRevision": base, "headRevision": head}
+    return {
+        "kind": kind,
+        "baseRevision": base,
+        "headRevision": head,
+        "contentDigest": immutable_diff_content_digest(kind, base, head),
+    }
 
 
 def inspect_setup_values(
@@ -504,8 +515,9 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
-            target["snapshotDigest"] = scan["diff_content_digest"]
+        diff_target = stored_diff_target(scan)
+        if diff_target and diff_target.get("contentDigest"):
+            target["snapshotDigest"] = diff_target["contentDigest"]
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
@@ -1622,6 +1634,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if head != current_head:
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
+        else:
+            diff_target["contentDigest"] = immutable_diff_content_digest("range", base, head)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (

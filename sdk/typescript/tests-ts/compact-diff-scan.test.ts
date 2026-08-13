@@ -1,6 +1,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -69,6 +70,36 @@ function python(script: string, ...args: string[]) {
     ["-B", join(PLUGIN_ROOT, "scripts", script), ...args],
     { encoding: "utf8" },
   );
+}
+
+function pythonWithState(stateDir: string, script: string, ...args: string[]) {
+  const command =
+    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(command).not.toBeNull();
+  return spawnSync(
+    command!,
+    ["-B", join(PLUGIN_ROOT, "scripts", script), ...args],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir },
+    },
+  );
+}
+
+function immutableDiffDigest(
+  kind: "commit" | "range",
+  baseRevision: string,
+  headRevision: string,
+): string {
+  const digest = createHash("sha256")
+    .update("codex-security-diff/v1\0")
+    .update(kind)
+    .update("\0")
+    .update(baseRevision)
+    .update("\0")
+    .update(headRevision)
+    .digest("hex");
+  return `codex-security-snapshot/v1:sha256:${digest}`;
 }
 
 function candidate(path: string): JsonObject {
@@ -281,6 +312,162 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
+  test("derives canonical digests for immutable and working-tree diffs", () => {
+    const { repository } = createRepository();
+    writeSource(repository, "app.ts", "export const value = 1;\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "first");
+    const first = git(repository, "rev-parse", "HEAD");
+    writeSource(repository, "app.ts", "export const value = 2;\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "second");
+    const second = git(repository, "rev-parse", "HEAD");
+    writeSource(repository, "app.ts", "export const value = 3;\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "third");
+    const third = git(repository, "rev-parse", "HEAD");
+
+    const inspect = (
+      kind: "commit" | "range" | "working_tree",
+      baseRevision?: string,
+      headRevision?: string,
+    ): JsonObject => {
+      const args = [
+        "inspect-setup",
+        "--target-path",
+        repository,
+        "--scope",
+        ".",
+        "--mode",
+        "diff",
+        "--diff-target-kind",
+        kind,
+      ];
+      if (baseRevision !== undefined)
+        args.push("--diff-base-revision", baseRevision);
+      if (headRevision !== undefined)
+        args.push("--diff-head-revision", headRevision);
+      const result = python("workbench_db.py", ...args);
+      expect(result.status, result.stderr).toBe(0);
+      return (JSON.parse(result.stdout) as { diffTarget: JsonObject }).diffTarget;
+    };
+
+    const commit = inspect("commit", second, third);
+    const range = inspect("range", second, third);
+    const repeatedRange = inspect("range", second, third);
+    const widerRange = inspect("range", first, third);
+    expect(commit["contentDigest"]).toBe(
+      immutableDiffDigest("commit", second, third),
+    );
+    expect(range["contentDigest"]).toBe(
+      immutableDiffDigest("range", second, third),
+    );
+    expect(repeatedRange["contentDigest"]).toBe(range["contentDigest"]);
+    expect(commit["contentDigest"]).not.toBe(range["contentDigest"]);
+    expect(widerRange["contentDigest"]).not.toBe(range["contentDigest"]);
+
+    writeSource(repository, "app.ts", "export const value = 4;\n");
+    const workingTree = inspect("working_tree");
+    const repeatedWorkingTree = inspect("working_tree");
+    expect(workingTree["contentDigest"]).toMatch(
+      /^codex-security-snapshot\/v1:sha256:[0-9a-f]{64}$/u,
+    );
+    expect(repeatedWorkingTree["contentDigest"]).toBe(
+      workingTree["contentDigest"],
+    );
+    writeSource(repository, "app.ts", "export const value = 5;\n");
+    expect(inspect("working_tree")["contentDigest"]).not.toBe(
+      workingTree["contentDigest"],
+    );
+  });
+
+  test("prepares CLI range completion with the canonical snapshot digest", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "app.ts", "export const value = 1;\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const baseRevision = git(repository, "rev-parse", "HEAD");
+    writeSource(repository, "app.ts", "export const value = 2;\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "head");
+    const headRevision = git(repository, "rev-parse", "HEAD");
+    const stateDir = join(root, "state");
+    const scanDir = join(root, "scan");
+    mkdirSync(stateDir);
+    mkdirSync(scanDir);
+
+    const registration = pythonWithState(
+      stateDir,
+      "workbench_db.py",
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "standard",
+        repository,
+        target: {
+          kind: "refs",
+          paths: [],
+          base: baseRevision,
+          head: headRevision,
+        },
+      }),
+    );
+    expect(registration.status, registration.stderr).toBe(0);
+    const scanId = (JSON.parse(registration.stdout) as { scanId: string })
+      .scanId;
+
+    cpSync(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
+      recursive: true,
+    });
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      scan: {
+        id: string;
+        sealedAt?: string;
+        artifacts?: unknown;
+        target: JsonObject;
+      };
+    };
+    manifest.scan.id = scanId;
+    manifest.scan.target["kind"] = "git_diff";
+    delete manifest.scan.target["snapshotDigest"];
+    delete manifest.scan.sealedAt;
+    delete manifest.scan.artifacts;
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+
+    for (const name of ["findings.json", "coverage.json"]) {
+      const path = join(scanDir, name);
+      const artifact = JSON.parse(readFileSync(path, "utf8")) as JsonObject;
+      artifact["scanId"] = scanId;
+      writeFileSync(path, `${JSON.stringify(artifact)}\n`);
+    }
+    writeFileSync(join(scanDir, "report.md"), "# Draft report\n");
+
+    const prepared = pythonWithState(
+      stateDir,
+      "workbench_db.py",
+      "prepare-scan-completion",
+      "--scan-id",
+      scanId,
+    );
+    expect(prepared.status, prepared.stderr).toBe(0);
+    const target = (
+      (
+        JSON.parse(readFileSync(manifestPath, "utf8")) as {
+          scan: { target: JsonObject };
+        }
+      ).scan
+    ).target;
+    expect(target["snapshotDigest"]).toBe(
+      immutableDiffDigest("range", baseRevision, headRevision),
+    );
+  });
+
   test("runs the compact MCP diff lifecycle through a completed scan", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
@@ -407,16 +594,8 @@ describe("compact diff scan", () => {
       const target = (
         (completed["manifest"] as JsonObject)["scan"] as JsonObject
       )["target"] as JsonObject;
-      const digest = createHash("sha256")
-        .update("codex-security-diff/v1\0")
-        .update("range")
-        .update("\0")
-        .update(baseRevision)
-        .update("\0")
-        .update(headRevision)
-        .digest("hex");
       expect(target["snapshotDigest"]).toBe(
-        `codex-security-snapshot/v1:sha256:${digest}`,
+        immutableDiffDigest("range", baseRevision, headRevision),
       );
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",

@@ -20,6 +20,7 @@ from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
     git_revision,
+    immutable_diff_content_digest,
     worktree_content_digest,
 )
 from workbench_validation import optional_text, user_text
@@ -83,6 +84,14 @@ def stored_diff_target(row: sqlite3.Row) -> dict[str, str] | None:
     }
     if row["diff_content_digest"]:
         target["contentDigest"] = row["diff_content_digest"]
+    elif (
+        target["kind"] in {"commit", "range"}
+        and target["baseRevision"]
+        and target["headRevision"]
+    ):
+        target["contentDigest"] = immutable_diff_content_digest(
+            target["kind"], target["baseRevision"], target["headRevision"]
+        )
     return target
 
 

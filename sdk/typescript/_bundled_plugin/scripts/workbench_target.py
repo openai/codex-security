@@ -80,6 +80,14 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
+def immutable_diff_content_digest(kind: str, base_revision: str, head_revision: str) -> str:
+    payload = "\0".join(
+        ("codex-security-diff/v1", kind, base_revision, head_revision)
+    ).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    return f"codex-security-snapshot/v1:sha256:{digest}"
+
+
 def worktree_content_digest(target: Path) -> str:
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
