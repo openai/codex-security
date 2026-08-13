@@ -739,11 +739,49 @@ def build_report_markdown(
             else:
                 lines.extend(["", *_finding_section(number, finding)])
     else:
+        deferred = coverage.get("deferred", [])
+        no_source_review = (
+            coverage.get("completeness") == "partial"
+            and isinstance(deferred, list)
+            and any(
+                isinstance(item, dict)
+                and item.get("reason")
+                == "The configured discovery time limit elapsed before any source review completed."
+                for item in deferred
+            )
+        )
+        budget_exhausted = (
+            coverage.get("completeness") == "partial"
+            and isinstance(deferred, list)
+            and any(
+                isinstance(item, dict)
+                and isinstance(item.get("reason"), str)
+                and (
+                    item["reason"]
+                    == "Validation was deferred because the scan reached its cost limit."
+                    or item["reason"].startswith(
+                        "Validation was deferred because the scan reached its cost limit: "
+                    )
+                )
+                for item in deferred
+            )
+        )
         lines.extend(
             [
                 "### No findings",
                 "",
-                "No reportable findings survived the canonical discovery, validation, and reportability gates.",
+                (
+                    "No source review completed before the configured time limit. "
+                    "No vulnerability conclusion can be drawn."
+                    if no_source_review
+                    else (
+                        "No findings were validated before the scan reached its cost limit. "
+                        "Review the deferred candidates in Open Questions And Follow Up."
+                        if budget_exhausted
+                        else "No reportable findings survived the canonical discovery, validation, "
+                        "and reportability gates."
+                    )
+                ),
             ]
         )
     if hardening_portfolio_path is not None:
