@@ -125,8 +125,10 @@ describe("plugin runtime preparation", () => {
     ).toBe(true);
   });
 
-  test("forwards bundled Bedrock credentials through the MCP worker environment", async () => {
-    const awsKeys = [
+  test("forwards configured provider credentials through the MCP worker environment", async () => {
+    const providerKeys = [
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
       "AWS_ACCESS_KEY_ID",
       "AWS_SECRET_ACCESS_KEY",
@@ -150,7 +152,7 @@ describe("plugin runtime preparation", () => {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const parentEnvironment = Object.fromEntries(
-      awsKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
+      providerKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
     );
     const allowed = new Set(
       configuration.mcpServers["codex-security"]!.env_vars,
