@@ -1447,8 +1447,7 @@ def complete_scan_locked(
         claim_token,
         error_message="Scan completion is owned by another continuation.",
     )
-    if scan["recipe_json"] is None:
-        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+    deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
     warning = scan_target_warning(scan)
@@ -1541,8 +1540,7 @@ def complete_scan_locked(
             return scan_context(connection, scan["id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
-        if scan["recipe_json"] is None:
-            deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         handoff.require_current_continuation(
             scan,
             claim_token,
