@@ -350,7 +350,8 @@ describe("compact diff scan", () => {
         args.push("--diff-head-revision", headRevision);
       const result = python("workbench_db.py", ...args);
       expect(result.status, result.stderr).toBe(0);
-      return (JSON.parse(result.stdout) as { diffTarget: JsonObject }).diffTarget;
+      return (JSON.parse(result.stdout) as { diffTarget: JsonObject })
+        .diffTarget;
     };
 
     const commit = inspect("commit", second, third);
@@ -460,12 +461,10 @@ describe("compact diff scan", () => {
     );
     expect(prepared.status, prepared.stderr).toBe(0);
     const target = (
-      (
-        JSON.parse(readFileSync(manifestPath, "utf8")) as {
-          scan: { target: JsonObject };
-        }
-      ).scan
-    ).target;
+      JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        scan: { target: JsonObject };
+      }
+    ).scan.target;
     expect(target["snapshotDigest"]).toBe(
       immutableDiffDigest("range", baseRevision, headRevision),
     );
