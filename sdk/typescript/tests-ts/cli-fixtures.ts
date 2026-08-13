@@ -1,5 +1,3 @@
-import { lstat, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { main } from "../src/cli.js";
 import type {
   CodexSecurity,
@@ -16,7 +14,7 @@ import type {
   ScanWorkerStatus,
   SeverityLevel,
 } from "../src/index.js";
-import { CodexSecurityError, ScanResult } from "../src/index.js";
+import { ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
 
 type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
@@ -261,25 +259,13 @@ export function dependencies(
       (await options.onWorkbench?.(args)) ?? { scans: [] },
     matchFindings: async (input) =>
       (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
-    exportFindings: async (arguments_) => {
-      const contents = new TextEncoder().encode(
+    exportFindings: async (arguments_) =>
+      new TextEncoder().encode(
         arguments_.format === "csv"
           ? "occurrence_id,finding_id\n"
           : arguments_.format === "json"
             ? '{"documentType":"codex-security.findings"}\n'
             : '{"version":"2.1.0"}\n',
-      );
-      if (arguments_.output !== "-") {
-        const metadata = await lstat(arguments_.output).catch(() => undefined);
-        if (metadata?.isSymbolicLink()) {
-          throw new CodexSecurityError(
-            "results.sarif: expected a regular non-symlink file",
-          );
-        }
-        await mkdir(join(arguments_.output, ".."), { recursive: true });
-        await writeFile(arguments_.output, contents, { mode: 0o600 });
-      }
-      return contents;
-    },
+      ),
   };
 }
