@@ -1217,26 +1217,7 @@ export class CodexSecurity {
                 mode: 0o600,
                 signal,
               });
-              try {
-                await rename(temporary, path);
-              } catch (error) {
-                if (
-                  process.platform !== "win32" ||
-                  (error as NodeJS.ErrnoException).code !== "EPERM"
-                ) {
-                  throw error;
-                }
-                await chmod(
-                  await requireScanFile(
-                    scanDir,
-                    artifact.name,
-                    artifact.name,
-                    signal,
-                  ),
-                  0o600,
-                );
-                await rename(temporary, path);
-              }
+              await rename(temporary, path);
             } finally {
               await rm(temporary, { force: true });
             }
