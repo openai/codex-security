@@ -740,6 +740,7 @@ export class CodexSecurity {
         codexHome: runtime.codexHome,
         model,
         repository: repo,
+        scanDirectory: scanDir,
         maxCostUsd: options.maxCostUsd,
         onActivity:
           options.onActivity === undefined
