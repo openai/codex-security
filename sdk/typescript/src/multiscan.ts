@@ -147,7 +147,7 @@ async function runCampaign(
           : await legacyIncompleteCoverage(receipt);
       if (coverage !== undefined) {
         incomplete += 1;
-        options.onProgress?.({
+        notifyProgress(options, {
           repository: task.id,
           status: "completed_with_incomplete_coverage",
           attempt: receipt.attempt,
@@ -193,7 +193,7 @@ async function runCampaign(
           `attempt-${attempt}`,
         );
         const progress = { repository: task.id, attempt };
-        options.onProgress?.({ ...progress, status: "started" });
+        notifyProgress(options, { ...progress, status: "started" });
         let failure: string | undefined;
         let warning: string | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
@@ -234,7 +234,11 @@ async function runCampaign(
               ? {}
               : { postScanPrompt: options.postScanPrompt }),
             onWarning: (warning) =>
-              options.onProgress?.({ ...progress, status: "started", warning }),
+              notifyProgress(options, {
+                ...progress,
+                status: "started",
+                warning,
+              }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
@@ -272,7 +276,7 @@ async function runCampaign(
             ...(warning === undefined ? {} : { warning }),
           })}\n`,
         );
-        options.onProgress?.({
+        notifyProgress(options, {
           ...progress,
           status,
           ...(failure === undefined ? {} : { error: failure }),
@@ -310,6 +314,15 @@ async function runCampaign(
     skipped,
     resultsPath: ledger,
   };
+}
+
+function notifyProgress(
+  options: MultiscanOptions,
+  event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
+): void {
+  try {
+    void Promise.resolve(options.onProgress?.(event)).catch(() => {});
+  } catch {}
 }
 
 async function ensureOutputDirectory(path: string): Promise<void> {
