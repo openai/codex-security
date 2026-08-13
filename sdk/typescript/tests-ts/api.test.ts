@@ -4819,10 +4819,12 @@ describe("CodexSecurity orchestration", () => {
       join(repository, "tracked.ts"),
       "export const value = 'base';\n",
     );
+    await mkdir(join(repository, "src"));
+    await writeFile(join(repository, "src", "context.ts"), "export {};\n");
     const git = (...args: string[]) =>
       execFileSync("git", args, { cwd: repository, stdio: "pipe" });
     git("init", "-q", "-b", "main");
-    git("add", "tracked.ts");
+    git("add", ".");
     git(
       "-c",
       "user.name=Codex Security",
@@ -4866,6 +4868,15 @@ describe("CodexSecurity orchestration", () => {
         target: DiffTarget.refs({ base: "main", head: "feature" }),
       }),
     ).rejects.toThrow("clean repository checkout");
+
+    git("restore", "tracked.ts");
+    git("update-index", "--skip-worktree", "src/context.ts");
+    await rm(join(repository, "src", "context.ts"));
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base: "main", head: "feature" }),
+      }),
+    ).rejects.toThrow("Sparse checkouts are not supported");
     await client.close();
   });
 

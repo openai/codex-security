@@ -303,6 +303,13 @@ export async function validateCommittedDiffCheckout(
       "Committed-diff scans require a clean repository checkout. Commit, stash, or remove local changes and retry. Use `git stash --include-untracked` to stash untracked files.",
     );
   }
+
+  const tracked = await gitOutput(repository, ["ls-files", "-t", "-z"], signal);
+  if (tracked.split("\0").some((entry) => entry.startsWith("S "))) {
+    throw new InvalidTargetError(
+      "Committed-diff scans require a full repository checkout. Sparse checkouts are not supported; materialize skipped tracked files and retry.",
+    );
+  }
 }
 
 export function validateMode(target: NormalizedTarget, mode: ScanMode): void {
