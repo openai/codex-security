@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { confirm, input, search } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
+import { hardenScanOutputDirectory } from "./runtime.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -178,8 +179,15 @@ export async function runBulkScanWizard(
   signal?.throwIfAborted();
 
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
+  const prepared = await lstat(outputDir);
+  if (!prepared.isDirectory() || prepared.isSymbolicLink()) {
+    throw new Error("The scan output must be a non-symlink directory.");
+  }
+  const secured = await hardenScanOutputDirectory(outputDir);
+  const canonicalOutput = secured.path;
+  const canonicalInput = join(canonicalOutput, "repositories.csv");
   await writeFile(
-    inputPath,
+    canonicalInput,
     `${Papa.unparse(
       repositories.map(({ fullName, url, revision }) => ({
         id: repositoryId(fullName),
@@ -189,7 +197,11 @@ export async function runBulkScanWizard(
     )}\n`,
     { flag: "wx", mode: 0o600, ...(signal === undefined ? {} : { signal }) },
   );
-  return { inputPath, outputDir, githubHost };
+  return {
+    inputPath: canonicalInput,
+    outputDir: canonicalOutput,
+    githubHost,
+  };
 }
 
 async function selectGitHubOwner(

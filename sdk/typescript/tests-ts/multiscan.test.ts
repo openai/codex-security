@@ -2,11 +2,13 @@ import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   symlink,
@@ -41,7 +43,9 @@ async function fixture(): Promise<{
   input: string;
   output: string;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-multiscan-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-multiscan-")),
+  );
   temporaryDirectories.push(root);
   return {
     root,
@@ -1480,7 +1484,10 @@ describe("multiscan", () => {
       const preserved = join(external, "victim", "keep.txt");
       await mkdir(join(external, "victim"), { recursive: true });
       await writeFile(preserved, "preserved\n");
-      if (directory) await mkdir(paths.output);
+      if (directory) {
+        await mkdir(paths.output, { mode: 0o700 });
+        if (process.platform !== "win32") await chmod(paths.output, 0o700);
+      }
       await symlink(
         external,
         directory ? join(paths.output, directory) : paths.output,

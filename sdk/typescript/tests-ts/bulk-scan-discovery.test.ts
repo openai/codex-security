@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -29,7 +30,9 @@ afterEach(async () => {
 });
 
 async function temporaryDirectory(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-bulk-discovery-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-bulk-discovery-")),
+  );
   temporaryDirectories.push(root);
   return root;
 }
