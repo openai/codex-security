@@ -233,6 +233,8 @@ async function runCampaign(
             ...(options.postScanPrompt === undefined
               ? {}
               : { postScanPrompt: options.postScanPrompt }),
+            onWarning: (warning) =>
+              options.onProgress?.({ ...progress, status: "started", warning }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;

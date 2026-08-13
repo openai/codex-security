@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -1162,19 +1163,81 @@ export class CodexSecurity {
       if (runPostScan !== null) {
         const followUp = runPostScan;
         runPostScan = null;
-        await runScanEvents({
-          thread,
-          events: (await followUp()).events,
-          signal,
-          scanDir,
-          pluginRoot: runtime.plugin.installedRoot,
-          expectation,
-          model,
-          onReconnect: options.onReconnect,
-          onWorkerStatus: options.onWorkerStatus,
-          onObserverError: options.onObserverError,
-        });
-        checkOpen();
+        const completedArtifacts = await Promise.all(
+          [
+            ...new Set([
+              "scan-manifest.json",
+              "findings.json",
+              "coverage.json",
+              "report.md",
+              ...result.manifest.scan.artifacts.map(
+                (artifact) => artifact.path,
+              ),
+            ]),
+          ].map(async (name) => ({
+            name,
+            contents: await readFile(
+              await requireScanFile(scanDir, name, name, signal),
+              { signal },
+            ),
+          })),
+        );
+        try {
+          await runScanEvents({
+            thread,
+            events: (await followUp()).events,
+            signal,
+            scanDir,
+            pluginRoot: runtime.plugin.installedRoot,
+            expectation,
+            model,
+            onReconnect: options.onReconnect,
+            onWorkerStatus: options.onWorkerStatus,
+            onObserverError: options.onObserverError,
+          });
+          checkOpen();
+        } catch (error) {
+          if (signal.aborted || this.#closed) throw error;
+          for (const artifact of completedArtifacts) {
+            const path = join(scanDir, artifact.name);
+            const current = await readFile(path, { signal }).catch(
+              (readError: NodeJS.ErrnoException) => {
+                if (readError.code !== "ENOENT") throw readError;
+                return null;
+              },
+            );
+            if (current?.equals(artifact.contents)) continue;
+            const temporary = join(
+              dirname(path),
+              `.${randomUUID()}.${basename(path)}.restore`,
+            );
+            try {
+              await writeFile(temporary, artifact.contents, {
+                flag: "wx",
+                mode: 0o600,
+                signal,
+              });
+              await rename(temporary, path);
+            } finally {
+              await rm(temporary, { force: true });
+            }
+          }
+          await collectResult(
+            result.turnResult,
+            result.threadId,
+            scanDir,
+            runtime.plugin.installedRoot,
+            expectation,
+            signal,
+            true,
+          );
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not run post-scan instructions: ${errorMessage(error)}`,
+          );
+        }
       }
       try {
         const runWorkbench = (args: readonly string[]) =>

@@ -3083,7 +3083,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("surfaces post-scan failures without reopening a completed scan", async () => {
+  test("warns about post-scan failures without failing a completed scan", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3092,6 +3092,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const commands: Array<readonly string[]> = [];
+    const warnings: string[] = [];
     let turns = 0;
 
     const client = new TestClient(
@@ -3129,14 +3130,21 @@ describe("CodexSecurity orchestration", () => {
     );
 
     await expect(
-      client.run(repository, { postScanPrompt: "Draft confirmed fixes." }),
-    ).rejects.toThrow("Could not draft fixes.");
+      client.run(repository, {
+        postScanPrompt: "Draft confirmed fixes.",
+        onWarning: (warning) => warnings.push(warning),
+      }),
+    ).resolves.toMatchObject({ scanDir });
+    expect(warnings).toEqual([
+      "Could not run post-scan instructions: Could not draft fixes.",
+    ]);
     expect(commands.map((command) => command[0])).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
       "set-scan-thread",
       "prepare-scan-completion",
       "complete-scan",
+      "list-global-findings",
     ]);
     await client.close();
   });
