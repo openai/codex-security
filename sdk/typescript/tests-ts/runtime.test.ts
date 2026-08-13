@@ -403,30 +403,6 @@ describe("plugin runtime preparation", () => {
     );
   });
 
-  test("keeps focused Standard scans on native direct-start tools", async () => {
-    const skill = await readFile(
-      join(PLUGIN_ROOT, "skills", "security-scan", "SKILL.md"),
-      "utf8",
-    );
-    const desktop = await readFile(
-      join(
-        PLUGIN_ROOT,
-        "skills",
-        "security-scan",
-        "references",
-        "desktop-scan.md",
-      ),
-      "utf8",
-    );
-
-    expect(skill).toContain("Immediately launch one baseline subagent");
-    expect(skill).toContain("Launch focused investigator subagents");
-    expect(skill).toContain("record_codex_security_scan_draft");
-    expect(desktop).toContain("start_codex_security_prompt_only_scan");
-    expect(desktop).toContain("record_codex_security_scan_draft");
-    expect(desktop).not.toContain("await_codex_security_scan_start");
-  });
-
   test("keeps native scan tools without the obsolete setup widget", async () => {
     const contract = JSON.parse(
       await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),

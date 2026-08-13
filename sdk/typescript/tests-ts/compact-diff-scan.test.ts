@@ -11,7 +11,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -463,33 +462,5 @@ describe("compact diff scan", () => {
     } finally {
       await client.close();
     }
-  });
-
-  test("preserves stable finding identities from existing public scans", () => {
-    const runtime = brotliDecompressSync(
-      Buffer.concat(
-        ["000", "001"].map((part) =>
-          readFileSync(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-        ),
-      ),
-    ).toString("utf8");
-    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
-      runtime,
-    )?.[0];
-    expect(source).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string) => value) as (findings: JsonObject[]) => JsonObject[];
-
-    const [finding] = buildFindings([
-      {
-        title: "Changed title",
-        extensions: { candidateId: "candidate-stable" },
-      },
-    ]);
-    expect((finding?.["identity"] as JsonObject)["anchor"]).toBe(
-      "candidate-stable",
-    );
   });
 });

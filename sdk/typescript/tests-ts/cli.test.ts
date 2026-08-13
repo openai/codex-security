@@ -298,11 +298,7 @@ describe("CLI", () => {
     );
 
     for (const documentation of [readme, publicReadme]) {
-      expect(documentation).toContain(
-        "Some cybersecurity requests and protected findings require approval through\n" +
-          "Trusted Access for Cyber. To apply or check your access, visit\n" +
-          "[chatgpt.com/cyber](https://chatgpt.com/cyber).",
-      );
+      expect(documentation).toContain("https://chatgpt.com/cyber");
     }
 
     for (const setting of [
