@@ -398,8 +398,8 @@ describe("CLI", () => {
       ).toBe(2);
       expect(await readFile(outside, "utf8")).toBe("unchanged\n");
       expect((await lstat(output)).isSymbolicLink()).toBe(true);
-      expect(stderr.text()).toBe(
-        "codex-security: results.sarif: expected a regular non-symlink file\n",
+      expect(stderr.text()).toMatch(
+        /codex-security: results\.sarif: (?:expected a regular non-symlink file|\[Errno 22\] scan-local files must not be reparse points)/u,
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
