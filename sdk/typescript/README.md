@@ -657,7 +657,7 @@ from the root of the Codex Security repository:
 mkdir -p results state
 chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.4
+export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
 docker compose pull codex-security
 docker compose run --rm codex-security login --device-auth
 docker compose run --rm codex-security
