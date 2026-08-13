@@ -64,29 +64,55 @@ def git_blob_bytes(
     if completed.returncode != 0:
         return [None] * len(object_names)
 
-    output = completed.stdout
+    try:
+        return _decode_git_batch_blobs(completed.stdout, len(object_names))
+    except ValueError:
+        return [None] * len(object_names)
+
+
+def _decode_git_batch_blobs(output: bytes, count: int) -> list[bytes | None]:
     blobs: list[bytes | None] = []
     offset = 0
-    for _ in object_names:
-        header_end = output.find(b"\0", offset)
-        if header_end < 0:
-            return [None] * len(object_names)
-        header = output[offset:header_end]
-        offset = header_end + 1
-        fields = header.rsplit(b" ", 2)
-        if len(fields) != 3 or fields[1] != b"blob":
+    for _ in range(count):
+        header, offset = _read_nul_field(output, offset)
+        size = _git_batch_blob_size(header)
+        if size is None:
             blobs.append(None)
             continue
-        try:
-            size = int(fields[2])
-        except ValueError:
-            return [None] * len(object_names)
-        content_end = offset + size
-        if output[content_end : content_end + 1] != b"\0":
-            return [None] * len(object_names)
-        blobs.append(output[offset:content_end])
-        offset = content_end + 1
+        blob, offset = _read_sized_nul_field(output, offset, size)
+        blobs.append(blob)
     return blobs
+
+
+def _read_nul_field(output: bytes, offset: int) -> tuple[bytes, int]:
+    end = output.find(b"\0", offset)
+    if end < 0:
+        raise ValueError("missing NUL terminator")
+    return output[offset:end], end + 1
+
+
+def _git_batch_blob_size(header: bytes) -> int | None:
+    fields = header.rsplit(b" ", 2)
+    if len(fields) != 3 or fields[1] != b"blob":
+        return None
+    try:
+        size = int(fields[2])
+    except ValueError as error:
+        raise ValueError("invalid blob size") from error
+    if size < 0:
+        raise ValueError("invalid blob size")
+    return size
+
+
+def _read_sized_nul_field(
+    output: bytes,
+    offset: int,
+    size: int,
+) -> tuple[bytes, int]:
+    end = offset + size
+    if output[end : end + 1] != b"\0":
+        raise ValueError("missing blob terminator")
+    return output[offset:end], end + 1
 
 
 def git_command(

@@ -121,6 +121,7 @@ def generate_diff_in_scope_files(
         is_binary_sample,
         preview_for,
     )
+    from workbench_target import git_blob_bytes
 
     rows: list[bytes] = []
     try:
@@ -140,24 +141,36 @@ def generate_diff_in_scope_files(
         else:
             changed = git_changed_paths(repository, base, head, mode)
 
-        for path, status in changed:
+        eligible = [
+            (path, status)
+            for path, status in changed
+            if not path_is_excluded(path.relative_to(repository))
+            and path.suffix.lower() in TEXT_CODE_EXTENSIONS
+        ]
+        revision_paths = [
+            path.relative_to(repository)
+            for path, status in eligible
+            if mode == "revisions" and status != "D"
+        ]
+        revision_blobs = dict(
+            zip(
+                revision_paths,
+                git_blob_bytes(
+                    repository,
+                    [f"{head}:{path.as_posix()}" for path in revision_paths],
+                ),
+            )
+        )
+
+        for path, status in eligible:
             relative = path.relative_to(repository)
-            if path_is_excluded(relative) or path.suffix.lower() not in TEXT_CODE_EXTENSIONS:
-                continue
             if status != "D":
                 if mode == "revisions":
-                    contents = subprocess.run(
-                        [
-                            "git",
-                            "-C",
-                            str(repository),
-                            "cat-file",
-                            "blob",
-                            f"{head}:{relative.as_posix()}",
-                        ],
-                        capture_output=True,
-                        check=True,
-                    ).stdout
+                    contents = revision_blobs[relative]
+                    if contents is None:
+                        raise InventoryError(
+                            f"could not read committed diff blob: {head}:{relative.as_posix()}"
+                        )
                     if is_binary_sample(contents):
                         continue
                 elif (
