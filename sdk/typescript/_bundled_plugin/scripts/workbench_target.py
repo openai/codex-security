@@ -40,10 +40,60 @@ def git_bytes(
     return completed.stdout if completed.returncode == 0 else None
 
 
+def git_blob_bytes(
+    target: Path,
+    object_names: list[str],
+    *,
+    git_dir: Path | None = None,
+    work_tree: Path | None = None,
+) -> list[bytes | None]:
+    if not object_names:
+        return []
+
+    request = b"\0".join(os.fsencode(name) for name in object_names) + b"\0"
+    completed = git_command(
+        target,
+        "cat-file",
+        "--batch",
+        "-Z",
+        text=False,
+        input_data=request,
+        git_dir=git_dir,
+        work_tree=work_tree,
+    )
+    if completed.returncode != 0:
+        return [None] * len(object_names)
+
+    output = completed.stdout
+    blobs: list[bytes | None] = []
+    offset = 0
+    for _ in object_names:
+        header_end = output.find(b"\0", offset)
+        if header_end < 0:
+            return [None] * len(object_names)
+        header = output[offset:header_end]
+        offset = header_end + 1
+        fields = header.rsplit(b" ", 2)
+        if len(fields) != 3 or fields[1] != b"blob":
+            blobs.append(None)
+            continue
+        try:
+            size = int(fields[2])
+        except ValueError:
+            return [None] * len(object_names)
+        content_end = offset + size
+        if output[content_end : content_end + 1] != b"\0":
+            return [None] * len(object_names)
+        blobs.append(output[offset:content_end])
+        offset = content_end + 1
+    return blobs
+
+
 def git_command(
     target: Path,
     *args: str,
     text: bool,
+    input_data: str | bytes | None = None,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
@@ -65,6 +115,7 @@ def git_command(
             capture_output=True,
             env=environment,
             text=text,
+            input=input_data,
         )
     except FileNotFoundError:
         # Git is optional for Codebase scans. Treat an unavailable executable like
