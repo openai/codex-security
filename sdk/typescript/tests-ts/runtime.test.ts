@@ -74,6 +74,7 @@ import {
   verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -838,6 +839,14 @@ describe("plugin runtime preparation", () => {
   });
 
   test("cancels configured plugin directory discovery", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "cancels configured plugin directory discovery",
+      )
+    ) {
+      return;
+    }
     const cancellationRoot = await temporaryDirectory();
     const cancellationSource = await plugin(cancellationRoot);
     const cancellationDirectory = join(cancellationSource, "many-files");
@@ -954,6 +963,14 @@ describe("plugin runtime preparation", () => {
   testPosix(
     "rejects a queued plugin directory replaced with a symlink",
     async () => {
+      if (
+        runMockInSubprocess(
+          import.meta.path,
+          "rejects a queued plugin directory replaced with a symlink",
+        )
+      ) {
+        return;
+      }
       const root = await temporaryDirectory();
       const selected = await plugin(root);
       const scripts = join(selected, "scripts");
@@ -1259,6 +1276,14 @@ describe("plugin runtime preparation", () => {
   });
 
   test("imports ambient auth when credential files do not support hard links", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "imports ambient auth when credential files do not support hard links",
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const ambient = join(root, "ambient");
     const isolated = join(root, "isolated");
@@ -2180,6 +2205,14 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("retries Windows credential verification when a descendant disappears", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "retries Windows credential verification when a descendant disappears",
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const home = join(root, "home");
     const temporary = join(home, ".auth-temporary");
@@ -2217,6 +2250,14 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test("rejects Windows credential descendants that repeatedly disappear", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "rejects Windows credential descendants that repeatedly disappear",
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const home = join(root, "home");
     const credential = join(home, "auth.json");

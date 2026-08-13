@@ -52,6 +52,7 @@ import {
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
@@ -5921,6 +5922,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
   });
 
   test("cleans the bootstrap workspace when credential-home cleanup fails", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "cleans the bootstrap workspace when credential-home cleanup fails",
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -5976,6 +5985,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
   });
 
   test("attempts both preparation cleanups and preserves the preparation and cleanup failures", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "attempts both preparation cleanups and preserves the preparation and cleanup failures",
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);

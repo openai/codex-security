@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurityError, type ScanOptions } from "../src/index.js";
 import {
@@ -24,16 +24,25 @@ import {
   fakeResult,
 } from "./support/cli.js";
 
+let stateDirectory: string;
+
+beforeEach(async () => {
+  stateDirectory = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-cli-authentication-")),
+  );
+});
+
+afterEach(async () => {
+  await rm(stateDirectory, { recursive: true, force: true });
+});
+
 function dependencies(
   options: Parameters<typeof cliDependencies>[0] = {},
 ): ReturnType<typeof cliDependencies> {
   return cliDependencies({
     ...options,
     environment: {
-      CODEX_SECURITY_STATE_DIR: join(
-        tmpdir(),
-        `codex-security-cli-authentication-${process.pid}`,
-      ),
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
       ...options.environment,
     },
   });
@@ -69,8 +78,6 @@ describe("CLI authentication", () => {
   });
 
   test("uses the same stable credential home for login, status, and logout", async () => {
-    const stateDirectory = join(tmpdir(), "codex-security-managed-auth-state");
-    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     const expectedHome = await realpath(
       await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,
