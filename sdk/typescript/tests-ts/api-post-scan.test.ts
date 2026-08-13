@@ -126,9 +126,10 @@ describe("completed scan follow-up instructions", () => {
         },
       );
 
-      await expect(
-        client.run(repository, { postScanPrompt: "Draft confirmed fixes." }),
-      ).resolves.toMatchObject({ scanDir });
+      const result = await client.run(repository, {
+        postScanPrompt: "Draft confirmed fixes.",
+      });
+      expect(result).toMatchObject({ scanDir });
       expect(await readFile(join(scanDir, artifact))).toEqual(original);
       await client.close();
     },
