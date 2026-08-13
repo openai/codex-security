@@ -437,6 +437,23 @@ describe("malformed scan artifact recovery", () => {
     expect((stored["scan"] as ScanSummary).progress.status).toBe("failed");
   });
 
+  test("keeps explicit scan cancellation distinct from failure", async () => {
+    const fixture = await startDraftScan();
+
+    await workbench(fixture, ["cancel-scan", "--scan-id", fixture.scanId]);
+    const stored = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+
+    expect(stored["scan"]).toMatchObject({
+      canceledAt: expect.any(String),
+      failureMessage: null,
+      progress: { status: "canceled" },
+    });
+  });
+
   test("normalizes finding identities and persists recovery warnings", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
