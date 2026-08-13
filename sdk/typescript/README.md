@@ -217,7 +217,7 @@ npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --su
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
-npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3
+npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3 --max-cost 25
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
@@ -485,6 +485,7 @@ it returns a sealed partial report with any completed findings and lists
 unvalidated candidates as follow-up work. Requests already in progress can
 finish above the limit; preparing the partial report makes no additional model
 requests. Incomplete coverage retains its existing exit code.
+For `bulk-scan`, the limit applies separately to each repository attempt.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.

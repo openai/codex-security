@@ -20,7 +20,7 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
-import { safeErrorMessage } from "./errors.js";
+import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
@@ -62,6 +62,7 @@ export interface MultiscanOptions {
   workers: number;
   mode: ScanMode;
   maxAttempts: number;
+  maxCostUsd?: number;
   scanPrompt?: string;
   postScanPrompt?: string;
   config: CodexSecurityConfig;
@@ -198,6 +199,7 @@ async function runCampaign(
         let warning: string | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        let exhaustedBudget = false;
         try {
           await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
           await rm(checkout, { recursive: true, force: true });
@@ -233,6 +235,9 @@ async function runCampaign(
             ...(options.postScanPrompt === undefined
               ? {}
               : { postScanPrompt: options.postScanPrompt }),
+            ...(options.maxCostUsd === undefined
+              ? {}
+              : { maxCostUsd: options.maxCostUsd }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
@@ -247,6 +252,10 @@ async function runCampaign(
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();
+          if (error instanceof ScanCostLimitExceededError) {
+            cost = error.cost;
+            exhaustedBudget = true;
+          }
           failure = safeErrorMessage(error);
         } finally {
           await rm(checkout, { recursive: true, force: true });
@@ -279,6 +288,10 @@ async function runCampaign(
         if (failure === undefined) {
           if (warning === undefined) completed += 1;
           else incomplete += 1;
+          break;
+        }
+        if (exhaustedBudget) {
+          failed += 1;
           break;
         }
         if (retry === options.maxAttempts - 1) failed += 1;
@@ -519,7 +532,10 @@ async function recoverLock(
 async function ensureManifest(
   path: string,
   tasks: MultiscanTask[],
-  options: Pick<MultiscanOptions, "scanPrompt" | "postScanPrompt">,
+  options: Pick<
+    MultiscanOptions,
+    "scanPrompt" | "postScanPrompt" | "maxCostUsd"
+  >,
 ): Promise<void> {
   const expected = `${JSON.stringify(
     {
@@ -531,6 +547,9 @@ async function ensureManifest(
       ...(options.postScanPrompt === undefined
         ? {}
         : { postScanPrompt: options.postScanPrompt }),
+      ...(options.maxCostUsd === undefined
+        ? {}
+        : { maxCostUsd: options.maxCostUsd }),
     },
     null,
     2,
