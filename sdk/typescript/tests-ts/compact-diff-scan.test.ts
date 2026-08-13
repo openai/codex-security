@@ -164,6 +164,45 @@ async function startMcp(root: string) {
 }
 
 describe("compact diff scan", () => {
+  test("reads committed diff previews from the selected head revision", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/feature.ts", "const marker = 'base';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+
+    writeSource(repository, "src/feature.ts", "const marker = 'head';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "head");
+    const head = git(repository, "rev-parse", "HEAD");
+    git(repository, "checkout", "--detach", base);
+
+    const output = join(root, "rank-input.jsonl");
+    const result = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--mode",
+      "revisions",
+      "--out",
+      output,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const row = JSON.parse(readFileSync(output, "utf8")) as {
+      path: string;
+      preview: string;
+    };
+    expect(row.path).toBe("src/feature.ts");
+    expect(row.preview).toContain("head");
+    expect(row.preview).not.toContain("base");
+  });
+
   test("uses the selected Git revisions and keeps deleted source files", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");

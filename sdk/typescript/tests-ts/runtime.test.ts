@@ -55,7 +55,6 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
-  codexPlatformPackage,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
@@ -125,8 +124,10 @@ describe("plugin runtime preparation", () => {
     ).toBe(true);
   });
 
-  test("forwards bundled Bedrock credentials through the MCP worker environment", async () => {
-    const awsKeys = [
+  test("forwards configured provider credentials through the MCP worker environment", async () => {
+    const providerKeys = [
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
       "AWS_ACCESS_KEY_ID",
       "AWS_SECRET_ACCESS_KEY",
@@ -150,7 +151,7 @@ describe("plugin runtime preparation", () => {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const parentEnvironment = Object.fromEntries(
-      awsKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
+      providerKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
     );
     const allowed = new Set(
       configuration.mcpServers["codex-security"]!.env_vars,
@@ -1054,7 +1055,7 @@ describe("plugin runtime preparation", () => {
 
     await expect(
       bootstrapPlugin(home, selected, {
-        codexCommand: { command: "/codex", prefixArgs: [] },
+        codexCommand: { command: "/codex" },
         signal: controller.signal,
         runCodex: async () => {
           registrationCalls += 1;
@@ -1363,7 +1364,7 @@ describe("plugin runtime preparation", () => {
       "1.2.3",
     );
     const install = await bootstrapPlugin(home, selected, {
-      codexCommand: { command: "/codex", prefixArgs: [] },
+      codexCommand: { command: "/codex" },
       environment: {
         SAFE_VALUE: "kept",
       },
@@ -1407,7 +1408,7 @@ describe("plugin runtime preparation", () => {
       "print('updated')\n",
     );
     const reused = await bootstrapPlugin(home, selected, {
-      codexCommand: { command: "/codex", prefixArgs: [] },
+      codexCommand: { command: "/codex" },
       runCodex: async (_command, args) => {
         calls.push([...args]);
         return JSON.stringify({ installedPath: installed, version: "1.2.3" });
@@ -1440,7 +1441,7 @@ describe("plugin runtime preparation", () => {
 
       await expect(
         bootstrapPlugin(home, selected, {
-          codexCommand: { command: "/codex", prefixArgs: [] },
+          codexCommand: { command: "/codex" },
           runCodex: async () => output,
         }),
       ).rejects.toThrow(PluginBootstrapError);
@@ -1472,7 +1473,7 @@ describe("plugin runtime preparation", () => {
     const calls: string[][] = [];
 
     const result = await bootstrapPlugin(home, selected, {
-      codexCommand: { command: "/codex", prefixArgs: [] },
+      codexCommand: { command: "/codex" },
       runCodex: async (_command, args) => {
         calls.push([...args]);
         if (args[1] === "marketplace") {
@@ -1574,7 +1575,7 @@ describe("plugin runtime preparation", () => {
       }
     };
     const options = {
-      codexCommand: { command: "/codex", prefixArgs: [] },
+      codexCommand: { command: "/codex" },
       runCodex,
     };
 
@@ -1620,16 +1621,12 @@ describe("plugin runtime preparation", () => {
       OPENAI_API_KEY: undefined,
       CODEX_API_KEY: undefined,
     };
-    const login = spawnSync(
-      command.command,
-      [...command.prefixArgs, "login", "--with-api-key"],
-      {
-        env: environment,
-        input: "synthetic-key\n",
-        encoding: "utf8",
-        windowsHide: true,
-      },
-    );
+    const login = spawnSync(command.command, ["login", "--with-api-key"], {
+      env: environment,
+      input: "synthetic-key\n",
+      encoding: "utf8",
+      windowsHide: true,
+    });
     expect(login.status).toBe(0);
     const credentials = await readFile(join(home, "auth.json"), "utf8");
 
@@ -1642,7 +1639,7 @@ describe("plugin runtime preparation", () => {
     expect(upgraded.version).toBe("1.2.4");
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
     expect(
-      spawnSync(command.command, [...command.prefixArgs, "login", "status"], {
+      spawnSync(command.command, ["login", "status"], {
         env: environment,
         encoding: "utf8",
         windowsHide: true,
@@ -1652,16 +1649,28 @@ describe("plugin runtime preparation", () => {
 
   test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();
-    const target = codexPlatformPackage();
-    expect(command.prefixArgs).toEqual([]);
-    expect(command.command).toContain(
-      join(
-        "vendor",
-        target.targetTriple,
-        "bin",
-        process.platform === "win32" ? "codex.exe" : "codex",
-      ),
+    expect(isAbsolute(command.command)).toBe(true);
+    expect(command.command).toContain(`${sep}vendor${sep}`);
+    expect(command.command).toEndWith(
+      join("bin", process.platform === "win32" ? "codex.exe" : "codex"),
     );
+  });
+
+  test("uses an explicit Codex executable override", () => {
+    const configured = join(tmpdir(), "custom codex", "codex");
+
+    expect(resolveCodexCommand({ CODEX_CLI_PATH: ` ${configured} ` })).toEqual({
+      command: configured,
+    });
+    expect(resolveCodexCommand({ CODEX_CLI_PATH: "   " })).toEqual(
+      resolveCodexCommand({}),
+    );
+    expect(resolveCodexCommand({ CODEX_CLI_PATH: "./bin/codex" })).toEqual({
+      command: join(process.cwd(), "bin", "codex"),
+    });
+    expect(resolveCodexCommand({ Codex_Cli_Path: configured })).toEqual({
+      command: configured,
+    });
   });
 
   test("launches the bundled Codex through the Deep Scan MCP environment without a global executable", async () => {
@@ -1723,13 +1732,6 @@ describe("plugin runtime preparation", () => {
         CODEX_CLI_PATH: "   ",
       })["CODEX_CLI_PATH"],
     ).toBe(resolveCodexCommand().command);
-  });
-
-  test("selects the native Windows Codex executable package", () => {
-    expect(codexPlatformPackage("win32", "x64")).toEqual({
-      packageName: "@openai/codex-win32-x64",
-      targetTriple: "x86_64-pc-windows-msvc",
-    });
   });
 });
 

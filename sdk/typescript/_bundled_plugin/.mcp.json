@@ -9,6 +9,8 @@
         "CODEX_SQLITE_HOME",
         "CODEX_API_KEY",
         "CODEX_CLI_PATH",
+        "OPENROUTER_API_KEY",
+        "FIREWORKS_API_KEY",
         "AWS_BEARER_TOKEN_BEDROCK",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",

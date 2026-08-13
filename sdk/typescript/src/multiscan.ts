@@ -238,6 +238,8 @@ async function runCampaign(
             ...(options.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: options.maxCostUsd }),
+            onWarning: (warning) =>
+              options.onProgress?.({ ...progress, status: "started", warning }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;

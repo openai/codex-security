@@ -346,6 +346,37 @@ describe("multiscan", () => {
     expect(invalid.text()).toContain("expected number to be >0");
   });
 
+  test("surfaces optional post-scan warnings without failing completed scans", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "follow-up-warning");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfollow-up-warning,${source.path},${source.revision}\n`,
+    );
+    const progress: Parameters<
+      NonNullable<MultiscanOptions["onProgress"]>
+    >[0][] = [];
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          scanOptions.onWarning?.("Could not run post-scan instructions.");
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { onProgress: (event) => progress.push(event) },
+      ),
+    );
+
+    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(progress).toContainEqual({
+      repository: "follow-up-warning",
+      attempt: 1,
+      status: "started",
+      warning: "Could not run post-scan instructions.",
+    });
+  });
+
   test.each(["partial", "unknown"] as const)(
     "retains sealed %s coverage without retries or multiplied costs",
     async (completeness) => {
