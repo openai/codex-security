@@ -94,11 +94,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_json_bytes(payload))
-
-
 def _generate_report_projection(
     manifest: dict[str, Any],
     findings: dict[str, Any],
@@ -176,14 +171,6 @@ def _sha256_text(value: str) -> str:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
