@@ -14,44 +14,6 @@ Search [existing issues](https://github.com/openai/codex-security/issues)
 before opening a new one. Maintainers can carry accepted changes into the
 canonical source or invite a focused pull request for this public repository.
 
-## Open a public pull request
-
-Everything you post here is public. Review branch names before pushing. Before
-opening or updating a pull request, review its branch name, title, description,
-commits, changed files, comments, logs, screenshots, attachments, and links.
-
-Never include customer, partner, prospect, or user names, identifying domains
-or repository URLs, account or tenant identifiers, support cases, incidents,
-or customer-specific environment details. Keep credentials, personal data,
-private source or configuration, security findings, undisclosed
-vulnerabilities, internal documents or conversations, nonpublic links, and
-private issue identifiers out of every public artifact.
-
-Describe the technical problem without identifying the affected organization
-or system. Use synthetic repositories, names, identifiers, logs, credentials,
-and test fixtures. Link only to information you have confirmed is public. If
-you cannot confidently remove identifying context, do not publish it.
-
-Use the [pull request template](.github/PULL_REQUEST_TEMPLATE.md). Complete the
-summary, changes, testing, risk and rollout, and public disclosure review
-sections; report only checks you actually ran; and check every disclosure
-attestation after inspecting the complete change. Use a supported
-Conventional Commit title, such as `fix: handle missing configuration`.
-
-When using the GitHub CLI, start with
-`gh pr create --template .github/PULL_REQUEST_TEMPLATE.md` and review the
-title and description before submitting them. Do not use `--fill` or
-`--fill-verbose` without manually reviewing every generated field: commit
-messages can contain private context. Later edits cannot reliably undo a
-public disclosure.
-
-Bots and automation follow the same requirements without exception. Review
-generated content before publication when possible; maintainers must review
-and correct existing bot pull requests before merging them.
-
-Report security vulnerabilities privately as described in
-[SECURITY.md](SECURITY.md); never include them in a public pull request.
-
 ## Support for open-source projects
 
 If you maintain an open-source project,
