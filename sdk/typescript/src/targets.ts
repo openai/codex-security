@@ -289,7 +289,13 @@ export async function validateCommittedDiffCheckout(
 
   const status = await gitOutput(
     repository,
-    ["status", "--porcelain=v1", "--untracked-files=all"],
+    [
+      "-c",
+      "core.fsmonitor=false",
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ],
     signal,
   );
   if (status.length !== 0) {
