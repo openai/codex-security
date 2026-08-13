@@ -47,6 +47,7 @@ def git_blob_bytes(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
 ) -> list[bytes | None]:
+    """Read ordered raw blobs with one NUL-framed ``git cat-file --batch`` call."""
     if not object_names:
         return []
 
@@ -71,6 +72,7 @@ def git_blob_bytes(
 
 
 def _decode_git_batch_blobs(output: bytes, count: int) -> list[bytes | None]:
+    """Decode ordered ``cat-file --batch -Z`` records without scanning blob bytes."""
     blobs: list[bytes | None] = []
     offset = 0
     for _ in range(count):
@@ -85,6 +87,7 @@ def _decode_git_batch_blobs(output: bytes, count: int) -> list[bytes | None]:
 
 
 def _read_nul_field(output: bytes, offset: int) -> tuple[bytes, int]:
+    """Read one NUL-terminated protocol field and return the next offset."""
     end = output.find(b"\0", offset)
     if end < 0:
         raise ValueError("missing NUL terminator")
@@ -92,6 +95,7 @@ def _read_nul_field(output: bytes, offset: int) -> tuple[bytes, int]:
 
 
 def _git_batch_blob_size(header: bytes) -> int | None:
+    """Return a blob header's byte count, or ``None`` for a non-blob record."""
     fields = header.rsplit(b" ", 2)
     if len(fields) != 3 or fields[1] != b"blob":
         return None
@@ -109,6 +113,7 @@ def _read_sized_nul_field(
     offset: int,
     size: int,
 ) -> tuple[bytes, int]:
+    """Read exactly ``size`` blob bytes followed by one NUL record terminator."""
     end = offset + size
     if output[end : end + 1] != b"\0":
         raise ValueError("missing blob terminator")
