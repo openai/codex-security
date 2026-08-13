@@ -2890,7 +2890,13 @@ async function runScan(
         arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
       );
     } else {
-      dashboard.start();
+      try {
+        dashboard.start();
+      } catch {
+        dashboard = null;
+        progress = new Progress(errorOutput, dependencies, false);
+        progress.startTimer("Preparing scan");
+      }
     }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {

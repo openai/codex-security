@@ -1629,6 +1629,35 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("\r");
   });
 
+  test("falls back to plain progress when the dashboard cannot initialize", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    let scans = 0;
+    let closed = 0;
+    let timers = 0;
+    const deps = dependencies({
+      onRun: () => {
+        scans += 1;
+      },
+      onClose: () => {
+        closed += 1;
+      },
+    });
+    deps.setInterval = () => {
+      timers += 1;
+      throw new Error("Dashboard timer unavailable.");
+    };
+
+    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
+      0,
+    );
+    expect(scans).toBe(1);
+    expect(closed).toBe(1);
+    expect(timers).toBe(1);
+    expect(stderr.text()).toContain("Preparing scan");
+    expect(stderr.text()).toContain("Running scan");
+  });
+
   test("keeps terminal scans in one live dashboard", async () => {
     const stdout = capture();
     const stderr = capture(true);
