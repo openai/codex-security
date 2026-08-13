@@ -1,6 +1,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  chmodSync,
   cpSync,
   mkdirSync,
   mkdtempSync,
@@ -393,8 +394,10 @@ describe("compact diff scan", () => {
     const headRevision = git(repository, "rev-parse", "HEAD");
     const stateDir = join(root, "state");
     const scanDir = join(root, "scan");
-    mkdirSync(stateDir);
-    mkdirSync(scanDir);
+    mkdirSync(stateDir, { mode: 0o700 });
+    mkdirSync(scanDir, { mode: 0o700 });
+    chmodSync(stateDir, 0o700);
+    chmodSync(scanDir, 0o700);
 
     const registration = pythonWithState(
       stateDir,
