@@ -160,7 +160,13 @@ export class ScanDashboard {
       }
       this.#render();
     } catch (error) {
-      this.stop();
+      try {
+        this.stop();
+      } catch {
+        try {
+          this.#stream.write(`${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`);
+        } catch {}
+      }
       throw error;
     }
   }
