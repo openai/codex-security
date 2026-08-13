@@ -319,7 +319,7 @@ export async function comparisonEnvironment(
       }
     }
     const status = await nativeAccountStatus(
-      resolveCodexCommand(),
+      resolveCodexCommand(source),
       storedEnvironment,
       signal,
     );

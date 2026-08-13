@@ -188,6 +188,7 @@ const VALUE_OPTIONS = new Set([
   "--subagents",
   "--stop-after-no-new",
   "--max-discovery-runs",
+  "--max-time-hours",
   "--max-attempts",
   "--export-format",
   "--output",
@@ -244,6 +245,12 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .positive()
     .optional()
     .describe("Maximum deep-scan discovery runs."),
+  maxTimeHours: z
+    .number()
+    .positive()
+    .max(96)
+    .optional()
+    .describe("Maximum deep-scan discovery hours (default: 96; maximum: 96)."),
 };
 
 async function readPromptFiles(
@@ -376,7 +383,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
           name.toUpperCase() !== "CODEX_API_KEY",
       ),
     );
-    const command = resolveCodexCommand();
+    const command = resolveCodexCommand(environment);
     if (existsSync(codexSecurityCredentialHome(process.env))) {
       const dedicatedStatus = await accountStatus(command, {
         ...environment,
@@ -410,7 +417,12 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   },
   forceExit: (signal) => process.kill(process.pid, signal),
   runCodex: (args, output, environment) =>
-    runCodexSkillCommand(args, output, resolveCodexCommand(), environment),
+    runCodexSkillCommand(
+      args,
+      output,
+      resolveCodexCommand(environment),
+      environment,
+    ),
   exportFindings: async (arguments_, output) => {
     const environment = exportEnvironment();
     const python = await resolvePluginPython({
@@ -507,7 +519,7 @@ export async function runCodexSkillCommand(
   if (configuredHome?.trim()) {
     environment["CODEX_HOME"] = resolve(expandHome(configuredHome));
   }
-  const invocation = spawn(command.command, [...command.prefixArgs, ...args], {
+  const invocation = spawn(command.command, [...args], {
     env: environment,
     cwd: parse(process.execPath).root,
     stdio: output === undefined ? "inherit" : ["ignore", "pipe", "pipe"],
@@ -1230,7 +1242,8 @@ export async function main(
             (options.workers === undefined &&
               options.subagents === undefined &&
               options.stopAfterNoNew === undefined &&
-              options.maxDiscoveryRuns === undefined),
+              options.maxDiscoveryRuns === undefined &&
+              options.maxTimeHours === undefined),
           { message: "Deep scan settings require --mode deep." },
         ),
       examples: [
@@ -1278,6 +1291,7 @@ export async function main(
             subagents: options.subagents,
             stopAfterNoNew: options.stopAfterNoNew,
             maxDiscoveryRuns: options.maxDiscoveryRuns,
+            maxTimeHours: options.maxTimeHours,
             model: options.model,
             effort: options.effort,
             provider: options.provider,
@@ -2889,6 +2903,7 @@ async function runScan(
       subagents: arguments_.subagents,
       stopAfterNoNew: arguments_.stopAfterNoNew,
       maxDiscoveryRuns: arguments_.maxDiscoveryRuns,
+      maxTimeHours: arguments_.maxTimeHours,
       outputDir: arguments_.outputDir,
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,

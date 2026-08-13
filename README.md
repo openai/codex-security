@@ -19,12 +19,16 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
-npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
+npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
 Environment API keys are passed directly to the current scan and are never
 stored in Codex's credential home or system keyring.
+
+Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
+any positive number of hours, including fractional hours, up to 96. Completed
+findings are preserved and returned when the limit is reached.
 
 To use another inference provider, set its API key and select a model:
 
@@ -106,6 +110,7 @@ await security.run(".", {
   subagents: 0,
   stopAfterNoNew: 3,
   maxDiscoveryRuns: 10,
+  maxTimeHours: 1.5,
 });
 
 console.log(result.reportPath);

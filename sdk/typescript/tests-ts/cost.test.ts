@@ -45,6 +45,8 @@ async function writeSession(
   threadId: string,
   usage: Record<string, number>,
   parentThreadId?: string,
+  workingDirectory?: string,
+  timestamp?: string,
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
@@ -56,6 +58,8 @@ async function writeSession(
         type: "session_meta",
         payload: {
           id: threadId,
+          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+          ...(timestamp === undefined ? {} : { timestamp }),
           ...(parentThreadId === undefined
             ? {}
             : {
@@ -429,6 +433,96 @@ describe("live scan cost tracking", () => {
         outputTokens: 15,
         estimatedUsd: 0.006275,
       },
+    });
+  });
+
+  test("counts independent Deep workers inside the scan directory only", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "current");
+    await writeSession(
+      home,
+      "scan-thread",
+      { input_tokens: 1_000, output_tokens: 10 },
+      undefined,
+      scanDirectory,
+      "2026-07-26T12:00:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-worker",
+      { input_tokens: 250, output_tokens: 2 },
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "worker",
+        "output",
+      ),
+      "2026-07-26T12:01:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-reducer",
+      { input_tokens: 125, output_tokens: 1 },
+      undefined,
+      join(scanDirectory, "artifacts"),
+      "2026-07-26T12:02:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-worker-child",
+      { input_tokens: 50, output_tokens: 1 },
+      "deep-worker",
+    );
+    await writeSession(
+      home,
+      "unrelated-thread",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      `${scanDirectory}-other`,
+    );
+    await writeSession(
+      home,
+      "previous-scan",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(scanDirectory, "artifacts", "deep_discovery", "previous-worker"),
+      "2026-07-26T11:59:00Z",
+    );
+    await writeSession(
+      home,
+      "unknown-start",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "stale",
+        "output",
+      ),
+    );
+    await writeSession(
+      home,
+      "nested-scan",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(scanDirectory, "nested", "artifacts"),
+      "2026-07-26T12:03:00Z",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      scanDirectory,
+    });
+    tracker.start("scan-thread");
+
+    expect((await tracker.stop()).usage).toMatchObject({
+      input_tokens: 1_425,
+      output_tokens: 14,
     });
   });
 

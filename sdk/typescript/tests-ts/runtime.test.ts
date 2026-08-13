@@ -55,7 +55,6 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
-  codexPlatformPackage,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
@@ -125,8 +124,10 @@ describe("plugin runtime preparation", () => {
     ).toBe(true);
   });
 
-  test("forwards bundled Bedrock credentials through the MCP worker environment", async () => {
-    const awsKeys = [
+  test("forwards configured provider credentials through the MCP worker environment", async () => {
+    const providerKeys = [
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
       "AWS_BEARER_TOKEN_BEDROCK",
       "AWS_ACCESS_KEY_ID",
       "AWS_SECRET_ACCESS_KEY",
@@ -150,7 +151,7 @@ describe("plugin runtime preparation", () => {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const parentEnvironment = Object.fromEntries(
-      awsKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
+      providerKeys.map((name) => [name, `synthetic-${name.toLowerCase()}`]),
     );
     const allowed = new Set(
       configuration.mcpServers["codex-security"]!.env_vars,
@@ -847,23 +848,19 @@ describe("plugin runtime preparation", () => {
     );
     const cancellationDestination = join(cancellationRoot, "canceled-home");
     const controller = new AbortController();
-    const originalOpendir = fsPromises.opendir;
+    const originalLstat = fsPromises.lstat;
     let discovered = 0;
     mock.module("node:fs/promises", () => ({
       ...fsPromises,
-      opendir: async (...args: Parameters<typeof originalOpendir>) => {
-        const directory = await originalOpendir(...args);
-        if (String(args[0]) !== cancellationDirectory) return directory;
-        const originalRead = directory.read.bind(directory);
-        directory.read = async () => {
-          const entry = await originalRead();
+      lstat: async (...args: Parameters<typeof originalLstat>) => {
+        const metadata = await originalLstat(...args);
+        if (dirname(String(args[0])) === cancellationDirectory) {
           discovered += 1;
           if (discovered === 2) {
             controller.abort(new DOMException("canceled", "AbortError"));
           }
-          return entry;
-        };
-        return directory;
+        }
+        return metadata;
       },
     }));
     try {
@@ -888,7 +885,7 @@ describe("plugin runtime preparation", () => {
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
-        opendir: originalOpendir,
+        lstat: originalLstat,
       }));
     }
   });
@@ -1058,7 +1055,7 @@ describe("plugin runtime preparation", () => {
 
     await expect(
       bootstrapPlugin(home, selected, {
-        codexCommand: { command: "/codex", prefixArgs: [] },
+        codexCommand: { command: "/codex" },
         signal: controller.signal,
         runCodex: async () => {
           registrationCalls += 1;
@@ -1351,7 +1348,7 @@ describe("plugin runtime preparation", () => {
     },
   );
 
-  test("bootstraps through supported Codex plugin commands and verifies registration", async () => {
+  test("uses the installed plugin path returned by Codex", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
     const home = join(root, "home");
@@ -1367,7 +1364,7 @@ describe("plugin runtime preparation", () => {
       "1.2.3",
     );
     const install = await bootstrapPlugin(home, selected, {
-      codexCommand: { command: "/codex", prefixArgs: [] },
+      codexCommand: { command: "/codex" },
       environment: {
         SAFE_VALUE: "kept",
       },
@@ -1383,6 +1380,7 @@ describe("plugin runtime preparation", () => {
             `\n[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(join(home, "sdk-marketplace"))}\n`,
             { flag: "a" },
           );
+          return "";
         } else {
           await writeFile(
             join(home, "config.toml"),
@@ -1394,13 +1392,13 @@ describe("plugin runtime preparation", () => {
             join(installed, ".codex-plugin", "plugin.json"),
             JSON.stringify({ name: "codex-security", version: "1.2.3" }),
           );
+          return JSON.stringify({ installedPath: installed, version: "1.2.3" });
         }
-        return "";
       },
     });
     expect(calls).toEqual([
       ["plugin", "marketplace", "add", join(home, "sdk-marketplace")],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
+      ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
     expect(install.installedRoot).toBe(installed);
     expect(install.version).toBe("1.2.3");
@@ -1410,14 +1408,44 @@ describe("plugin runtime preparation", () => {
       "print('updated')\n",
     );
     const reused = await bootstrapPlugin(home, selected, {
-      codexCommand: { command: "/codex", prefixArgs: [] },
-      runCodex: async () => {
-        throw new Error("must not reinstall an existing Codex Security plugin");
+      codexCommand: { command: "/codex" },
+      runCodex: async (_command, args) => {
+        calls.push([...args]);
+        return JSON.stringify({ installedPath: installed, version: "1.2.3" });
       },
     });
     expect(reused.installedRoot).toBe(installed);
     expect(reused.version).toBe("1.2.3");
-    expect(calls).toHaveLength(2);
+    expect(calls).toEqual([
+      ["plugin", "marketplace", "add", join(home, "sdk-marketplace")],
+      ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
+      ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
+    ]);
+  });
+
+  test("rejects plugin installs without the selected path and version", async () => {
+    for (const output of [
+      "not JSON",
+      JSON.stringify({ version: "1.2.3" }),
+      JSON.stringify({ installedPath: "/plugin", version: "1.2.4" }),
+    ]) {
+      const root = await temporaryDirectory();
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = join(home, "sdk-marketplace");
+      await mkdir(home);
+      await writeFile(
+        join(home, "config.toml"),
+        `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+      );
+
+      await expect(
+        bootstrapPlugin(home, selected, {
+          codexCommand: { command: "/codex" },
+          runCodex: async () => output,
+        }),
+      ).rejects.toThrow(PluginBootstrapError);
+    }
   });
 
   test("repairs an interrupted marketplace without deleting stored credentials", async () => {
@@ -1445,7 +1473,7 @@ describe("plugin runtime preparation", () => {
     const calls: string[][] = [];
 
     const result = await bootstrapPlugin(home, selected, {
-      codexCommand: { command: "/codex", prefixArgs: [] },
+      codexCommand: { command: "/codex" },
       runCodex: async (_command, args) => {
         calls.push([...args]);
         if (args[1] === "marketplace") {
@@ -1454,6 +1482,7 @@ describe("plugin runtime preparation", () => {
             `\n[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
             { flag: "a" },
           );
+          return "";
         } else {
           await writeFile(
             join(home, "config.toml"),
@@ -1465,8 +1494,8 @@ describe("plugin runtime preparation", () => {
             join(installed, ".codex-plugin", "plugin.json"),
             JSON.stringify({ name: "codex-security", version: "1.2.3" }),
           );
+          return JSON.stringify({ installedPath: installed, version: "1.2.3" });
         }
-        return "";
       },
     });
 
@@ -1476,7 +1505,7 @@ describe("plugin runtime preparation", () => {
     );
     expect(calls).toEqual([
       ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
+      ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
   });
 
@@ -1498,26 +1527,10 @@ describe("plugin runtime preparation", () => {
     await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
     await writeFile(join(home, "unrelated-state"), "preserved\n");
 
-    let marketplaceRegistered = false;
-    let pluginRegistered = false;
-    const updateConfig = async () => {
-      const sections = [
-        "[features]\nplugins = true\n",
-        `[projects.${JSON.stringify(join(root, "unrelated-project"))}]\ntrust_level = "trusted"\n`,
-      ];
-      if (marketplaceRegistered) {
-        sections.push(
-          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
-        );
-      }
-      if (pluginRegistered) {
-        sections.push(
-          '[plugins."codex-security@codex-security-sdk"]\nenabled = true\n',
-        );
-      }
-      await writeFile(configPath, sections.join("\n"));
-    };
-    await updateConfig();
+    await writeFile(
+      configPath,
+      `[features]\nplugins = true\n\n[projects.${JSON.stringify(join(root, "unrelated-project"))}]\ntrust_level = "trusted"\n`,
+    );
 
     const calls: string[][] = [];
     const runCodex: NonNullable<
@@ -1527,12 +1540,12 @@ describe("plugin runtime preparation", () => {
       calls.push([...args]);
 
       if (args[1] === "marketplace" && args[2] === "add") {
-        marketplaceRegistered = true;
-      } else if (args[1] === "marketplace" && args[2] === "remove") {
-        marketplaceRegistered = false;
-      } else if (args[1] === "remove") {
-        pluginRegistered = false;
-        await rm(pluginCache, { recursive: true, force: true });
+        await writeFile(
+          configPath,
+          `\n[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+          { flag: "a" },
+        );
+        return "";
       } else if (args[1] === "add") {
         const manifest = JSON.parse(
           await readFile(
@@ -1547,21 +1560,22 @@ describe("plugin runtime preparation", () => {
           ),
         ) as { version: string };
         const installed = join(pluginCache, manifest.version);
+        await rm(pluginCache, { recursive: true, force: true });
         await mkdir(join(installed, ".codex-plugin"), { recursive: true });
         await writeFile(
           join(installed, ".codex-plugin", "plugin.json"),
           JSON.stringify({ name: "codex-security", version: manifest.version }),
         );
-        pluginRegistered = true;
+        return JSON.stringify({
+          installedPath: installed,
+          version: manifest.version,
+        });
       } else {
         throw new Error(`Unexpected plugin command: ${args.join(" ")}`);
       }
-
-      await updateConfig();
-      return "";
     };
     const options = {
-      codexCommand: { command: "/codex", prefixArgs: [] },
+      codexCommand: { command: "/codex" },
       runCodex,
     };
 
@@ -1584,11 +1598,8 @@ describe("plugin runtime preparation", () => {
     expect(existsSync(join(pluginCache, "1.2.3"))).toBe(false);
     expect(calls).toEqual([
       ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
-      ["plugin", "remove", "codex-security@codex-security-sdk"],
-      ["plugin", "marketplace", "remove", "codex-security-sdk"],
-      ["plugin", "marketplace", "add", marketplace],
-      ["plugin", "add", "codex-security@codex-security-sdk"],
+      ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
+      ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
   });
 
@@ -1610,16 +1621,12 @@ describe("plugin runtime preparation", () => {
       OPENAI_API_KEY: undefined,
       CODEX_API_KEY: undefined,
     };
-    const login = spawnSync(
-      command.command,
-      [...command.prefixArgs, "login", "--with-api-key"],
-      {
-        env: environment,
-        input: "synthetic-key\n",
-        encoding: "utf8",
-        windowsHide: true,
-      },
-    );
+    const login = spawnSync(command.command, ["login", "--with-api-key"], {
+      env: environment,
+      input: "synthetic-key\n",
+      encoding: "utf8",
+      windowsHide: true,
+    });
     expect(login.status).toBe(0);
     const credentials = await readFile(join(home, "auth.json"), "utf8");
 
@@ -1632,7 +1639,7 @@ describe("plugin runtime preparation", () => {
     expect(upgraded.version).toBe("1.2.4");
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
     expect(
-      spawnSync(command.command, [...command.prefixArgs, "login", "status"], {
+      spawnSync(command.command, ["login", "status"], {
         env: environment,
         encoding: "utf8",
         windowsHide: true,
@@ -1642,16 +1649,28 @@ describe("plugin runtime preparation", () => {
 
   test("resolves the exact npm Codex executable", () => {
     const command = resolveCodexCommand();
-    const target = codexPlatformPackage();
-    expect(command.prefixArgs).toEqual([]);
-    expect(command.command).toContain(
-      join(
-        "vendor",
-        target.targetTriple,
-        "bin",
-        process.platform === "win32" ? "codex.exe" : "codex",
-      ),
+    expect(isAbsolute(command.command)).toBe(true);
+    expect(command.command).toContain(`${sep}vendor${sep}`);
+    expect(command.command).toEndWith(
+      join("bin", process.platform === "win32" ? "codex.exe" : "codex"),
     );
+  });
+
+  test("uses an explicit Codex executable override", () => {
+    const configured = join(tmpdir(), "custom codex", "codex");
+
+    expect(resolveCodexCommand({ CODEX_CLI_PATH: ` ${configured} ` })).toEqual({
+      command: configured,
+    });
+    expect(resolveCodexCommand({ CODEX_CLI_PATH: "   " })).toEqual(
+      resolveCodexCommand({}),
+    );
+    expect(resolveCodexCommand({ CODEX_CLI_PATH: "./bin/codex" })).toEqual({
+      command: join(process.cwd(), "bin", "codex"),
+    });
+    expect(resolveCodexCommand({ Codex_Cli_Path: configured })).toEqual({
+      command: configured,
+    });
   });
 
   test("launches the bundled Codex through the Deep Scan MCP environment without a global executable", async () => {
@@ -1713,13 +1732,6 @@ describe("plugin runtime preparation", () => {
         CODEX_CLI_PATH: "   ",
       })["CODEX_CLI_PATH"],
     ).toBe(resolveCodexCommand().command);
-  });
-
-  test("selects the native Windows Codex executable package", () => {
-    expect(codexPlatformPackage("win32", "x64")).toEqual({
-      packageName: "@openai/codex-win32-x64",
-      targetTriple: "x86_64-pc-windows-msvc",
-    });
   });
 });
 

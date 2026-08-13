@@ -84,6 +84,7 @@ Pass scan configuration to `security.run(repository, options)` or
 | `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
 | `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
 | `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
+| `maxTimeHours`          | Limit deep-scan discovery to a positive number of hours, up to 96.                    |
 | `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                            |
 | `parentScanId`          | Link a rerun to an existing parent scan.                                              |
 | `expectedPluginVersion` | Require the original plugin version when replaying a scan.                            |
@@ -213,7 +214,7 @@ npx @openai/codex-security scan /path/to/repository --verbose
 npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
-npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
+npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
@@ -268,8 +269,9 @@ Markdown, text, PDF, and Word (`.docx`) files.
 
 For `scan --mode deep`, `--workers` limits concurrent discovery workers,
 `--subagents` controls each worker's subagents, `--stop-after-no-new` stops after
-that many runs find no new issues, and `--max-discovery-runs` limits total runs.
-These options are also available on SDK scans:
+that many runs find no new issues, `--max-discovery-runs` limits total runs, and
+`--max-time-hours` limits discovery duration. These options are also available
+on SDK scans:
 
 ```ts
 await security.run("/path/to/repository", {
@@ -278,6 +280,7 @@ await security.run("/path/to/repository", {
   subagents: 0,
   stopAfterNoNew: 3,
   maxDiscoveryRuns: 10,
+  maxTimeHours: 1.5,
 });
 ```
 
@@ -290,7 +293,14 @@ workers = 2
 subagents = 0
 stop_after_no_new = 3
 max_discovery_runs = 10
+max_time_hours = 1.5
 ```
+
+The discovery deadline defaults to 96 hours. The configured value may be any
+positive number, including fractional hours, up to 96. At the deadline,
+in-flight discovery stops and completed findings are reduced and returned.
+The 97-hour outer tool-call timeout reserves approximately one hour for final
+reduction and result delivery, including at the 96-hour maximum.
 
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
@@ -387,20 +397,24 @@ subagents = 3
 stop_after_no_new = 6
 stop_after_consecutive_errors = 3
 max_discovery_runs = 60
+max_time_hours = 96
 ```
 
 `workers = "auto"` uses half the available parallelism, with a minimum of one
 and a maximum of six discovery workers. Set `workers` to a positive integer to
 choose an explicit count. `subagents` must be a nonnegative integer;
 `stop_after_no_new`, `stop_after_consecutive_errors`, and `max_discovery_runs`
-must be positive integers. Unknown `[deep_scan]` keys are rejected.
+must be positive integers. `max_time_hours` must be a positive finite number no
+greater than 96; fractional hours are supported. Unknown `[deep_scan]` keys are
+rejected.
 
-Standalone scans copy these settings into their isolated runtime. CLI flags
-and SDK scan options override the corresponding values; set
-`stop_after_consecutive_errors` in the configuration file. Codex's
-`features.multi_agent_v2.max_concurrent_threads_per_session` controls the
-separate session thread limit, and `bulk-scan --workers` controls concurrent
-repository scans.
+These settings are separate from Codex's
+`features.multi_agent_v2.max_concurrent_threads_per_session` and
+`bulk-scan --workers`. Standalone CLI and SDK scans create an isolated
+`CODEX_HOME`, import the ambient `[deep_scan]` configuration, and apply explicit
+CLI or SDK options on top. Set `stop_after_consecutive_errors` in the
+configuration file. Use `--codex` to adjust the Codex session thread limit, not
+to set `[deep_scan]` values.
 
 ### Environment variables
 
@@ -413,6 +427,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
+| `CODEX_CLI_PATH`                                                            | Use another Codex executable for authentication, plugin setup, scans, and nested workers.     |
 | `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
 | `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                     |
 | `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                           |
@@ -473,8 +488,11 @@ scan history, and bulk-scan receipt. Estimates use
 including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
-running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit.
+running cost exceeds the limit. If a Deep Scan has already finished discovery,
+it returns a sealed partial report with any completed findings and lists
+unvalidated candidates as follow-up work. Requests already in progress can
+finish above the limit; preparing the partial report makes no additional model
+requests. Incomplete coverage retains its existing exit code.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
