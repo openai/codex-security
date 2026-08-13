@@ -858,7 +858,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     unknown = [result for result in results if result["status"] == "unknown"]
     if any(result["severity"] == "block" for result in failed):
         status = "blocked"
-    elif unknown:
+    elif any(result["severity"] == "block" for result in unknown):
         status = "incomplete"
     else:
         status = "ready"

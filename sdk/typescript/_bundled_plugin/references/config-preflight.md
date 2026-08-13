@@ -22,7 +22,7 @@ When the current Codex CLI session selected `-p/--profile <name>`, pass `--codex
 
 For targeted tests or unusual runtimes, repeated `--config <path>` arguments override automatic discovery. Pass those manual layers from lower to higher precedence.
 
-Repeat `--available-plugin-skill <skill-name>` only for skills from the capability's plugin when the selected profile checks skill dependencies. For the `deep_security_scan` profile, expose only the plugin-local names of available `codex-security` skills, such as `security-scan`; do not pass unrelated session skills. Use the current session's Available skills surface, not files found on disk. The helper reports unavailable skills as a runtime problem and a missing runtime plugin skill list as `incomplete`.
+Repeat `--available-plugin-skill <skill-name>` only for skills from the capability's plugin when the selected profile checks skill dependencies. For the `deep_security_scan` profile, expose only the plugin-local names of available `codex-security` skills, such as `security-scan`; do not pass unrelated session skills. Use the current session's Available skills surface, not files found on disk. The helper reports unavailable skills as a runtime problem and a missing runtime plugin skill list as `incomplete` only when the selected capability is blocking.
 
 In Codex CLI, run the helper directly in the parent even when delegation is available. This keeps the exact command, exit code, and JSON result in the CLI event stream and avoids attributing an unobservable child result to the active runtime. In other hosts with delegation, run preflight in one dedicated worker before substantive scan work. Dispatch means a successful worker-spawn tool call that returns a concrete worker or thread id. Do not claim that a worker is running, or call a generic wait with no receiver, unless that spawn succeeded. Wait for the specific returned id and accept a result only from that worker. If spawning fails or returns no id, run the helper directly in the parent and report the spawn failure; never invent or reconstruct a helper result. The worker should return only a compact summary: the executed command and exit code, overall status, unmet or unknown capabilities, the returned `user_config_path`, and applicable remediation. Include the source path for any conflicting setting. Do not return the helper's raw JSON unless the parent needs it to resolve an ambiguity. This keeps preflight inspection out of the primary scan context.
 
@@ -34,7 +34,7 @@ Multi-agent config mode is auto-detected when static config fully describes it. 
 --multi-agent-runtime-owner native --multi-agent-runtime-version v2 --multi-agent-session-cap <count> --multi-agent-runtime-provenance <app-server|thread-context|tool-surface>
 ```
 
-The V2 session cap includes the root thread. For profiles that evaluate current-session worker capacity, the helper subtracts that root thread when evaluating usable worker slots. For native V2 selected by static config, the documented Codex default session cap is four when no explicit cap is configured. Do not apply that static default to model- or session-selected V2 when a profile needs the active capacity: pass the observed runtime cap, or the result remains `incomplete`.
+The V2 session cap includes the root thread. For profiles that evaluate current-session worker capacity, the helper subtracts that root thread when evaluating usable worker slots. For native V2 selected by static config, the documented Codex default session cap is four when no explicit cap is configured. Do not apply that static default to model- or session-selected V2 when a profile needs the active capacity: pass the observed runtime cap, or a blocking capacity requirement remains `incomplete`.
 
 When the active session is actually managed by `codex_bridge`, provide explicit verified ownership. A backend config value alone is not ownership evidence:
 
@@ -44,7 +44,7 @@ When the active session is actually managed by `codex_bridge`, provide explicit 
 
 Without `--multi-agent-runtime-owner codex-bridge` and `verified-bridge` provenance, passing `multiagent_config.max_concurrency` is an error. This prevents an assumed config value from reclassifying a native App session as bridge-owned.
 
-Static native V2 accepts both `[features] multi_agent_v2 = true` and `[features.multi_agent_v2] enabled = true`. Native V2 cannot be combined with `agents.max_threads`; the helper rejects that invalid config. `agents.max_depth` applies to V1 only and is not required for V2. A runtime version and cap without verified ownership cannot produce `ready`. When runtime version, ownership, or capacity remains unknown, the helper returns `incomplete` where the selected profile needs that fact and omits unsafe concurrency patches.
+Static native V2 accepts both `[features] multi_agent_v2 = true` and `[features.multi_agent_v2] enabled = true`. Native V2 cannot be combined with `agents.max_threads`; the helper rejects that invalid config. `agents.max_depth` applies to V1 only and is not required for V2. A runtime version and cap without verified ownership cannot satisfy a blocking requirement. When runtime version, ownership, or capacity remains unknown, the helper returns `incomplete` only when a blocking requirement needs that fact and omits unsafe concurrency patches.
 
 The helper reads the routed capability profile from `../preflight/capability-profiles.toml`, discovers the applicable Codex config paths from `--cwd`, applies documented defaults where the registry provides them, and prints one JSON result.
 
@@ -66,7 +66,7 @@ Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's w
 
 Do not warn merely because a user's value differs from the profile's suggested patch. Warn or block only when the evaluated capability requirement is unmet.
 
-If a runtime capability is `unknown`, establish it from the current tool surface and rerun the helper with an explicit `--runtime-check`. Do not treat an `incomplete` result or unknown value as evidence that the capability is available.
+If a blocking runtime capability is `unknown`, establish it from the current tool surface and rerun the helper with an explicit `--runtime-check`. An unknown `warn` or `suggest` capability does not block a `ready` scan; continue on the documented degraded path without claiming that capability is available.
 
 ## Durable scan handoff
 
