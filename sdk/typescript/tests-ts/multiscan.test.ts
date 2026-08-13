@@ -1601,4 +1601,233 @@ describe("multiscan", () => {
       { id: "complete", status: "completed", attempt: 1, coverage: "complete" },
     ]);
   });
+
+  test("records a completed attempt's warnings on its receipt and in the summary", async () => {
+    const paths = await fixture();
+    const drifted = await repository(paths.root, "drifted");
+    const quiet = await repository(paths.root, "quiet");
+    const secret = "sk-proj-SYNTHETIC_MULTISCAN_WARNING_123";
+    await writeFile(
+      paths.input,
+      [
+        "id,repository,revision",
+        `drifted,${drifted.path},${drifted.revision}`,
+        `quiet,${quiet.path},${quiet.revision}`,
+        "",
+      ].join("\n"),
+    );
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (checkout, scanOptions = {}) => {
+          expect(scanOptions.onWarning).toBeDefined();
+          if (
+            (await readFile(join(checkout, "src", "app.ts"), "utf8")).includes(
+              'name = "drifted"',
+            )
+          ) {
+            scanOptions.onWarning!(
+              `Scan target drifted mid-run after reusing ${secret}.`,
+            );
+          }
+          return await completedScan(scanOptions.outputDir!);
+        }),
+      ),
+    );
+
+    expect(summary).toMatchObject({
+      total: 2,
+      completed: 2,
+      failed: 0,
+      warned: 1,
+      skipped: 0,
+    });
+    const [warned, unwarned] = await results(summary.resultsPath);
+    expect(warned).toMatchObject({
+      id: "drifted",
+      status: "completed",
+      attempt: 1,
+      warnings: ["[redacted]"],
+    });
+    expect(unwarned).toMatchObject({ id: "quiet", status: "completed" });
+    expect(unwarned).not.toHaveProperty("warnings");
+    expect(await readFile(summary.resultsPath, "utf8")).not.toContain(secret);
+  });
+
+  test("records a failed attempt's warnings and counts its repository once", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "cleanup");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\ncleanup,${source.path},${source.revision}\n`,
+    );
+
+    let attempts = 0;
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          attempts += 1;
+          scanOptions.onWarning!(
+            `Could not clean up after the Codex Security scan: attempt ${attempts}.`,
+          );
+          if (attempts === 1) throw new Error("temporary failure");
+          return await completedScan(scanOptions.outputDir!);
+        }),
+      ),
+    );
+
+    expect(attempts).toBe(2);
+    expect(summary).toMatchObject({ completed: 1, failed: 0, warned: 1 });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      {
+        status: "failed",
+        attempt: 1,
+        error: "temporary failure",
+        warnings: [
+          "Could not clean up after the Codex Security scan: attempt 1.",
+        ],
+      },
+      {
+        status: "completed",
+        attempt: 2,
+        warnings: [
+          "Could not clean up after the Codex Security scan: attempt 2.",
+        ],
+      },
+    ]);
+  });
+
+  test("resumes receipts written before the ledger carried warnings", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "legacy");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nlegacy,${source.path},${source.revision}\n`,
+    );
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls += 1;
+      scanOptions.onWarning!("Scan target drifted mid-run.");
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    const initial = await runMultiscan(options(paths, security));
+    expect(initial).toMatchObject({ completed: 1, warned: 1, skipped: 0 });
+    const resumed = await runMultiscan(options(paths, security));
+    expect(resumed).toMatchObject({ completed: 1, warned: 1, skipped: 1 });
+    expect(calls).toBe(1);
+
+    // Rewrite the ledger the way a release before this field did: resuming must not
+    // require the key, and the repository stays skipped rather than being rescanned.
+    await writeFile(
+      initial.resultsPath,
+      `${(await results(initial.resultsPath))
+        .map((receipt) => {
+          delete receipt["warnings"];
+          return JSON.stringify(receipt);
+        })
+        .join("\n")}\n`,
+    );
+    const legacy = await runMultiscan(options(paths, security));
+    expect(legacy).toMatchObject({
+      total: 1,
+      completed: 1,
+      failed: 0,
+      warned: 0,
+      skipped: 1,
+    });
+    expect(calls).toBe(1);
+  });
+
+  test("keeps a retried repository's warnings in a resumed summary", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "retried");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nretried,${source.path},${source.revision}\n`,
+    );
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls += 1;
+      if (calls === 1) {
+        scanOptions.onWarning!("Scan target drifted mid-run.");
+        throw new Error("temporary failure");
+      }
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    // The warning belongs to attempt 1, which failed; attempt 2 succeeded quietly, so the
+    // last receipt for this repository carries no warnings at all.
+    const initial = await runMultiscan(options(paths, security));
+    expect(initial).toMatchObject({ completed: 1, failed: 0, warned: 1 });
+    expect(await results(initial.resultsPath)).toMatchObject([
+      {
+        attempt: 1,
+        status: "failed",
+        warnings: ["Scan target drifted mid-run."],
+      },
+      { attempt: 2, status: "completed" },
+    ]);
+
+    // Resuming does no new work, so it must report the campaign the ledger already
+    // records rather than silently dropping the attempt that warned.
+    const resumed = await runMultiscan(options(paths, security));
+    expect(calls).toBe(2);
+    expect(resumed).toMatchObject({
+      total: 1,
+      completed: 1,
+      failed: 0,
+      warned: 1,
+      skipped: 1,
+    });
+  });
+
+  test("keeps a rescanned repository's earlier warnings in the summary", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "rescanned");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrescanned,${source.path},${source.revision}\n`,
+    );
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls += 1;
+      if (calls === 1) {
+        scanOptions.onWarning!("Scan target drifted mid-run.");
+        throw new Error("temporary failure");
+      }
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    // One attempt per run, so the first run leaves the repository failed with a warning
+    // and the second has to scan it again rather than skip it.
+    const first = await runMultiscan(
+      options(paths, security, { maxAttempts: 1 }),
+    );
+    expect(first).toMatchObject({ completed: 0, failed: 1, warned: 1 });
+
+    // The retry is quiet, but the ledger still holds the attempt that warned, so the
+    // summary must not drop back to zero for a campaign whose ledger only ever grows.
+    const second = await runMultiscan(
+      options(paths, security, { maxAttempts: 1 }),
+    );
+    expect(calls).toBe(2);
+    expect(second).toMatchObject({
+      total: 1,
+      completed: 1,
+      failed: 0,
+      warned: 1,
+      skipped: 0,
+    });
+
+    // And a third run, which skips the repository outright, agrees with the second.
+    expect(await runMultiscan(options(paths, security))).toMatchObject({
+      completed: 1,
+      warned: 1,
+      skipped: 1,
+    });
+    expect(calls).toBe(2);
+  });
 });
