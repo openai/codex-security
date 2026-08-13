@@ -1,7 +1,11 @@
 import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { McpToolCallItem, ThreadEvent } from "@openai/codex-sdk";
+import {
+  Codex,
+  type McpToolCallItem,
+  type ThreadEvent,
+} from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runScanEvents } from "../src/api.js";
 import {
@@ -112,6 +116,53 @@ describe("one-shot scan events", () => {
       outputTokens: 3,
       estimatedUsd: 0.000131,
     });
+  });
+
+  test.each([null, undefined])(
+    "preserves completed scans when the real Codex SDK receives %p token usage",
+    async (usage) => {
+      const scanDir = await copyCompletedScan(await temporaryDirectory());
+      const thread = new Codex({
+        codexPathOverride: process.execPath,
+      }).startThread();
+      const executable = thread as unknown as {
+        _exec: { run(): AsyncGenerator<string> };
+      };
+      executable._exec.run = async function* () {
+        yield JSON.stringify({ type: "thread.started", thread_id: "thread-1" });
+        yield JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "message-1",
+            type: "agent_message",
+            text: "scan complete",
+          },
+        });
+        yield JSON.stringify({ type: "turn.completed", usage });
+      };
+
+      const { events } = await thread.runStreamed("Scan the repository.");
+      const result = await runEvents(scanDir, events);
+
+      expect(result.threadId).toBe("thread-1");
+      expect(result.turnResult).toMatchObject({
+        status: "completed",
+        finalResponse: "scan complete",
+      });
+      expect(result.cost).toBeNull();
+    },
+  );
+
+  test("does not suppress unrelated SDK stream failures", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      throw new TypeError("Cannot read properties of null (reading 'message')");
+    }
+
+    await expect(runEvents(scanDir, failedEvents())).rejects.toThrow(
+      "reading 'message'",
+    );
   });
 
   test("reports granted trusted cyber access once without a warning", async () => {

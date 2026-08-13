@@ -33,6 +33,7 @@ import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
+  BUNDLED_PLUGIN_VERSION,
   bootstrapPlugin,
   bundledPluginRoot,
   createIsolatedHome,
@@ -1420,6 +1421,68 @@ describe("plugin runtime preparation", () => {
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
+  });
+
+  test("refreshes cached plugins before forwarding delegated scan attribution", async () => {
+    const root = await temporaryDirectory();
+    const previous = await plugin(join(root, "previous"), "0.1.19");
+    await writeFile(
+      join(previous, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: { "codex-security": { env_vars: [] } },
+      }),
+    );
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    await mkdir(home);
+    const runCodex: NonNullable<
+      NonNullable<Parameters<typeof bootstrapPlugin>[2]>["runCodex"]
+    > = async (_command, args) => {
+      if (args[1] === "marketplace") {
+        await writeFile(
+          join(home, "config.toml"),
+          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+        );
+        return "";
+      }
+      const manifest = JSON.parse(
+        await readFile(
+          join(
+            marketplace,
+            "plugins",
+            "codex-security",
+            ".codex-plugin",
+            "plugin.json",
+          ),
+          "utf8",
+        ),
+      ) as { version: string };
+      return JSON.stringify({
+        installedPath: join(home, "installed", manifest.version),
+        version: manifest.version,
+      });
+    };
+    const options = {
+      codexCommand: { command: "/codex", prefixArgs: [] },
+      runCodex,
+    };
+
+    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
+      "0.1.19",
+    );
+    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
+    const configuration = JSON.parse(
+      await readFile(
+        join(marketplace, "plugins", "codex-security", ".mcp.json"),
+        "utf8",
+      ),
+    ) as { mcpServers: Record<string, { env_vars: string[] }> };
+
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.version).not.toBe("0.1.19");
+    expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
+      "CODEX_SECURITY_SURFACE",
+    );
   });
 
   test("rejects plugin installs without the selected path and version", async () => {

@@ -3539,18 +3539,25 @@ describe("CodexSecurity orchestration", () => {
           }
           return {};
         },
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
+        createCodex: (options: CodexOptions) => ({
+          startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
+            const thread = new Codex({
+              ...options,
+              codexPathOverride: process.execPath,
+            }).startThread(threadOptions);
+            const executable = thread as unknown as {
+              _exec: { run(): AsyncGenerator<string> };
+            };
+            executable._exec.run = async function* () {
               await copyCompletedScan(root);
-              async function* events() {
-                yield { type: "thread.started", thread_id: "scan-thread" };
-                yield { type: "turn.completed", usage: null };
-              }
-              return { events: events() };
-            },
-          }),
+              yield JSON.stringify({
+                type: "thread.started",
+                thread_id: "scan-thread",
+              });
+              yield JSON.stringify({ type: "turn.completed", usage: null });
+            };
+            return thread;
+          },
         }),
       },
     );

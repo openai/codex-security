@@ -1980,7 +1980,7 @@ export async function runScanEvents(
   let lastStreamError: string | null = null;
   let tacStatusReported = false;
   try {
-    for await (const event of options.events) {
+    for await (const event of scanEventsWithOptionalUsage(options.events)) {
       if (!tacStatusReported) {
         const tacStatus = trustedAccessStatusFromEvent(event);
         if (tacStatus !== null) {
@@ -2136,6 +2136,24 @@ export async function runScanEvents(
         options.scanDir,
         { cause: error },
       );
+    }
+    throw error;
+  }
+}
+
+async function* scanEventsWithOptionalUsage(
+  events: AsyncGenerator<ScanEvent>,
+): AsyncGenerator<ScanEvent> {
+  try {
+    yield* events;
+  } catch (error) {
+    if (
+      error instanceof TypeError &&
+      /\b(?:null|undefined)\b/u.test(error.message) &&
+      /\bcache_write_input_tokens\b/u.test(error.message)
+    ) {
+      yield { type: "turn.completed", usage: null };
+      return;
     }
     throw error;
   }
