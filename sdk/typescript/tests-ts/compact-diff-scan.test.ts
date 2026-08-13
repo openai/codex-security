@@ -87,6 +87,15 @@ function pythonWithState(stateDir: string, script: string, ...args: string[]) {
   );
 }
 
+function pythonEval(source: string, ...args: string[]) {
+  const command =
+    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(command).not.toBeNull();
+  return spawnSync(command!, ["-I", "-B", "-c", source, ...args], {
+    encoding: "utf8",
+  });
+}
+
 function immutableDiffDigest(
   kind: "commit" | "range",
   baseRevision: string,
@@ -422,8 +431,43 @@ describe("compact diff scan", () => {
       }),
     );
     expect(registration.status, registration.stderr).toBe(0);
-    const scanId = (JSON.parse(registration.stdout) as { scanId: string })
-      .scanId;
+    const expectedDigest = immutableDiffDigest(
+      "range",
+      baseRevision,
+      headRevision,
+    );
+    const registered = JSON.parse(registration.stdout) as {
+      scanId: string;
+      contract: { diffTarget: { contentDigest?: string } };
+    };
+    const scanId = registered.scanId;
+    expect(registered.contract.diffTarget.contentDigest).toBe(expectedDigest);
+
+    const database = join(stateDir, "workbench.sqlite3");
+    const stored = pythonEval(
+      [
+        "import sqlite3, sys",
+        "connection = sqlite3.connect(sys.argv[1])",
+        "value = connection.execute('SELECT diff_content_digest FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()[0]",
+        "print(value or '')",
+      ].join("\n"),
+      database,
+      scanId,
+    );
+    expect(stored.status, stored.stderr).toBe(0);
+    expect(stored.stdout.trim()).toBe(expectedDigest);
+
+    const cleared = pythonEval(
+      [
+        "import sqlite3, sys",
+        "connection = sqlite3.connect(sys.argv[1])",
+        "connection.execute('UPDATE scans SET diff_content_digest = NULL WHERE id = ?', (sys.argv[2],))",
+        "connection.commit()",
+      ].join("\n"),
+      database,
+      scanId,
+    );
+    expect(cleared.status, cleared.stderr).toBe(0);
 
     cpSync(join(PLUGIN_ROOT, "examples", "completed-scan"), scanDir, {
       recursive: true,
@@ -465,9 +509,7 @@ describe("compact diff scan", () => {
         scan: { target: JsonObject };
       }
     ).scan.target;
-    expect(target["snapshotDigest"]).toBe(
-      immutableDiffDigest("range", baseRevision, headRevision),
-    );
+    expect(target["snapshotDigest"]).toBe(expectedDigest);
   });
 
   test("runs the compact MCP diff lifecycle through a completed scan", async () => {
