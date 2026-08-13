@@ -164,7 +164,9 @@ export class ScanDashboard {
         this.stop();
       } catch {
         try {
-          this.#stream.write(`${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`);
+          this.#stream.write(
+            `${DISABLE_ALTERNATE_SCROLL}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
+          );
         } catch {}
       }
       throw error;
