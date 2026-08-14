@@ -4677,7 +4677,7 @@ describe("runtime directories and plugin Python boundary", () => {
             PATH: [
               unsafeBin,
               linkedBin,
-              "node_modules/.bin",
+              relative(process.cwd(), unsafeBin),
               "",
               trustedBin,
             ].join(delimiter),
