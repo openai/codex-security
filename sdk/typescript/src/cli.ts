@@ -970,6 +970,8 @@ export async function main(
             const scan = value["scan"] as {
               scanId: string;
               continuationThreadId?: string;
+              mode?: string;
+              progress?: { status?: string; updatedAt?: string };
               scanDir?: string;
             };
             const threadId = scan.continuationThreadId;
@@ -982,7 +984,15 @@ export async function main(
               scanId: scan.scanId,
               threadId,
               codexHome: codexSecurityCredentialHome(dependencies.environment),
-              scanDirectory: scan.scanDir,
+              scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+              completedAt:
+                scan.progress?.status === "running"
+                  ? null
+                  : scan.progress?.status === "complete" ||
+                      scan.progress?.status === "failed" ||
+                      scan.progress?.status === "canceled"
+                    ? scan.progress.updatedAt ?? ""
+                    : "",
             })) as unknown as JsonObject;
           },
         );

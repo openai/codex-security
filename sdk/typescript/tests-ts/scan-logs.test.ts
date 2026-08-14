@@ -245,6 +245,8 @@ describe("saved scan logs", () => {
         "2026-08-11T11:59:00.000Z",
       ],
       ["same-second-previous-scan", artifacts, "2026-08-11T12:00:00.100Z"],
+      ["completion-instant", artifacts, "2026-08-11T12:02:00.001Z"],
+      ["after-completion", artifacts, "2026-08-11T12:02:00.002Z"],
       [
         "invalid-start",
         join(artifacts, "deep_discovery", "workers", "invalid", "output"),
@@ -284,6 +286,7 @@ describe("saved scan logs", () => {
       threadId: "parent",
       codexHome: home,
       scanDirectory,
+      completedAt: "2026-08-11T12:02:00.001Z",
     });
 
     expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
@@ -295,6 +298,73 @@ describe("saved scan logs", () => {
     expect(JSON.stringify(result)).toContain("review current worker");
     expect(JSON.stringify(result)).toContain("reduce current findings");
     expect(JSON.stringify(result)).not.toContain("exclude ");
+  });
+
+  test("keeps archived Deep workers without exposing later replacement sessions", async () => {
+    const home = await temporaryHome();
+    const original = join(home, "scans", "results");
+    const archived = `${original}.previous-20260811T120300-a1b2c3d4`;
+    const completedAt = "2026-08-11T12:02:00.000Z";
+    await writeSession(
+      home,
+      "archived-parent",
+      [],
+      undefined,
+      "2026-08-11T12:00:00.000Z",
+      original,
+    );
+    await writeSession(
+      home,
+      "archived-worker",
+      [commandEvent("review archived scan", "archived-call")],
+      undefined,
+      "2026-08-11T12:01:00.000Z",
+      join(original, "artifacts", "deep_discovery", "workers", "old", "output"),
+    );
+    await writeSession(
+      home,
+      "replacement-worker",
+      [commandEvent("PRIVATE REPLACEMENT SCAN", "replacement-call")],
+      undefined,
+      "2026-08-11T12:03:00.000Z",
+      join(original, "artifacts"),
+    );
+
+    const options = {
+      scanId: "archived-scan",
+      threadId: "archived-parent",
+      codexHome: home,
+      scanDirectory: archived,
+      completedAt,
+    };
+    const archivedLogs = await readScanLogs(options);
+    expect(archivedLogs.sessions.map(({ threadId }) => threadId)).toEqual([
+      "archived-parent",
+      "archived-worker",
+    ]);
+    expect(JSON.stringify(archivedLogs)).toContain("review archived scan");
+    expect(JSON.stringify(archivedLogs)).not.toContain("PRIVATE REPLACEMENT");
+
+    const unrelatedRoot = await readScanLogs({
+      ...options,
+      scanDirectory: join(home, "scans", "unrelated.previous-fixture"),
+    });
+    expect(unrelatedRoot.sessions.map(({ threadId }) => threadId)).toEqual([
+      "archived-parent",
+    ]);
+
+    const malformedCompletion = await readScanLogs({
+      ...options,
+      completedAt: "invalid-timestamp",
+    });
+    expect(
+      malformedCompletion.sessions.map(({ threadId }) => threadId),
+    ).toEqual(["archived-parent"]);
+
+    const runningLogs = await readScanLogs({ ...options, completedAt: null });
+    expect(runningLogs.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+      ["archived-parent", "archived-worker", "replacement-worker"],
+    );
   });
 
   test("does not parse event bodies from unrelated saved sessions", async () => {

@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
@@ -9,6 +9,7 @@ interface ScanLogOptions {
   threadId: string;
   codexHome: string;
   scanDirectory?: string;
+  completedAt?: string | null;
 }
 
 interface SessionLog {
@@ -67,7 +68,7 @@ export async function readScanLogs(options: ScanLogOptions) {
         (session.parentThreadId === parent.threadId ||
           (parent === root &&
             session.parentThreadId === null &&
-            belongsToScan(session, root, options.scanDirectory)))
+            belongsToScan(session, root, options)))
       ) {
         included.add(session.threadId);
         sessions.push(session);
@@ -114,8 +115,9 @@ export async function readScanLogs(options: ScanLogOptions) {
 function belongsToScan(
   session: SessionLog,
   root: SessionLog,
-  scanDirectory: string | undefined,
+  options: ScanLogOptions,
 ): boolean {
+  const { scanDirectory, completedAt } = options;
   if (
     scanDirectory === undefined ||
     session.workingDirectory === null ||
@@ -125,20 +127,46 @@ function belongsToScan(
   ) {
     return false;
   }
-  const artifacts = join(scanDirectory, "artifacts");
-  if (relative(artifacts, session.workingDirectory) === "") return true;
-  const workers = join(artifacts, "deep_discovery", "workers");
-  const directory = relative(workers, session.workingDirectory);
-  const components = directory.split(sep);
-  return (
-    !isAbsolute(directory) &&
-    components.length === 2 &&
-    components[0] !== ".." &&
+  if (completedAt !== undefined && completedAt !== null) {
+    const completed = Date.parse(completedAt);
+    if (!Number.isFinite(completed) || session.startedAt >= completed) {
+      return false;
+    }
+  }
+
+  const roots = [scanDirectory];
+  const name = basename(scanDirectory);
+  const marker = name.lastIndexOf(".previous-");
+  if (
+    marker > 0 &&
+    root.workingDirectory !== null &&
     relative(
-      join(workers, components[0]!, "output"),
-      session.workingDirectory,
+      join(dirname(scanDirectory), name.slice(0, marker)),
+      root.workingDirectory,
     ) === ""
-  );
+  ) {
+    roots.push(root.workingDirectory);
+  }
+
+  for (const directoryRoot of roots) {
+    const artifacts = join(directoryRoot, "artifacts");
+    if (relative(artifacts, session.workingDirectory) === "") return true;
+    const workers = join(artifacts, "deep_discovery", "workers");
+    const directory = relative(workers, session.workingDirectory);
+    const components = directory.split(sep);
+    if (
+      !isAbsolute(directory) &&
+      components.length === 2 &&
+      components[0] !== ".." &&
+      relative(
+        join(workers, components[0]!, "output"),
+        session.workingDirectory,
+      ) === ""
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function* sessionEvents(

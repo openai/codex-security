@@ -287,6 +287,28 @@ describe("CLI workbench", () => {
           .map((event) => JSON.stringify(event))
           .join("\n"),
       );
+      await writeFile(
+        join(sessions, "rollout-after-completion.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "after-completion",
+              timestamp: "2026-08-11T12:03:00.000Z",
+              cwd: join(scanDirectory, "artifacts"),
+            },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "agent_message",
+              message: "PRIVATE LATER SESSION",
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
 
       const calls: Array<readonly string[]> = [];
       const stdout = capture();
@@ -298,6 +320,11 @@ describe("CLI workbench", () => {
             scan: {
               scanId: "scan-1",
               continuationThreadId: "thread-1",
+              mode: "deep",
+              progress: {
+                status: "complete",
+                updatedAt: "2026-08-11T12:02:00.000Z",
+              },
               scanDir: scanDirectory,
             },
           };
@@ -317,6 +344,7 @@ describe("CLI workbench", () => {
       expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
       expect(stdout.text()).toContain("SYNTHETIC_KEY");
       expect(stdout.text()).toContain("independent worker");
+      expect(stdout.text()).not.toContain("PRIVATE LATER SESSION");
     } finally {
       await rm(state, { recursive: true, force: true });
     }
