@@ -408,14 +408,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    [
-      "--no-lazy-fetch",
-      "-c",
-      "core.fsmonitor=false",
-      "-C",
-      repository,
-      ...args,
-    ],
+    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
     {
       encoding: "utf8",
       signal,
@@ -453,11 +446,13 @@ function isolatedGitEnvironment(
     const normalized = name.toUpperCase();
     if (
       GIT_REPOSITORY_ENVIRONMENT.has(normalized) ||
+      normalized === "GIT_ALLOW_PROTOCOL" ||
       (!preserveGitConfiguration && normalized.startsWith("GIT_"))
     ) {
       delete environment[name];
     }
   }
+  environment["GIT_ALLOW_PROTOCOL"] = "";
   return environment;
 }
 

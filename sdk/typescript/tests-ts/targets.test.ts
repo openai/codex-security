@@ -415,6 +415,7 @@ describe("scan target normalization", () => {
           GIT_CONFIG_COUNT: "1",
           GIT_CONFIG_KEY_0: "http.extraHeader",
           GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
+          GIT_ALLOW_PROTOCOL: "ext",
         },
       },
     );
