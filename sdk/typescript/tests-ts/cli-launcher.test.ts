@@ -111,6 +111,7 @@ describe("CLI launcher", () => {
       );
       expect(build.error).toBeUndefined();
       expect(build.status).toBe(0);
+      expect(build.stderr).toBe("");
 
       expect(await readFile(join(dist, "cli.js"), "utf8")).toContain(
         'from "./api.js"',

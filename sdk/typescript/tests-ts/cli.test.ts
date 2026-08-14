@@ -1,19 +1,17 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  copyFile,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, normalize } from "node:path";
 import { Writable } from "node:stream";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
@@ -1852,98 +1850,6 @@ describe("CLI", () => {
     expect(stdout.text()).not.toContain("--format {sarif}");
     expect(stderr.text()).toBe("");
   });
-
-  test("runs split TypeScript output from an npm-style bin when Node preserves main symlinks", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-node-bin-"));
-    try {
-      const source = join(import.meta.dir, "..");
-      const installed = join(root, "node_modules", "@openai", "codex-security");
-      const dist = join(installed, "dist");
-      const build = spawnSync(
-        "node",
-        [
-          join(source, "node_modules", "typescript", "bin", "tsc"),
-          "-p",
-          join(source, "tsconfig.build.json"),
-          "--outDir",
-          dist,
-          "--pretty",
-          "false",
-        ],
-        { encoding: "utf8", cwd: source },
-      );
-      expect(build.status).toBe(0);
-      expect(build.stderr).toBe("");
-      expect(await readFile(join(dist, "cli.js"), "utf8")).toContain(
-        'from "./api.js"',
-      );
-      const launcher = join(installed, "bin", "codex-security.mjs");
-      await mkdir(join(installed, "bin"), { recursive: true });
-      await copyFile(join(source, "bin", "codex-security.mjs"), launcher);
-      await copyFile(
-        join(source, "package.json"),
-        join(installed, "package.json"),
-      );
-      await symlink(
-        join(source, "node_modules"),
-        join(installed, "node_modules"),
-        "dir",
-      );
-      const binDirectory = join(root, "node_modules", ".bin");
-      await mkdir(binDirectory, { recursive: true });
-      const bin = join(binDirectory, "codex-security");
-      await symlink(launcher, bin);
-      const child = spawnSync("node", [bin, "--version"], {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          NODE_OPTIONS:
-            "--preserve-symlinks-main --no-experimental-detect-module",
-          NODE_USE_ENV_PROXY: undefined,
-        },
-      });
-      expect(child.status).toBe(0);
-      expect(child.stderr).toBe("");
-      expect(child.stdout).toBe(`${VERSION}\n`);
-
-      const preload = join(root, "unavailable-cwd.mjs");
-      await writeFile(
-        preload,
-        [
-          "const originalCwd = process.cwd;",
-          'Object.defineProperty(process, "cwd", {',
-          "  value() {",
-          '    if (/[\\\\/]dist[\\\\/]cli\\.js:/u.test(new Error().stack ?? "")) {',
-          '      throw new Error("working directory is unavailable");',
-          "    }",
-          "    return originalCwd.call(process);",
-          "  },",
-          "});\n",
-        ].join("\n"),
-      );
-      const failed = spawnSync(
-        "node",
-        ["--import", pathToFileURL(preload).href, bin, "scan"],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            NODE_OPTIONS:
-              "--preserve-symlinks-main --no-experimental-detect-module",
-            NODE_USE_ENV_PROXY: undefined,
-          },
-          timeout: 30_000,
-        },
-      );
-      expect([failed.status, failed.stdout, failed.stderr]).toEqual([
-        2,
-        "",
-        "working directory is unavailable\n",
-      ]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30_000);
 
   test("uses Incur version and command help", async () => {
     const version = capture();

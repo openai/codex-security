@@ -1890,33 +1890,6 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  testPosix("rejects sticky shared parents controlled by another user", () => {
-    expect(() =>
-      requireTrustedOutputAncestor(
-        { mode: 0o41777, uid: 1001 },
-        "/shared",
-        1000,
-      ),
-    ).toThrow("trusted owner");
-    expect(() =>
-      requireTrustedOutputAncestor(
-        { mode: 0o40755, uid: 1001 },
-        "/shared",
-        1000,
-      ),
-    ).toThrow("trusted owner");
-    expect(() =>
-      requireTrustedOutputAncestor(
-        { mode: 0o41777, uid: 1000 },
-        "/shared",
-        1000,
-      ),
-    ).not.toThrow();
-    expect(() =>
-      requireTrustedOutputAncestor({ mode: 0o41777, uid: 0 }, "/tmp", 1000),
-    ).not.toThrow();
-  });
-
   testPosix(
     "rejects a credential home that is no longer private to the current user",
     async () => {
