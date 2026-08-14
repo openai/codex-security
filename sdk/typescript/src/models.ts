@@ -141,9 +141,91 @@ export interface FindingsDocument {
       | string;
     remediation: string;
     validation?: {
+      assertions?: string[];
+      counterEvidence?: string[];
+      evidence?: string | string[];
+      evidenceRefs?: string[];
+      evidence_refs?: string[];
+      limitations?: string[];
+      method?: string;
+      status?: string | null;
+      summary?: string;
+      disposition?: string | null;
+      result?: string | null;
       [k: string]: unknown;
     } | null;
     attackPath?: {
+      assumptions?: string[];
+      blindspots?: string[];
+      controls?: string[];
+      dataFlow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      data_flow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      dataflow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      evidenceRefs?: string[];
+      evidence_refs?: string[];
+      impact?:
+        | string
+        | {
+            level?: string;
+            rationale?: string;
+            why?: string;
+            [k: string]: unknown;
+          }
+        | null;
+      likelihood?:
+        | string
+        | {
+            level?: string;
+            rationale?: string;
+            why?: string;
+            [k: string]: unknown;
+          }
+        | null;
+      limitations?: string[];
+      preconditions?: string[];
+      reachability?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      steps?: string[];
+      summary?: string;
       [k: string]: unknown;
     } | null;
     remediationTests?: string[];
