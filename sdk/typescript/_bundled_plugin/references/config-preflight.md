@@ -42,9 +42,9 @@ When the active session is actually managed by `codex_bridge`, provide explicit 
 --multi-agent-runtime-owner codex-bridge --multi-agent-runtime-version v2 --multi-agent-runtime-provenance verified-bridge --effective-config multiagent_config.max_concurrency=<count>
 ```
 
-Without `--multi-agent-runtime-owner codex-bridge` and `verified-bridge` provenance, passing `multiagent_config.max_concurrency` is an error. This prevents an assumed config value from reclassifying a native App session as bridge-owned.
+For a profile that evaluates parent-runtime settings, passing `multiagent_config.max_concurrency` without `--multi-agent-runtime-owner codex-bridge` and `verified-bridge` provenance is an error. Explicit runtime claims still require their existing provenance and ownership checks. An unrelated backend config value does not block a profile that does not use parent-runtime settings.
 
-Static native V2 accepts both `[features] multi_agent_v2 = true` and `[features.multi_agent_v2] enabled = true`. Native V2 cannot be combined with `agents.max_threads`; the helper rejects that invalid config. `agents.max_depth` applies to V1 only and is not required for V2. A runtime version and cap without verified ownership cannot satisfy a blocking requirement. When runtime version, ownership, or capacity remains unknown, the helper returns `incomplete` only when a blocking requirement needs that fact and omits unsafe concurrency patches.
+Static native V2 accepts both `[features] multi_agent_v2 = true` and `[features.multi_agent_v2] enabled = true`. When the profile evaluates parent-runtime settings or explicit runtime facts are supplied, native V2 cannot be combined with `agents.max_threads`. `agents.max_depth` applies to V1 only and is not required for V2. A runtime version and cap without verified ownership cannot satisfy a blocking requirement. When runtime version, ownership, or capacity remains unknown, the helper returns `incomplete` only when a blocking requirement needs that fact and omits unsafe concurrency patches.
 
 The helper reads the routed capability profile from `../preflight/capability-profiles.toml`, discovers the applicable Codex config paths from `--cwd`, applies documented defaults where the registry provides them, and prints one JSON result.
 

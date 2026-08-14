@@ -1,5 +1,12 @@
-import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -50,7 +57,198 @@ async function temporaryDirectory(): Promise<string> {
   return path;
 }
 
+function runPreflight(
+  config: string,
+  profile: string,
+  options: readonly string[] = [],
+): { status: number | null; payload: Record<string, unknown> } {
+  const interpreter =
+    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(interpreter).not.toBeNull();
+  const result = spawnSync(
+    interpreter!,
+    [
+      "-I",
+      "-B",
+      join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+      "--profile",
+      profile,
+      "--config",
+      config,
+      ...options,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.error).toBeUndefined();
+  return {
+    status: result.status,
+    payload: JSON.parse(result.stdout) as Record<string, unknown>,
+  };
+}
+
 describe("CodexSecurity preflight configuration", () => {
+  test("ignores unrelated runtime settings for profiles without parent-runtime requirements", async () => {
+    const root = await temporaryDirectory();
+    const config = join(root, "empty.toml");
+    await writeFile(config, "");
+    const settings = [
+      {
+        args: [
+          "--effective-config",
+          "features.multi_agent_v2.enabled=true",
+          "--effective-config",
+          "agents.max_threads=8",
+        ],
+        context: { owner: "native", version: "v2", agent_max_threads: 8 },
+        error: "agents.max_threads cannot be set",
+      },
+      {
+        args: ["--effective-config", "multiagent_config.max_concurrency=8"],
+        context: { owner: "unknown", version: "unknown" },
+        error: "does not prove bridge ownership",
+      },
+    ];
+
+    for (const { args, context, error } of settings) {
+      for (const profile of ["deep_security_scan", "security_diff_scan"]) {
+        const result = runPreflight(config, profile, args);
+        expect(result.status).toBe(0);
+        expect(result.payload).toMatchObject({
+          multi_agent_context: context,
+          profile,
+          status: "ready",
+        });
+      }
+
+      const required = runPreflight(config, "security_scan", args);
+      expect(required.status).toBe(2);
+      expect(required.payload["error"]).toContain(error);
+    }
+  });
+
+  test("keeps custom profile requirements and explicit runtime ownership strict", async () => {
+    const root = await temporaryDirectory();
+    const config = join(root, "empty.toml");
+    const registry = join(root, "registry.toml");
+    await writeFile(config, "");
+    await writeFile(
+      registry,
+      [
+        "version = 1",
+        "[capabilities.available]",
+        'kind = "runtime"',
+        'check = "available"',
+        "[capabilities.mode]",
+        'kind = "multi_agent_mode"',
+        'owner = "native"',
+        'version = "v2"',
+        "[capabilities.bridge]",
+        'kind = "config"',
+        'path = "multiagent_config.max_concurrency"',
+        'op = ">="',
+        "value = 1",
+        ...[
+          ["root_bridge", "multiagent_config"],
+          ["root_agents", "agents"],
+          ["root_features", "features"],
+        ].flatMap(([capability, path]) => [
+          `[capabilities.${capability}]`,
+          'kind = "config"',
+          `path = "${path}"`,
+          'op = "=="',
+          "value = {}",
+        ]),
+        ...[
+          "available",
+          "mode",
+          "bridge",
+          "root_bridge",
+          "root_agents",
+          "root_features",
+        ].flatMap((profile) => [
+          `[profiles.${profile}]`,
+          `description = "${profile} capability"`,
+          `[[profiles.${profile}.requirements]]`,
+          `capability = "${profile}"`,
+          'severity = "block"',
+          'reason = "Required capability"',
+        ]),
+        "[profiles.root_patch]",
+        'description = "Root runtime remediation"',
+        "[[profiles.root_patch.requirements]]",
+        'capability = "available"',
+        'severity = "block"',
+        'reason = "Required capability"',
+        "[profiles.root_patch.remediation]",
+        "[[profiles.root_patch.remediation.patches]]",
+        'path = "multiagent_config"',
+        "value = {}",
+      ].join("\n"),
+    );
+    const conflictingNative = [
+      "--registry",
+      registry,
+      "--runtime-check",
+      "available=true",
+      "--effective-config",
+      "features.multi_agent_v2.enabled=true",
+      "--effective-config",
+      "agents.max_threads=8",
+    ];
+
+    expect(runPreflight(config, "available", conflictingNative)).toMatchObject({
+      status: 0,
+      payload: { status: "ready" },
+    });
+    for (const profile of ["mode", "root_agents", "root_features"]) {
+      expect(runPreflight(config, profile, conflictingNative)).toMatchObject({
+        status: 2,
+        payload: { error: expect.stringContaining("agents.max_threads") },
+      });
+    }
+    for (const profile of ["bridge", "root_bridge", "root_patch"]) {
+      expect(
+        runPreflight(config, profile, [
+          "--registry",
+          registry,
+          "--runtime-check",
+          "available=true",
+          "--effective-config",
+          "multiagent_config.max_concurrency=8",
+        ]),
+      ).toMatchObject({
+        status: 2,
+        payload: { error: expect.stringContaining("bridge ownership") },
+      });
+    }
+
+    const forged = runPreflight(config, "deep_security_scan", [
+      "--multi-agent-runtime-owner",
+      "codex-bridge",
+      "--multi-agent-runtime-provenance",
+      "tool-surface",
+    ]);
+    expect(forged.status).toBe(2);
+    expect(forged.payload["error"]).toContain("verified-bridge");
+
+    const conflictingBridge = runPreflight(config, "deep_security_scan", [
+      "--multi-agent-runtime-owner",
+      "codex-bridge",
+      "--multi-agent-runtime-version",
+      "v2",
+      "--multi-agent-runtime-provenance",
+      "verified-bridge",
+      "--multi-agent-session-cap",
+      "9",
+      "--effective-config",
+      "multiagent_config.max_concurrency=8",
+    ]);
+    expect(conflictingBridge.status).toBe(2);
+    expect(conflictingBridge.payload["error"]).toContain(
+      "conflicting bridge concurrency facts",
+    );
+  });
+
   test("uses a root-read filesystem profile with writable workspace and workbench state", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
