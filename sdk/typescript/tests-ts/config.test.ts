@@ -63,6 +63,13 @@ function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
 }
 
 describe("Codex configuration", () => {
+  test("automatically reviews scan execution approvals by default", async () => {
+    expect(await mergedCodexConfig({})).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
+    });
+  });
+
   test("lets Codex honor native and managed credential storage", async () => {
     expect(DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"]).toBe("auto");
     expect((await mergedCodexConfig({}))["cli_auth_credentials_store"]).toBe(

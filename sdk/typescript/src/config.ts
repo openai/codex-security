@@ -52,6 +52,8 @@ export function isExternalModelProvider(
 }
 
 export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = {
+  approval_policy: "on-request",
+  approvals_reviewer: "auto_review",
   cli_auth_credentials_store: "auto",
   model: "gpt-5.6-sol",
   model_reasoning_effort: "xhigh",
