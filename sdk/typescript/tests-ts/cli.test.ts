@@ -1494,6 +1494,25 @@ describe("CLI", () => {
     expect(stream.listenerCount("error")).toBe(0);
   });
 
+  test("releases progress stream listeners after completed scans and preflight", async () => {
+    for (const command of [
+      ["scan", ".", "--json"],
+      ["scan", ".", "--dry-run", "--json"],
+    ]) {
+      const stream = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+
+      expect(
+        await main(command, capture().stream, stream, dependencies()),
+      ).toBe(0);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(stream.listenerCount("error")).toBe(0);
+    }
+  });
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
     const stderr = capture(true);

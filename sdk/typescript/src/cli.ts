@@ -3753,6 +3753,7 @@ export class Progress {
   public stage(message: string): void {
     this.#observeStreamErrors();
     this.#stream.write(`${this.#line(message)}\n`);
+    if (this.#timer === null) this.stopTimer();
   }
 
   public startTimer(message: string): void {
