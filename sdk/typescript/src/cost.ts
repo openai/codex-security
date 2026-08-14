@@ -18,6 +18,12 @@ export interface ScanCost {
   estimatedUsd: number;
 }
 
+export interface ScanSessionEvent {
+  threadId: string;
+  parentThreadId: string | null;
+  event: Record<string, unknown>;
+}
+
 type ModelPricing = readonly [
   input: number,
   cachedInput: number,
@@ -61,6 +67,7 @@ interface SessionUsage {
   prose: Set<string>;
   reasoning: SessionReasoning | null;
   reasoningCount: number;
+  events?: Record<string, unknown>[];
 }
 
 interface ScanCostTrackerOptions {
@@ -73,6 +80,7 @@ interface ScanCostTrackerOptions {
   onCost?: (cost: Readonly<ScanCost>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
+  onSessionEvent?: (event: ScanSessionEvent) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -121,7 +129,8 @@ export class ScanCostTracker {
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
       this.#options.onActivity === undefined &&
-      this.#options.onProgress === undefined
+      this.#options.onProgress === undefined &&
+      this.#options.onSessionEvent === undefined
     ) {
       return;
     }
@@ -200,6 +209,7 @@ export class ScanCostTracker {
           prose: new Set(),
           reasoning: null,
           reasoningCount: 0,
+          ...(this.#options.onSessionEvent === undefined ? {} : { events: [] }),
         };
         this.#sessions.set(path, session);
       }
@@ -264,14 +274,23 @@ export class ScanCostTracker {
 
     let usage: ScanTokenUsage | null = null;
     for (const session of this.#sessions.values()) {
-      if (session.threadId !== null && included.has(session.threadId)) {
-        if (session.threadId !== this.#threadId) {
-          this.#reportWorkerActivities(session);
-          this.#reportWorkerProgress(session);
-        }
-        if (session.usage !== null) {
-          usage = addTokenUsage(usage, session.usage);
-        }
+      if (session.threadId === null || !included.has(session.threadId)) {
+        session.events?.splice(0);
+        continue;
+      }
+      for (const event of session.events?.splice(0) ?? []) {
+        this.#options.onSessionEvent?.({
+          threadId: session.threadId,
+          parentThreadId: session.parentThreadId,
+          event,
+        });
+      }
+      if (session.threadId !== this.#threadId) {
+        this.#reportWorkerActivities(session);
+        this.#reportWorkerProgress(session);
+      }
+      if (session.usage !== null) {
+        usage = addTokenUsage(usage, session.usage);
       }
     }
     if (usage === null) return;
@@ -454,6 +473,7 @@ function readSessionEvent(
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
+      if (!session.replaying) session.events?.push(event);
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -472,6 +492,7 @@ function readSessionEvent(
       payload["parent_thread_id"] ??
       (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
     if (typeof parent === "string") session.parentThreadId = parent;
+    session.events?.push(event);
     return;
   }
   if (session.replaying) {
@@ -487,9 +508,11 @@ function readSessionEvent(
       payload["started_at"] >= session.startedAt
     ) {
       session.replaying = false;
+      session.events?.push(event);
     }
     return;
   }
+  session.events?.push(event);
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));
     if (repository === undefined) return;

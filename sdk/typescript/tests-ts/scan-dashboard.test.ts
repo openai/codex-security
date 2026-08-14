@@ -42,11 +42,13 @@ class DashboardTestInput extends EventEmitter {
 describe("live scan dashboard", () => {
   test("renders publication progress without scan-only inventory and cost fields", () => {
     const stderr = capture(true);
+    const input = new DashboardTestInput();
     const dashboard = new ScanDashboard(
       { ...stderr.stream, columns: 100, rows: 18 },
       {
         repository: "/synthetic/payments-api",
         presentation: "publication",
+        input,
         color: false,
         clock: fakeClock(),
       },
@@ -54,6 +56,7 @@ describe("live scan dashboard", () => {
 
     dashboard.setStage("Connecting to Linear");
     dashboard.start();
+    input.emit("data", "d");
     let text = stripVTControlCharacters(stderr.text());
     expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  payments-api");
     expect(text).toContain("Waiting for publication activity");
@@ -61,6 +64,8 @@ describe("live scan dashboard", () => {
     expect(text).not.toContain("FILES");
     expect(text).not.toContain("TOKENS");
     expect(text).not.toContain("COST");
+    expect(text).not.toContain("DETAILS");
+    expect(text).not.toContain("d details");
 
     dashboard.setPublicationProgress(2, 5);
     dashboard.setStage("Publishing findings · 2/5");
@@ -610,6 +615,230 @@ describe("live scan dashboard", () => {
     expect(lastFrame(stderr)).toContain("6 lines above live");
     input.emit("data", "\u001B[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
+    dashboard.stop();
+  });
+
+  test("shows unredacted, chronological session events and keeps the activity view safe", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 140, rows: 24 },
+      {
+        repository: "/code/juice-shop",
+        input,
+        color: true,
+        clock: fakeClock(),
+        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
+      },
+    );
+
+    dashboard.start();
+    dashboard.record({
+      id: "activity-1",
+      kind: "command",
+      status: "completed",
+      description: "rg -n synthetic-secret routes/login.ts",
+      paths: [],
+    });
+    for (const [seconds, type, payload] of [
+      [
+        2,
+        "turn_context",
+        { model: "gpt-5.6-sol", developer_instructions: "Check boundaries." },
+      ],
+      [0, "session_meta", { base_instructions: { text: "Inspect safely." } }],
+      [1, "message", { role: "user", content: [{ text: "Find bugs." }] }],
+      [
+        3,
+        "function_call",
+        {
+          name: "exec_command",
+          arguments:
+            "synthetic-secret `literal` **glob** \u001B[31mspoofed\u001B[0m\u0007",
+        },
+      ],
+      [
+        4,
+        "function_call_output",
+        {
+          output: [
+            {
+              text: "result\nfunction inspect() {\n  if (input) {\n    return input;\n  }\n\n  return null;\n}",
+            },
+          ],
+        },
+      ],
+      [5, "agent_reasoning", { text: "Inspect **critical** `db.raw(input)`." }],
+      [
+        5,
+        "reasoning",
+        {
+          summary: [
+            { text: "Inspect **critical** `db.raw(input)`." },
+            { text: "New final detail." },
+          ],
+          encrypted_content: "never-display-encrypted-reasoning",
+        },
+      ],
+      [6, "agent_message", { message: "Confirmed." }],
+      [6, "message", { role: "assistant", content: [{ text: "Confirmed." }] }],
+      [7, "token_count", {}],
+      [8, "reasoning", { summary: [] }],
+      [9, "agent_reasoning", { text: "   " }],
+    ] as [number, string, Record<string, unknown>][]) {
+      dashboard.recordDetails({
+        threadId: "scan-thread",
+        parentThreadId: null,
+        event: {
+          type: ["session_meta", "turn_context"].includes(type)
+            ? type
+            : type.startsWith("agent_") || type === "token_count"
+              ? "event_msg"
+              : "response_item",
+          payload: { type, ...payload },
+          timestamp: new Date(STARTED_AT + seconds * 1_000).toISOString(),
+        },
+      });
+    }
+
+    let frame = lastFrame(stderr);
+    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).toContain("d details");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    for (const line of [
+      "main · system: Inspect safely.",
+      "main · user: Find bugs.",
+      "main · context: gpt-5.6-sol · Check boundaries.",
+      "main · tool exec_command: synthetic-secret `literal` **glob** spoofed",
+      "main · result: result",
+      "main · reasoning: Inspect critical db.raw(input).",
+      "main · reasoning: New final detail.",
+      "main · assistant: Confirmed.",
+    ]) {
+      expect(frame).toContain(line);
+    }
+    expect(frame.indexOf("main · system:")).toBeLessThan(
+      frame.indexOf("main · context:"),
+    );
+    const continuation = " ".repeat("  [09:41:04] main · ".length);
+    expect(frame).toContain(`${continuation}  if (input) {`);
+    expect(frame).toContain(`\n${continuation}\n${continuation}  return null;`);
+    expect(frame).not.toContain("main · token count");
+    expect(frame.match(/main · reasoning:/gu)).toHaveLength(2);
+    expect(frame.match(/Inspect critical db\.raw\(input\)\./gu)).toHaveLength(
+      1,
+    );
+    expect(frame.match(/Confirmed\./gu)).toHaveLength(1);
+    for (const sequence of [
+      "\u001B[2m[09:41:05]\u001B[22m",
+      "\u001B[36mmain\u001B[39m",
+      "\u001B[35mreasoning:\u001B[39m",
+      "\u001B[36mtool exec_command:\u001B[39m",
+      "\u001B[32mresult:\u001B[39m",
+      "\u001B[36massistant:\u001B[39m",
+      "\u001B[1mcritical\u001B[22m",
+      "\u001B[2mdb.raw(input)\u001B[22m",
+    ]) {
+      expect(stderr.text()).toContain(sequence);
+    }
+    expect(frame).toContain("TOKENS");
+    expect(stderr.text()).not.toContain("never-display-encrypted-reasoning");
+    expect(stderr.text()).not.toContain("\u001B[31m");
+    expect(stderr.text()).not.toContain("\u0007");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).not.toContain("synthetic-secret");
+    dashboard.stop();
+  });
+
+  test("filters workers and scrolls the details separately from scan activity", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 120, rows: 14 },
+      { repository: "/code/juice-shop", input, clock: fakeClock() },
+    );
+    let payloadReads = 0;
+    const event = (
+      threadId: string,
+      text: string,
+      parentThreadId: string | null = null,
+    ) => {
+      dashboard.recordDetails({
+        threadId,
+        parentThreadId,
+        event: {
+          type: "event_msg",
+          get payload() {
+            payloadReads += 1;
+            return { type: "agent_message", message: text };
+          },
+        },
+      });
+    };
+
+    dashboard.start();
+    event("worker-one", "Worker one inspected routes.", "scan-thread");
+    event("scan-thread", "Main scan started.");
+    event("worker-two", "Independent worker inspected models.");
+    for (let index = 1; index <= 10; index += 1) {
+      event("scan-thread", `trace ${index}`);
+    }
+
+    input.emit("data", "d");
+    for (const [source, included, excluded] of [
+      ["m", "trace 10", "Worker one"],
+      ["1", "Worker one", "Independent worker"],
+      ["2", "Independent worker", "Worker one"],
+    ] as const) {
+      input.emit("data", source);
+      const frame = lastFrame(stderr);
+      expect(frame).toContain(
+        `DETAILS · ${source === "m" ? "main" : `worker ${source}`}`,
+      );
+      expect(frame).toContain(included);
+      expect(frame).not.toContain(excluded);
+    }
+
+    input.emit("data", "a");
+    input.emit("data", "\u001B[H");
+    let frame = lastFrame(stderr);
+    expect(frame).toContain("worker 1 · assistant: Worker one");
+    expect(frame).toContain("main · assistant: Main scan started.");
+    expect(frame).not.toContain("trace 10");
+    expect(frame).toContain("above live");
+
+    const readsBeforeScroll = payloadReads;
+    input.emit("data", "\u001B[B");
+    input.emit("data", "\u001B[A");
+    expect(payloadReads).toBe(readsBeforeScroll);
+
+    event("scan-thread", "live result\nsecond line");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Worker one inspected routes.");
+    expect(frame).not.toContain("live result");
+    expect(payloadReads).toBe(readsBeforeScroll + 3);
+
+    dashboard.record({
+      id: "background-activity",
+      kind: "command",
+      status: "completed",
+      description: "Background activity must not move the details.",
+      paths: [],
+    });
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Worker one inspected routes.");
+    expect(frame).not.toContain("trace 10");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Background activity must not move the details.");
+    expect(frame).not.toContain("above live");
+    expect(stderr.text()).not.toMatch(/\u001B\[[\d;]*m/u);
     dashboard.stop();
   });
 
