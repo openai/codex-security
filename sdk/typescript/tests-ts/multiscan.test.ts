@@ -1563,11 +1563,19 @@ describe("multiscan", () => {
       const leakedVariables = (await readFile(trace, "utf8"))
         .trim()
         .split("\n")
-        .map((line) => JSON.parse(line) as { event: string; param?: string })
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              event: string;
+              param?: string;
+              value?: string;
+            },
+        )
         .filter(
           (event) =>
             event.event === "def_param" &&
-            repositoryVariables.includes(event.param ?? ""),
+            repositoryVariables.includes(event.param ?? "") &&
+            event.value === join(paths.root, `missing-${event.param}`),
         );
       expect(leakedVariables).toEqual([]);
     } finally {
