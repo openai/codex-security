@@ -21,7 +21,12 @@ const GIT_REPOSITORY_ENVIRONMENT = new Set([
   ...UNSUPPORTED_GIT_ENVIRONMENT,
   "GIT_CEILING_DIRECTORIES",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_GRAFT_FILE",
+  "GIT_IMPLICIT_WORK_TREE",
   "GIT_NAMESPACE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
 ]);
 
 export type ScanMode = "standard" | "deep";
@@ -295,13 +300,7 @@ export async function validateCommittedDiffCheckout(
 
   const status = await gitOutput(
     repository,
-    [
-      "-c",
-      "core.fsmonitor=false",
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-    ],
+    ["status", "--porcelain=v1", "--untracked-files=all"],
     signal,
   );
   if (status.length !== 0) {
@@ -409,7 +408,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-C", repository, ...args],
+    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
     {
       encoding: "utf8",
       signal,

@@ -202,7 +202,16 @@ describe("scan target normalization", () => {
     const repo = await repository();
     const root = join(repo, "..");
     const trace = join(root, "git-events.jsonl");
+    await writeFile(
+      join(repo, "src", "app.ts"),
+      "export const updated = true;\n",
+    );
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "updated");
     const revision = git(repo, "rev-parse", "HEAD");
+    const parent = git(repo, "rev-parse", "HEAD^");
+    const shallow = join(root, "shallow");
+    await writeFile(shallow, `${revision}\n`);
     const repositoryOverrides = {
       GIT_DIR: join(root, "missing-git-dir"),
       GIT_WORK_TREE: join(root, "missing-work-tree"),
@@ -213,13 +222,18 @@ describe("scan target normalization", () => {
       GIT_REPLACE_REF_BASE: "refs/unsafe/",
       GIT_CEILING_DIRECTORIES: root,
       GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
+      GIT_GRAFT_FILE: join(root, "missing-grafts"),
+      GIT_IMPLICIT_WORK_TREE: "0",
       GIT_NAMESPACE: "unsafe",
+      GIT_NO_REPLACE_OBJECTS: "1",
+      GIT_PREFIX: "unsafe/",
+      GIT_SHALLOW_FILE: shallow,
     };
     const result = spawnSync(
       process.execPath,
       [
         "-e",
-        "const { repositoryRevision } = await import(process.argv[1]); console.log(await repositoryRevision(process.argv[2]));",
+        "const { DiffTarget, normalizeTarget } = await import(process.argv[1]); console.log(JSON.stringify(await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD^' }))));",
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
         repo,
       ],
@@ -245,7 +259,11 @@ describe("scan target normalization", () => {
     );
 
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe(revision);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      kind: "refs",
+      base: parent,
+      head: revision,
+    });
     const events = (await readFile(trace, "utf8"))
       .trim()
       .split(/\r?\n/u)
@@ -262,6 +280,41 @@ describe("scan target normalization", () => {
     for (const name of Object.keys(repositoryOverrides)) {
       expect(events.some(({ param }) => param === name)).toBe(false);
     }
+  });
+
+  test("does not expose Git configuration to repository fsmonitor hooks", async () => {
+    const repo = await repository();
+    const root = join(repo, "..");
+    const hook = join(root, "fsmonitor-hook");
+    const leaked = join(root, "leaked-credential");
+    await writeFile(
+      hook,
+      `#!/bin/sh\nprintf '%s' "$GIT_CONFIG_VALUE_0" > ${JSON.stringify(leaked)}\nprintf '\\0'\n`,
+    );
+    await chmod(hook, 0o700);
+    git(repo, "config", "core.fsmonitor", hook);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
+        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        repo,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.extraHeader",
+          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(existsSync(leaked)).toBe(false);
   });
 
   test("does not execute repository-local Git shims from PATH", async () => {
