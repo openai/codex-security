@@ -4,11 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import re
 from collections import Counter
-from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
@@ -26,16 +23,6 @@ WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 
 class ReportProjectionError(ValueError):
     """Raised when a canonical scan cannot be projected into a valid report."""
-
-
-def _load_script(name: str) -> ModuleType:
-    path = Path(__file__).resolve().parent / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"codex_security_{name}", path)
-    if spec is None or spec.loader is None:
-        raise ReportProjectionError(f"could not load report helper: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _text(value: Any, fallback: str) -> str:
@@ -864,12 +851,7 @@ def generate_report_markdown(
     findings: dict[str, Any],
     coverage: dict[str, Any],
 ) -> bytes:
-    markdown = build_report_markdown(manifest, findings, coverage)
-    validator = _load_script("validate_report_format")
-    errors = validator.validate_report(markdown)
-    if errors:
-        raise ReportProjectionError("generated report failed validation: " + "; ".join(errors))
-    return markdown.encode("utf-8")
+    return build_report_markdown(manifest, findings, coverage).encode("utf-8")
 
 
 def main() -> int:

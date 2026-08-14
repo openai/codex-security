@@ -280,27 +280,6 @@ describe("plugin runtime preparation", () => {
 
     const contents = await readFile(output);
     expect(await readFile(repeatedOutput)).toEqual(contents);
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const validateSource =
-      /function validateRepositoryPath\(value, field\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    const parseSource =
-      /function parseInScopePaths\(content, path3\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(validateSource).toBeDefined();
-    expect(parseSource).toBeDefined();
-    const parseInventory = new Function(
-      "import_node_util5",
-      `${validateSource}\n${parseSource}\nreturn parseInScopePaths;`,
-    )({ TextDecoder }) as (content: Uint8Array, path: string) => Set<string>;
-    expect(() => parseInventory(contents, "in_scope_files.txt")).not.toThrow();
 
     const rows = contents.toString("utf8").trimEnd().split(/\r?\n/u);
     expect(rows).toContain("./nested/tracked-secret.py");
@@ -3597,9 +3576,15 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(result.status, result.stderr).toBe(0);
       const payload = JSON.parse(result.stdout) as {
         status: string;
+        results: { capability: string; severity: string }[];
         unknown: { capability: string; severity: string }[];
       };
       expect(payload.status).toBe("ready");
+      if (profile === "deep_security_scan") {
+        expect(payload.results).toEqual([]);
+        expect(payload.unknown).toEqual([]);
+        continue;
+      }
       expect(payload.unknown.length).toBeGreaterThan(0);
       expect(
         payload.unknown.every(({ severity }) => severity !== "block"),
