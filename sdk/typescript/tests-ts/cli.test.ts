@@ -1450,6 +1450,48 @@ describe("CLI", () => {
     progress.stopTimer();
   });
 
+  test("handles asynchronous progress stream failures while a scan is active", async () => {
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    const stream = Object.assign(
+      new Writable({
+        autoDestroy: false,
+        write(_chunk, _encoding, callback) {
+          if (failRedraw) {
+            queueMicrotask(() =>
+              callback(new Error("Progress output failed.")),
+            );
+          } else {
+            callback();
+          }
+        },
+      }),
+      { isTTY: true },
+    );
+    const progress = new Progress(stream, {
+      now: () => 0,
+      setInterval: (callback) => {
+        redraw = callback;
+        return {} as NodeJS.Timeout;
+      },
+      clearInterval: () => {},
+    });
+
+    progress.startTimer("Running scan");
+    expect(stream.listenerCount("error")).toBe(1);
+    const failure = new Promise<Error>((resolve) =>
+      stream.once("error", resolve),
+    );
+    failRedraw = true;
+    redraw?.();
+
+    await expect(failure).resolves.toMatchObject({
+      message: "Progress output failed.",
+    });
+    progress.stopTimer();
+    expect(stream.listenerCount("error")).toBe(0);
+  });
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
     const stderr = capture(true);

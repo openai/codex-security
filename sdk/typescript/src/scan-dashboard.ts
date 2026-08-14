@@ -19,6 +19,8 @@ const FIXED_SCREEN_ROWS = 8;
 
 interface DashboardStream {
   write(chunk: string): unknown;
+  on?(event: "error", listener: (error: Error) => void): unknown;
+  off?(event: "error", listener: (error: Error) => void): unknown;
   readonly columns?: number;
   readonly rows?: number;
 }
@@ -101,6 +103,7 @@ export class ScanDashboard {
   #scrollOffset = 0;
   #inputWasRaw = false;
   #noteCount = 0;
+  readonly #onStreamError = (): void => {};
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
       typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
@@ -151,6 +154,7 @@ export class ScanDashboard {
     }
     this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
     try {
+      this.#stream.on?.("error", this.#onStreamError);
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
         input.setRawMode?.(true);
@@ -178,14 +182,18 @@ export class ScanDashboard {
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
     const input = this.#options.input;
-    if (input?.isTTY === true) {
-      input.off("data", this.#onInput);
-      input.setRawMode?.(this.#inputWasRaw);
-      input.pause?.();
+    try {
+      if (input?.isTTY === true) {
+        input.off("data", this.#onInput);
+        input.setRawMode?.(this.#inputWasRaw);
+        input.pause?.();
+      }
+      this.#stream.write(
+        `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
+      );
+    } finally {
+      this.#stream.off?.("error", this.#onStreamError);
     }
-    this.#stream.write(
-      `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
-    );
   }
 
   public setStage(stage: string): void {

@@ -128,6 +128,8 @@ const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
+  on?(event: "error", listener: (error: Error) => void): unknown;
+  off?(event: "error", listener: (error: Error) => void): unknown;
   readonly isTTY?: boolean;
   readonly fd?: number;
   readonly columns?: number;
@@ -3719,6 +3721,8 @@ export class Progress {
   #timerMessage: string | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
+  #observingStreamErrors = false;
+  readonly #onStreamError = (): void => {};
 
   public constructor(
     stream: Writable = process.stderr,
@@ -3746,10 +3750,12 @@ export class Progress {
   }
 
   public stage(message: string): void {
+    this.#observeStreamErrors();
     this.#stream.write(`${this.#line(message)}\n`);
   }
 
   public startTimer(message: string): void {
+    this.#observeStreamErrors();
     if (!this.interactive) {
       this.stage(message);
       return;
@@ -3766,18 +3772,25 @@ export class Progress {
   }
 
   public stopTimer(): void {
-    if (this.#timer !== null) {
-      this.#dependencies.clearInterval(this.#timer);
-      this.#timer = null;
-    }
-    this.#timerMessage = null;
-    if (this.#timerLineActive) {
-      this.#stream.write("\n");
-      this.#timerLineActive = false;
-    }
-    if (this.#cursorHidden) {
-      this.#stream.write(SHOW_CURSOR);
-      this.#cursorHidden = false;
+    try {
+      if (this.#timer !== null) {
+        this.#dependencies.clearInterval(this.#timer);
+        this.#timer = null;
+      }
+      this.#timerMessage = null;
+      if (this.#timerLineActive) {
+        this.#stream.write("\n");
+        this.#timerLineActive = false;
+      }
+      if (this.#cursorHidden) {
+        this.#stream.write(SHOW_CURSOR);
+        this.#cursorHidden = false;
+      }
+    } finally {
+      if (this.#observingStreamErrors) {
+        this.#stream.off?.("error", this.#onStreamError);
+        this.#observingStreamErrors = false;
+      }
     }
   }
 
@@ -3800,6 +3813,13 @@ export class Progress {
     const minutes = Math.floor(elapsedSeconds / 60);
     const seconds = elapsedSeconds % 60;
     return `[${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}] ${message}`;
+  }
+
+  #observeStreamErrors(): void {
+    if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
+      this.#stream.on("error", this.#onStreamError);
+      this.#observingStreamErrors = true;
+    }
   }
 
   #renderTimer(message: string): void {
