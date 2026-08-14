@@ -4,6 +4,7 @@ import {
   chmod,
   mkdtemp,
   mkdir,
+  readFile,
   realpath,
   rm,
   symlink,
@@ -195,6 +196,72 @@ describe("scan target normalization", () => {
     await expect(
       normalizeTarget(repo, DiffTarget.refs({ base: "missing", head: "HEAD" })),
     ).rejects.toThrow("unknown Git ref");
+  });
+
+  test("preserves user Git settings while removing repository overrides", async () => {
+    const repo = await repository();
+    const root = join(repo, "..");
+    const trace = join(root, "git-events.jsonl");
+    const revision = git(repo, "rev-parse", "HEAD");
+    const repositoryOverrides = {
+      GIT_DIR: join(root, "missing-git-dir"),
+      GIT_WORK_TREE: join(root, "missing-work-tree"),
+      GIT_INDEX_FILE: join(root, "missing-index"),
+      GIT_OBJECT_DIRECTORY: join(root, "missing-objects"),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: join(root, "missing-alternates"),
+      GIT_COMMON_DIR: join(root, "missing-common"),
+      GIT_REPLACE_REF_BASE: "refs/unsafe/",
+      GIT_CEILING_DIRECTORIES: root,
+      GIT_DISCOVERY_ACROSS_FILESYSTEM: "1",
+      GIT_NAMESPACE: "unsafe",
+    };
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "const { repositoryRevision } = await import(process.argv[1]); console.log(await repositoryRevision(process.argv[2]));",
+        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        repo,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "codex.security",
+          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_SETTING",
+          GIT_TRACE2_EVENT: trace,
+          GIT_TRACE2_CONFIG_PARAMS: "codex.security",
+          GIT_TRACE2_ENV_VARS: [
+            "GIT_SSL_CAINFO",
+            "GIT_SSH_COMMAND",
+            ...Object.keys(repositoryOverrides),
+          ].join(","),
+          GIT_SSL_CAINFO: join(root, "ca.pem"),
+          GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+          ...repositoryOverrides,
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(revision);
+    const events = (await readFile(trace, "utf8"))
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => JSON.parse(line) as { param?: string; value?: string });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        param: "codex.security",
+        value: "SYNTHETIC_GIT_SETTING",
+      }),
+    );
+    for (const name of ["GIT_SSL_CAINFO", "GIT_SSH_COMMAND"]) {
+      expect(events.some(({ param }) => param === name)).toBe(true);
+    }
+    for (const name of Object.keys(repositoryOverrides)) {
+      expect(events.some(({ param }) => param === name)).toBe(false);
+    }
   });
 
   test("does not execute repository-local Git shims from PATH", async () => {

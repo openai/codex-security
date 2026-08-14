@@ -17,6 +17,12 @@ const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
   "GIT_COMMON_DIR",
   "GIT_REPLACE_REF_BASE",
 ]);
+const GIT_REPOSITORY_ENVIRONMENT = new Set([
+  ...UNSUPPORTED_GIT_ENVIRONMENT,
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_NAMESPACE",
+]);
 
 export type ScanMode = "standard" | "deep";
 export type DiffTargetKind = "refs" | "working_tree";
@@ -436,7 +442,7 @@ async function outermostGitMarkerRoot(
 function isolatedGitEnvironment(): NodeJS.ProcessEnv {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
-    if (name.toUpperCase().startsWith("GIT_")) {
+    if (GIT_REPOSITORY_ENVIRONMENT.has(name.toUpperCase())) {
       delete environment[name];
     }
   }
