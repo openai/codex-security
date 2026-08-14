@@ -14,14 +14,21 @@ function validatePreflightIssues(issues: object[]) {
       "-c",
       [
         "import json, sys",
-        "sys.path.insert(0, sys.argv[1])",
+        "sys.path.insert(0, sys.argv.pop(1))",
+        "from workbench_cli import parse_args",
         "from workbench_progress import preflight_issues_json",
-        "issues = json.loads(preflight_issues_json(sys.stdin.read()))",
+        "args = parse_args('Synthetic workbench progress')",
+        "issues = json.loads(preflight_issues_json(args.preflight_issues_json))",
         "print(json.dumps({'count': len(issues), 'reasonLength': len(issues[0]['reason'])}))",
       ].join("\n"),
       join(PLUGIN_ROOT, "scripts"),
+      "update-progress",
+      "--scan-id",
+      "00000000-0000-4000-8000-000000000000",
+      "--preflight-issues-json",
+      JSON.stringify(issues),
     ],
-    { encoding: "utf8", input: JSON.stringify(issues) },
+    { encoding: "utf8" },
   );
 }
 
@@ -36,17 +43,17 @@ function issue(reason = "Preflight warning") {
 
 describe("workbench preflight progress", () => {
   test("accepts valid non-ASCII issues larger than 64 KiB", () => {
-    const issues = Array.from({ length: 32 }, () => issue("€".repeat(1_200)));
-    expect(Buffer.byteLength(JSON.stringify(issues))).toBeGreaterThan(
-      64 * 1024,
-    );
+    const issues = Array.from({ length: 24 }, () => issue("€".repeat(1_000)));
+    const serialized = JSON.stringify(issues);
+    expect(Buffer.byteLength(serialized)).toBeGreaterThan(64 * 1024);
+    expect(serialized.length).toBeLessThan(30_000);
 
     const result = validatePreflightIssues(issues);
 
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
-      count: 32,
-      reasonLength: 1_200,
+      count: 24,
+      reasonLength: 1_000,
     });
   });
 
