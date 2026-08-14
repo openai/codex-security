@@ -308,10 +308,6 @@ def main() -> None:
                         raise ValueError(f"{source} row {number}: {error}") from error
         combined = combine(rows)
         output.parent.mkdir(parents=True, exist_ok=True)
-        payload = "".join(
-            json.dumps(row, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
-            for row in combined
-        )
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -323,7 +319,11 @@ def main() -> None:
                 delete=False,
             ) as handle:
                 temporary = Path(handle.name)
-                handle.write(payload)
+                for row in combined:
+                    handle.write(
+                        json.dumps(row, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                        + "\n"
+                    )
             temporary.replace(output)
         finally:
             if temporary is not None:
