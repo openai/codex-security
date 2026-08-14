@@ -140,6 +140,8 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         "severity",
         "status",
         "taxonomy",
+        "preventiveControls",
+        "remediationTests",
     ):
         if key in value:
             prepared[key] = (

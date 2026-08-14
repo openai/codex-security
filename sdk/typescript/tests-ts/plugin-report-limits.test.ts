@@ -39,4 +39,40 @@ describe("bundled scan report and source limits", () => {
       unsafePathRejected: true,
     });
   });
+
+  test("preserves bounded remediation tests and preventive controls", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const program = [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "from finding_preview import bounded_finding_details",
+      "details = {'remediationTests': [f'test-{index}' for index in range(21)], 'preventiveControls': ['Centralize authorization.']}",
+      "large = {'preventiveControls': ['x' * 900 for _ in range(20)], 'provenance': {'source': 'scan'}, 'severity': {'level': 'high', 'rationale': 'Verified impact'}, 'status': 'open', 'taxonomy': {'category': 'injection', 'cwe': ['CWE-79']}}",
+      "print(json.dumps({'details': bounded_finding_details(details), 'large': bounded_finding_details(large)}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    const projections = JSON.parse(new TextDecoder().decode(result.stdout)) as {
+      details: Record<string, unknown>;
+      large: Record<string, unknown>;
+    };
+    expect(projections.details).toEqual({
+      preventiveControls: ["Centralize authorization."],
+      remediationTests: Array.from(
+        { length: 20 },
+        (_, index) => `test-${index}`,
+      ),
+    });
+    expect(projections.large).toMatchObject({
+      provenance: { source: "scan" },
+      severity: { level: "high", rationale: "Verified impact" },
+      status: "open",
+      taxonomy: { category: "injection", cwe: ["CWE-79"] },
+    });
+  });
 });
