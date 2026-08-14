@@ -293,13 +293,20 @@ async function readRegularInputFile(
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
+  const canonicalRepository = await realpath(repository);
   const canonicalParent = await realpath(dirname(path));
-  if (!isOutsidePath(relative(repository, path))) {
-    const canonicalRepository = await realpath(repository);
-    if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
-      throw new CodexSecurityError(
-        "Input files must not follow repository directory links outside the selected repository.",
-      );
+  if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
+    for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+      if (
+        !isOutsidePath(relative(canonicalRepository, await realpath(ancestor)))
+      ) {
+        throw new CodexSecurityError(
+          "Input files must not follow repository directory links outside the selected repository.",
+        );
+      }
+      if (dirname(ancestor) === ancestor) {
+        break;
+      }
     }
   }
   const file = await open(

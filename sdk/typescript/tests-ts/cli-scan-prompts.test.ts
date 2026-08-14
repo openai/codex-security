@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -47,10 +54,17 @@ describe("CLI scan prompts", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
     try {
       const repository = join(root, "repository");
+      const repositoryAlias = join(root, "repository-alias");
       const externalDirectory = join(root, "external");
       const external = join(externalDirectory, "external-prompt.md");
       const linked = join(repository, "linked-prompt.md");
       await mkdir(repository);
+      await symlink(
+        repository,
+        repositoryAlias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const physicalRepository = await realpath(repository);
       await mkdir(externalDirectory);
       await writeFile(external, "SYNTHETIC_EXTERNAL_PROMPT\n");
       await symlink(external, linked);
@@ -68,6 +82,16 @@ describe("CLI scan prompts", () => {
             root,
             repository,
             join(repository, "linked-directory", "external-prompt.md"),
+          ],
+          [
+            physicalRepository,
+            repositoryAlias,
+            join("linked-directory", "external-prompt.md"),
+          ],
+          [
+            repositoryAlias,
+            physicalRepository,
+            join("linked-directory", "external-prompt.md"),
           ],
         ] as const) {
           let started = false;
@@ -90,22 +114,28 @@ describe("CLI scan prompts", () => {
           expect(started).toBe(false);
         }
 
-        let selected: unknown;
-        expect(
-          await main(
-            ["scan", ".", option, external, "--json"],
-            capture().stream,
-            capture().stream,
-            dependencies({
-              currentDirectory: repository,
-              onTurn: (_repository, value) => (selected = value),
-            }),
-          ),
-        ).toBe(0);
-        expect(selected).toMatchObject({
-          [option === "--scan-prompt-file" ? "scanPrompt" : "postScanPrompt"]:
-            "SYNTHETIC_EXTERNAL_PROMPT\n",
-        });
+        for (const [directory, target] of [
+          [repository, "."],
+          [physicalRepository, repositoryAlias],
+          [repositoryAlias, physicalRepository],
+        ] as const) {
+          let selected: unknown;
+          expect(
+            await main(
+              ["scan", target, option, external, "--json"],
+              capture().stream,
+              capture().stream,
+              dependencies({
+                currentDirectory: directory,
+                onTurn: (_repository, value) => (selected = value),
+              }),
+            ),
+          ).toBe(0);
+          expect(selected).toMatchObject({
+            [option === "--scan-prompt-file" ? "scanPrompt" : "postScanPrompt"]:
+              "SYNTHETIC_EXTERNAL_PROMPT\n",
+          });
+        }
       }
     } finally {
       await rm(root, { recursive: true, force: true });
