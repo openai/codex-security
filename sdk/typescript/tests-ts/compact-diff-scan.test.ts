@@ -244,7 +244,7 @@ describe("compact diff scan", () => {
     ]);
   });
 
-  test("includes staged, unstaged, and untracked working-tree changes", () => {
+  test("keeps staged, unstaged, and untracked working-tree inputs aligned", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
     git(repository, "add", ".");
@@ -276,6 +276,27 @@ describe("compact diff scan", () => {
       "src/staged.py",
       "src/untracked.py",
     ]);
+
+    const reviewOutput = join(root, "rank-input.jsonl");
+    const review = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      "HEAD",
+      "--mode",
+      "local-patch",
+      "--out",
+      reviewOutput,
+    );
+    expect(review.status, review.stderr).toBe(0);
+    expect(
+      readFileSync(reviewOutput, "utf8")
+        .trim()
+        .split("\n")
+        .map((row) => (JSON.parse(row) as { path: string }).path),
+    ).toEqual(["src/handler.py", "src/staged.py", "src/untracked.py"]);
   });
 
   test("keeps deleted inventory paths without accepting unsafe candidates", () => {

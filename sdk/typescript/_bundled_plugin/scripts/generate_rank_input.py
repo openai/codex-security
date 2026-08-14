@@ -646,8 +646,19 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
+        untracked = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         combined = dict(staged)
         combined.update(unstaged)
+        combined.update(
+            (repo / relative, "A")
+            for relative in untracked.stdout.split("\0")
+            if relative
+        )
         return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 

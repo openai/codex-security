@@ -114,7 +114,7 @@ def generate_diff_in_scope_files(
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from generate_rank_input import git_changed_paths, path_is_excluded, run_git_changed_paths
+    from generate_rank_input import git_changed_paths, path_is_excluded
     from rank_preview import (
         DEFAULT_PREVIEW_BYTES,
         TEXT_CODE_EXTENSIONS,
@@ -125,22 +125,7 @@ def generate_diff_in_scope_files(
 
     rows: list[bytes] = []
     try:
-        if mode == "local-patch":
-            changed = run_git_changed_paths(repository, [base])
-            untracked = subprocess.run(
-                ["git", "-C", str(repository), "ls-files", "--others", "--exclude-standard", "-z"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            changed.extend(
-                (repository / relative, "A")
-                for relative in untracked.stdout.split("\0")
-                if relative
-            )
-        else:
-            changed = git_changed_paths(repository, base, head, mode)
-
+        changed = git_changed_paths(repository, base, head, mode)
         eligible = [
             (path, status)
             for path, status in changed
