@@ -2779,6 +2779,8 @@ export function scanRuntimeCodexConfig(
       if (!isRecord(profile)) continue;
       delete profile["approval_policy"];
       delete profile["approvals_reviewer"];
+      delete profile["default_permissions"];
+      delete profile["permissions"];
       delete profile["sandbox_mode"];
     }
   }

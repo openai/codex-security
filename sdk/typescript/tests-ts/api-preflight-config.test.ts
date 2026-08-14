@@ -368,7 +368,7 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("removes approval and sandbox overrides from every configured profile", () => {
+  test("removes execution and permission overrides from every configured profile", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
       profile: "selected",
@@ -377,12 +377,16 @@ describe("CodexSecurity preflight configuration", () => {
           model: "profile-model",
           approval_policy: "on-request",
           approvals_reviewer: "auto_review",
+          default_permissions: "unsafe",
+          permissions: { unsafe: { filesystem: { ":root": "write" } } },
           sandbox_mode: "danger-full-access",
         },
         other: {
           model_reasoning_effort: "high",
           approval_policy: "untrusted",
           approvals_reviewer: "guardian_subagent",
+          default_permissions: "other-unsafe",
+          permissions: { "other-unsafe": { filesystem: { ":root": "write" } } },
           sandbox_mode: "workspace-write",
         },
       },
@@ -391,6 +395,7 @@ describe("CodexSecurity preflight configuration", () => {
     const hardened = scanRuntimeCodexConfig(original, stateDirectory);
     expect(hardened).toMatchObject({
       approval_policy: "never",
+      default_permissions: "codex_security_scan",
       profile: "selected",
     });
     expect(hardened["profiles"]).toEqual({
@@ -400,6 +405,8 @@ describe("CodexSecurity preflight configuration", () => {
     expect(original.profiles.selected).toMatchObject({
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
+      default_permissions: "unsafe",
+      permissions: { unsafe: { filesystem: { ":root": "write" } } },
       sandbox_mode: "danger-full-access",
     });
   });
