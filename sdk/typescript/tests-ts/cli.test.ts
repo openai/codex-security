@@ -1543,10 +1543,59 @@ describe("CLI", () => {
     await expect(failure).resolves.toMatchObject({
       message: "Scan summary failed.",
     });
-    expect(progressListenersDuringFailure).toBe(1);
+    expect(progressListenersDuringFailure).toBeGreaterThan(0);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(stream.listenerCount("error")).toBe(0);
   });
+
+  test.each(["archive", "failure"] as const)(
+    "keeps %s output failures isolated after progress stops",
+    async (scenario) => {
+      const failingMessage =
+        scenario === "archive"
+          ? "Moved existing results to:"
+          : "Synthetic scan failure.";
+      const stream = new Writable({
+        autoDestroy: false,
+        write(chunk, _encoding, callback) {
+          if (chunk.toString().includes(failingMessage)) {
+            setImmediate(() => callback(new Error("Terminal output failed.")));
+          } else {
+            callback();
+          }
+        },
+      });
+      let activeProtection = 0;
+      const failure = new Promise<Error>((resolve) => {
+        stream.once("error", (error) => {
+          activeProtection = stream.listenerCount("error");
+          resolve(error);
+        });
+      });
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        async run(_repository, options) {
+          if (scenario === "archive") {
+            options?.onOutputArchived?.("/tmp/previous-results");
+            return fakeResult();
+          }
+          throw new CodexSecurityError(failingMessage);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", ".", "--json"], capture().stream, stream, deps),
+      ).toBe(scenario === "archive" ? 0 : 2);
+      await expect(failure).resolves.toMatchObject({
+        message: "Terminal output failed.",
+      });
+      expect(activeProtection).toBeGreaterThan(0);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(stream.listenerCount("error")).toBe(0);
+    },
+  );
 
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();

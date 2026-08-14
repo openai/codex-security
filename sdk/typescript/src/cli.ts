@@ -2649,6 +2649,39 @@ async function runScan(
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
+  const observeTerminalErrors =
+    typeof errorOutput.on === "function" &&
+    typeof errorOutput.off === "function";
+  const ignoreTerminalError = (): void => {};
+  if (observeTerminalErrors) {
+    errorOutput.on?.("error", ignoreTerminalError);
+  }
+  try {
+    return await executeScan(
+      arguments_,
+      errorOutput,
+      dependencies,
+      interactive,
+    );
+  } finally {
+    if (observeTerminalErrors) {
+      try {
+        errorOutput.write("", () => {
+          queueMicrotask(() => errorOutput.off?.("error", ignoreTerminalError));
+        });
+      } catch {
+        errorOutput.off?.("error", ignoreTerminalError);
+      }
+    }
+  }
+}
+
+async function executeScan(
+  arguments_: ScanArguments,
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+  interactive = true,
+): Promise<ScanOutcome> {
   let scanDir: string | null = null;
   let requestedSignal: SignalName | null = null;
   let firstSignalAt = 0;
