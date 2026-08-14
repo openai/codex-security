@@ -305,6 +305,80 @@ describe("malformed scan artifact recovery", () => {
     });
   });
 
+  test("builds each ordinary scan context once without losing selected findings", async () => {
+    const fixture = await startDraftScan();
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(findingsPath);
+    const original = document.findings[0]!;
+    document.findings = Array.from({ length: 21 }, (_, index) => {
+      const finding = structuredClone(original);
+      finding.identity.anchor = `scan-context-finding-${index}`;
+      return finding;
+    });
+    await writeJson(findingsPath, document);
+    await completeScan(fixture);
+
+    const page = await workbench(fixture, [
+      "list-findings",
+      "--scan-id",
+      fixture.scanId,
+      "--offset",
+      "20",
+      "--limit",
+      "1",
+    ]);
+    const occurrenceId = (
+      page["findingsPage"] as {
+        findings: Array<{ occurrenceId: string }>;
+      }
+    ).findings[0]!.occurrenceId;
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_db as workbench",
+          "calls = []",
+          "original = workbench.scan_result",
+          "def count_result(connection, scan, **kwargs):",
+          "    calls.append(kwargs.get('occurrence_id'))",
+          "    return original(connection, scan, **kwargs)",
+          "workbench.scan_result = count_result",
+          "with workbench.connect() as connection:",
+          "    ordinary = workbench.scan_context(connection, sys.argv[2])",
+          "    ordinary_calls = len(calls)",
+          "    calls.clear()",
+          "    selected = workbench.scan_context(connection, sys.argv[2], sys.argv[3])",
+          "print(json.dumps({'ordinaryCalls': ordinary_calls, 'selectedCalls': len(calls), 'ordinaryCount': len(ordinary['scan']['findings']), 'selectedCount': len(selected['scan']['findings']), 'workspaceCount': len(selected['workspace']['results']['findings']), 'selectedIncluded': any(finding['occurrenceId'] == sys.argv[3] for finding in selected['scan']['findings'])}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.scanId,
+        occurrenceId,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual({
+      ordinaryCalls: 1,
+      selectedCalls: 2,
+      ordinaryCount: 20,
+      selectedCount: 21,
+      workspaceCount: 20,
+      selectedIncluded: true,
+    });
+  }, 30_000);
+
   test("returns authoritative clean, dirty, and nested Git target contracts", async () => {
     for (const kind of ["clean", "dirty", "nested"] as const) {
       const fixture = await startDraftScan(kind);

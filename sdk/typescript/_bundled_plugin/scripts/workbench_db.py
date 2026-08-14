@@ -2905,10 +2905,15 @@ def scan_context(
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
+    workspace = workspace_state(connection, scan["workspace_id"], result_scan_id=scan["id"])
     context = {
         "otherRunningDeepScans": deep_scan.other_running_deep_scans(connection, scan["id"]),
-        "scan": scan_result(connection, scan, occurrence_id=occurrence_id),
-        "workspace": workspace_state(connection, scan["workspace_id"], result_scan_id=scan["id"]),
+        "scan": (
+            workspace["results"]
+            if occurrence_id is None
+            else scan_result(connection, scan, occurrence_id=occurrence_id)
+        ),
+        "workspace": workspace,
     }
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
