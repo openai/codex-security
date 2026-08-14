@@ -400,7 +400,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
-    isolatedGitEnvironment(),
+    isolatedGitEnvironment(args[0] === "rev-parse"),
     await outermostGitMarkerRoot(repository, signal),
   );
   if (command === null)
@@ -438,10 +438,16 @@ async function outermostGitMarkerRoot(
   }
 }
 
-function isolatedGitEnvironment(): NodeJS.ProcessEnv {
+function isolatedGitEnvironment(
+  preserveGitConfiguration: boolean,
+): NodeJS.ProcessEnv {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
-    if (GIT_REPOSITORY_ENVIRONMENT.has(name.toUpperCase())) {
+    const normalized = name.toUpperCase();
+    if (
+      GIT_REPOSITORY_ENVIRONMENT.has(normalized) ||
+      (!preserveGitConfiguration && normalized.startsWith("GIT_"))
+    ) {
       delete environment[name];
     }
   }

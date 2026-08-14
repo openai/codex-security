@@ -8,6 +8,7 @@ import {
   realpath,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -314,6 +315,50 @@ describe("scan target normalization", () => {
     );
 
     expect(result.status).toBe(0);
+    expect(existsSync(leaked)).toBe(false);
+  });
+
+  test("does not expose Git configuration to repository clean filters", async () => {
+    const repo = await repository();
+    const root = join(repo, "..");
+    const filter = join(root, "clean-filter");
+    const executed = join(root, "filter-executed");
+    const leaked = join(root, "leaked-credential");
+    await writeFile(
+      join(repo, ".gitattributes"),
+      "src/app.ts filter=capture\n",
+    );
+    git(repo, "add", ".gitattributes");
+    git(repo, "commit", "-m", "configure attributes");
+    await writeFile(
+      filter,
+      `#!/bin/sh\nprintf 'executed' > ${JSON.stringify(executed)}\nif [ -n "$GIT_CONFIG_VALUE_0" ]; then printf '%s' "$GIT_CONFIG_VALUE_0" > ${JSON.stringify(leaked)}; fi\ncat\n`,
+    );
+    await chmod(filter, 0o700);
+    git(repo, "config", "filter.capture.clean", filter);
+    await utimes(join(repo, "src", "app.ts"), new Date(0), new Date(0));
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "const { DiffTarget, normalizeTarget, validateCommittedDiffCheckout } = await import(process.argv[1]); const target = await normalizeTarget(process.argv[2], DiffTarget.refs({ base: 'HEAD' })); await validateCommittedDiffCheckout(process.argv[2], target);",
+        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        repo,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.extraHeader",
+          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(existsSync(executed)).toBe(true);
     expect(existsSync(leaked)).toBe(false);
   });
 
