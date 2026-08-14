@@ -95,7 +95,7 @@ describe("CLI skill commands", () => {
           `Usage: codex-security ${command} <${argument}>`,
         );
         expect(help.text()).toContain(
-          "--effort <minimal|low|medium|high|xhigh>",
+          "--effort <minimal|low|medium|high|xhigh|max>",
         );
         expect(help.text()).toContain("--codex <array>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
@@ -299,7 +299,7 @@ describe("CLI skill commands", () => {
             command,
             "a candidate finding",
             "--effort",
-            "high",
+            "max",
             "--codex",
             'model="gpt-5.6-terra"',
           ],
@@ -314,13 +314,13 @@ describe("CLI skill commands", () => {
         ),
       ).toBe(0);
       expect(invocation).toContain('model="gpt-5.6-terra"');
-      expect(invocation).toContain('model_reasoning_effort="high"');
+      expect(invocation).toContain('model_reasoning_effort="max"');
       expect(stderr.text()).toBe("");
 
       for (const [options, message] of [
         [
           ["--effort", "ultra"],
-          "--effort must be minimal, low, medium, high, or xhigh",
+          "--effort must be minimal, low, medium, high, xhigh, or max",
         ],
         [
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
