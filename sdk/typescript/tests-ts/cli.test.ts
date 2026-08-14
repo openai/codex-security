@@ -120,7 +120,9 @@ describe("CLI", () => {
           maxTimeHours: { type: "number", maximum: 96 },
           model: { type: "string" },
           verbose: { type: "boolean" },
-          effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
+          effort: {
+            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+          },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
           },
@@ -902,6 +904,7 @@ describe("CLI", () => {
       ["bulk-scan", "--model=gpt-5.6-terra"],
       ["bulk-scan", "--effort", "high"],
       ["bulk-scan", "--effort=high"],
+      ["bulk-scan", "--effort", "max"],
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
@@ -2094,7 +2097,9 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
-    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      "--effort <minimal|low|medium|high|xhigh|max>",
+    );
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
     );
@@ -2130,7 +2135,9 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
-    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      "--effort <minimal|low|medium|high|xhigh|max>",
+    );
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
     );
@@ -2168,6 +2175,7 @@ describe("CLI", () => {
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
+      [["--effort", "max"], { model_reasoning_effort: "max" }],
       [
         ["--model", "gpt-5.6-terra", "--effort", "high"],
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
@@ -2505,7 +2513,7 @@ describe("CLI", () => {
       ],
       [
         ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, or xhigh",
+        "--effort must be minimal, low, medium, high, xhigh, or max",
       ],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],

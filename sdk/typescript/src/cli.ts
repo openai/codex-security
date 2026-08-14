@@ -26,7 +26,6 @@ import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ModelReasoningEffort } from "@openai/codex-sdk";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -153,7 +152,9 @@ const MODEL_REASONING_EFFORTS = [
   "medium",
   "high",
   "xhigh",
-] as const satisfies readonly ModelReasoningEffort[];
+  "max",
+] as const;
+type ScanReasoningEffort = (typeof MODEL_REASONING_EFFORTS)[number];
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const CODEX_OVERRIDE_DESCRIPTION =
@@ -214,7 +215,7 @@ function optionValue(flag: string) {
 function effortOption() {
   return z
     .enum(MODEL_REASONING_EFFORTS, {
-      error: "--effort must be minimal, low, medium, high, or xhigh.",
+      error: "--effort must be minimal, low, medium, high, xhigh, or max.",
     })
     .optional()
     .describe(
@@ -288,7 +289,7 @@ interface ScanArguments extends DeepScanOptions {
   base?: string;
   mode: ScanMode;
   model?: string;
-  effort?: ModelReasoningEffort;
+  effort?: ScanReasoningEffort;
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
@@ -2348,7 +2349,7 @@ async function runSkill(
   skill: "validation" | "fix-finding",
   inputs: readonly string[],
   codexOverrides: readonly string[],
-  effort: ModelReasoningEffort | undefined,
+  effort: ScanReasoningEffort | undefined,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
@@ -3660,7 +3661,7 @@ function targetFromArguments(arguments_: ScanArguments): ScanTarget {
 export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
-  effort?: ModelReasoningEffort,
+  effort?: ScanReasoningEffort,
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
