@@ -970,6 +970,7 @@ export async function main(
             const scan = value["scan"] as {
               scanId: string;
               continuationThreadId?: string;
+              scanDir?: string;
             };
             const threadId = scan.continuationThreadId;
             if (!threadId) {
@@ -981,6 +982,7 @@ export async function main(
               scanId: scan.scanId,
               threadId,
               codexHome: codexSecurityCredentialHome(dependencies.environment),
+              scanDirectory: scan.scanDir,
             })) as unknown as JsonObject;
           },
         );

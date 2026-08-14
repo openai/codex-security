@@ -241,13 +241,17 @@ describe("CLI workbench", () => {
     );
     try {
       const sessions = join(state, "codex-home", "sessions", "2026", "08");
+      const scanDirectory = join(state, "scans", "scan-1");
       await mkdir(sessions, { recursive: true });
       await writeFile(
         join(sessions, "rollout-thread-1.jsonl"),
         [
           {
             type: "session_meta",
-            payload: { id: "thread-1" },
+            payload: {
+              id: "thread-1",
+              timestamp: "2026-08-11T12:00:00.000Z",
+            },
           },
           {
             type: "response_item",
@@ -264,6 +268,25 @@ describe("CLI workbench", () => {
           .map((event) => JSON.stringify(event))
           .join("\n"),
       );
+      await writeFile(
+        join(sessions, "rollout-worker.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "worker",
+              timestamp: "2026-08-11T12:01:00.000Z",
+              cwd: join(scanDirectory, "artifacts"),
+            },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "agent_message", message: "independent worker" },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
 
       const calls: Array<readonly string[]> = [];
       const stdout = capture();
@@ -275,6 +298,7 @@ describe("CLI workbench", () => {
             scan: {
               scanId: "scan-1",
               continuationThreadId: "thread-1",
+              scanDir: scanDirectory,
             },
           };
         },
@@ -292,6 +316,7 @@ describe("CLI workbench", () => {
       ).toBe(0);
       expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
       expect(stdout.text()).toContain("SYNTHETIC_KEY");
+      expect(stdout.text()).toContain("independent worker");
     } finally {
       await rm(state, { recursive: true, force: true });
     }
