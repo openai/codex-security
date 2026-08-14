@@ -47,31 +47,48 @@ describe("CLI scan prompts", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
     try {
       const repository = join(root, "repository");
-      const external = join(root, "external-prompt.md");
+      const externalDirectory = join(root, "external");
+      const external = join(externalDirectory, "external-prompt.md");
       const linked = join(repository, "linked-prompt.md");
       await mkdir(repository);
+      await mkdir(externalDirectory);
       await writeFile(external, "SYNTHETIC_EXTERNAL_PROMPT\n");
       await symlink(external, linked);
+      await symlink(
+        externalDirectory,
+        join(repository, "linked-directory"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
 
       for (const option of ["--scan-prompt-file", "--post-scan-prompt-file"]) {
-        let started = false;
-        const stderr = capture();
-        expect(
-          await main(
-            ["scan", ".", option, "linked-prompt.md", "--json"],
-            capture().stream,
-            stderr.stream,
-            dependencies({
-              currentDirectory: repository,
-              onTurn: () => {
-                started = true;
-              },
-            }),
-          ),
-        ).toBe(2);
-        expect(stderr.text()).toContain("Input files must be regular files");
-        expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_PROMPT");
-        expect(started).toBe(false);
+        for (const [directory, target, input] of [
+          [repository, ".", "linked-prompt.md"],
+          [repository, ".", join("linked-directory", "external-prompt.md")],
+          [
+            root,
+            repository,
+            join(repository, "linked-directory", "external-prompt.md"),
+          ],
+        ] as const) {
+          let started = false;
+          const stderr = capture();
+          expect(
+            await main(
+              ["scan", target, option, input, "--json"],
+              capture().stream,
+              stderr.stream,
+              dependencies({
+                currentDirectory: directory,
+                onTurn: () => {
+                  started = true;
+                },
+              }),
+            ),
+          ).toBe(2);
+          expect(stderr.text()).toContain("Input files must");
+          expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_PROMPT");
+          expect(started).toBe(false);
+        }
 
         let selected: unknown;
         expect(

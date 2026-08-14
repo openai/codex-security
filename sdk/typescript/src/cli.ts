@@ -10,7 +10,14 @@ import {
   type Stats,
   writeSync,
 } from "node:fs";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -258,14 +265,18 @@ async function readPromptFiles(
   directory: string,
   scanPromptFile?: string,
   postScanPromptFile?: string,
+  repository = directory,
 ): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
   const [scanPrompt, postScanPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
-      : readRegularInputFile(resolve(directory, scanPromptFile)),
+      : readRegularInputFile(resolve(directory, scanPromptFile), repository),
     postScanPromptFile === undefined
       ? undefined
-      : readRegularInputFile(resolve(directory, postScanPromptFile)),
+      : readRegularInputFile(
+          resolve(directory, postScanPromptFile),
+          repository,
+        ),
   ]);
   return {
     ...(scanPrompt?.trim() ? { scanPrompt } : {}),
@@ -275,12 +286,39 @@ async function readPromptFiles(
 
 async function readRegularInputFile(
   path: string,
-  metadata?: Pick<Stats, "isFile">,
+  repository: string,
+  metadata?: Pick<Stats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
-  if (!(metadata ?? (await lstat(path))).isFile()) {
+  const selected = metadata ?? (await lstat(path));
+  if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
-  return await readFile(path, "utf8");
+  const canonicalParent = await realpath(dirname(path));
+  if (!isOutsidePath(relative(repository, path))) {
+    const canonicalRepository = await realpath(repository);
+    if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
+      throw new CodexSecurityError(
+        "Input files must not follow repository directory links outside the selected repository.",
+      );
+    }
+  }
+  const file = await open(
+    join(canonicalParent, basename(path)),
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const opened = await file.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== selected.dev ||
+      opened.ino !== selected.ino
+    ) {
+      throw new CodexSecurityError("Input files must remain regular files.");
+    }
+    return await file.readFile({ encoding: "utf8" });
+  } finally {
+    await file.close();
+  }
 }
 
 interface ScanArguments extends DeepScanOptions {
@@ -2404,7 +2442,11 @@ async function runSkill(
           );
         }
         try {
-          contentsOrLiteral = await readRegularInputFile(path, metadata);
+          contentsOrLiteral = await readRegularInputFile(
+            path,
+            directory,
+            metadata,
+          );
         } catch {
           throw new CodexSecurityError(
             "Could not read the finding or issue input.",
@@ -2750,12 +2792,14 @@ async function runScan(
   let failed = false;
   let failure: unknown;
   try {
-    const repository = arguments_.repository ?? dependencies.currentDirectory();
+    const directory = dependencies.currentDirectory();
+    const repository = arguments_.repository ?? directory;
     const target = targetFromArguments(arguments_);
     const prompts = await readPromptFiles(
-      dependencies.currentDirectory(),
+      directory,
       arguments_.scanPromptFile,
       arguments_.postScanPromptFile,
+      resolve(directory, repository),
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,

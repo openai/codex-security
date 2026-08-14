@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   main,
   readSkillCommandOutput,
@@ -123,30 +124,40 @@ describe("CLI skill commands", () => {
         linkedDirectory,
         process.platform === "win32" ? "junction" : "dir",
       );
+      await symlink(
+        externalDirectory,
+        join(repository, "linked-directory"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
 
       for (const command of ["validate", "patch"] as const) {
         let invocation: readonly string[] | undefined;
-        const stderr = capture();
-        expect(
-          await main(
-            [command, "linked-finding.txt"],
-            capture().stream,
-            stderr.stream,
-            dependencies({
-              currentDirectory: repository,
-              onCodex: (args) => {
-                invocation = args;
-                return 0;
-              },
-            }),
-          ),
-        ).toBe(2);
-        expect(stderr.text()).toContain("must be files or literal text");
-        expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
-        expect(invocation).toBeUndefined();
+        for (const input of [
+          "linked-finding.txt",
+          join("linked-directory", "finding.txt"),
+        ]) {
+          const stderr = capture();
+          expect(
+            await main(
+              [command, input],
+              capture().stream,
+              stderr.stream,
+              dependencies({
+                currentDirectory: repository,
+                onCodex: (args) => {
+                  invocation = args;
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(2);
+          expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
+          expect(invocation).toBeUndefined();
+        }
 
         for (const selected of [
           finding,
+          join("..", "external", "finding.txt"),
           join(linkedDirectory, "finding.txt"),
         ]) {
           expect(
@@ -167,6 +178,56 @@ describe("CLI skill commands", () => {
             "SYNTHETIC_EXTERNAL_FINDING\n",
           ]);
         }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects finding files replaced after their metadata was inspected", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-skill-inputs-"));
+    try {
+      const repository = join(root, "repository");
+      const selected = join(repository, "finding.txt");
+      const external = join(root, "external.txt");
+      await mkdir(repository);
+      await writeFile(selected, "ordinary finding\n");
+      await writeFile(external, "SYNTHETIC_EXTERNAL_FINDING\n");
+      const canonicalSelected = await filesystem.realpath(selected);
+
+      const originalOpen = filesystem.open;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === canonicalSelected) {
+            opening.mockRestore();
+            await rm(selected);
+            await symlink(external, selected);
+          }
+          return await originalOpen(...args);
+        },
+      );
+
+      try {
+        let started = false;
+        const stderr = capture();
+        expect(
+          await main(
+            ["validate", "finding.txt"],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              currentDirectory: repository,
+              onCodex: () => {
+                started = true;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
+        expect(started).toBe(false);
+      } finally {
+        opening.mockRestore();
       }
     } finally {
       await rm(root, { recursive: true, force: true });
