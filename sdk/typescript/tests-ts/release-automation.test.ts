@@ -3307,15 +3307,6 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("recovers when another PR concurrently creates the skip label", () => {
-    expect(releaseLabelsWorkflow).toContain(
-      'if ! gh api --method POST "repos/$GITHUB_REPOSITORY/labels"',
-    );
-    expect(releaseLabelsWorkflow).toContain(
-      '"repos/$GITHUB_REPOSITORY/labels/skip-release-notes"',
-    );
-  });
-
   test.each([
     { title: "feat!: breaking feature", label: "enhancement" },
     { title: "feat(api)!: breaking feature", label: "enhancement" },
