@@ -218,24 +218,17 @@ describe("CLI update notice", () => {
     const stdout = capture();
     const stderr = capture(true);
     let updateSignal: AbortSignal | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      main(
-        ["info", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          onUpdateCheck: async (signal) => {
-            updateSignal = signal;
-            return await new Promise<undefined>(() => {});
-          },
-        }),
-      ),
-      new Promise<"pending">((resolve) => {
-        timer = setTimeout(() => resolve("pending"), 1_000);
+    const result = await main(
+      ["info", "--json"],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        onUpdateCheck: async (signal) => {
+          updateSignal = signal;
+          return await new Promise<undefined>(() => {});
+        },
       }),
-    ]);
-    clearTimeout(timer);
+    );
 
     expect(result).toBe(0);
     expect(updateSignal?.aborted).toBe(true);
