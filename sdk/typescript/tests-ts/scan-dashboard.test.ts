@@ -186,11 +186,13 @@ describe("live scan dashboard", () => {
     );
     failRedraw = true;
     redraw?.();
+    dashboard.stop();
+    expect(stream.listenerCount("error")).toBe(2);
 
     await expect(failure).resolves.toMatchObject({
       message: "Dashboard output failed.",
     });
-    dashboard.stop();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(stream.listenerCount("error")).toBe(0);
   });
 

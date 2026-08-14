@@ -18,7 +18,7 @@ const MAX_HISTORY_ENTRIES = 2_000;
 const FIXED_SCREEN_ROWS = 8;
 
 interface DashboardStream {
-  write(chunk: string): unknown;
+  write(chunk: string, callback?: (error?: Error | null) => void): unknown;
   on?(event: "error", listener: (error: Error) => void): unknown;
   off?(event: "error", listener: (error: Error) => void): unknown;
   readonly columns?: number;
@@ -103,6 +103,7 @@ export class ScanDashboard {
   #scrollOffset = 0;
   #inputWasRaw = false;
   #noteCount = 0;
+  #observingStreamErrors = false;
   readonly #onStreamError = (): void => {};
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
@@ -154,7 +155,10 @@ export class ScanDashboard {
     }
     this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
     try {
-      this.#stream.on?.("error", this.#onStreamError);
+      if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
+        this.#stream.on("error", this.#onStreamError);
+        this.#observingStreamErrors = true;
+      }
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
         input.setRawMode?.(true);
@@ -192,7 +196,21 @@ export class ScanDashboard {
         `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
       );
     } finally {
-      this.#stream.off?.("error", this.#onStreamError);
+      if (this.#observingStreamErrors) {
+        try {
+          this.#stream.write("", () => {
+            queueMicrotask(() => {
+              if (this.#timer === null && this.#observingStreamErrors) {
+                this.#stream.off?.("error", this.#onStreamError);
+                this.#observingStreamErrors = false;
+              }
+            });
+          });
+        } catch {
+          this.#stream.off?.("error", this.#onStreamError);
+          this.#observingStreamErrors = false;
+        }
+      }
     }
   }
 

@@ -3722,6 +3722,7 @@ export class Progress {
   #timerLineActive = false;
   #cursorHidden = false;
   #observingStreamErrors = false;
+  #streamErrorsActive = false;
   readonly #onStreamError = (): void => {};
 
   public constructor(
@@ -3788,8 +3789,20 @@ export class Progress {
       }
     } finally {
       if (this.#observingStreamErrors) {
-        this.#stream.off?.("error", this.#onStreamError);
-        this.#observingStreamErrors = false;
+        this.#streamErrorsActive = false;
+        try {
+          this.#stream.write("", () => {
+            queueMicrotask(() => {
+              if (!this.#streamErrorsActive && this.#observingStreamErrors) {
+                this.#stream.off?.("error", this.#onStreamError);
+                this.#observingStreamErrors = false;
+              }
+            });
+          });
+        } catch {
+          this.#stream.off?.("error", this.#onStreamError);
+          this.#observingStreamErrors = false;
+        }
       }
     }
   }
@@ -3816,6 +3829,7 @@ export class Progress {
   }
 
   #observeStreamErrors(): void {
+    this.#streamErrorsActive = true;
     if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
       this.#stream.on("error", this.#onStreamError);
       this.#observingStreamErrors = true;

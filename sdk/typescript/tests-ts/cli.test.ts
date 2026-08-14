@@ -1484,11 +1484,13 @@ describe("CLI", () => {
     );
     failRedraw = true;
     redraw?.();
+    progress.stopTimer();
+    expect(stream.listenerCount("error")).toBe(2);
 
     await expect(failure).resolves.toMatchObject({
       message: "Progress output failed.",
     });
-    progress.stopTimer();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(stream.listenerCount("error")).toBe(0);
   });
 
