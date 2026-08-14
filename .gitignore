@@ -10,3 +10,6 @@ dist/
 /codex-security.json
 /findings.json
 /*.sarif
+
+# Never publish internal-only plugin data.
+.internal/
