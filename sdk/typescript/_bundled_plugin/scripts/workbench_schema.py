@@ -744,7 +744,6 @@ def normalize_pre_release_execution_profile_migrations(
         12: "scan continuation threads",
     }
     model_migration_name = "persist scan model settings"
-    warnings_migration_name = "persist scan completion warnings"
     if execution_migrations.get(25) == "dynamic scan execution profiles":
         connection.execute(
             "UPDATE schema_migrations SET name = ? WHERE version = 25 AND name = ?",
@@ -752,9 +751,6 @@ def normalize_pre_release_execution_profile_migrations(
         )
         execution_migrations[25] = model_migration_name
     has_legacy_profile_history = execution_migrations.get(11) == legacy_names[11]
-    has_public_warnings_history = (
-        execution_migrations.get(25) == warnings_migration_name
-    )
 
     scan_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(scans)")
@@ -765,11 +761,7 @@ def normalize_pre_release_execution_profile_migrations(
     has_legacy_profile_columns = (
         "execution_model" in scan_columns or "execution_model" in workspace_columns
     )
-    if not (
-        has_legacy_profile_history
-        or has_public_warnings_history
-        or has_legacy_profile_columns
-    ):
+    if not (has_legacy_profile_history or has_legacy_profile_columns):
         return
 
     if (
@@ -810,17 +802,6 @@ def normalize_pre_release_execution_profile_migrations(
         raise SystemExit(
             "The Codex Security database has an unsupported execution-profile migration history."
         )
-
-    if has_public_warnings_history:
-        if execution_migrations.get(26) is not None:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-        connection.execute(
-            "UPDATE schema_migrations SET version = 26 WHERE version = 25 AND name = ?",
-            (warnings_migration_name,),
-        )
-        execution_migrations.pop(25)
 
     if execution_migrations.get(25) not in (None, model_migration_name):
         raise SystemExit(
