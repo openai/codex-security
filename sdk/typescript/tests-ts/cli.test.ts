@@ -1976,6 +1976,51 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
+  test("omits stage and file counts from interactive Deep scan dashboards", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const result = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+
+    expect(
+      await main(
+        ["scan", "/code/juice-shop", "--mode", "deep"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { NO_COLOR: "1" },
+          result,
+          activities: [
+            {
+              id: "worker-1:read-1",
+              kind: "command",
+              status: "completed",
+              description: "read routes/login.ts",
+              paths: ["routes/login.ts"],
+              worker: 1,
+            },
+          ],
+          costUpdates: [result.cost!],
+          scanProgress: [
+            { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+          ],
+        }),
+      ),
+    ).toBe(0);
+
+    const text = stripVTControlCharacters(stderr.text());
+    expect(text).not.toContain("STAGE");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("0 / 1,258 reviewed");
+    expect(text).toContain("worker 1 · read routes/login.ts");
+    expect(text).toContain("TOKENS");
+    expect(text).toContain("COST");
+    expect(text).toContain("TIME");
+  });
+
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
       ["validate", ["finding"]],

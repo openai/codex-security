@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { ScanModelConfiguration } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { ScanMode } from "./targets.js";
 import type { ScanProgress } from "./worker-progress.js";
 
 const HIDE_CURSOR = "\u001B[?25l";
@@ -43,6 +44,7 @@ interface DashboardInput {
 
 interface ScanDashboardOptions {
   repository: string;
+  mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
   clock: DashboardClock;
@@ -342,8 +344,9 @@ export class ScanDashboard {
       divider,
       ...activity,
       divider,
-      `  STAGE    ${this.#stage}`,
-      `  FILES    ${files}`,
+      ...(this.#options.mode === "deep"
+        ? []
+        : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
       `  TOKENS   ${tokens}`,
       `  COST     ${cost}`,
       `  TIME     ${time}  ·  ${scrollStatus}`,
@@ -390,7 +393,12 @@ export class ScanDashboard {
   }
 
   #activityRows(): number {
-    return Math.max(1, (this.#stream.rows ?? 24) - FIXED_SCREEN_ROWS);
+    return Math.max(
+      1,
+      (this.#stream.rows ?? 24) -
+        FIXED_SCREEN_ROWS +
+        (this.#options.mode === "deep" ? 2 : 0),
+    );
   }
 
   #activityLines(width: number): DashboardActivityLine[] {

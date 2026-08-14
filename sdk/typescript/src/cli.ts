@@ -2908,6 +2908,7 @@ async function executeScan(
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
         repository,
+        mode: arguments_.mode,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
         ...(arguments_.maxCostUsd === undefined
           ? {}

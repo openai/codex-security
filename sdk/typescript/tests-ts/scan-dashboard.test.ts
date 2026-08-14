@@ -243,6 +243,8 @@ describe("live scan dashboard", () => {
     expect(text).not.toContain("ACTIVITY");
     expect(text).not.toContain("events · live");
     expect(text).not.toContain("WORKERS");
+    expect(text).toContain("STAGE");
+    expect(text).toContain("FILES");
     expect(text).toContain(
       '[09:41:19] ◐ nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
     );
@@ -260,6 +262,56 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).toContain("\u001B[?25l");
     expect(stderr.text()).toContain("\u001B[?25h");
     expect(timers).toEqual([]);
+  });
+
+  test("hides stage and file counts during Deep scans without wasting screen rows", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 80, rows: 12 },
+      {
+        repository: "/code/juice-shop",
+        mode: "deep",
+        clock: fakeClock(),
+      },
+    );
+
+    dashboard.start();
+    dashboard.setStage("inspecting repository files");
+    dashboard.setFiles({
+      phase: "preflight",
+      filesCompleted: 0,
+      filesTotal: 1_258,
+    });
+    for (let index = 1; index <= 6; index += 1) {
+      dashboard.record({
+        id: `worker-1:read-${index}`,
+        kind: "command",
+        status: "completed",
+        description: `Reviewed source file ${index}`,
+        paths: [],
+        worker: 1,
+      });
+    }
+    dashboard.setCost(
+      fakeResult([], "complete", {
+        input_tokens: 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      }).cost!,
+    );
+
+    const frame = lastFrame(stderr);
+    dashboard.stop();
+
+    expect(frame).not.toContain("STAGE");
+    expect(frame).not.toContain("FILES");
+    expect(frame).not.toContain("inspecting repository files");
+    expect(frame).not.toContain("0 / 1,258 reviewed");
+    expect(frame).toContain("worker 1 · Reviewed source file 1");
+    expect(frame).toContain("worker 1 · Reviewed source file 6");
+    expect(frame).toContain("TOKENS");
+    expect(frame).toContain("COST");
+    expect(frame).toContain("TIME");
   });
 
   test("updates the same activity when a command completes", () => {
