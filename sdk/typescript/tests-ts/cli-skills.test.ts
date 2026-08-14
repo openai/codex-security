@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -184,7 +184,11 @@ describe("CLI skill commands", () => {
     }
   });
 
-  test("rejects finding files replaced after their metadata was inspected", async () => {
+  test.each(
+    process.platform === "win32"
+      ? ["symbolic link"]
+      : ["symbolic link", "FIFO"],
+  )("rejects finding files replaced with a %s", async (replacement) => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-skill-inputs-"));
     try {
       const repository = join(root, "repository");
@@ -201,7 +205,8 @@ describe("CLI skill commands", () => {
           if (String(args[0]) === canonicalSelected) {
             opening.mockRestore();
             await rm(selected);
-            await symlink(external, selected);
+            if (replacement === "FIFO") execFileSync("mkfifo", [selected]);
+            else await symlink(external, selected);
           }
           return await originalOpen(...args);
         },

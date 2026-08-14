@@ -304,7 +304,9 @@ async function readRegularInputFile(
   }
   const file = await open(
     join(canonicalParent, basename(path)),
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
   );
   try {
     const opened = await file.stat();
