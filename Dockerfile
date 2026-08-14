@@ -13,7 +13,6 @@ RUN corepack enable \
 COPY sdk/typescript/ ./
 
 RUN pnpm run types \
-    && pnpm run build \
     && pnpm pack --pack-destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
