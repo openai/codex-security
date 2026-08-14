@@ -1748,12 +1748,21 @@ export class CodexSecurity {
     const stateDirectory = codexSecurityStateDirectory(
       this.#dependencies.environment,
     );
-    const canonicalStateDirectory = await realpath(stateDirectory).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return stateDirectory;
-        throw error;
-      },
-    );
+    let canonicalStateDirectory = stateDirectory;
+    while (true) {
+      try {
+        canonicalStateDirectory = join(
+          await realpath(canonicalStateDirectory),
+          relative(canonicalStateDirectory, stateDirectory),
+        );
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const parent = dirname(canonicalStateDirectory);
+        if (parent === canonicalStateDirectory) throw error;
+        canonicalStateDirectory = parent;
+      }
+    }
     requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
     return {
       repository: repo,

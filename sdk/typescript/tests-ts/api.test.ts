@@ -3948,6 +3948,7 @@ describe("CodexSecurity orchestration", () => {
       join(repository, "state"),
       root,
       linkedState,
+      join(linkedState, "repository", "missing", "state"),
     ]) {
       const client = new TestClient(
         {},
