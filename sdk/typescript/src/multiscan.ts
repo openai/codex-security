@@ -22,6 +22,7 @@ import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { safeErrorMessage } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
+import { requireSecureOutputAncestry } from "./runtime.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -108,6 +109,7 @@ export async function runMultiscan(
   );
   const output = resolve(options.outputDir);
   await ensureOutputDirectory(output);
+  await requireSecureOutputAncestry(await realpath(output));
   const unlock = await acquireLock(output);
   try {
     return await runCampaign(options, tasks, output);
@@ -199,7 +201,7 @@ async function runCampaign(
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         try {
-          await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
+          await ensureOutputDirectory(dirname(scanDir));
           await rm(checkout, { recursive: true, force: true });
           await mkdir(checkout, { mode: 0o700 });
           await checkoutRevision(
@@ -334,6 +336,19 @@ async function ensureOutputDirectory(path: string): Promise<void> {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
   await mkdir(path, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  const directory = metadata ?? (await lstat(path));
+  if ((directory.mode & 0o022) !== 0) {
+    throw new Error(
+      "Multiscan output directories must not be group- or world-writable.",
+    );
+  }
+  const owner = process.geteuid?.();
+  if (owner !== undefined && directory.uid !== owner) {
+    throw new Error(
+      "Multiscan output directories must be owned by the current user.",
+    );
+  }
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
