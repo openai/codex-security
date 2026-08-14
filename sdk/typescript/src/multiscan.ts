@@ -107,12 +107,15 @@ export async function runMultiscan(
     dirname(resolve(options.inputPath)),
     options.mode,
   );
-  const output = resolve(options.outputDir);
-  await ensureOutputDirectory(output);
-  await requireSecureOutputAncestry(await realpath(output));
+  const requestedOutput = resolve(options.outputDir);
+  const output = await ensureOutputDirectory(requestedOutput);
+  await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   try {
-    return await runCampaign(options, tasks, output);
+    const result = await runCampaign(options, tasks, output);
+    return (await realpath(requestedOutput).catch(() => undefined)) === output
+      ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
+      : result;
   } finally {
     await unlock();
   }
@@ -133,11 +136,24 @@ async function runCampaign(
   let incomplete = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
+    if (receipt === undefined) {
+      pending.push(task);
+      continue;
+    }
+    const artifactRoot = await ensureOutputDirectory(
+      join(output, "artifacts", task.id),
+    );
+    const artifactOutput = join(artifactRoot, `attempt-${receipt.attempt}`);
+    const selectedArtifactOutput = join(
+      resolve(options.outputDir),
+      "artifacts",
+      task.id,
+      `attempt-${receipt.attempt}`,
+    );
     if (
-      receipt !== undefined &&
-      receipt.outputDir ===
-        join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
-      (await hasArtifacts(receipt.outputDir))
+      (receipt.outputDir === artifactOutput ||
+        receipt.outputDir === selectedArtifactOutput) &&
+      (await hasArtifacts(artifactOutput))
     ) {
       if (receipt.status === "completed") {
         completed += 1;
@@ -146,7 +162,10 @@ async function runCampaign(
       const coverage =
         receipt.status === "completed_with_incomplete_coverage"
           ? receipt.coverage ?? "unknown"
-          : await legacyIncompleteCoverage(receipt);
+          : await legacyIncompleteCoverage({
+              ...receipt,
+              outputDir: artifactOutput,
+            });
       if (coverage !== undefined) {
         incomplete += 1;
         notifyProgress(options, {
@@ -327,7 +346,7 @@ function notifyProgress(
   } catch {}
 }
 
-async function ensureOutputDirectory(path: string): Promise<void> {
+async function ensureOutputDirectory(path: string): Promise<string> {
   const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
     return undefined;
@@ -336,8 +355,15 @@ async function ensureOutputDirectory(path: string): Promise<void> {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
   await mkdir(path, { recursive: true, mode: 0o700 });
-  if (process.platform === "win32") return;
-  const directory = metadata ?? (await lstat(path));
+  const canonical = await realpath(path);
+  const directory = await lstat(canonical);
+  if (
+    metadata !== undefined &&
+    (directory.dev !== metadata.dev || directory.ino !== metadata.ino)
+  ) {
+    throw new Error("Multiscan output directories changed during preparation.");
+  }
+  if (process.platform === "win32") return canonical;
   if ((directory.mode & 0o022) !== 0) {
     throw new Error(
       "Multiscan output directories must not be group- or world-writable.",
@@ -349,6 +375,7 @@ async function ensureOutputDirectory(path: string): Promise<void> {
       "Multiscan output directories must be owned by the current user.",
     );
   }
+  return canonical;
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
