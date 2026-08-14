@@ -357,6 +357,8 @@ describe("Codex configuration", () => {
       runPinnedCodex(codexHome, [
         "sandbox",
         "--config",
+        "features.use_legacy_landlock=true",
+        "--config",
         "permissions.codex_security_scan.network.enabled=true",
         "--permission-profile",
         "codex_security_scan",
