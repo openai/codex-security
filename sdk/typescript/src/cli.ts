@@ -2691,6 +2691,14 @@ async function runScan(
     });
   };
   const preparationAbortController = new AbortController();
+  const stopPresentation = (): void => {
+    try {
+      dashboard?.stop();
+    } catch {}
+    try {
+      progress?.stopTimer();
+    } catch {}
+  };
   const signalListener = (signal: SignalName) => () => {
     if (requestedSignal !== null) {
       // Launchers and terminals can deliver the same initial signal twice.
@@ -2702,8 +2710,7 @@ async function runScan(
         return;
       }
       requestedSignal = signal;
-      dashboard?.stop();
-      progress?.stopTimer();
+      stopPresentation();
       if (progress?.interactive === true) {
         try {
           dependencies.writeSynchronously(errorOutput, SHOW_CURSOR);
@@ -3150,8 +3157,7 @@ async function runScan(
     failed = true;
     failure = error;
   } finally {
-    dashboard?.stop();
-    progress?.stopTimer();
+    stopPresentation();
     if (security !== null) {
       diagnostic("runtime.cleanup.started");
       await security.close().then(
@@ -3751,10 +3757,11 @@ export class Progress {
     this.#stream.write(HIDE_CURSOR);
     this.#cursorHidden = true;
     this.#renderTimer(message);
-    this.#timer = this.#dependencies.setInterval(
-      () => this.#renderTimer(message),
-      PROGRESS_REFRESH_MILLISECONDS,
-    );
+    this.#timer = this.#dependencies.setInterval(() => {
+      try {
+        this.#renderTimer(message);
+      } catch {}
+    }, PROGRESS_REFRESH_MILLISECONDS);
     this.#timerMessage = message;
   }
 

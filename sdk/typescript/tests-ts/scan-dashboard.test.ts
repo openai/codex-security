@@ -120,6 +120,40 @@ describe("live scan dashboard", () => {
     expect(output.join("")).toContain("\u001B[?1007l\u001B[?25h\u001B[?1049l");
   });
 
+  test("keeps later dashboard redraw failures from stopping the scan", () => {
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          if (failRedraw && chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard redraw failed.");
+          }
+          return true;
+        },
+      },
+      {
+        repository: "/synthetic/repository",
+        clock: {
+          ...fakeClock(),
+          setInterval: (callback) => {
+            redraw = callback;
+            return {} as NodeJS.Timeout;
+          },
+        },
+      },
+    );
+
+    dashboard.start();
+    failRedraw = true;
+
+    expect(() => redraw?.()).not.toThrow();
+    expect(() => dashboard.setStage("reviewing files")).not.toThrow();
+
+    failRedraw = false;
+    dashboard.stop();
+  });
+
   test("redraws real scan activity and metrics in place", () => {
     const stderr = capture(true);
     const timers: NodeJS.Timeout[] = [];

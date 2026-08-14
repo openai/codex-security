@@ -149,7 +149,7 @@ export class ScanDashboard {
     if (input?.isTTY === true) {
       this.#inputWasRaw = input.isRaw === true;
     }
-    this.#timer = this.#options.clock.setInterval(() => this.#render(), 1_000);
+    this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
     try {
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
@@ -258,7 +258,10 @@ export class ScanDashboard {
   }
 
   #refresh(): void {
-    if (this.#timer !== null) this.#render();
+    if (this.#timer === null) return;
+    try {
+      this.#render();
+    } catch {}
   }
 
   #render(): void {

@@ -1423,6 +1423,33 @@ describe("CLI", () => {
     expect(timers).toBe(0);
   });
 
+  test("keeps later progress redraw failures from stopping the scan", () => {
+    const stderr = capture(true);
+    const write = stderr.stream.write;
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    stderr.stream.write = (chunk) => {
+      if (failRedraw) throw new Error("Progress redraw failed.");
+      return write.call(stderr.stream, chunk);
+    };
+    const progress = new Progress(stderr.stream, {
+      now: () => 0,
+      setInterval: (callback) => {
+        redraw = callback;
+        return {} as NodeJS.Timeout;
+      },
+      clearInterval: () => {},
+    });
+
+    progress.startTimer("Running scan");
+    failRedraw = true;
+
+    expect(() => redraw?.()).not.toThrow();
+
+    failRedraw = false;
+    progress.stopTimer();
+  });
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
     const stderr = capture(true);
@@ -1650,6 +1677,37 @@ describe("CLI", () => {
     expect(timers).toBe(1);
     expect(stderr.text()).toContain("Preparing scan");
     expect(stderr.text()).toContain("Running scan");
+  });
+
+  test("closes the client when dashboard cleanup cannot restore the terminal", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const write = stderr.stream.write;
+    const signals = new FakeSignals();
+    let closed = 0;
+    stderr.stream.write = (chunk) => {
+      if (chunk.toString().includes("\u001B[?25h\u001B[?1049l")) {
+        throw new Error("Terminal cleanup failed.");
+      }
+      return write.call(stderr.stream, chunk);
+    };
+
+    expect(
+      await main(
+        ["scan", "."],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          signals,
+          onClose: () => {
+            closed += 1;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(closed).toBe(1);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });
 
   test("keeps terminal scans in one live dashboard", async () => {
