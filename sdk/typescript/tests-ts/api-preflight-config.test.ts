@@ -368,6 +368,42 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
+  test("removes approval and sandbox overrides from every configured profile", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+    const original = {
+      profile: "selected",
+      profiles: {
+        selected: {
+          model: "profile-model",
+          approval_policy: "on-request",
+          approvals_reviewer: "auto_review",
+          sandbox_mode: "danger-full-access",
+        },
+        other: {
+          model_reasoning_effort: "high",
+          approval_policy: "untrusted",
+          approvals_reviewer: "guardian_subagent",
+          sandbox_mode: "workspace-write",
+        },
+      },
+    };
+
+    const hardened = scanRuntimeCodexConfig(original, stateDirectory);
+    expect(hardened).toMatchObject({
+      approval_policy: "never",
+      profile: "selected",
+    });
+    expect(hardened["profiles"]).toEqual({
+      selected: { model: "profile-model" },
+      other: { model_reasoning_effort: "high" },
+    });
+    expect(original.profiles.selected).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
+      sandbox_mode: "danger-full-access",
+    });
+  });
+
   test("preserves configured Responses metadata without persisting scan attribution", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const credentialHome = join(stateDirectory, "codex-home");
