@@ -1934,20 +1934,7 @@ export async function createMarketplace(
   const root = await realpath(pluginRoot);
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  const projectionContract = join(
-    root,
-    ".internal",
-    "external-promotion",
-    "external-projection-contract.json",
-  );
-  if (
-    root === (await bundledPluginRoot()) &&
-    (await isRegularFile(projectionContract))
-  ) {
-    await copyExternalPayload(root, pluginDestination);
-  } else {
-    await copyPluginTree(root, pluginDestination, signal);
-  }
+  await copyPluginTree(root, pluginDestination, signal);
   throwIfSignalAborted(signal);
   const manifest = {
     name: MARKETPLACE_NAME,
@@ -2384,56 +2371,6 @@ async function readExactly(
     offset += bytesRead;
   }
   return buffer;
-}
-
-async function copyExternalPayload(
-  source: string,
-  destination: string,
-): Promise<void> {
-  const contractPath = join(
-    source,
-    ".internal",
-    "external-promotion",
-    "external-projection-contract.json",
-  );
-  let contract: unknown;
-  try {
-    contract = JSON.parse(await readFile(contractPath, "utf8"));
-  } catch (error) {
-    throw new PluginBootstrapError(
-      `Invalid plugin projection contract: ${contractPath}`,
-      {
-        cause: error,
-      },
-    );
-  }
-  const shippedExact = isRecord(contract)
-    ? contract["shippedExact"]
-    : undefined;
-  if (
-    !Array.isArray(shippedExact) ||
-    !shippedExact.every((value) => typeof value === "string")
-  ) {
-    throw new PluginBootstrapError(
-      "Plugin projection contract must contain shippedExact paths.",
-    );
-  }
-  const paths = [".codex-plugin/plugin.json", ...shippedExact].filter(
-    (value) => !value.startsWith("sdk/"),
-  );
-  for (const path of paths) {
-    const normalized = safeArchivePath(path);
-    const sourcePath = join(source, ...normalized.split("/"));
-    const destinationPath = join(destination, ...normalized.split("/"));
-    const metadata = await lstat(sourcePath).catch(() => null);
-    if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new PluginBootstrapError(
-        `Bundled plugin file is missing or unsafe: ${sourcePath}`,
-      );
-    }
-    await mkdir(dirname(destinationPath), { recursive: true, mode: 0o700 });
-    await copyFile(sourcePath, destinationPath, constants.COPYFILE_EXCL);
-  }
 }
 
 function safeArchivePath(value: string): string {
