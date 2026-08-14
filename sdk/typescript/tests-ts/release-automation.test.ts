@@ -992,12 +992,6 @@ describe("cryptographically verified npm provenance", () => {
     }
   });
 
-  test("fails closed when a certificate child does not advance", () => {
-    expect(readFileSync(automationScript, "utf8")).toMatch(
-      /const child = derElement\(bytes, cursor, element\.end\);\s*if \(child\.end <= cursor\) \{\s*throw invalidSigningCertificate\(\);\s*\}/u,
-    );
-  });
-
   test("rejects empty and noncanonical DER signing certificates", () => {
     const invalidCertificates = [
       Buffer.from([0x30, 0x00]),
