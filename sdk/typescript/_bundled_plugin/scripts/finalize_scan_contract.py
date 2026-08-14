@@ -17,6 +17,7 @@ import re
 import secrets
 import stat
 import sys
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -71,6 +72,10 @@ class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
 
 
+class RecoverableContractError(ContractError):
+    """Raised when report projection can safely be retried before publication."""
+
+
 def _reject_non_finite_json(value: str) -> None:
     raise ValueError(f"non-finite JSON number {value!r} is not supported")
 
@@ -105,10 +110,21 @@ def _generate_report_projection(
         raise ContractError(f"could not load report projection helper: {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    try:
-        return module.generate_report_markdown(manifest, findings, coverage)
-    except (OSError, ValueError) as exc:
-        raise ContractError(f"report projection failed: {exc}") from exc
+    attempts = (
+        getattr(sys.modules.get("workbench_constants"), "SQLITE_RETRY_ATTEMPTS", 1)
+        if coverage.get("mode") == "deep_repository"
+        else 1
+    )
+    for attempt in range(attempts):
+        try:
+            return module.generate_report_markdown(manifest, findings, coverage)
+        except OSError as exc:
+            if attempt == attempts - 1:
+                raise RecoverableContractError(f"report projection failed: {exc}") from exc
+            time.sleep(0.05 * (2**attempt))
+        except ValueError as exc:
+            raise ContractError(f"report projection failed: {exc}") from exc
+    raise AssertionError("Report projection retry loop exhausted unexpectedly.")
 
 
 def _validate_report_output_paths(scan_dir: Path) -> None:
@@ -845,6 +861,15 @@ def _recover_unsealed_coverage(
     partial = completeness not in ("complete", "partial", "unknown")
     if partial:
         warnings.append("Recovered malformed coverage completeness; marked coverage as partial.")
+    if (
+        coverage.get("mode") == "deep_repository"
+        and coverage.get("inventoryStrategy") != "repository"
+    ):
+        coverage["inventoryStrategy"] = "repository"
+        warnings.append(
+            "Recovered malformed Deep Scan inventory strategy; marked coverage as partial."
+        )
+        partial = True
 
     surface_ids: set[str] = set()
     for field, label in (

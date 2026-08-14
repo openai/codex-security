@@ -411,7 +411,7 @@ describe("CLI", () => {
         maxDiscoveryRuns: number;
         maxTimeHours: number;
       };
-      expect(defaults.workers).toBe(6);
+      expect(defaults.workers).toBe(4);
       const documentedDeepScan = documentedConfigs.find(
         (config) =>
           typeof config["deep_scan"] === "object" &&
@@ -420,7 +420,7 @@ describe("CLI", () => {
       );
       expect(documentedDeepScan).toMatchObject({
         deep_scan: {
-          workers: "auto",
+          workers: 4,
           subagents: defaults.subagents,
           stop_after_no_new: defaults.stopAfterNoNew,
           stop_after_consecutive_errors: defaults.stopAfterConsecutiveErrors,

@@ -30,6 +30,10 @@ async function bundledWorkerExecutor(
   if (source === undefined) {
     throw new Error("Bundled Deep Scan worker executor was not found.");
   }
+  const fileSystemImport = /\b(import_node_fs\d*)\.promises\.readFile\(/u.exec(
+    source,
+  )?.[1];
+  expect(fileSystemImport).toBeDefined();
 
   class FakeCodex {
     startThread() {
@@ -44,7 +48,7 @@ async function bundledWorkerExecutor(
 
   return new Function(
     "Codex",
-    "import_node_fs11",
+    fileSystemImport!,
     "assertVerifiedParentSandbox",
     "resolveCodexPath",
     "workerSubagentConfig",

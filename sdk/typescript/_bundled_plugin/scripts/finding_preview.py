@@ -111,8 +111,14 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     ):
         key = next((alias for alias in aliases if alias in value), None)
         if key is not None:
+            section = value[key]
+            if key == "attackPath" and isinstance(section, dict):
+                section = dict(section)
+                for assessment in ("impact", "likelihood"):
+                    if isinstance(section.get(assessment), str):
+                        section[assessment] = {"level": section[assessment]}
             prepared[key] = bounded_finding_section(
-                value[key],
+                section,
                 maximum_bytes,
                 priority_keys,
                 reserved_fields,
