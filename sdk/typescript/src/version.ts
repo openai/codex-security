@@ -78,6 +78,7 @@ export async function checkForUpdate({
   entrypoint,
   currentVersion = VERSION,
   fetch: fetchLatest = fetch,
+  signal,
 }: {
   environment?: NodeJS.ProcessEnv;
   entrypoint?: string;
@@ -86,6 +87,7 @@ export async function checkForUpdate({
     input: Parameters<typeof fetch>[0],
     init?: Parameters<typeof fetch>[1],
   ) => ReturnType<typeof fetch>;
+  signal?: AbortSignal;
 } = {}): Promise<UpdateNotice | undefined> {
   if (!updateNoticeEnabled(environment)) return undefined;
 
@@ -95,12 +97,16 @@ export async function checkForUpdate({
       environment["npm_config_registry"] ??
       environment["NPM_CONFIG_REGISTRY"] ??
       "https://registry.npmjs.org/";
+    const timeout = AbortSignal.timeout(3_000);
     const response = await fetchLatest(
       new URL(
         `${encodeURIComponent(PACKAGE_NAME)}/latest`,
         registry.endsWith("/") ? registry : `${registry}/`,
       ),
-      { signal: AbortSignal.timeout(3_000) },
+      {
+        signal:
+          signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      },
     );
     if (!response.ok) return undefined;
 

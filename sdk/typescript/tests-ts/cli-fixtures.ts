@@ -194,7 +194,7 @@ export function dependencies(
     bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
-    onUpdateCheck?: () => Promise<UpdateNotice | undefined>;
+    onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
     preflight?: ScanPreflight;
     environment?: NodeJS.ProcessEnv;
@@ -243,7 +243,7 @@ export function dependencies(
       return security;
     },
     environment: options.environment ?? {},
-    checkForUpdate: async () => await options.onUpdateCheck?.(),
+    checkForUpdate: async (signal) => await options.onUpdateCheck?.(signal),
     currentDirectory: () => options.currentDirectory ?? "/current/repository",
     now: () => 0,
     setInterval: () => ({}) as NodeJS.Timeout,
