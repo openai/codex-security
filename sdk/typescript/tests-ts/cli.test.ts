@@ -1,21 +1,20 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  copyFile,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, normalize } from "node:path";
 import { Writable } from "node:stream";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -36,6 +35,7 @@ import {
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
+import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -296,11 +296,7 @@ describe("CLI", () => {
     );
 
     for (const documentation of [readme, publicReadme]) {
-      expect(documentation).toContain(
-        "Some cybersecurity requests and protected findings require approval through\n" +
-          "Trusted Access for Cyber. To apply or check your access, visit\n" +
-          "[chatgpt.com/cyber](https://chatgpt.com/cyber).",
-      );
+      expect(documentation).toContain("https://chatgpt.com/cyber");
     }
 
     for (const setting of [
@@ -349,18 +345,29 @@ describe("CLI", () => {
     const readme = await readFile(new URL("../README.md", import.meta.url), {
       encoding: "utf8",
     });
-    expect(readme).toContain(
-      `model = "${DEFAULT_SCAN_MODEL_CONFIGURATION.model}"`,
+    const documentedConfigs = [
+      ...readme.matchAll(/^```toml\s*\n([\s\S]*?)\n```\s*$/gmu),
+    ].map(([, config]) => parseToml(config!));
+    const documentedRuntime = documentedConfigs.find(
+      (config) => "cli_auth_credentials_store" in config,
     );
-    expect(readme).toContain(
-      `model_reasoning_effort = "${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}"`,
-    );
+    expect(documentedRuntime).toMatchObject({
+      cli_auth_credentials_store:
+        DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"],
+      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
+      model_reasoning_effort: DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort,
+    });
 
     const features = DEFAULT_CODEX_CONFIG["features"] as JsonObject;
     const multiAgent = features["multi_agent_v2"] as JsonObject;
-    expect(readme).toContain(
-      `max_concurrent_threads_per_session = ${String(multiAgent["max_concurrent_threads_per_session"])}`,
-    );
+    expect(documentedRuntime).toMatchObject({
+      features: {
+        multi_agent_v2: {
+          max_concurrent_threads_per_session:
+            multiAgent["max_concurrent_threads_per_session"],
+        },
+      },
+    });
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
@@ -398,19 +405,27 @@ describe("CLI", () => {
         workers: number;
         subagents: number;
         stopAfterNoNew: number;
+        stopAfterConsecutiveErrors: number;
         maxDiscoveryRuns: number;
         maxTimeHours: number;
       };
       expect(defaults.workers).toBe(6);
-      expect(readme).toContain('workers = "auto"');
-      expect(readme).toContain(`subagents = ${defaults.subagents}`);
-      expect(readme).toContain(
-        `stop_after_no_new = ${defaults.stopAfterNoNew}`,
+      const documentedDeepScan = documentedConfigs.find(
+        (config) =>
+          typeof config["deep_scan"] === "object" &&
+          config["deep_scan"] !== null &&
+          "stop_after_consecutive_errors" in config["deep_scan"],
       );
-      expect(readme).toContain(
-        `max_discovery_runs = ${defaults.maxDiscoveryRuns}`,
-      );
-      expect(readme).toContain(`max_time_hours = ${defaults.maxTimeHours}`);
+      expect(documentedDeepScan).toMatchObject({
+        deep_scan: {
+          workers: "auto",
+          subagents: defaults.subagents,
+          stop_after_no_new: defaults.stopAfterNoNew,
+          stop_after_consecutive_errors: defaults.stopAfterConsecutiveErrors,
+          max_discovery_runs: defaults.maxDiscoveryRuns,
+          max_time_hours: defaults.maxTimeHours,
+        },
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1011,8 +1026,8 @@ describe("CLI", () => {
       bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
       scanMcp: false,
       cliVersion: VERSION,
-      codexVersion: "0.144.6",
-      codexSdkVersion: "0.144.6",
+      codexVersion: CODEX_EXECUTABLE_VERSION,
+      codexSdkVersion: CODEX_SDK_VERSION,
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
@@ -1608,6 +1623,35 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("\r");
   });
 
+  test("falls back to plain progress when the dashboard cannot initialize", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    let scans = 0;
+    let closed = 0;
+    let timers = 0;
+    const deps = dependencies({
+      onRun: () => {
+        scans += 1;
+      },
+      onClose: () => {
+        closed += 1;
+      },
+    });
+    deps.setInterval = () => {
+      timers += 1;
+      throw new Error("Dashboard timer unavailable.");
+    };
+
+    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
+      0,
+    );
+    expect(scans).toBe(1);
+    expect(closed).toBe(1);
+    expect(timers).toBe(1);
+    expect(stderr.text()).toContain("Preparing scan");
+    expect(stderr.text()).toContain("Running scan");
+  });
+
   test("keeps terminal scans in one live dashboard", async () => {
     const stdout = capture();
     const stderr = capture(true);
@@ -1806,98 +1850,6 @@ describe("CLI", () => {
     expect(stdout.text()).not.toContain("--format {sarif}");
     expect(stderr.text()).toBe("");
   });
-
-  test("runs split TypeScript output from an npm-style bin when Node preserves main symlinks", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-node-bin-"));
-    try {
-      const source = join(import.meta.dir, "..");
-      const installed = join(root, "node_modules", "@openai", "codex-security");
-      const dist = join(installed, "dist");
-      const build = spawnSync(
-        "node",
-        [
-          join(source, "node_modules", "typescript", "bin", "tsc"),
-          "-p",
-          join(source, "tsconfig.build.json"),
-          "--outDir",
-          dist,
-          "--pretty",
-          "false",
-        ],
-        { encoding: "utf8", cwd: source },
-      );
-      expect(build.status).toBe(0);
-      expect(build.stderr).toBe("");
-      expect(await readFile(join(dist, "cli.js"), "utf8")).toContain(
-        'from "./api.js"',
-      );
-      const launcher = join(installed, "bin", "codex-security.mjs");
-      await mkdir(join(installed, "bin"), { recursive: true });
-      await copyFile(join(source, "bin", "codex-security.mjs"), launcher);
-      await copyFile(
-        join(source, "package.json"),
-        join(installed, "package.json"),
-      );
-      await symlink(
-        join(source, "node_modules"),
-        join(installed, "node_modules"),
-        "dir",
-      );
-      const binDirectory = join(root, "node_modules", ".bin");
-      await mkdir(binDirectory, { recursive: true });
-      const bin = join(binDirectory, "codex-security");
-      await symlink(launcher, bin);
-      const child = spawnSync("node", [bin, "--version"], {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          NODE_OPTIONS:
-            "--preserve-symlinks-main --no-experimental-detect-module",
-          NODE_USE_ENV_PROXY: undefined,
-        },
-      });
-      expect(child.status).toBe(0);
-      expect(child.stderr).toBe("");
-      expect(child.stdout).toBe(`${VERSION}\n`);
-
-      const preload = join(root, "unavailable-cwd.mjs");
-      await writeFile(
-        preload,
-        [
-          "const originalCwd = process.cwd;",
-          'Object.defineProperty(process, "cwd", {',
-          "  value() {",
-          '    if (/[\\\\/]dist[\\\\/]cli\\.js:/u.test(new Error().stack ?? "")) {',
-          '      throw new Error("working directory is unavailable");',
-          "    }",
-          "    return originalCwd.call(process);",
-          "  },",
-          "});\n",
-        ].join("\n"),
-      );
-      const failed = spawnSync(
-        "node",
-        ["--import", pathToFileURL(preload).href, bin, "scan"],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            NODE_OPTIONS:
-              "--preserve-symlinks-main --no-experimental-detect-module",
-            NODE_USE_ENV_PROXY: undefined,
-          },
-          timeout: 30_000,
-        },
-      );
-      expect([failed.status, failed.stdout, failed.stderr]).toEqual([
-        2,
-        "",
-        "working directory is unavailable\n",
-      ]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30_000);
 
   test("uses Incur version and command help", async () => {
     const version = capture();

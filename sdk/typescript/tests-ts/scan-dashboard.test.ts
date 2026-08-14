@@ -39,6 +39,87 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("restores terminal state when dashboard initialization fails", () => {
+    const input = new DashboardTestInput();
+    const output: string[] = [];
+    let timerCleared = false;
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          output.push(chunk);
+          if (chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard rendering failed.");
+          }
+          return true;
+        },
+      },
+      {
+        repository: "/synthetic/repository",
+        input,
+        clock: {
+          ...fakeClock(),
+          clearInterval: () => {
+            timerCleared = true;
+          },
+        },
+      },
+    );
+
+    expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
+    expect(timerCleared).toBe(true);
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount("data")).toBe(0);
+    expect(output.join("")).toContain("\u001B[?25h\u001B[?1049l");
+    dashboard.stop();
+  });
+
+  test("restores the screen when raw mode setup and cleanup both fail", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    input.setRawMode = (enabled) => {
+      throw new Error(
+        enabled
+          ? "Raw mode initialization failed."
+          : "Raw mode cleanup failed.",
+      );
+    };
+    const dashboard = new ScanDashboard(stderr.stream, {
+      repository: "/synthetic/repository",
+      input,
+      clock: fakeClock(),
+    });
+
+    expect(() => dashboard.start()).toThrow("Raw mode initialization failed.");
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+    expect(input.listenerCount("data")).toBe(0);
+  });
+
+  test("disables alternate scrolling when dashboard rollback fails", () => {
+    const input = new DashboardTestInput();
+    const output: string[] = [];
+    input.setRawMode = (enabled) => {
+      if (!enabled) throw new Error("Raw mode cleanup failed.");
+      input.isRaw = enabled;
+      return input;
+    };
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          output.push(chunk);
+          if (chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard rendering failed.");
+          }
+          return true;
+        },
+      },
+      { repository: "/synthetic/repository", input, clock: fakeClock() },
+    );
+
+    expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
+    expect(output.join("")).toContain("\u001B[?1007h");
+    expect(output.join("")).toContain("\u001B[?1007l\u001B[?25h\u001B[?1049l");
+  });
+
   test("redraws real scan activity and metrics in place", () => {
     const stderr = capture(true);
     const timers: NodeJS.Timeout[] = [];

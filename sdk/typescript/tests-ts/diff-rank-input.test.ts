@@ -95,6 +95,8 @@ test("diff previews stay inside the selected repository", () => {
       base,
       "--head",
       head,
+      "--mode",
+      "local-patch",
       "--out",
       output,
     ],

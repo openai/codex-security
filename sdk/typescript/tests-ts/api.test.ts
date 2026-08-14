@@ -52,6 +52,7 @@ import {
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
@@ -195,6 +196,20 @@ async function temporaryDirectory(): Promise<string> {
   return path;
 }
 
+function nodeCodex(script: string): {
+  command: { command: string };
+  environment: Record<string, string>;
+} {
+  return {
+    command: {
+      command: execFileSync("node", ["-p", "process.execPath"], {
+        encoding: "utf8",
+      }).trim(),
+    },
+    environment: { NODE_OPTIONS: `--import=${pathToFileURL(script).href}` },
+  };
+}
+
 async function copyCompletedScan(root: string): Promise<string> {
   const scanDir = join(root, "scan");
   await cp(EXAMPLE, scanDir, { recursive: true });
@@ -246,6 +261,7 @@ async function* completedEvents(): AsyncGenerator<ThreadEvent> {
     usage: {
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 1,
     },
@@ -3008,6 +3024,7 @@ describe("CodexSecurity orchestration", () => {
     const usage = {
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 1,
     };
@@ -3083,7 +3100,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("surfaces post-scan failures without reopening a completed scan", async () => {
+  test("warns about post-scan failures without failing a completed scan", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3092,6 +3109,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const commands: Array<readonly string[]> = [];
+    const warnings: string[] = [];
     let turns = 0;
 
     const client = new TestClient(
@@ -3129,14 +3147,21 @@ describe("CodexSecurity orchestration", () => {
     );
 
     await expect(
-      client.run(repository, { postScanPrompt: "Draft confirmed fixes." }),
-    ).rejects.toThrow("Could not draft fixes.");
+      client.run(repository, {
+        postScanPrompt: "Draft confirmed fixes.",
+        onWarning: (warning) => warnings.push(warning),
+      }),
+    ).resolves.toMatchObject({ scanDir });
+    expect(warnings).toEqual([
+      "Could not run post-scan instructions: Could not draft fixes.",
+    ]);
     expect(commands.map((command) => command[0])).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
       "set-scan-thread",
       "prepare-scan-completion",
       "complete-scan",
+      "list-global-findings",
     ]);
     await client.close();
   });
@@ -3537,18 +3562,25 @@ describe("CodexSecurity orchestration", () => {
           }
           return {};
         },
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
+        createCodex: (options: CodexOptions) => ({
+          startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
+            const thread = new Codex({
+              ...options,
+              codexPathOverride: process.execPath,
+            }).startThread(threadOptions);
+            const executable = thread as unknown as {
+              _exec: { run(): AsyncGenerator<string> };
+            };
+            executable._exec.run = async function* () {
               await copyCompletedScan(root);
-              async function* events() {
-                yield { type: "thread.started", thread_id: "scan-thread" };
-                yield { type: "turn.completed", usage: null };
-              }
-              return { events: events() };
-            },
-          }),
+              yield JSON.stringify({
+                type: "thread.started",
+                thread_id: "scan-thread",
+              });
+              yield JSON.stringify({ type: "turn.completed", usage: null });
+            };
+            return thread;
+          },
         }),
       },
     );
@@ -4017,6 +4049,7 @@ describe("CodexSecurity orchestration", () => {
                 join(codexHome!, "config.toml"),
                 "utf8",
               );
+              expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(codexConfig).toContain(
                 'model_reasoning_summary = "detailed"',
               );
@@ -4975,6 +5008,75 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects committed diffs when checkout bytes can differ from head", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await writeFile(
+      join(repository, "tracked.ts"),
+      "export const value = 'base';\n",
+    );
+    await mkdir(join(repository, "src"));
+    await writeFile(join(repository, "src", "context.ts"), "export {};\n");
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: repository, stdio: "pipe" });
+    git("init", "-q", "-b", "main");
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.com",
+      "commit",
+      "-qm",
+      "base",
+    );
+    git("checkout", "-qb", "feature");
+    await writeFile(
+      join(repository, "tracked.ts"),
+      "export const value = 'head';\n",
+    );
+    git("add", "tracked.ts");
+    git(
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.com",
+      "commit",
+      "-qm",
+      "head",
+    );
+    git("checkout", "-q", "main");
+
+    const client = new TestClient({}, { environment: {} });
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base: "main", head: "feature" }),
+      }),
+    ).rejects.toThrow("checkout to match the requested head revision");
+
+    git("checkout", "-q", "feature");
+    await writeFile(
+      join(repository, "tracked.ts"),
+      "export const value = 'dirty';\n",
+    );
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base: "main", head: "feature" }),
+      }),
+    ).rejects.toThrow("clean repository checkout");
+
+    git("restore", "tracked.ts");
+    git("update-index", "--skip-worktree", "src/context.ts");
+    await rm(join(repository, "src", "context.ts"));
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base: "main", head: "feature" }),
+      }),
+    ).rejects.toThrow("Sparse checkouts are not supported");
+    await client.close();
+  });
+
   test("reports effective ambient API-key authentication", async () => {
     const root = await temporaryDirectory();
     const codexHome = join(root, "codex-home");
@@ -5008,23 +5110,76 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("uses one configured Codex executable for scans and nested workers", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const executable = join(root, "custom codex");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let codexOptions: CodexOptions | null = null;
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          OPENAI_API_KEY: "ambient-key",
+          CODEX_CLI_PATH: ` ${executable} `,
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: {
+            CODEX_HOME: codexHome,
+            CODEX_CLI_PATH: ` ${executable} `,
+          },
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          return {
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          };
+        },
+      },
+    );
+
+    await client.run(repository);
+    expect((codexOptions as CodexOptions | null)?.codexPathOverride).toBe(
+      executable,
+    );
+    expect((codexOptions as CodexOptions | null)?.env?.["CODEX_CLI_PATH"]).toBe(
+      executable,
+    );
+    await client.close();
+  });
+
   test("authenticates without initializing the plugin runtime", async () => {
     const root = await temporaryDirectory();
     const stateDirectory = join(root, "state");
     const codexHome = join(stateDirectory, "codex-home");
     const fakeCodex = join(root, "codex.mjs");
     await writeFile(fakeCodex, "process.exitCode = 1;\n");
+    const fakeCommand = nodeCodex(fakeCodex);
     const client = new TestClient(
       { pluginPath: join(root, "missing-plugin") },
       {
-        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          ...fakeCommand.environment,
+        },
         prepareRuntime: async () => {
           throw new Error("authentication must not initialize the plugin");
         },
-        resolveCodexCommand: () => ({
-          command: process.execPath,
-          prefixArgs: [fakeCodex],
-        }),
+        resolveCodexCommand: () => fakeCommand.command,
       },
     );
 
@@ -5056,9 +5211,10 @@ describe("CodexSecurity orchestration", () => {
       `
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(nativeLoginMarker)}, "native login was invoked");
-process.exitCode = 2;
+process.exit(2);
 `,
     );
+    const fakeCommand = nodeCodex(fakeCodex);
     let codexOptions: CodexOptions | null = null;
     let selectedAuthentication: unknown;
     let pythonEnvironment: Record<string, string | undefined> | undefined;
@@ -5085,13 +5241,11 @@ process.exitCode = 2;
             CODEX_HOME: codexHome,
             OpenAi_Api_Key: "forwarded-openai-key",
             codex_api_key: "forwarded-codex-key",
+            ...fakeCommand.environment,
           },
           credentialsAvailable: false,
         }),
-        resolveCodexCommand: () => ({
-          command: process.execPath,
-          prefixArgs: [fakeCodex],
-        }),
+        resolveCodexCommand: () => fakeCommand.command,
         resolvePluginPython: async (options: {
           environment?: Record<string, string | undefined>;
           protectedRoot?: string;
@@ -5159,15 +5313,19 @@ process.exitCode = 2;
     await writeFile(
       fakeCodex,
       `
-if (process.argv.slice(2).join(" ") !== "login status") {
-  process.exitCode = 2;
+import { basename } from "node:path";
+
+if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login status") {
+  process.exit(2);
 } else if (process.env.CODEX_HOME !== ${JSON.stringify(codexHome)}) {
-  process.exitCode = 3;
+  process.exit(3);
 } else {
   console.log("Logged in using ChatGPT");
+  process.exit(0);
 }
 `,
     );
+    const fakeCommand = nodeCodex(fakeCodex);
 
     const client = new TestClient(
       {},
@@ -5175,13 +5333,10 @@ if (process.argv.slice(2).join(" ") !== "login status") {
         environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
-          environment: { CODEX_HOME: codexHome },
+          environment: { CODEX_HOME: codexHome, ...fakeCommand.environment },
           credentialsAvailable: false,
         }),
-        resolveCodexCommand: () => ({
-          command: process.execPath,
-          prefixArgs: [fakeCodex],
-        }),
+        resolveCodexCommand: () => fakeCommand.command,
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
@@ -5767,6 +5922,14 @@ if (process.argv.slice(2).join(" ") !== "login status") {
   });
 
   test("cleans the bootstrap workspace when credential-home cleanup fails", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "cleans the bootstrap workspace when credential-home cleanup fails",
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -5822,6 +5985,14 @@ if (process.argv.slice(2).join(" ") !== "login status") {
   });
 
   test("attempts both preparation cleanups and preserves the preparation and cleanup failures", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "attempts both preparation cleanups and preserves the preparation and cleanup failures",
+      )
+    ) {
+      return;
+    }
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
@@ -5892,10 +6063,14 @@ if (process.argv.slice(2).join(" ") !== "login status") {
       fakeCodex,
       'console.error("Open https://auth.example.test/device");\nconsole.error("User code: ABCD-EFGH");\nprocess.on("SIGTERM", () => {});\nsetInterval(() => {}, 1000);\n',
     );
+    const fakeCommand = nodeCodex(fakeCodex);
     const client = new TestClient(
       {},
       {
-        environment: { CODEX_SECURITY_STATE_DIR: root },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          ...fakeCommand.environment,
+        },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -5906,13 +6081,10 @@ if (process.argv.slice(2).join(" ") !== "login status") {
             name: "codex-security",
             version: "0.1.0",
           },
-          environment: {},
+          environment: fakeCommand.environment,
           credentialsAvailable: false,
         }),
-        resolveCodexCommand: () => ({
-          command: process.execPath,
-          prefixArgs: [fakeCodex],
-        }),
+        resolveCodexCommand: () => fakeCommand.command,
         createCodex: () => {
           throw new Error("not used");
         },
@@ -6021,10 +6193,14 @@ for await (const _chunk of process.stdin) {}
 setInterval(() => {}, 1000);
 `,
     );
+    const fakeCommand = nodeCodex(fakeCodex);
     const client = new TestClient(
       {},
       {
-        environment: { CODEX_SECURITY_STATE_DIR: root },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: root,
+          ...fakeCommand.environment,
+        },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -6035,13 +6211,10 @@ setInterval(() => {}, 1000);
             name: "codex-security",
             version: "0.1.0",
           },
-          environment: {},
+          environment: fakeCommand.environment,
           credentialsAvailable: false,
         }),
-        resolveCodexCommand: () => ({
-          command: process.execPath,
-          prefixArgs: [fakeCodex],
-        }),
+        resolveCodexCommand: () => fakeCommand.command,
         createCodex: () => {
           throw new Error("not used");
         },

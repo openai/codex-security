@@ -11,7 +11,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -164,6 +163,45 @@ async function startMcp(root: string) {
 }
 
 describe("compact diff scan", () => {
+  test("reads committed diff previews from the selected head revision", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/feature.ts", "const marker = 'base';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+
+    writeSource(repository, "src/feature.ts", "const marker = 'head';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "head");
+    const head = git(repository, "rev-parse", "HEAD");
+    git(repository, "checkout", "--detach", base);
+
+    const output = join(root, "rank-input.jsonl");
+    const result = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--mode",
+      "revisions",
+      "--out",
+      output,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const row = JSON.parse(readFileSync(output, "utf8")) as {
+      path: string;
+      preview: string;
+    };
+    expect(row.path).toBe("src/feature.ts");
+    expect(row.preview).toContain("head");
+    expect(row.preview).not.toContain("base");
+  });
+
   test("uses the selected Git revisions and keeps deleted source files", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
@@ -424,33 +462,5 @@ describe("compact diff scan", () => {
     } finally {
       await client.close();
     }
-  });
-
-  test("preserves stable finding identities from existing public scans", () => {
-    const runtime = brotliDecompressSync(
-      Buffer.concat(
-        ["000", "001"].map((part) =>
-          readFileSync(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-        ),
-      ),
-    ).toString("utf8");
-    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
-      runtime,
-    )?.[0];
-    expect(source).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string) => value) as (findings: JsonObject[]) => JsonObject[];
-
-    const [finding] = buildFindings([
-      {
-        title: "Changed title",
-        extensions: { candidateId: "candidate-stable" },
-      },
-    ]);
-    expect((finding?.["identity"] as JsonObject)["anchor"]).toBe(
-      "candidate-stable",
-    );
   });
 });

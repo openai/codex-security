@@ -93,6 +93,62 @@ function runOwnershipProbe(probe: OwnershipProbe): Record<string, unknown> {
 }
 
 describe("deep scan workbench ownership", () => {
+  test("rejects completion before an SDK-created Deep Scan finishes", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-completion-guard-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    const stateDir = join(root, "state");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const command = (args: string[]) =>
+      Bun.spawnSync(
+        [
+          python!,
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+          ...args,
+        ],
+        {
+          env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+    const registered = command([
+      "register-cli-scan",
+      "--repository",
+      repository,
+      "--scan-dir",
+      scanDir,
+      "--recipe-json",
+      JSON.stringify({
+        config: {},
+        mode: "deep",
+        repository,
+        target: { kind: "repository", paths: [] },
+      }),
+    ]);
+    expect(
+      registered.exitCode,
+      new TextDecoder().decode(registered.stderr),
+    ).toBe(0);
+    const { scanId } = JSON.parse(
+      new TextDecoder().decode(registered.stdout),
+    ) as { scanId: string };
+
+    const premature = command(["complete-scan", "--scan-id", scanId]);
+    expect(premature.exitCode).not.toBe(0);
+    expect(new TextDecoder().decode(premature.stderr)).toContain(
+      "orchestration must finish and persist its manifest",
+    );
+  });
+
   test.each([
     [undefined, 96],
     [0.5, 0.5],

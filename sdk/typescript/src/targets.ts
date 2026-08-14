@@ -273,6 +273,45 @@ export async function normalizeTarget(
   return { kind: "paths", paths };
 }
 
+export async function validateCommittedDiffCheckout(
+  repository: string,
+  target: NormalizedTarget,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (target.kind !== "refs") return;
+
+  const checkoutHead = await resolveGitRef(repository, "HEAD", signal);
+  if (checkoutHead !== target.head) {
+    throw new InvalidTargetError(
+      `Committed-diff scans require the repository checkout to match the requested head revision. Checkout HEAD is ${checkoutHead}; requested head is ${target.head}. Check out the requested head and retry.`,
+    );
+  }
+
+  const status = await gitOutput(
+    repository,
+    [
+      "-c",
+      "core.fsmonitor=false",
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ],
+    signal,
+  );
+  if (status.length !== 0) {
+    throw new InvalidTargetError(
+      "Committed-diff scans require a clean repository checkout. Commit, stash, or remove local changes and retry. Use `git stash --include-untracked` to stash untracked files.",
+    );
+  }
+
+  const tracked = await gitOutput(repository, ["ls-files", "-t", "-z"], signal);
+  if (tracked.split("\0").some((entry) => entry.startsWith("S "))) {
+    throw new InvalidTargetError(
+      "Committed-diff scans require a full repository checkout. Sparse checkouts are not supported; materialize skipped tracked files and retry.",
+    );
+  }
+}
+
 export function validateMode(target: NormalizedTarget, mode: ScanMode): void {
   if (mode !== "standard" && mode !== "deep") {
     throw new InvalidTargetError(`Unsupported scan mode: ${String(mode)}`);

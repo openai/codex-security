@@ -10,7 +10,7 @@ import {
   dependencies,
   fakeResult,
   SYNTHETIC_CREDENTIALS,
-} from "./support/cli.js";
+} from "./cli-fixtures.js";
 
 describe("CLI workbench", () => {
   test("lists and summarizes open findings for the current repository", async () => {

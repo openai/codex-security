@@ -383,7 +383,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
           name.toUpperCase() !== "CODEX_API_KEY",
       ),
     );
-    const command = resolveCodexCommand();
+    const command = resolveCodexCommand(environment);
     if (existsSync(codexSecurityCredentialHome(process.env))) {
       const dedicatedStatus = await accountStatus(command, {
         ...environment,
@@ -417,7 +417,12 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   },
   forceExit: (signal) => process.kill(process.pid, signal),
   runCodex: (args, output, environment) =>
-    runCodexSkillCommand(args, output, resolveCodexCommand(), environment),
+    runCodexSkillCommand(
+      args,
+      output,
+      resolveCodexCommand(environment),
+      environment,
+    ),
   exportFindings: async (arguments_, output) => {
     const environment = exportEnvironment();
     const python = await resolvePluginPython({
@@ -514,7 +519,7 @@ export async function runCodexSkillCommand(
   if (configuredHome?.trim()) {
     environment["CODEX_HOME"] = resolve(expandHome(configuredHome));
   }
-  const invocation = spawn(command.command, [...command.prefixArgs, ...args], {
+  const invocation = spawn(command.command, [...args], {
     env: environment,
     cwd: parse(process.execPath).root,
     stdio: output === undefined ? "inherit" : ["ignore", "pipe", "pipe"],
@@ -2885,7 +2890,13 @@ async function runScan(
         arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
       );
     } else {
-      dashboard.start();
+      try {
+        dashboard.start();
+      } catch {
+        dashboard = null;
+        progress = new Progress(errorOutput, dependencies, false);
+        progress.startTimer("Preparing scan");
+      }
     }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {

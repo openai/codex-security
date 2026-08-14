@@ -259,6 +259,81 @@ describe("multiscan", () => {
     ]);
   });
 
+  test("surfaces optional post-scan warnings without failing completed scans", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "follow-up-warning");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfollow-up-warning,${source.path},${source.revision}\n`,
+    );
+    const progress: Parameters<
+      NonNullable<MultiscanOptions["onProgress"]>
+    >[0][] = [];
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          scanOptions.onWarning?.("Could not run post-scan instructions.");
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { onProgress: (event) => progress.push(event) },
+      ),
+    );
+
+    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(progress).toContainEqual({
+      repository: "follow-up-warning",
+      attempt: 1,
+      status: "started",
+      warning: "Could not run post-scan instructions.",
+    });
+  });
+
+  test.each([false, true])(
+    "continues scanning when a progress observer fails %s",
+    async (asynchronous) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "observer-failure");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nobserver-failure,${source.path},${source.revision}\n`,
+      );
+      let attempts = 0;
+      const progress: string[] = [];
+
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            attempts += 1;
+            scanOptions.onWarning?.("Optional post-scan warning.");
+            return await completedScan(scanOptions.outputDir!);
+          }),
+          {
+            onProgress: (event) => {
+              progress.push(event.warning ?? event.status);
+              const error = new Error("Optional progress observer failed.");
+              if (asynchronous) return Promise.reject(error);
+              throw error;
+            },
+          },
+        ),
+      );
+
+      expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+      expect(attempts).toBe(1);
+      expect(progress).toEqual([
+        "started",
+        "Optional post-scan warning.",
+        "completed",
+      ]);
+      expect(await results(summary.resultsPath)).toMatchObject([
+        { id: "observer-failure", status: "completed", attempt: 1 },
+      ]);
+    },
+  );
+
   test.each(["partial", "unknown"] as const)(
     "retains sealed %s coverage without retries or multiplied costs",
     async (completeness) => {
@@ -343,7 +418,12 @@ describe("multiscan", () => {
       ]);
 
       const resumed = await runMultiscan(
-        options(paths, security, { maxAttempts: 3 }),
+        options(paths, security, {
+          maxAttempts: 3,
+          onProgress: () => {
+            throw new Error("Optional progress observer failed.");
+          },
+        }),
       );
       expect(resumed).toMatchObject({
         completed: 0,

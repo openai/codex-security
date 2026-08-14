@@ -159,10 +159,21 @@ function discoveryDependencies(
               });
 
               if (path === "/user/orgs") {
+                const organizations = options.organizations ?? [];
+                const page = Number(url.searchParams.get("page") ?? "1");
+                const perPage = Number(
+                  url.searchParams.get("per_page") ?? "30",
+                );
+                const offset = (page - 1) * perPage;
+                const next = new URL(url);
+                next.searchParams.set("page", String(page + 1));
                 return Response.json(
-                  (options.organizations ?? []).map((login) => ({
-                    login,
-                  })),
+                  organizations
+                    .slice(offset, offset + perPage)
+                    .map((login) => ({ login })),
+                  offset + perPage < organizations.length
+                    ? { headers: { link: `<${next.href}>; rel="next"` } }
+                    : undefined,
                 );
               }
               if (path === "/user") {
@@ -347,6 +358,30 @@ describe("bulk scan repository discovery", () => {
     expect(
       requests.find(({ path }) => path === "/graphql")?.variables?.owner,
     ).toBe("personal-account");
+  });
+
+  test("includes organizations beyond the first GitHub results page", async () => {
+    const root = await temporaryDirectory();
+    const organizations = Array.from(
+      { length: 101 },
+      (_value, index) => `organization-${String(index).padStart(3, "0")}`,
+    );
+    const { dependencies, prompt, requests } = discoveryDependencies(root, {
+      organizations,
+    });
+    prompt.confirms = [true];
+    prompt.choices = ["organization-100"];
+
+    await runBulkScanWizard(dependencies);
+
+    expect(prompt.searchOptions[0]).toContain("organization-100");
+    expect(prompt.searchOptions[0]).toHaveLength(102);
+    expect(requests.filter(({ path }) => path === "/user/orgs")).toHaveLength(
+      2,
+    );
+    expect(
+      requests.find(({ path }) => path === "/graphql")?.variables?.owner,
+    ).toBe("organization-100");
   });
 
   test("does not write an inventory when canceled or no repositories match", async () => {

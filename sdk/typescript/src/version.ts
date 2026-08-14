@@ -5,11 +5,10 @@ const PACKAGE_VERSIONS = packageVersions(
   new URL("../package.json", import.meta.url),
 );
 
-/** npm-compatible successor to the Python package version 0.1.0b3. */
 export const VERSION = PACKAGE_VERSIONS.package;
 export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
-export const BUNDLED_PLUGIN_VERSION = "0.1.19" as const;
+export const BUNDLED_PLUGIN_VERSION = "0.1.20" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
 const VERSION_PATTERN =

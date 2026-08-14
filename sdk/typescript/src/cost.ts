@@ -1,5 +1,5 @@
 import { open, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import {
   scanActivityFromSessionEvent,
   type ScanActivity,
@@ -48,6 +48,7 @@ interface SessionUsage {
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
+  workingDirectory: string | null;
   startedAt: number | null;
   inheritedUsage: ScanTokenUsage | null;
   replaying: boolean;
@@ -66,6 +67,7 @@ interface ScanCostTrackerOptions {
   codexHome: string;
   model: string;
   repository?: string;
+  scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
@@ -185,6 +187,7 @@ export class ScanCostTracker {
           unreadable: false,
           threadId: null,
           parentThreadId: null,
+          workingDirectory: null,
           startedAt: null,
           inheritedUsage: null,
           replaying: false,
@@ -209,6 +212,37 @@ export class ScanCostTracker {
     }
 
     const included = new Set([this.#threadId]);
+    if (this.#options.scanDirectory !== undefined) {
+      const scanStartedAt =
+        [...this.#sessions.values()].find(
+          (session) => session.threadId === this.#threadId,
+        )?.startedAt ?? null;
+      for (const session of this.#sessions.values()) {
+        if (
+          session.threadId === null ||
+          session.workingDirectory === null ||
+          scanStartedAt === null ||
+          session.startedAt === null ||
+          session.startedAt < scanStartedAt
+        ) {
+          continue;
+        }
+        const artifactsDirectory = join(
+          this.#options.scanDirectory,
+          "artifacts",
+        );
+        const workerDirectory = relative(
+          join(artifactsDirectory, "deep_discovery", "workers"),
+          session.workingDirectory,
+        ).split(sep);
+        if (
+          session.workingDirectory === artifactsDirectory ||
+          (workerDirectory.length === 2 && workerDirectory[1] === "output")
+        ) {
+          included.add(session.threadId);
+        }
+      }
+    }
     let changed = true;
     while (changed) {
       changed = false;
@@ -424,6 +458,9 @@ function readSessionEvent(
     }
     if (typeof payload["id"] === "string") {
       session.threadId = payload["id"];
+    }
+    if (typeof payload["cwd"] === "string") {
+      session.workingDirectory = payload["cwd"];
     }
     if (typeof payload["timestamp"] === "string") {
       session.startedAt = Math.floor(Date.parse(payload["timestamp"]) / 1_000);
@@ -718,8 +755,17 @@ function tokenUsage(value: unknown): ScanTokenUsage | null {
   if (!isRecord(value)) return null;
   const input = value["input_tokens"];
   const cached = value["cached_input_tokens"] ?? 0;
+  const canonicalCacheWrite = value["cache_write_input_tokens"];
+  const legacyCacheWrite = value["cache_write_tokens"];
   const cacheWrite =
-    value["cache_write_input_tokens"] ?? value["cache_write_tokens"] ?? 0;
+    canonicalCacheWrite === 0 &&
+    isTokenCount(input) &&
+    isTokenCount(cached) &&
+    isTokenCount(legacyCacheWrite) &&
+    legacyCacheWrite > 0 &&
+    cached + legacyCacheWrite <= input
+      ? legacyCacheWrite
+      : canonicalCacheWrite ?? legacyCacheWrite ?? 0;
   const output = value["output_tokens"];
   const reasoning = value["reasoning_output_tokens"] ?? 0;
   if (

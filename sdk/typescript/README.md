@@ -16,10 +16,11 @@ npx @openai/codex-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
-later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scanning and
-exporting findings also require Python 3.10 or later. If you use Python 3.10,
-install the `tomli` package. Select another interpreter with `--python`,
-`pythonPath`, or `PYTHON` when needed.
+later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scans, bulk
+scans, exports, scan history, and saved findings also require Python 3.10 or
+later. Python 3.10 also requires `tomli`. Use `--python` with `scan`,
+`bulk-scan`, or `export`; use `pythonPath` with the SDK. Set `PYTHON` to select
+an interpreter for any Python-backed command.
 
 When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
@@ -256,6 +257,10 @@ directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
 
+Working-tree snapshots include files from untracked nested Git repositories.
+Initialized submodules must be clean and checked out at the commit recorded by
+the parent repository.
+
 Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
 shares them with every repository. Directories are searched recursively for
 Markdown, text, PDF, and Word (`.docx`) files.
@@ -328,7 +333,7 @@ configuration. Each scan starts with a private runtime and these Codex
 defaults:
 
 ```toml
-cli_auth_credentials_store = "file"
+cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
@@ -382,8 +387,7 @@ permissions. See [Local security model](#local-security-model).
 
 ### Deep-scan engine configuration
 
-When the bundled plugin runs in a normal Codex host, its repeated-discovery
-engine reads `$CODEX_HOME/codex-security/config.toml`, defaulting to
+Deep scans read `$CODEX_HOME/codex-security/config.toml`, defaulting to
 `~/.codex/codex-security/config.toml`:
 
 ```toml
@@ -391,6 +395,7 @@ engine reads `$CODEX_HOME/codex-security/config.toml`, defaulting to
 workers = "auto"
 subagents = 3
 stop_after_no_new = 6
+stop_after_consecutive_errors = 3
 max_discovery_runs = 60
 max_time_hours = 96
 ```
@@ -398,16 +403,18 @@ max_time_hours = 96
 `workers = "auto"` uses half the available parallelism, with a minimum of one
 and a maximum of six discovery workers. Set `workers` to a positive integer to
 choose an explicit count. `subagents` must be a nonnegative integer;
-`stop_after_no_new` and `max_discovery_runs` must be positive integers.
-`max_time_hours` must be a positive finite number no greater than 96; fractional
-hours are supported. Unknown `[deep_scan]` keys are rejected.
+`stop_after_no_new`, `stop_after_consecutive_errors`, and `max_discovery_runs`
+must be positive integers. `max_time_hours` must be a positive finite number no
+greater than 96; fractional hours are supported. Unknown `[deep_scan]` keys are
+rejected.
 
 These settings are separate from Codex's
 `features.multi_agent_v2.max_concurrent_threads_per_session` and
 `bulk-scan --workers`. Standalone CLI and SDK scans create an isolated
 `CODEX_HOME`, import the ambient `[deep_scan]` configuration, and apply explicit
-CLI or SDK options on top. Use `--codex` to adjust the Codex session thread
-limit, not to set `[deep_scan]` values.
+CLI or SDK options on top. Set `stop_after_consecutive_errors` in the
+configuration file. Use `--codex` to adjust the Codex session thread limit, not
+to set `[deep_scan]` values.
 
 ### Environment variables
 
@@ -420,6 +427,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
+| `CODEX_CLI_PATH`                                                            | Use another Codex executable for authentication, plugin setup, scans, and nested workers.     |
 | `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
 | `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                     |
 | `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                           |
@@ -517,8 +525,10 @@ Use `--post-scan-prompt-file PATH` to run a follow-up in the same authenticated
 session after each scan, including incomplete or failed scans. Canceled scans
 and scans stopped at their configured cost limit do not start another turn.
 
-`--workers` limits concurrent scans and `--max-attempts` retries failures.
-Results remain under `--output-dir`; rerun the same command to resume.
+`--workers` sets the number of concurrent repository scans and defaults to
+`4`. `--max-attempts` sets how many times each pending repository can run per
+invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
+same command to resume.
 
 ### Scan history and reruns
 
@@ -534,11 +544,12 @@ workers, which can include source code and credentials.
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
 
-Scan history uses the existing Codex Security workbench database at
-`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
-`CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
-are never stored in the scan configuration. Recorded failure summaries and
-bulk-scan receipts omit messages that contain recognizable credentials.
+Scan history uses `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3` when
+`CODEX_SECURITY_STATE_DIR` is set. Otherwise, it uses
+`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`; `CODEX_HOME`
+defaults to `~/.codex`. Scan credentials are never stored in the scan
+configuration. Recorded failure summaries and bulk-scan receipts omit messages
+that contain recognizable credentials.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the
@@ -646,7 +657,7 @@ from the root of the Codex Security repository:
 mkdir -p results state
 chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.4
+export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
 docker compose pull codex-security
 docker compose run --rm codex-security login --device-auth
 docker compose run --rm codex-security

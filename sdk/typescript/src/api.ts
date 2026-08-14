@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -66,6 +67,7 @@ import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
+  matchScanFindingsInternal,
   type matchScanFindings,
 } from "./scan-comparison.js";
 import {
@@ -113,6 +115,7 @@ import {
   type ScanMode,
   type ScanTarget,
   validatedGitEnvironment,
+  validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
 
@@ -740,6 +743,7 @@ export class CodexSecurity {
         codexHome: runtime.codexHome,
         model,
         repository: repo,
+        scanDirectory: scanDir,
         maxCostUsd: options.maxCostUsd,
         onActivity:
           options.onActivity === undefined
@@ -963,6 +967,7 @@ export class CodexSecurity {
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
         CODEX_SECURITY_STATE_DIR: stateDirectory,
+        CODEX_SECURITY_SURFACE: this.#surface,
         CODEX_SECURITY_SCAN_ID: scanId,
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
@@ -1002,7 +1007,12 @@ export class CodexSecurity {
       };
       const sdkCodexConfig = { ...preflightConfig };
       delete sdkCodexConfig["projects"];
+      const codexPathOverride = environmentValue(
+        this.#dependencies.environment,
+        "CODEX_CLI_PATH",
+      )?.trim();
       const codex = this.#dependencies.createCodex({
+        ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
         ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
@@ -1162,19 +1172,81 @@ export class CodexSecurity {
       if (runPostScan !== null) {
         const followUp = runPostScan;
         runPostScan = null;
-        await runScanEvents({
-          thread,
-          events: (await followUp()).events,
-          signal,
-          scanDir,
-          pluginRoot: runtime.plugin.installedRoot,
-          expectation,
-          model,
-          onReconnect: options.onReconnect,
-          onWorkerStatus: options.onWorkerStatus,
-          onObserverError: options.onObserverError,
-        });
-        checkOpen();
+        const completedArtifacts = await Promise.all(
+          [
+            ...new Set([
+              "scan-manifest.json",
+              "findings.json",
+              "coverage.json",
+              "report.md",
+              ...result.manifest.scan.artifacts.map(
+                (artifact) => artifact.path,
+              ),
+            ]),
+          ].map(async (name) => ({
+            name,
+            contents: await readFile(
+              await requireScanFile(scanDir, name, name, signal),
+              { signal },
+            ),
+          })),
+        );
+        try {
+          await runScanEvents({
+            thread,
+            events: (await followUp()).events,
+            signal,
+            scanDir,
+            pluginRoot: runtime.plugin.installedRoot,
+            expectation,
+            model,
+            onReconnect: options.onReconnect,
+            onWorkerStatus: options.onWorkerStatus,
+            onObserverError: options.onObserverError,
+          });
+          checkOpen();
+        } catch (error) {
+          if (signal.aborted || this.#closed) throw error;
+          for (const artifact of completedArtifacts) {
+            const path = join(scanDir, artifact.name);
+            const current = await readFile(path, { signal }).catch(
+              (readError: NodeJS.ErrnoException) => {
+                if (readError.code !== "ENOENT") throw readError;
+                return null;
+              },
+            );
+            if (current?.equals(artifact.contents)) continue;
+            const temporary = join(
+              dirname(path),
+              `.${randomUUID()}.${basename(path)}.restore`,
+            );
+            try {
+              await writeFile(temporary, artifact.contents, {
+                flag: "wx",
+                mode: 0o600,
+                signal,
+              });
+              await rename(temporary, path);
+            } finally {
+              await rm(temporary, { force: true });
+            }
+          }
+          await collectResult(
+            result.turnResult,
+            result.threadId,
+            scanDir,
+            runtime.plugin.installedRoot,
+            expectation,
+            signal,
+            true,
+          );
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not run post-scan instructions: ${errorMessage(error)}`,
+          );
+        }
       }
       try {
         const runWorkbench = (args: readonly string[]) =>
@@ -1196,7 +1268,12 @@ export class CodexSecurity {
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
             workbench: runWorkbench,
-            matchFindings: this.#dependencies.matchFindings,
+            matchFindings:
+              this.#dependencies.matchFindings ??
+              ((input, comparisonOptions) =>
+                matchScanFindingsInternal(input, comparisonOptions, {
+                  surface: this.#surface,
+                })),
             environment,
             model,
             signal,
@@ -1601,7 +1678,10 @@ export class CodexSecurity {
   }
 
   #codexCommand(): CodexCommand {
-    return (this.#dependencies.resolveCodexCommand ?? resolveCodexCommand)();
+    return (
+      this.#dependencies.resolveCodexCommand?.() ??
+      resolveCodexCommand(this.#dependencies.environment)
+    );
   }
 
   async #refreshPersistentRuntime(
@@ -1624,6 +1704,7 @@ export class CodexSecurity {
       runtime.codexHome,
       runtime.plugin.pluginRoot,
       {
+        codexCommand: this.#codexCommand(),
         environment: withoutCodexHome(environment),
         signal,
       },
@@ -1654,6 +1735,8 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const mode = options.mode ?? "standard";
     validateMode(normalized, mode);
+    await validateCommittedDiffCheckout(repo, normalized, signal);
+    throwIfAborted(signal);
     const protectedRoot =
       (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
     const requestedOutput = await validateOutputDir(
@@ -1727,6 +1810,7 @@ export class CodexSecurity {
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
       throwIfAborted(signal);
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
+        codexCommand: this.#codexCommand(),
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
@@ -1973,7 +2057,7 @@ export async function runScanEvents(
   let lastStreamError: string | null = null;
   let tacStatusReported = false;
   try {
-    for await (const event of options.events) {
+    for await (const event of scanEventsWithOptionalUsage(options.events)) {
       if (!tacStatusReported) {
         const tacStatus = trustedAccessStatusFromEvent(event);
         if (tacStatus !== null) {
@@ -2129,6 +2213,24 @@ export async function runScanEvents(
         options.scanDir,
         { cause: error },
       );
+    }
+    throw error;
+  }
+}
+
+async function* scanEventsWithOptionalUsage(
+  events: AsyncGenerator<ScanEvent>,
+): AsyncGenerator<ScanEvent> {
+  try {
+    yield* events;
+  } catch (error) {
+    if (
+      error instanceof TypeError &&
+      /\b(?:null|undefined)\b/u.test(error.message) &&
+      /\bcache_write_input_tokens\b/u.test(error.message)
+    ) {
+      yield { type: "turn.completed", usage: null };
+      return;
     }
     throw error;
   }
@@ -2591,12 +2693,6 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
 }
 
 // A failed turn must fail the scan whatever its error payload looks like.
-//
-// Only `error.message` is reused, because that is the single shape the previous
-// code already surfaced. No other shape is forwarded or stringified: this message
-// reaches `fail-scan --message` and is stored unchanged in `scans.failure_message`,
-// so widening what is copied out of the payload would add a new
-// credential-disclosure path to persistent scan history.
 function turnFailureMessage(error: unknown): string {
   if (isRecord(error) && typeof error["message"] === "string") {
     const message = error["message"].trim();

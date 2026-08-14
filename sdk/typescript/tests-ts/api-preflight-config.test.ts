@@ -106,6 +106,24 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
+  test("preserves configured Responses metadata without persisting scan attribution", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    const config = scanRuntimeCodexConfig(
+      {
+        responses_api_metadata: {
+          request_trace: "preserve-configured-metadata",
+        },
+      },
+      stateDirectory,
+      credentialHome,
+    );
+
+    expect(config["responses_api_metadata"]).toEqual({
+      request_trace: "preserve-configured-metadata",
+    });
+  });
+
   test("projects only capability and trust metadata into the readable preflight config", async () => {
     const root = await temporaryDirectory();
     const configPath = join(root, "config-preflight.toml");

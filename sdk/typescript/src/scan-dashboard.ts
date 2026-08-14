@@ -145,17 +145,32 @@ export class ScanDashboard {
 
   public start(): void {
     if (this.#timer !== null) return;
-    this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
     const input = this.#options.input;
     if (input?.isTTY === true) {
       this.#inputWasRaw = input.isRaw === true;
-      input.setRawMode?.(true);
-      input.resume?.();
-      input.on("data", this.#onInput);
-      this.#stream.write(ENABLE_ALTERNATE_SCROLL);
     }
-    this.#render();
     this.#timer = this.#options.clock.setInterval(() => this.#render(), 1_000);
+    try {
+      this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
+      if (input?.isTTY === true) {
+        input.setRawMode?.(true);
+        input.resume?.();
+        input.on("data", this.#onInput);
+        this.#stream.write(ENABLE_ALTERNATE_SCROLL);
+      }
+      this.#render();
+    } catch (error) {
+      try {
+        this.stop();
+      } catch {
+        try {
+          this.#stream.write(
+            `${DISABLE_ALTERNATE_SCROLL}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
+          );
+        } catch {}
+      }
+      throw error;
+    }
   }
 
   public stop(): void {

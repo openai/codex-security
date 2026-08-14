@@ -97,7 +97,7 @@ from workbench_schema import (
 from workbench_schema import (
     sql_statements as sql_statements,
 )
-from workbench_source_excerpt import finding_source_excerpt
+from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
     clean_worktree_content_digest,
     copy_directory_excluding,
@@ -1447,8 +1447,7 @@ def complete_scan_locked(
         claim_token,
         error_message="Scan completion is owned by another continuation.",
     )
-    if scan["recipe_json"] is None:
-        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+    deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
     warning = scan_target_warning(scan)
@@ -1541,8 +1540,7 @@ def complete_scan_locked(
             return scan_context(connection, scan["id"])
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can be completed.")
-        if scan["recipe_json"] is None:
-            deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+        deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         handoff.require_current_continuation(
             scan,
             claim_token,
@@ -3462,20 +3460,6 @@ def patch_artifact_preview(
         "fileCount": file_count or min(old_headers, new_headers),
         "previewTruncated": preview_truncated,
     }
-
-
-def safe_source_path(target: Path, relative_path: str) -> Path | None:
-    if "\\" in relative_path:
-        return None
-    parsed = PurePosixPath(relative_path)
-    if parsed.is_absolute() or ".." in parsed.parts:
-        return None
-    try:
-        path = (target / parsed.as_posix()).resolve()
-        path.relative_to(target)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    return path
 
 
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
