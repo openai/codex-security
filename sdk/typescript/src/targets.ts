@@ -408,7 +408,14 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+    [
+      "--no-lazy-fetch",
+      "-c",
+      "core.fsmonitor=false",
+      "-C",
+      repository,
+      ...args,
+    ],
     {
       encoding: "utf8",
       signal,

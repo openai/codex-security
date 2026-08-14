@@ -321,7 +321,7 @@ describe("scan target normalization", () => {
   test("does not expose Git configuration to repository clean filters", async () => {
     const repo = await repository();
     const root = join(repo, "..");
-    const filter = join(root, "clean-filter");
+    const filter = join(root, "clean-filter.js");
     const executed = join(root, "filter-executed");
     const leaked = join(root, "leaked-credential");
     await writeFile(
@@ -332,10 +332,19 @@ describe("scan target normalization", () => {
     git(repo, "commit", "-m", "configure attributes");
     await writeFile(
       filter,
-      `#!/bin/sh\nprintf 'executed' > ${JSON.stringify(executed)}\nif [ -n "$GIT_CONFIG_VALUE_0" ]; then printf '%s' "$GIT_CONFIG_VALUE_0" > ${JSON.stringify(leaked)}; fi\ncat\n`,
+      [
+        'import { readFileSync, writeFileSync } from "node:fs";',
+        `writeFileSync(${JSON.stringify(executed)}, "executed");`,
+        `if (process.env.GIT_CONFIG_VALUE_0) writeFileSync(${JSON.stringify(leaked)}, process.env.GIT_CONFIG_VALUE_0);`,
+        "process.stdout.write(readFileSync(0));",
+      ].join("\n"),
     );
-    await chmod(filter, 0o700);
-    git(repo, "config", "filter.capture.clean", filter);
+    git(
+      repo,
+      "config",
+      "filter.capture.clean",
+      `${JSON.stringify(process.execPath.replaceAll("\\", "/"))} ${JSON.stringify(filter.replaceAll("\\", "/"))}`,
+    );
     await utimes(join(repo, "src", "app.ts"), new Date(0), new Date(0));
 
     const result = spawnSync(
@@ -359,6 +368,60 @@ describe("scan target normalization", () => {
 
     expect(result.status).toBe(0);
     expect(existsSync(executed)).toBe(true);
+    expect(existsSync(leaked)).toBe(false);
+  });
+
+  test("does not expose Git configuration to repository promisor helpers", async () => {
+    const repo = await repository();
+    const root = join(repo, "..");
+    const helper = join(root, "promisor-helper.js");
+    const executed = join(root, "promisor-executed");
+    const leaked = join(root, "leaked-credential");
+    const revision = git(repo, "rev-parse", "HEAD");
+    await writeFile(
+      helper,
+      [
+        'import { writeFileSync } from "node:fs";',
+        `writeFileSync(${JSON.stringify(executed)}, "executed");`,
+        `if (process.env.GIT_CONFIG_VALUE_0) writeFileSync(${JSON.stringify(leaked)}, process.env.GIT_CONFIG_VALUE_0);`,
+        "process.exit(1);",
+      ].join("\n"),
+    );
+    git(repo, "config", "extensions.partialClone", "unsafe");
+    git(repo, "config", "remote.unsafe.promisor", "true");
+    git(repo, "config", "protocol.ext.allow", "always");
+    git(
+      repo,
+      "config",
+      "remote.unsafe.url",
+      `ext::${process.execPath.replaceAll("\\", "/")} ${helper.replaceAll("\\", "/")}`,
+    );
+    await rm(
+      join(repo, ".git", "objects", revision.slice(0, 2), revision.slice(2)),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "const { repositoryRevision } = await import(process.argv[1]); console.log(await repositoryRevision(process.argv[2]));",
+        fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        repo,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.extraHeader",
+          GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("null");
+    expect(existsSync(executed)).toBe(false);
     expect(existsSync(leaked)).toBe(false);
   });
 
