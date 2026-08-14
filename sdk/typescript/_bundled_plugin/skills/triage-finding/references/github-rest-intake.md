@@ -65,7 +65,7 @@ The connector may not expose every security endpoint. If the requested connector
 
 ## Auth Priority
 
-When REST is the default transport, acquire a token in this order:
+When the user chooses a REST account or credential source, use only that account or source. Ask before selecting another. When REST is the default and the user did not select an account or credential, acquire a token in this order:
 
 1. GitHub Connector-provided auth token, if a connector token acquisition tool is available.
 2. `gh auth token`, if `gh` is installed and authenticated.
@@ -83,7 +83,7 @@ Accept: application/vnd.github+json
 X-GitHub-Api-Version: 2022-11-28
 ```
 
-If no REST auth source is available, ask the user to connect GitHub or provide one of the supported auth sources above. Do not continue with unauthenticated requests for private or owner-only security data.
+If REST is the authorized transport and its approved auth source is unavailable, ask the user to connect GitHub or provide one of the supported auth sources above. Do not require REST credentials for connector retrieval or continue with unauthenticated requests for private or owner-only security data.
 
 ## Endpoints
 

@@ -128,7 +128,7 @@ If no policy applies, record that absence as a proof gap and continue with the n
    - Do not write back to Jira or Linear unless the user explicitly asks.
 2. If the input is a GitHub repository intake request, follow `references/github-rest-intake.md`.
    - If the user did not specify a GitHub finding source, ask for the source and stop without emitting triage JSON.
-   - If REST auth is unavailable, ask for a supported auth source and stop without emitting triage JSON.
+   - If REST is the authorized transport and its approved credential is unavailable, ask for a supported auth source and stop without emitting triage JSON. Do not require REST credentials for connector retrieval.
    - Normalize retrieved GitHub findings into the existing source types: `sarif`, `cve`, `advisory`, or `freeform` for explicit GitHub Issues.
    - Preserve GitHub provenance in `input_id`, `normalized_input.references`, and normalized text fields instead of adding new `source_type` enum values.
 3. Normalize each supplied or imported finding into a triage item.
