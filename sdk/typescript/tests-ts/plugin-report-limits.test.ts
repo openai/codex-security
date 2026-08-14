@@ -51,8 +51,8 @@ describe("bundled scan report and source limits", () => {
       "large = {'preventiveControls': ['x' * 900 for _ in range(20)], 'remediationTests': ['Verify authorization.'], 'writeup': {'reportPath': 'findings/example/example.md'}, 'provenance': {'source': 'scan'}, 'severity': {'level': 'high', 'rationale': 'Verified impact'}, 'status': 'open', 'taxonomy': {'category': 'injection', 'cwe': ['CWE-79']}}",
       "code_evidence = [{'id': f'evidence-{index}', 'label': 'example', 'path': 'example.py', 'startLine': 1, 'code': 'c' * 1500, 'explanation': 'e' * 1500} for index in range(4)]",
       "rich = {'rootCause': {'summary': 'r' * 2000}, 'validation': {'summary': 'v' * 3000}, 'attackPath': {'narrative': 'a' * 4000}, 'codeEvidence': code_evidence, 'evidenceExcerpt': 'e' * 8000, 'identity': {'anchor': 'finding'}, 'preventiveControls': ['Centralize authorization.'], 'remediationTests': ['Verify authorization.']}",
-      "boundary = {'remediationTests': ['x'] * 4000}",
-      "unicode_boundary = {'preventiveControls': ['😀'] * 2000}",
+      "boundary = {'remediationTests': ['x'] * 4000, 'preventiveControls': ['Keep authorization centralized.']}",
+      "unicode_boundary = {'remediationTests': ['😀'] * 2000, 'preventiveControls': ['🛡'] * 2000}",
       "projections = {key: bounded_finding_details(value) for key, value in {'details': details, 'large': large, 'rich': rich, 'boundary': boundary, 'unicodeBoundary': unicode_boundary}.items()}",
       "print(json.dumps({'projections': projections, 'bytes': {key: len(json.dumps(value, separators=(',', ':')).encode()) for key, value in projections.items()}}))",
     ].join("\n");
@@ -69,8 +69,11 @@ describe("bundled scan report and source limits", () => {
         details: Record<string, unknown>;
         large: Record<string, unknown>;
         rich: Record<string, unknown>;
-        boundary: { remediationTests: string[] };
-        unicodeBoundary: { preventiveControls: string[] };
+        boundary: { remediationTests: string[]; preventiveControls: string[] };
+        unicodeBoundary: {
+          remediationTests: string[];
+          preventiveControls: string[];
+        };
       };
       bytes: Record<string, number>;
     };
@@ -100,11 +103,20 @@ describe("bundled scan report and source limits", () => {
     expect(
       projections.boundary.remediationTests.every((value) => value !== ""),
     ).toBe(true);
+    expect(projections.boundary.preventiveControls).toEqual([
+      "Keep authorization centralized.",
+    ]);
+    expect(projections.unicodeBoundary.remediationTests.length).toBeGreaterThan(
+      0,
+    );
     expect(
       projections.unicodeBoundary.preventiveControls.every(
-        (value) => value === "😀",
+        (value) => value === "🛡",
       ),
     ).toBe(true);
+    expect(
+      projections.unicodeBoundary.preventiveControls.length,
+    ).toBeGreaterThan(0);
     expect(Object.values(bytes).every((value) => value <= 16_000)).toBe(true);
   });
 });
