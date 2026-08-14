@@ -3237,6 +3237,7 @@ async function runScan(
           : undefined,
       verified: effectivePreflight.authentication.verified,
     });
+    progress?.stopTimer();
     return { exitCode: 0, data: { dryRun: true, ...effectivePreflight } };
   }
   if (result === null) {
@@ -3285,6 +3286,7 @@ async function runScan(
     errorOutput.write(
       "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
     );
+    progress?.stopTimer();
     return { exitCode: 2, data: scanData };
   }
   if (incomplete) {
@@ -3293,8 +3295,10 @@ async function runScan(
         ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
         : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
     );
+    progress?.stopTimer();
     return { exitCode: 2, data: scanData };
   }
+  progress?.stopTimer();
   return { exitCode: blockingCount > 0 ? 1 : 0, data: scanData };
 }
 
@@ -3723,6 +3727,7 @@ export class Progress {
   #cursorHidden = false;
   #observingStreamErrors = false;
   #streamErrorsActive = false;
+  #streamErrorGeneration = 0;
   readonly #onStreamError = (): void => {};
 
   public constructor(
@@ -3753,7 +3758,6 @@ export class Progress {
   public stage(message: string): void {
     this.#observeStreamErrors();
     this.#stream.write(`${this.#line(message)}\n`);
-    if (this.#timer === null) this.stopTimer();
   }
 
   public startTimer(message: string): void {
@@ -3791,10 +3795,15 @@ export class Progress {
     } finally {
       if (this.#observingStreamErrors) {
         this.#streamErrorsActive = false;
+        const generation = this.#streamErrorGeneration;
         try {
           this.#stream.write("", () => {
             queueMicrotask(() => {
-              if (!this.#streamErrorsActive && this.#observingStreamErrors) {
+              if (
+                generation === this.#streamErrorGeneration &&
+                !this.#streamErrorsActive &&
+                this.#observingStreamErrors
+              ) {
                 this.#stream.off?.("error", this.#onStreamError);
                 this.#observingStreamErrors = false;
               }
@@ -3831,6 +3840,7 @@ export class Progress {
 
   #observeStreamErrors(): void {
     this.#streamErrorsActive = true;
+    this.#streamErrorGeneration += 1;
     if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
       this.#stream.on("error", this.#onStreamError);
       this.#observingStreamErrors = true;

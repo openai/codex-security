@@ -1513,6 +1513,41 @@ describe("CLI", () => {
     }
   });
 
+  test("keeps final scan summary failures isolated until all output settles", async () => {
+    const stream = new Writable({
+      autoDestroy: false,
+      write(chunk, _encoding, callback) {
+        if (chunk.toString().includes("REPORT")) {
+          setImmediate(() => callback(new Error("Scan summary failed.")));
+        } else {
+          callback();
+        }
+      },
+    });
+    let progressListenersDuringFailure = 0;
+    const failure = new Promise<Error>((resolve) => {
+      stream.once("error", (error) => {
+        progressListenersDuringFailure = stream.listenerCount("error");
+        resolve(error);
+      });
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        capture().stream,
+        stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    await expect(failure).resolves.toMatchObject({
+      message: "Scan summary failed.",
+    });
+    expect(progressListenersDuringFailure).toBe(1);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(stream.listenerCount("error")).toBe(0);
+  });
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
     const stderr = capture(true);
