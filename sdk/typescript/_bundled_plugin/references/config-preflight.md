@@ -4,7 +4,7 @@ Codex Security top-level scan skills should run the read-only helper before subs
 
 Load `desktop-config-preflight.md` only after the host explicitly identifies itself as the Codex desktop app.
 
-Resolve `<python_command>` to the configured Python interpreter (`$PYTHON` when one is provided), otherwise use `python` on Windows and `python3` on Unix-like hosts. Before constructing the first helper command, inspect the current tool surface once and use that discovery result for both the runtime checks and `<verified-multi-agent-runtime-arguments>`. Do not omit active runtime facts from the first invocation and wait for an `incomplete` result before supplying them. The command is written on one line so it works in PowerShell, Command Prompt, and POSIX shells:
+Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts. Before constructing the first helper command, inspect the current tool surface once and use that discovery result for both the runtime checks and `<verified-multi-agent-runtime-arguments>`. Do not omit active runtime facts from the first invocation and wait for an `incomplete` result before supplying them. The command is written on one line so it works in PowerShell, Command Prompt, and POSIX shells:
 
 ```text
 <python_command> <plugin_dir>/scripts/config_preflight.py --profile <capability-profile> --cwd <scan-working-directory> --runtime-check delegation_available=<true|false> --runtime-check goal_tools_available=<true|false> <verified-multi-agent-runtime-arguments> --available-plugin-skill <skill-name>
@@ -14,7 +14,7 @@ Determine the runtime-check values from the current tool surface. Delegation too
 
 For standard and diff scans, a passed `delegated_workers` check means the runtime supports delegated review and the explicitly invoked scan authorizes it; a worker-slot result is the configured maximum, not a promise that every worker will start. If the runtime forbids delegation, pass `delegation_available=false`, continue on the documented parent fallback, and do not describe configured slots as running workers or reduced coverage.
 
-When `CODEX_SECURITY_CONFIG_PATH` is set, add `--config "$CODEX_SECURITY_CONFIG_PATH"` to the helper command. The CLI provides this sanitized, shell-readable copy of the active worker configuration because the credential-bearing `CODEX_HOME` is intentionally inaccessible to repository-influenced commands. Do not substitute an ambient Codex home in that case.
+When `CODEX_SECURITY_CONFIG_PATH` is set, add `--config "$CODEX_SECURITY_CONFIG_PATH"` in POSIX shells or `--config "$env:CODEX_SECURITY_CONFIG_PATH"` in PowerShell. The CLI provides this sanitized, shell-readable copy of the active worker configuration because the credential-bearing `CODEX_HOME` is intentionally inaccessible to repository-influenced commands. Do not substitute an ambient Codex home in that case.
 
 Otherwise, the helper discovers Codex config paths itself from `--cwd`, which defaults to the current working directory. It reads `/etc/codex/config.toml`, then `$CODEX_HOME/config.toml`, resolves `project_root_markers`, checks the matching `[projects."<absolute-project-root>"].trust_level`, and loads trusted project `.codex/config.toml` layers from the project root down to `--cwd`. It does not load project layers unless the user config marks that project root as `trusted`.
 

@@ -1522,6 +1522,62 @@ describe("multiscan", () => {
     }
   });
 
+  test("removes mixed-case repository Git variables before cloning", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "isolated");
+    const trace = join(paths.root, "git-events.jsonl");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nisolated,${source.path},${source.revision}\n`,
+    );
+    const repositoryVariables = [
+      "Git_Dir",
+      "gIt_Work_Tree",
+      "Git_Index_File",
+      "gIt_Object_Directory",
+      "Git_Alternate_Object_Directories",
+    ];
+    const previous = new Map(
+      [...repositoryVariables, "GIT_TRACE2_EVENT", "GIT_TRACE2_ENV_VARS"].map(
+        (name) => [name, process.env[name]] as const,
+      ),
+    );
+
+    try {
+      for (const name of repositoryVariables) {
+        process.env[name] = join(paths.root, `missing-${name}`);
+      }
+      process.env["GIT_TRACE2_EVENT"] = trace;
+      process.env["GIT_TRACE2_ENV_VARS"] = repositoryVariables.join(",");
+
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) =>
+            completedScan(scanOptions.outputDir!),
+          ),
+        ),
+      );
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
+
+      const leakedVariables = (await readFile(trace, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { event: string; param?: string })
+        .filter(
+          (event) =>
+            event.event === "def_param" &&
+            repositoryVariables.includes(event.param ?? ""),
+        );
+      expect(leakedVariables).toEqual([]);
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   test("rejects output-directory symlinks before deleting external checkouts", async () => {
     for (const directory of ["", "checkouts", "artifacts"]) {
       const paths = await fixture();
@@ -1808,6 +1864,25 @@ describe("multiscan", () => {
       {
         name: "task-id",
         row: `../escape,${source.path},${source.revision},.`,
+      },
+      ...[
+        "CON",
+        "con.txt",
+        "NUL",
+        "AUX.txt",
+        "PRN",
+        "COM1",
+        "com9.log",
+        "LPT1",
+        "lpt9.txt",
+        "report.",
+      ].map((id) => ({
+        name: `task-id-${id}`,
+        row: `${id},${source.path},${source.revision},.`,
+      })),
+      {
+        name: "windows-alias",
+        row: `report,${source.path},${source.revision},.\nreport.,${source.path},${source.revision},.`,
       },
       {
         name: "scope",

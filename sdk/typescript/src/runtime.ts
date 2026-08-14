@@ -1978,7 +1978,12 @@ export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
-  if (configured) return { command: resolve(configured) };
+  if (
+    configured &&
+    (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(configured))
+  ) {
+    return { command: resolve(configured) };
+  }
 
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
@@ -2162,7 +2167,7 @@ export async function resolvePluginPython(
       options.signal,
     );
   }
-  const inherited = environment["PYTHON"]?.trim();
+  const inherited = environmentValue(environment, "PYTHON");
   if (inherited) {
     return await requirePython(
       inherited,

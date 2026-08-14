@@ -435,6 +435,10 @@ The CLI and SDK recognize the following user-configurable environment:
 | `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
 | `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
 
+On Windows, `CODEX_CLI_PATH` must name a native `.exe` or `.com`. Command
+shims such as `codex.cmd` automatically use the bundled Codex executable
+instead.
+
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
 the managed Codex runtime, and finally `python3` or `python` from `PATH`.
 `CODEX_SECURITY_STATE_DIR` takes precedence over `CODEX_HOME`; keep both
