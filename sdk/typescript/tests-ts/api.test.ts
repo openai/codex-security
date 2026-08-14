@@ -52,6 +52,7 @@ import {
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
+import { preparedRuntime } from "./support/api-events.js";
 import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 type ScanObserverName = Parameters<
@@ -265,22 +266,6 @@ async function* completedEvents(): AsyncGenerator<ThreadEvent> {
       output_tokens: 3,
       reasoning_output_tokens: 1,
     },
-  };
-}
-
-function preparedRuntime(codexHome: string): Record<string, unknown> {
-  return {
-    codexHome,
-    plugin: {
-      pluginRoot: PLUGIN_ROOT,
-      marketplaceRoot: PLUGIN_ROOT,
-      installedRoot: PLUGIN_ROOT,
-      marketplaceName: "codex-security-sdk",
-      name: "codex-security",
-      version: "0.1.0",
-    },
-    environment: {},
-    credentialsAvailable: true,
   };
 }
 

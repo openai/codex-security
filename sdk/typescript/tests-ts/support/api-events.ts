@@ -6,6 +6,22 @@ import { runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
 
+export function preparedRuntime(codexHome: string): Record<string, unknown> {
+  return {
+    codexHome,
+    plugin: {
+      pluginRoot: PLUGIN_ROOT,
+      marketplaceRoot: PLUGIN_ROOT,
+      installedRoot: PLUGIN_ROOT,
+      marketplaceName: "codex-security-sdk",
+      name: "codex-security",
+      version: "0.1.0",
+    },
+    environment: {},
+    credentialsAvailable: true,
+  };
+}
+
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
 >[0];
