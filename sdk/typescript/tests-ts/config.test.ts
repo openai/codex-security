@@ -356,6 +356,8 @@ describe("Codex configuration", () => {
     const attemptWrite = (path: string) =>
       runPinnedCodex(codexHome, [
         "sandbox",
+        "--config",
+        "permissions.codex_security_scan.network.enabled=true",
         "--permission-profile",
         "codex_security_scan",
         "--cd",
