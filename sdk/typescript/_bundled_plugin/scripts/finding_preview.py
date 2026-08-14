@@ -253,11 +253,14 @@ def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
         for key, item in list(value.items())[:20]:
             if budget[0] <= 0 or not isinstance(key, str):
                 break
+            remaining = budget[0]
             separator = 0 if not result else 1
             if not consume_json_budget(budget, separator):
+                budget[0] = remaining
                 break
             bounded_key, key_size = bounded_json_text(key, min(budget[0], 512))
             if not consume_json_budget(budget, key_size + 1):
+                budget[0] = remaining
                 break
             item_budget = budget
             if depth == 0 and key == "remediationTests":
@@ -288,10 +291,18 @@ def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
                         if budget[0] >= minimum_tests + reserved:
                             item_budget = [budget[0] - reserved]
                             break
-            allocated = item_budget[0]
-            result[bounded_key] = bounded_json_value(item, item_budget, depth=depth + 1)
-            if item_budget is not budget:
-                budget[0] -= allocated - item_budget[0]
+            bounded_item = bounded_json_value(item, item_budget, depth=depth + 1)
+            size = (
+                separator
+                + key_size
+                + 1
+                + len(json.dumps(bounded_item, separators=(",", ":")).encode("utf-8"))
+            )
+            if size > remaining or (isinstance(item, str) and item and bounded_item == ""):
+                budget[0] = remaining
+                break
+            budget[0] = remaining - size
+            result[bounded_key] = bounded_item
         return result
     consume_json_budget(budget, 4)
     return None

@@ -53,7 +53,8 @@ describe("bundled scan report and source limits", () => {
       "rich = {'rootCause': {'summary': 'r' * 2000}, 'validation': {'summary': 'v' * 3000}, 'attackPath': {'narrative': 'a' * 4000}, 'codeEvidence': code_evidence, 'evidenceExcerpt': 'e' * 8000, 'identity': {'anchor': 'finding'}, 'preventiveControls': ['Centralize authorization.'], 'remediationTests': ['Verify authorization.']}",
       "boundary = {'remediationTests': ['x'] * 4000, 'preventiveControls': ['Keep authorization centralized.']}",
       "unicode_boundary = {'remediationTests': ['😀'] * 2000, 'preventiveControls': ['🛡'] * 2000}",
-      "projections = {key: bounded_finding_details(value) for key, value in {'details': details, 'large': large, 'rich': rich, 'boundary': boundary, 'unicodeBoundary': unicode_boundary}.items()}",
+      "nested_boundary = {'remediationTests': ['x'] * 3937, 'rootCause': {'summary': 'r' * 178, 'detail': {'x': {'y': 'z'}}}}",
+      "projections = {key: bounded_finding_details(value) for key, value in {'details': details, 'large': large, 'rich': rich, 'boundary': boundary, 'unicodeBoundary': unicode_boundary, 'nestedBoundary': nested_boundary}.items()}",
       "print(json.dumps({'projections': projections, 'bytes': {key: len(json.dumps(value, separators=(',', ':')).encode()) for key, value in projections.items()}}))",
     ].join("\n");
     const result = Bun.spawnSync(
@@ -73,6 +74,10 @@ describe("bundled scan report and source limits", () => {
         unicodeBoundary: {
           remediationTests: string[];
           preventiveControls: string[];
+        };
+        nestedBoundary: {
+          remediationTests: string[];
+          rootCause: { summary: string };
         };
       };
       bytes: Record<string, number>;
@@ -117,6 +122,7 @@ describe("bundled scan report and source limits", () => {
     expect(
       projections.unicodeBoundary.preventiveControls.length,
     ).toBeGreaterThan(0);
+    expect(projections.nestedBoundary.rootCause.summary).toContain("r");
     expect(Object.values(bytes).every((value) => value <= 16_000)).toBe(true);
   });
 });
