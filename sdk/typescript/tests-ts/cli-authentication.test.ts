@@ -22,7 +22,7 @@ import {
   dependencies as cliDependencies,
   fakePreflight,
   fakeResult,
-} from "./support/cli.js";
+} from "./cli-fixtures.js";
 
 let stateDirectory: string;
 

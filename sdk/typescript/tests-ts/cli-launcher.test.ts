@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { VERSION } from "../src/index.js";
-import { SYNTHETIC_CREDENTIALS } from "./support/cli.js";
+import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 
 const packageRoot = join(import.meta.dir, "..");
 

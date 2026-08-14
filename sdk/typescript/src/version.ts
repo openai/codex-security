@@ -5,7 +5,6 @@ const PACKAGE_VERSIONS = packageVersions(
   new URL("../package.json", import.meta.url),
 );
 
-/** npm-compatible successor to the Python package version 0.1.0b3. */
 export const VERSION = PACKAGE_VERSIONS.package;
 export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;

@@ -1418,6 +1418,13 @@ describe("idempotent GitHub release verification", () => {
 });
 
 describe("GitHub release workflow safeguards", () => {
+  const checkedOutVersion = releaseVersion(
+    JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as ReleaseMetadata,
+  );
+  const checkedOutTag = `npm-v${checkedOutVersion}`;
+
   test("requires a real tag for protected npm publication", () => {
     expect(protectedReleaseWorkflow).toContain("release-tag");
     expect(protectedReleaseWorkflow).toContain('"$GITHUB_REF_TYPE"');
@@ -1913,12 +1920,6 @@ describe("GitHub release workflow safeguards", () => {
         protectedReleaseWorkflow,
         "Revalidate protected release tag",
       );
-      const checkedOutVersion = releaseVersion(
-        JSON.parse(
-          readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-        ) as ReleaseMetadata,
-      );
-      const checkedOutTag = `npm-v${checkedOutVersion}`;
       const mock = [
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
@@ -1969,12 +1970,6 @@ describe("GitHub release workflow safeguards", () => {
       protectedReleaseWorkflow,
       "Validate release tag",
     );
-    const checkedOutVersion = releaseVersion(
-      JSON.parse(
-        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-      ) as ReleaseMetadata,
-    );
-    const checkedOutTag = `npm-v${checkedOutVersion}`;
     const mocks = [
       "git() { return 0; }",
       "sfw() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
@@ -2004,12 +1999,6 @@ describe("GitHub release workflow safeguards", () => {
       protectedReleaseWorkflow,
       "Validate release tag",
     );
-    const checkedOutVersion = releaseVersion(
-      JSON.parse(
-        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-      ) as ReleaseMetadata,
-    );
-    const checkedOutTag = `npm-v${checkedOutVersion}`;
     const mocks = [
       "git() { return 0; }",
       `sfw() { printf '%s\\n' '["0.1.0","${checkedOutVersion}"]'; }`,

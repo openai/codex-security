@@ -796,8 +796,6 @@ describe("one-shot scan events", () => {
       message: "retry budget exhausted",
     });
 
-    // A bare string is deliberately NOT reused: it was never surfaced before, and
-    // this message is stored by fail-scan without redaction.
     await expect(
       runEvents(
         await copyCompletedScan(await temporaryDirectory()),

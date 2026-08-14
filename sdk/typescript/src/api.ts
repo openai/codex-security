@@ -2693,12 +2693,6 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
 }
 
 // A failed turn must fail the scan whatever its error payload looks like.
-//
-// Only `error.message` is reused, because that is the single shape the previous
-// code already surfaced. No other shape is forwarded or stringified: this message
-// reaches `fail-scan --message` and is stored unchanged in `scans.failure_message`,
-// so widening what is copied out of the payload would add a new
-// credential-disclosure path to persistent scan history.
 function turnFailureMessage(error: unknown): string {
   if (isRecord(error) && typeof error["message"] === "string") {
     const message = error["message"].trim();

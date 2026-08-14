@@ -10,7 +10,7 @@ import {
   runCodexSkillCommand,
   skillCommandFailure,
 } from "../src/cli.js";
-import { capture, dependencies } from "./support/cli.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 
 describe("CLI skill commands", () => {
   test("runs validation and patch skills with file and literal inputs", async () => {
