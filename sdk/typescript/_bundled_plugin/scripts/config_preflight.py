@@ -521,8 +521,7 @@ def resolve_multi_agent_context(
     )
     if (
         owner != "codex-bridge"
-        and feature_found
-        and enabled
+        and ((feature_found and enabled) or (owner == "native" and version == "v2"))
         and agent_threads_found
         and (validate_multi_agent_config or runtime_facts_supplied)
     ):
@@ -774,8 +773,8 @@ def profile_requires_multi_agent_config(
 ) -> bool:
     def is_runtime_path(path: Any) -> bool:
         return isinstance(path, str) and (
-            path in {"agents", "features", "multiagent_config"}
-            or path.startswith(("agents.", "multiagent_config.", "features.multi_agent_v2"))
+            path in {"agents", "features", "features.multi_agent_v2", "multiagent_config"}
+            or path.startswith(("agents.", "multiagent_config.", "features.multi_agent_v2."))
         )
 
     for requirement in profile["requirements"]:

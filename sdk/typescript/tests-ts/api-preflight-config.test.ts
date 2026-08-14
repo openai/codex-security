@@ -151,6 +151,7 @@ describe("CodexSecurity preflight configuration", () => {
           ["root_bridge", "multiagent_config"],
           ["root_agents", "agents"],
           ["root_features", "features"],
+          ["v2_feature", "features.multi_agent_v2"],
         ].flatMap(([capability, path]) => [
           `[capabilities.${capability}]`,
           'kind = "config"',
@@ -159,12 +160,25 @@ describe("CodexSecurity preflight configuration", () => {
           "value = {}",
         ]),
         ...[
+          ["similar_v20", "features.multi_agent_v20"],
+          ["similar_preview", "features.multi_agent_v2_preview"],
+        ].flatMap(([capability, path]) => [
+          `[capabilities.${capability}]`,
+          'kind = "config"',
+          `path = "${path}"`,
+          'op = "=="',
+          "value = true",
+        ]),
+        ...[
           "available",
           "mode",
           "bridge",
           "root_bridge",
           "root_agents",
           "root_features",
+          "v2_feature",
+          "similar_v20",
+          "similar_preview",
         ].flatMap((profile) => [
           `[profiles.${profile}]`,
           `description = "${profile} capability"`,
@@ -206,7 +220,12 @@ describe("CodexSecurity preflight configuration", () => {
         payload: { error: expect.stringContaining("agents.max_threads") },
       });
     }
-    for (const profile of ["bridge", "root_bridge", "root_patch"]) {
+    for (const profile of [
+      "bridge",
+      "root_bridge",
+      "root_patch",
+      "v2_feature",
+    ]) {
       expect(
         runPreflight(config, profile, [
           "--registry",
@@ -220,6 +239,46 @@ describe("CodexSecurity preflight configuration", () => {
         status: 2,
         payload: { error: expect.stringContaining("bridge ownership") },
       });
+    }
+    for (const [profile, feature] of [
+      ["similar_v20", "features.multi_agent_v20"],
+      ["similar_preview", "features.multi_agent_v2_preview"],
+    ] as const) {
+      expect(
+        runPreflight(config, profile, [
+          "--registry",
+          registry,
+          "--effective-config",
+          `${feature}=true`,
+          "--effective-config",
+          "multiagent_config.max_concurrency=8",
+        ]),
+      ).toMatchObject({ status: 0, payload: { status: "ready" } });
+    }
+
+    for (const [version, additional] of [
+      ["v2", []],
+      ["v1", ["--effective-config", "features.multi_agent_v2.enabled=true"]],
+    ] as const) {
+      const conflictingNativeRuntime = runPreflight(
+        config,
+        "deep_security_scan",
+        [
+          "--multi-agent-runtime-owner",
+          "native",
+          "--multi-agent-runtime-version",
+          version,
+          "--multi-agent-runtime-provenance",
+          "tool-surface",
+          "--effective-config",
+          "agents.max_threads=8",
+          ...additional,
+        ],
+      );
+      expect(conflictingNativeRuntime.status).toBe(2);
+      expect(conflictingNativeRuntime.payload["error"]).toContain(
+        "agents.max_threads",
+      );
     }
 
     const forged = runPreflight(config, "deep_security_scan", [
