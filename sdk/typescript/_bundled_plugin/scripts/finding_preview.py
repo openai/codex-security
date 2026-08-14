@@ -150,8 +150,22 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 else value[key]
             )
 
-    priority = (
+    guidance = {
+        key: prepared[key]
+        for key in ("remediationTests", "preventiveControls")
+        if key in prepared and isinstance(prepared[key], list)
+    }
+    diagnostics = (
+        "rootCause",
+        "root_cause",
+        "validation",
+        "attackPath",
+        "codeEvidence",
+        "code_evidence",
+    )
+    core_keys = (
         "writeup",
+        *diagnostics,
         "confidence",
         "detectedAt",
         "identity",
@@ -160,12 +174,40 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         "severity",
         "status",
         "taxonomy",
-        "remediationTests",
-        "preventiveControls",
+        "evidence",
+        "evidenceExcerpt",
     )
-    prepared = {**{key: prepared[key] for key in priority if key in prepared}, **prepared}
-    budget = [FINDING_DETAILS_PREVIEW_BYTES]
-    bounded = bounded_json_value(prepared, budget)
+    core = {key: prepared[key] for key in core_keys if key in prepared}
+    extras = {
+        key: item
+        for key, item in prepared.items()
+        if key not in core and key not in guidance
+    }
+    complete_guidance = {key: items[:1] for key, items in guidance.items()}
+    minimum_guidance = {
+        key: [items[0][:1]] if items and isinstance(items[0], str) else []
+        for key, items in guidance.items()
+    }
+    projected_core = {}
+    for selected_guidance in (complete_guidance, minimum_guidance):
+        reserved = (
+            len(json.dumps(selected_guidance, separators=(",", ":")).encode("utf-8")) - 1
+            if selected_guidance
+            else 0
+        )
+        if reserved >= FINDING_DETAILS_PREVIEW_BYTES:
+            continue
+        projected_core = bounded_json_value(
+            core,
+            [FINDING_DETAILS_PREVIEW_BYTES - reserved],
+        )
+        if all(key in projected_core for key in core):
+            break
+    ordered_guidance = dict(sorted(guidance.items(), key=lambda entry: bool(entry[1])))
+    bounded = bounded_json_value(
+        {**projected_core, **ordered_guidance, **extras},
+        [FINDING_DETAILS_PREVIEW_BYTES],
+    )
     return bounded if isinstance(bounded, dict) else {}
 
 
