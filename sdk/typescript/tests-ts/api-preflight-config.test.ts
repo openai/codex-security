@@ -311,8 +311,8 @@ describe("CodexSecurity preflight configuration", () => {
   test("uses a root-read filesystem profile with writable workspace and workbench state", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
-      approval_policy: "never",
-      approvals_reviewer: "user",
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",
@@ -326,8 +326,7 @@ describe("CodexSecurity preflight configuration", () => {
     };
 
     expect(scanRuntimeCodexConfig(original, stateDirectory)).toEqual({
-      approval_policy: "on-request",
-      approvals_reviewer: "auto_review",
+      approval_policy: "never",
       allow_login_shell: false,
       default_permissions: "codex_security_scan",
       permissions: {
@@ -342,8 +341,8 @@ describe("CodexSecurity preflight configuration", () => {
       },
     });
     expect(original).toMatchObject({
-      approval_policy: "never",
-      approvals_reviewer: "user",
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",

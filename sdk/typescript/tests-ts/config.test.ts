@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -63,11 +63,13 @@ function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
 }
 
 describe("Codex configuration", () => {
-  test("automatically reviews scan execution approvals by default", async () => {
+  test("never grants scan execution approvals by default", async () => {
     expect(await mergedCodexConfig({})).toMatchObject({
-      approval_policy: "on-request",
-      approvals_reviewer: "auto_review",
+      approval_policy: "never",
     });
+    expect(await mergedCodexConfig({})).not.toHaveProperty(
+      "approvals_reviewer",
+    );
   });
 
   test("lets Codex honor native and managed credential storage", async () => {
@@ -331,6 +333,51 @@ describe("Codex configuration", () => {
         },
       },
     });
+  });
+
+  test("denies writes outside the scan workspace and state directory", async () => {
+    const root = await temporaryDirectory();
+    const codexHome = join(root, "codex-home");
+    const workspace = join(root, "workspace");
+    const stateDirectory = join(root, "state");
+    await Promise.all(
+      [codexHome, workspace, stateDirectory].map((path) => mkdir(path)),
+    );
+    await writeCodexConfig(
+      join(codexHome, "config.toml"),
+      scanRuntimeCodexConfig(
+        await mergedCodexConfig({}),
+        stateDirectory,
+        codexHome,
+      ),
+    );
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const attemptWrite = (path: string) =>
+      runPinnedCodex(codexHome, [
+        "sandbox",
+        "--permission-profile",
+        "codex_security_scan",
+        "--cd",
+        workspace,
+        node!,
+        "-e",
+        "require('node:fs').writeFileSync(process.argv[1], 'probe')",
+        path,
+      ]);
+
+    const allowed = join(workspace, "inside.txt");
+    const permitted = attemptWrite(allowed);
+    if (permitted.exitCode !== 0) {
+      throw new Error(
+        `The pinned Codex CLI rejected an allowed scan write: ${new TextDecoder().decode(permitted.stderr)}`,
+      );
+    }
+    expect(await readFile(allowed, "utf8")).toBe("probe");
+
+    const outside = join(root, "outside.txt");
+    expect(attemptWrite(outside).exitCode).not.toBe(0);
+    await expect(stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("writes Windows sandbox settings accepted by the pinned Codex CLI", async () => {

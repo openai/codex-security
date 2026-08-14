@@ -1898,14 +1898,16 @@ describe("CodexSecurity orchestration", () => {
       "CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST",
     );
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
-      approvals_reviewer: "auto_review",
       default_permissions: "codex_security_scan",
       allow_login_shell: false,
     });
+    expect((codexOptions as CodexOptions | null)?.config).not.toHaveProperty(
+      "approvals_reviewer",
+    );
     expect(threadOptions as Record<string, unknown> | null).toEqual({
       workingDirectory: scanDir,
       skipGitRepoCheck: true,
-      approvalPolicy: "on-request",
+      approvalPolicy: "never",
     });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(

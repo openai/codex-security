@@ -136,7 +136,7 @@ interface CodexClientLike {
   startThread(options: {
     workingDirectory: string;
     skipGitRepoCheck: boolean;
-    approvalPolicy: "on-request";
+    approvalPolicy: "never";
   }): CodexThreadLike;
 }
 
@@ -1018,7 +1018,6 @@ export class CodexSecurity {
         ),
         config: {
           ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-          approvals_reviewer: "auto_review",
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
           responses_api_metadata: {
@@ -1029,7 +1028,7 @@ export class CodexSecurity {
       const thread = codex.startThread({
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
-        approvalPolicy: "on-request",
+        approvalPolicy: "never",
       });
       const serializedPaths =
         normalized.kind === "paths"
@@ -2773,13 +2772,13 @@ export function scanRuntimeCodexConfig(
 ): JsonObject {
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
+  delete hardened["approvals_reviewer"];
   const configuredPermissions = isRecord(hardened["permissions"])
     ? hardened["permissions"]
     : {};
   return {
     ...hardened,
-    approval_policy: "on-request",
-    approvals_reviewer: "auto_review",
+    approval_policy: "never",
     allow_login_shell: false,
     default_permissions: SCAN_PERMISSION_PROFILE,
     permissions: {
