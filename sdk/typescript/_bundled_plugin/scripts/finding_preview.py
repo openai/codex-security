@@ -150,6 +150,20 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 else value[key]
             )
 
+    priority = (
+        "writeup",
+        "confidence",
+        "detectedAt",
+        "identity",
+        "provenance",
+        "ruleId",
+        "severity",
+        "status",
+        "taxonomy",
+        "remediationTests",
+        "preventiveControls",
+    )
+    prepared = {**{key: prepared[key] for key in priority if key in prepared}, **prepared}
     budget = [FINDING_DETAILS_PREVIEW_BYTES]
     bounded = bounded_json_value(prepared, budget)
     return bounded if isinstance(bounded, dict) else {}
@@ -217,11 +231,20 @@ def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
         if not consume_json_budget(budget, 2):
             return []
         result = []
-        for item in value[:20]:
+        for item in value:
+            remaining = budget[0]
             separator = 0 if not result else 1
             if not consume_json_budget(budget, separator):
                 break
-            result.append(bounded_json_value(item, budget, depth=depth + 1))
+            bounded_item = bounded_json_value(item, budget, depth=depth + 1)
+            size = len(json.dumps(bounded_item, separators=(",", ":")).encode("utf-8"))
+            if separator + size > remaining or (
+                isinstance(item, str) and item and bounded_item == ""
+            ):
+                budget[0] = remaining
+                break
+            budget[0] = remaining - separator - size
+            result.append(bounded_item)
         return result
     if isinstance(value, dict):
         if not consume_json_budget(budget, 2):
