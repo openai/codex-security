@@ -3466,6 +3466,41 @@ describe("runtime directories and plugin Python boundary", () => {
     if (process.platform !== "win32") {
       expect((await stat(scanRoot)).mode & 0o777).toBe(0o700);
     }
+
+    const linkedState = join(root, "linked-state");
+    await symlink(
+      join(root, "state"),
+      linkedState,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    expect(
+      await preparePersistentScanRoot(linkedState, "linked repository"),
+    ).toBe(join(root, "state", "scans", "linked-repository"));
+  });
+
+  test("rejects symbolic children beneath persistent scan state", async () => {
+    const root = await temporaryDirectory();
+    const external = join(root, "external");
+    await mkdir(external);
+
+    for (const [name, path] of [
+      ["scans", "scans"],
+      ["repository", join("scans", "repository")],
+    ] as const) {
+      const state = join(root, `state-${name}`);
+      const linked = join(state, path);
+      await mkdir(dirname(linked), { recursive: true });
+      await symlink(
+        external,
+        linked,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      await expect(
+        preparePersistentScanRoot(state, "repository"),
+      ).rejects.toThrow("Persistent scan output must use real directories");
+      expect(await readdir(external)).toEqual([]);
+    }
   });
 
   test("expands a tilde CODEX_HOME when discovering preflight configuration", async () => {

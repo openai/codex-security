@@ -1479,10 +1479,11 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("rejects scan output inside the repository before runtime initialization", async () => {
+  test("rejects overlapping scan output before runtime initialization", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     await mkdir(repository);
+    await writeFile(join(repository, "preserved.txt"), "preserved\n");
     let runtimeStarted = false;
     const client = new TestClient(
       {},
@@ -1498,6 +1499,22 @@ describe("CodexSecurity orchestration", () => {
     await expect(
       client.run(repository, { outputDir: join(repository, "scan") }),
     ).rejects.toBeInstanceOf(OutputDirectoryError);
+    for (const operation of ["preflight", "run"] as const) {
+      await expect(
+        client[operation](repository, {
+          outputDir: root,
+          archiveExisting: true,
+        }),
+      ).rejects.toMatchObject({
+        name: OutputInsideProtectedRootError.name,
+        outputDirectory: root,
+        protectedRoot: repository,
+        pathKind: "output",
+      });
+      expect(await readFile(join(repository, "preserved.txt"), "utf8")).toBe(
+        "preserved\n",
+      );
+    }
     if (process.platform !== "win32") {
       const linkedRepository = join(root, "linked-repository");
       await symlink(repository, linkedRepository);
@@ -3917,30 +3934,44 @@ describe("CodexSecurity orchestration", () => {
     expect(existsSync(join(result.scanDir, "scan-manifest.json"))).toBe(true);
   });
 
-  test("rejects repository-local state even when scan output is outside", async () => {
+  test("rejects state directories overlapping the selected repository", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
-    const stateDirectory = join(repository, "state");
+    const linkedState = join(root, "linked-state");
     await mkdir(repository);
-    const client = new TestClient(
-      {},
-      {
-        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
-        prepareRuntime: async () => {
-          throw new Error("Runtime must not start");
-        },
-        resolvePluginPython: async () => "/managed/python",
-        createCodex: () => {
-          throw new Error("Codex must not start");
-        },
-      },
+    await symlink(
+      root,
+      linkedState,
+      process.platform === "win32" ? "junction" : "dir",
     );
+    for (const stateDirectory of [
+      join(repository, "state"),
+      root,
+      linkedState,
+    ]) {
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: async () => {
+            throw new Error("Runtime must not start");
+          },
+          resolvePluginPython: async () => "/managed/python",
+          createCodex: () => {
+            throw new Error("Codex must not start");
+          },
+        },
+      );
 
-    await expect(
-      client.run(repository, { outputDir: join(root, "output") }),
-    ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
-    expect(existsSync(stateDirectory)).toBe(false);
-    await client.close();
+      for (const operation of ["preflight", "run"] as const) {
+        await expect(
+          client[operation](repository, { outputDir: join(root, "output") }),
+        ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
+      }
+      if (stateDirectory !== root && stateDirectory !== linkedState)
+        expect(existsSync(stateDirectory)).toBe(false);
+      await client.close();
+    }
   });
 
   test("rejects reruns when the original plugin version is unavailable", async () => {
@@ -5941,7 +5972,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       {},
       {
         environment: {
-          CODEX_SECURITY_STATE_DIR: root,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "ambient-key",
         },
         prepareRuntime: async () => ({
@@ -6122,7 +6153,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       {},
       {
         environment: {
-          CODEX_SECURITY_STATE_DIR: root,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "ambient-key",
         },
         prepareRuntime: async () => ({

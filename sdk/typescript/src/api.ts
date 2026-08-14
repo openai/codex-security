@@ -262,6 +262,7 @@ export interface ScanPreflight extends DeepScanOptions {
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
+  stateDirectory: string;
 }
 
 export interface CodexSecurityMetadata {
@@ -450,11 +451,8 @@ export class CodexSecurity {
         mode,
         outputDir: requestedOutput,
         protectedRoot,
+        stateDirectory,
       } = await this.#validateLocalInputs(repository, options, signal);
-      const stateDirectory = codexSecurityStateDirectory(
-        this.#dependencies.environment,
-      );
-      requireOutputOutsideRepository(protectedRoot, stateDirectory);
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
@@ -468,9 +466,6 @@ export class CodexSecurity {
           temporaryRoot,
           "temporary",
         );
-      }
-      if (requestedOutput !== null) {
-        requireOutputOutsideRepository(protectedRoot, requestedOutput);
       }
       if (options.knowledgeBasePaths?.length) {
         knowledgeBase = await prepareKnowledgeBase(
@@ -633,7 +628,11 @@ export class CodexSecurity {
           ? await preparePersistentScanRoot(stateDirectory, basename(repo))
           : temporaryRoot;
       if (scanOutputRoot !== undefined) {
-        requireOutputOutsideRepository(protectedRoot, scanOutputRoot);
+        requireOutputOutsideRepository(
+          protectedRoot,
+          scanOutputRoot,
+          scanOutputRoot === temporaryRoot ? "temporary" : "output",
+        );
       }
       scanDir = await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
         requestedOutput ?? undefined,
@@ -1746,12 +1745,23 @@ export class CodexSecurity {
     if (requestedOutput !== null) {
       requireOutputOutsideRepository(protectedRoot, requestedOutput);
     }
+    const stateDirectory = codexSecurityStateDirectory(
+      this.#dependencies.environment,
+    );
+    const canonicalStateDirectory = await realpath(stateDirectory).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return stateDirectory;
+        throw error;
+      },
+    );
+    requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
     return {
       repository: repo,
       target: normalized,
       mode,
       outputDir: requestedOutput,
       protectedRoot,
+      stateDirectory,
     };
   }
 
@@ -2905,11 +2915,16 @@ function requireOutputOutsideRepository(
   pathKind: ProtectedScanPathKind = "output",
 ): void {
   const outputRelative = relative(repository, outputDirectory);
+  const repositoryRelative = relative(outputDirectory, repository);
   if (
     outputRelative === "" ||
     (outputRelative !== ".." &&
       !outputRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(outputRelative))
+      !isAbsolute(outputRelative)) ||
+    (pathKind === "output" &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(repositoryRelative))
   ) {
     throw new OutputInsideProtectedRootError(
       outputDirectory,

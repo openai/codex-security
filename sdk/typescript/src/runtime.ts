@@ -1272,9 +1272,18 @@ export async function preparePersistentScanRoot(
   stateDirectory: string,
   repositoryName: string,
 ): Promise<string> {
-  const root = join(stateDirectory, "scans", safePrefix(repositoryName));
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  return await realpath(root);
+  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  let root = await realpath(stateDirectory);
+  for (const directory of ["scans", safePrefix(repositoryName)]) {
+    root = join(root, directory);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    if (!(await lstat(root)).isDirectory()) {
+      throw new OutputDirectoryError(
+        `Persistent scan output must use real directories: ${root}`,
+      );
+    }
+  }
+  return root;
 }
 
 export async function runWorkbench(
