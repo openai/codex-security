@@ -7,9 +7,10 @@ import {
   existsSync,
   lstatSync,
   realpathSync,
+  type Stats,
   writeSync,
 } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -261,15 +262,25 @@ async function readPromptFiles(
   const [scanPrompt, postScanPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, scanPromptFile), "utf8"),
+      : readRegularInputFile(resolve(directory, scanPromptFile)),
     postScanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+      : readRegularInputFile(resolve(directory, postScanPromptFile)),
   ]);
   return {
     ...(scanPrompt?.trim() ? { scanPrompt } : {}),
     ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
   };
+}
+
+async function readRegularInputFile(
+  path: string,
+  metadata?: Pick<Stats, "isFile">,
+): Promise<string> {
+  if (!(metadata ?? (await lstat(path))).isFile()) {
+    throw new CodexSecurityError("Input files must be regular files.");
+  }
+  return await readFile(path, "utf8");
 }
 
 interface ScanArguments extends DeepScanOptions {
@@ -2370,7 +2381,7 @@ async function runSkill(
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
       const path = resolve(directory, input);
-      const metadata = await stat(path).catch((error: unknown) => {
+      const metadata = await lstat(path).catch((error: unknown) => {
         if (
           typeof error === "object" &&
           error !== null &&
@@ -2393,7 +2404,7 @@ async function runSkill(
           );
         }
         try {
-          contentsOrLiteral = await readFile(path, "utf8");
+          contentsOrLiteral = await readRegularInputFile(path, metadata);
         } catch {
           throw new CodexSecurityError(
             "Could not read the finding or issue input.",

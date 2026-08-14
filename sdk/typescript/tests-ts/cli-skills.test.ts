@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -104,6 +104,72 @@ describe("CLI skill commands", () => {
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects linked findings while preserving selected external files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-skill-inputs-"));
+    try {
+      const repository = join(root, "repository");
+      const externalDirectory = join(root, "external");
+      const linkedDirectory = join(root, "external-alias");
+      const finding = join(externalDirectory, "finding.txt");
+      await mkdir(repository);
+      await mkdir(externalDirectory);
+      await writeFile(finding, "SYNTHETIC_EXTERNAL_FINDING\n");
+      await symlink(finding, join(repository, "linked-finding.txt"));
+      await symlink(
+        externalDirectory,
+        linkedDirectory,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      for (const command of ["validate", "patch"] as const) {
+        let invocation: readonly string[] | undefined;
+        const stderr = capture();
+        expect(
+          await main(
+            [command, "linked-finding.txt"],
+            capture().stream,
+            stderr.stream,
+            dependencies({
+              currentDirectory: repository,
+              onCodex: (args) => {
+                invocation = args;
+                return 0;
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain("must be files or literal text");
+        expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
+        expect(invocation).toBeUndefined();
+
+        for (const selected of [
+          finding,
+          join(linkedDirectory, "finding.txt"),
+        ]) {
+          expect(
+            await main(
+              [command, selected],
+              capture().stream,
+              capture().stream,
+              dependencies({
+                currentDirectory: repository,
+                onCodex: (args) => {
+                  invocation = args;
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(JSON.parse(invocation!.at(-1)!.split("\n").at(-1)!)).toEqual([
+            "SYNTHETIC_EXTERNAL_FINDING\n",
+          ]);
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
