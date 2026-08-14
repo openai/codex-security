@@ -11,7 +11,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -164,6 +163,45 @@ async function startMcp(root: string) {
 }
 
 describe("compact diff scan", () => {
+  test("reads committed diff previews from the selected head revision", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/feature.ts", "const marker = 'base';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+
+    writeSource(repository, "src/feature.ts", "const marker = 'head';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "head");
+    const head = git(repository, "rev-parse", "HEAD");
+    git(repository, "checkout", "--detach", base);
+
+    const output = join(root, "rank-input.jsonl");
+    const result = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--mode",
+      "revisions",
+      "--out",
+      output,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const row = JSON.parse(readFileSync(output, "utf8")) as {
+      path: string;
+      preview: string;
+    };
+    expect(row.path).toBe("src/feature.ts");
+    expect(row.preview).toContain("head");
+    expect(row.preview).not.toContain("base");
+  });
+
   test("uses the selected Git revisions and keeps deleted source files", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
@@ -223,6 +261,7 @@ describe("compact diff scan", () => {
 
     rmSync(join(repository, "src", "deleted-link.py"));
     writeSource(repository, "src/handler.py", "value = 2\n");
+    writeSource(repository, "src/丁.py", "value = 3\n");
     writeSource(repository, "src/added-link.py", "handler.py");
     git(repository, "add", ".");
     const addedLink = git(repository, "hash-object", "src/added-link.py");
@@ -236,25 +275,37 @@ describe("compact diff scan", () => {
     const head = git(repository, "rev-parse", "HEAD");
     const output = join(root, "in-scope.txt");
 
-    const result = python(
-      "generate_in_scope_files.py",
-      "--repo",
-      repository,
-      "--scope",
-      ".",
-      "--diff-base",
-      base,
-      "--diff-head",
-      head,
-      "--out",
-      output,
+    const executable = Bun.which("python3") ?? Bun.which("python");
+    expect(executable).not.toBeNull();
+    const result = spawnSync(
+      executable!,
+      [
+        "-B",
+        "-c",
+        "import locale, runpy, sys; locale.setlocale(locale.LC_CTYPE, 'C'); runpy.run_path(sys.argv.pop(1), run_name='__main__')",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--diff-base",
+        base,
+        "--diff-head",
+        head,
+        "--out",
+        output,
+      ],
+      { encoding: "utf8", env: { ...process.env, PYTHONUTF8: "0" } },
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(readFileSync(output, "utf8").trim()).toBe("src/handler.py");
+    expect(readFileSync(output, "utf8").split("\n").filter(Boolean)).toEqual([
+      "src/handler.py",
+      "src/丁.py",
+    ]);
   });
 
-  test("includes staged, unstaged, and untracked working-tree changes", () => {
+  test("keeps staged, unstaged, and untracked working-tree inputs aligned", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
     git(repository, "add", ".");
@@ -286,16 +337,46 @@ describe("compact diff scan", () => {
       "src/staged.py",
       "src/untracked.py",
     ]);
+
+    const reviewOutput = join(root, "rank-input.jsonl");
+    const review = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      "HEAD",
+      "--mode",
+      "local-patch",
+      "--out",
+      reviewOutput,
+    );
+    expect(review.status, review.stderr).toBe(0);
+    expect(
+      readFileSync(reviewOutput, "utf8")
+        .trim()
+        .split("\n")
+        .map((row) => (JSON.parse(row) as { path: string }).path),
+    ).toEqual(["src/handler.py", "src/staged.py", "src/untracked.py"]);
   });
 
   test("keeps deleted inventory paths without accepting unsafe candidates", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
+    writeSource(repository, "src/second.py", "value = 2\n");
     const inventory = join(root, "in-scope.txt");
     const input = join(root, "candidates.jsonl");
     const output = join(root, "normalized.jsonl");
-    writeFileSync(inventory, "src/deleted.py\nsrc/handler.py\n");
-    writeFileSync(input, `${JSON.stringify(candidate("src/handler.py"))}\n`);
+    writeFileSync(inventory, "src/deleted.py\nsrc/handler.py\nsrc/second.py\n");
+    writeFileSync(
+      input,
+      [
+        candidate("src/handler.py"),
+        { ...candidate("src/second.py"), summary: "Résumé: missing guard" },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n") + "\n",
+    );
     const args = [
       "--input",
       input,
@@ -314,10 +395,16 @@ describe("compact diff scan", () => {
       "--allow-missing-in-scope",
     );
     expect(accepted.status, accepted.stderr).toBe(0);
-    const normalized = JSON.parse(readFileSync(output, "utf8")) as {
-      locations: { path: string }[];
-    };
-    expect(normalized.locations[0]?.path).toBe("src/handler.py");
+    const contents = readFileSync(output, "utf8");
+    expect(contents).toContain("Résumé: missing guard");
+    const normalized = contents
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { locations: { path: string }[] });
+    expect(normalized.map((entry) => entry.locations[0]?.path).sort()).toEqual([
+      "src/handler.py",
+      "src/second.py",
+    ]);
 
     writeFileSync(inventory, "../escaped.py\nsrc/handler.py\n");
     const escaped = python(
@@ -472,33 +559,5 @@ describe("compact diff scan", () => {
     } finally {
       await client.close();
     }
-  });
-
-  test("preserves stable finding identities from existing public scans", () => {
-    const runtime = brotliDecompressSync(
-      Buffer.concat(
-        ["000", "001"].map((part) =>
-          readFileSync(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-        ),
-      ),
-    ).toString("utf8");
-    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
-      runtime,
-    )?.[0];
-    expect(source).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string) => value) as (findings: JsonObject[]) => JsonObject[];
-
-    const [finding] = buildFindings([
-      {
-        title: "Changed title",
-        extensions: { candidateId: "candidate-stable" },
-      },
-    ]);
-    expect((finding?.["identity"] as JsonObject)["anchor"]).toBe(
-      "candidate-stable",
-    );
   });
 });

@@ -20,7 +20,7 @@ import sys
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, TextIO
+from typing import Any, TextIO
 from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = "1.0"
@@ -58,33 +58,8 @@ GITHUB_HASH_BLOCK_SIZE = 100
 GITHUB_HASH_MOD = 37
 GITHUB_HASH_MASK = (1 << 64) - 1
 GITHUB_HASH_EOF = 65535
-GITHUB_HASH_MAX_LINES = 100_000
 SOURCE_READ_CHUNK_SIZE = 64 * 1024
-SOURCE_READ_MAX_BYTES = 10 * 1024 * 1024
-CONTRACT_DOCUMENT_MAX_BYTES = {
-    "scan-manifest.json": 16 * 1024 * 1024,
-    "findings.json": 128 * 1024 * 1024,
-    "coverage.json": 32 * 1024 * 1024,
-}
-SCHEMA_DOCUMENT_MAX_BYTES = 4 * 1024 * 1024
-JSON_DOCUMENT_READ_CHUNK_SIZE = 64 * 1024
-MAX_JSON_DEPTH = 256
 MAX_JSON_INTEGER = (1 << 53) - 1
-MAX_SCHEMA_NODES = 8192
-MAX_SCHEMA_COLLECTION_ENTRIES = 4096
-MAX_SCHEMA_APPLICATOR_EDGES = 128
-SAFE_SCHEMA_PATTERNS = {
-    r"^(?![^:/?#]+://[^/?#]*@)[^?#]+$",
-    r"^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$",
-    r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))(?!.*\\).+$",
-    r"^[a-f0-9]{64}$",
-    r"^(?!.*(?:^|/)\.\.(?:/|$))(?!.*\\)artifacts/.+$",
-    r"^csf_[a-f0-9]{24}$",
-    r"^occ_[a-f0-9]{24}$",
-    r"^[a-z0-9][a-z0-9._/-]*$",
-    r"^codex-security/v1:sha256:[a-f0-9]{64}$",
-    r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$",
-}
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
     "json": "exports/findings.json",
@@ -106,9 +81,7 @@ def _loads_json(value: str | bytes) -> Any:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        with path.open("rb") as handle:
-            raw = _read_bounded_json_document(handle, str(path), SCHEMA_DOCUMENT_MAX_BYTES)
-        payload = _loads_json(raw.decode("utf-8"))
+        payload = _loads_json(path.read_text(encoding="utf-8"))
         _require_safe_json_value(payload, str(path))
     except FileNotFoundError as exc:
         raise ContractError(f"missing required contract artifact: {path}") from exc
@@ -119,11 +92,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ContractError(f"{path}: expected a JSON object")
     return payload
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_json_bytes(payload))
 
 
 def _generate_report_projection(
@@ -157,72 +125,21 @@ def _json_bytes(payload: Any) -> bytes:
 
 def _contract_json_bytes(relative_path: str, payload: Any) -> bytes:
     _require_safe_json_value(payload, relative_path)
-    encoded = _json_bytes(payload)
-    maximum = CONTRACT_DOCUMENT_MAX_BYTES.get(relative_path)
-    if maximum is not None and len(encoded) > maximum:
-        raise ContractError(f"{relative_path}: JSON document exceeds the {maximum}-byte limit")
-    return encoded
-
-
-def _read_bounded_json_document(handle: BinaryIO, context: str, maximum: int) -> bytes:
-    if os.fstat(handle.fileno()).st_size > maximum:
-        raise ContractError(f"{context}: JSON document exceeds the {maximum}-byte limit")
-    chunks: list[bytes] = []
-    length = 0
-    while length <= maximum:
-        chunk = handle.read(min(JSON_DOCUMENT_READ_CHUNK_SIZE, maximum + 1 - length))
-        if not chunk:
-            break
-        length += len(chunk)
-        if length > maximum:
-            raise ContractError(f"{context}: JSON document exceeds the {maximum}-byte limit")
-        chunks.append(chunk)
-    result = b"".join(chunks)
-    _require_json_nesting(result, context)
-    return result
-
-
-def _require_json_nesting(value: bytes, context: str) -> None:
-    depth = 0
-    in_string = False
-    escaped = False
-    for character in value:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == ord("\\"):
-                escaped = True
-            elif character == ord('"'):
-                in_string = False
-            continue
-        if character == ord('"'):
-            in_string = True
-        elif character in (ord("{"), ord("[")):
-            depth += 1
-            if depth > MAX_JSON_DEPTH + 1:
-                raise ContractError(
-                    f"{context}: JSON document exceeds the {MAX_JSON_DEPTH}-level nesting limit"
-                )
-        elif character in (ord("}"), ord("]")):
-            depth -= 1
+    return _json_bytes(payload)
 
 
 def _require_safe_json_value(value: Any, context: str, *, validate_strings: bool = True) -> None:
-    def visit(item: Any, location: str, depth: int) -> None:
-        if depth > MAX_JSON_DEPTH:
-            raise ContractError(
-                f"{location}: JSON document exceeds the {MAX_JSON_DEPTH}-level nesting limit"
-            )
+    def visit(item: Any, location: str) -> None:
         if isinstance(item, dict):
             for key, child in item.items():
                 if not isinstance(key, str):
                     raise ContractError(f"{location}: expected string JSON property names")
                 if validate_strings:
                     _require_safe_json_string(key, location)
-                visit(child, f"{location}.<property>", depth + 1)
+                visit(child, f"{location}.<property>")
         elif isinstance(item, list):
             for index, child in enumerate(item):
-                visit(child, f"{location}[{index}]", depth + 1)
+                visit(child, f"{location}[{index}]")
         elif isinstance(item, str) and validate_strings:
             _require_safe_json_string(item, location)
         elif isinstance(item, int) and not isinstance(item, bool):
@@ -238,7 +155,7 @@ def _require_safe_json_value(value: Any, context: str, *, validate_strings: bool
                     f"{location}: unsafe integer-valued JSON numbers are not supported"
                 )
 
-    visit(value, context, 0)
+    visit(value, context)
 
 
 def _require_safe_json_string(value: str, context: str) -> None:
@@ -254,14 +171,6 @@ def _sha256_text(value: str) -> str:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
@@ -505,12 +414,7 @@ def _read_scan_local_json_bytes(
     try:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            maximum = CONTRACT_DOCUMENT_MAX_BYTES.get(relative_path)
-            raw = (
-                handle.read()
-                if maximum is None
-                else _read_bounded_json_document(handle, context, maximum)
-            )
+            raw = handle.read()
         try:
             payload = _loads_json(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
@@ -786,7 +690,6 @@ def _recover_unsealed_findings(
     warnings: list[str],
 ) -> list[str]:
     schema = _read_json(schema_dir / "findings.schema.json")
-    _require_safe_schema(schema, "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
     finding_array = _require_dict(properties, "findings", "findings.schema.properties")
     finding_schema = _require_dict(finding_array, "items", "findings.schema.properties.findings")
@@ -937,7 +840,6 @@ def _recover_unsealed_coverage(
     discarded_findings: list[str],
 ) -> None:
     schema = _read_json(schema_dir / "coverage.schema.json")
-    _require_safe_schema(schema, "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
     completeness = coverage.get("completeness")
     partial = completeness not in ("complete", "partial", "unknown")
@@ -1536,89 +1438,7 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> N
 
 def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     schema = _read_json(schema_path)
-    _require_safe_schema(schema, schema_path.name)
     _validate_schema_node(payload, schema, schema_path.stem)
-
-
-def _require_safe_schema(schema: dict[str, Any], context: str) -> None:
-    pending: list[tuple[Any, bool]] = [(schema, True)]
-    nodes = 0
-    applicator_edges = 0
-    unsupported_keywords = {
-        "$async",
-        "$ref",
-        "$dynamicRef",
-        "$recursiveRef",
-        "prefixItems",
-        "patternProperties",
-        "propertyNames",
-        "dependentSchemas",
-        "dependencies",
-        "uniqueItems",
-    }
-    while pending:
-        value, is_schema = pending.pop()
-        nodes += 1
-        if nodes > MAX_SCHEMA_NODES:
-            raise ContractError(
-                f"{context}: JSON Schema exceeds the {MAX_SCHEMA_NODES}-node complexity limit"
-            )
-        if isinstance(value, list):
-            if len(value) > MAX_SCHEMA_COLLECTION_ENTRIES:
-                raise ContractError(
-                    f"{context}: JSON Schema exceeds the "
-                    f"{MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit"
-                )
-            pending.extend((child, is_schema) for child in value)
-            continue
-        if not isinstance(value, dict):
-            continue
-        if len(value) > MAX_SCHEMA_COLLECTION_ENTRIES:
-            raise ContractError(
-                f"{context}: JSON Schema exceeds the "
-                f"{MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit"
-            )
-        for keyword, child in value.items():
-            if not is_schema:
-                pending.append((child, False))
-                continue
-            if keyword in unsupported_keywords:
-                raise ContractError(f"{context}: unsupported JSON Schema keyword")
-            edges = 0
-            if keyword in {"allOf", "anyOf", "oneOf"} and isinstance(child, list):
-                edges = len(child)
-            elif keyword in {
-                "if",
-                "then",
-                "else",
-                "not",
-                "items",
-                "contains",
-                "additionalProperties",
-                "unevaluatedProperties",
-                "unevaluatedItems",
-            } and isinstance(child, (dict, bool)):
-                edges = 1
-            elif keyword in {"properties", "$defs", "definitions"} and isinstance(child, dict):
-                edges = len(child)
-            applicator_edges += edges
-            if applicator_edges > MAX_SCHEMA_APPLICATOR_EDGES:
-                raise ContractError(
-                    f"{context}: JSON Schema exceeds the "
-                    f"{MAX_SCHEMA_APPLICATOR_EDGES}-edge applicator limit"
-                )
-            if keyword == "pattern" and isinstance(child, str):
-                if child not in SAFE_SCHEMA_PATTERNS:
-                    raise ContractError(f"{context}: unsupported JSON Schema pattern")
-            if keyword in {"properties", "$defs", "definitions"} and isinstance(child, dict):
-                pending.extend((child_schema, True) for child_schema in child.values())
-                continue
-            pending.append(
-                (
-                    child,
-                    keyword not in {"const", "enum", "default", "examples", "dependentRequired"},
-                )
-            )
 
 
 def _validate_canonical_schemas_before_projection(
@@ -1666,10 +1486,7 @@ def _utf16_code_units(value: str) -> Iterator[int]:
 def _github_line_hashes(
     handle: TextIO,
     requested_lines: set[int] | None = None,
-    source_read_budget: list[int] | None = None,
-) -> dict[int, str] | None:
-    if source_read_budget is not None and source_read_budget[0] <= 0:
-        return None
+) -> dict[int, str]:
     window = [0] * GITHUB_HASH_BLOCK_SIZE
     line_numbers = [-1] * GITHUB_HASH_BLOCK_SIZE
     hash_counts: dict[str, int] = {}
@@ -1680,7 +1497,6 @@ def _github_line_hashes(
     line_number = 0
     line_start = True
     previous_was_cr = False
-    source_bytes = 0
 
     def output_hash() -> None:
         nonlocal index
@@ -1698,11 +1514,11 @@ def _github_line_hashes(
         hash_raw = (GITHUB_HASH_MOD * hash_raw + current - first_mod * beginning) & GITHUB_HASH_MASK
         index = (index + 1) % GITHUB_HASH_BLOCK_SIZE
 
-    def process_character(current: int) -> bool:
+    def process_character(current: int) -> None:
         nonlocal line_number, line_start, previous_was_cr
         if current in {ord(" "), ord("\t")} or (previous_was_cr and current == ord("\n")):
             previous_was_cr = False
-            return True
+            return
         if current == ord("\r"):
             current = ord("\n")
             previous_was_cr = True
@@ -1713,28 +1529,15 @@ def _github_line_hashes(
         if line_start:
             line_start = False
             line_number += 1
-            if line_number > GITHUB_HASH_MAX_LINES:
-                return False
             line_numbers[index] = line_number
         if current == ord("\n"):
             line_start = True
         update_hash(current)
-        return True
 
     while chunk := handle.read(SOURCE_READ_CHUNK_SIZE):
-        chunk_bytes = len(chunk.encode("utf-8", errors="replace"))
-        source_bytes += chunk_bytes
-        if source_bytes > SOURCE_READ_MAX_BYTES:
-            return None
-        if source_read_budget is not None:
-            source_read_budget[0] -= chunk_bytes
-            if source_read_budget[0] < 0:
-                return None
         for code_unit in _utf16_code_units(chunk):
-            if not process_character(code_unit):
-                return None
-    if not process_character(GITHUB_HASH_EOF):
-        return None
+            process_character(code_unit)
+    process_character(GITHUB_HASH_EOF)
     for _ in range(GITHUB_HASH_BLOCK_SIZE):
         if line_numbers[index] != -1:
             output_hash()
@@ -1762,14 +1565,13 @@ def _github_line_hashes_for_source(
     source_root: Path,
     relative_path: str,
     requested_lines: set[int] | None = None,
-    source_read_budget: list[int] | None = None,
 ) -> dict[int, str] | None:
     handle = _open_source_file(source_root, relative_path)
     if handle is None:
         return None
     try:
         with handle:
-            return _github_line_hashes(handle, requested_lines, source_read_budget)
+            return _github_line_hashes(handle, requested_lines)
     except OSError:
         return None
 
@@ -1849,15 +1651,8 @@ def _github_line_hash_cache(
         )
         requested_lines_by_path.setdefault(relative_path, set()).add(primary_location["startLine"])
     line_hash_cache: dict[tuple[Path, int], str | None] = {}
-    source_read_budget = [SOURCE_READ_MAX_BYTES]
     for relative_path, requested_lines in requested_lines_by_path.items():
-        line_hashes = (
-            None
-            if source_read_budget[0] <= 0
-            else _github_line_hashes_for_source(
-                source_root, relative_path, requested_lines, source_read_budget
-            )
-        )
+        line_hashes = _github_line_hashes_for_source(source_root, relative_path, requested_lines)
         source_path = source_root / relative_path
         for line_number in requested_lines:
             line_hash_cache[(source_path, line_number)] = (

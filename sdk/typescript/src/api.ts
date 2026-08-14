@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -66,6 +67,7 @@ import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   matchCompletedScan,
+  matchScanFindingsInternal,
   type matchScanFindings,
 } from "./scan-comparison.js";
 import {
@@ -113,6 +115,7 @@ import {
   type ScanMode,
   type ScanTarget,
   validatedGitEnvironment,
+  validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
 
@@ -153,6 +156,7 @@ export interface DeepScanOptions {
   subagents?: number;
   stopAfterNoNew?: number;
   maxDiscoveryRuns?: number;
+  maxTimeHours?: number;
 }
 
 export interface ScanOptions extends DeepScanOptions {
@@ -258,6 +262,7 @@ export interface ScanPreflight extends DeepScanOptions {
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
+  stateDirectory: string;
 }
 
 export interface CodexSecurityMetadata {
@@ -302,6 +307,7 @@ const DEEP_SCAN_SETTINGS = [
   ["subagents", "subagents", 0],
   ["stopAfterNoNew", "stop_after_no_new", 1],
   ["maxDiscoveryRuns", "max_discovery_runs", 1],
+  ["maxTimeHours", "max_time_hours", 0],
 ] as const;
 
 export class CodexSecurity {
@@ -418,6 +424,12 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
+    let budgetRecovery: {
+      expectation: ScanExpectation;
+      pluginRoot: string;
+      model: string;
+      threadId: string | null;
+    } | null = null;
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
@@ -439,11 +451,8 @@ export class CodexSecurity {
         mode,
         outputDir: requestedOutput,
         protectedRoot,
+        stateDirectory,
       } = await this.#validateLocalInputs(repository, options, signal);
-      const stateDirectory = codexSecurityStateDirectory(
-        this.#dependencies.environment,
-      );
-      requireOutputOutsideRepository(protectedRoot, stateDirectory);
       checkOpen();
       let temporaryRoot: string | undefined;
       if (
@@ -457,9 +466,6 @@ export class CodexSecurity {
           temporaryRoot,
           "temporary",
         );
-      }
-      if (requestedOutput !== null) {
-        requireOutputOutsideRepository(protectedRoot, requestedOutput);
       }
       if (options.knowledgeBasePaths?.length) {
         knowledgeBase = await prepareKnowledgeBase(
@@ -511,20 +517,23 @@ export class CodexSecurity {
         (path) =>
           requireOutputOutsideRepository(protectedRoot, path, "runtime"),
         options.auth,
-        modelProvider,
+        requestedConfig,
       );
       if (
         runtime === previousRuntime &&
         this.#dependencies.prepareRuntime === undefined
       ) {
-        await this.#refreshPersistentRuntime(runtime, scanEnvironment, signal);
+        await this.#refreshPersistentRuntime(
+          runtime,
+          scanEnvironment,
+          signal,
+          requestedConfig,
+        );
       }
       const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
+      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       if (runtime.configPath !== undefined) {
-        await writeCodexConfig(
-          runtime.configPath,
-          scanPreflightCodexConfig(effectiveConfig),
-        );
+        await writeCodexConfig(runtime.configPath, preflightConfig);
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
@@ -619,7 +628,11 @@ export class CodexSecurity {
           ? await preparePersistentScanRoot(stateDirectory, basename(repo))
           : temporaryRoot;
       if (scanOutputRoot !== undefined) {
-        requireOutputOutsideRepository(protectedRoot, scanOutputRoot);
+        requireOutputOutsideRepository(
+          protectedRoot,
+          scanOutputRoot,
+          scanOutputRoot === temporaryRoot ? "temporary" : "output",
+        );
       }
       scanDir = await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
         requestedOutput ?? undefined,
@@ -687,6 +700,14 @@ export class CodexSecurity {
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model);
+      if (mode === "deep" && options.maxCostUsd !== undefined) {
+        budgetRecovery = {
+          expectation,
+          pluginRoot: runtime.plugin.installedRoot,
+          model,
+          threadId: null,
+        };
+      }
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
       const reportProgress = (progress: ScanProgress): void => {
@@ -721,6 +742,7 @@ export class CodexSecurity {
         codexHome: runtime.codexHome,
         model,
         repository: repo,
+        scanDirectory: scanDir,
         maxCostUsd: options.maxCostUsd,
         onActivity:
           options.onActivity === undefined
@@ -766,7 +788,7 @@ export class CodexSecurity {
         mode,
         expectation.repositoryRevision,
         runtime.plugin.version,
-        effectiveConfig,
+        preflightConfig,
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
@@ -944,6 +966,7 @@ export class CodexSecurity {
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
         CODEX_SECURITY_STATE_DIR: stateDirectory,
+        CODEX_SECURITY_SURFACE: this.#surface,
         CODEX_SECURITY_SCAN_ID: scanId,
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
@@ -981,9 +1004,14 @@ export class CodexSecurity {
         CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
       };
-      const sdkCodexConfig = scanPreflightCodexConfig(effectiveConfig);
+      const sdkCodexConfig = { ...preflightConfig };
       delete sdkCodexConfig["projects"];
+      const codexPathOverride = environmentValue(
+        this.#dependencies.environment,
+        "CODEX_CLI_PATH",
+      )?.trim();
       const codex = this.#dependencies.createCodex({
+        ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
         ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
@@ -1039,6 +1067,7 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         onThreadStarted: async (threadId) => {
+          if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
           tracker.start(threadId);
           try {
             await workbench(workbenchOptions, [
@@ -1142,19 +1171,81 @@ export class CodexSecurity {
       if (runPostScan !== null) {
         const followUp = runPostScan;
         runPostScan = null;
-        await runScanEvents({
-          thread,
-          events: (await followUp()).events,
-          signal,
-          scanDir,
-          pluginRoot: runtime.plugin.installedRoot,
-          expectation,
-          model,
-          onReconnect: options.onReconnect,
-          onWorkerStatus: options.onWorkerStatus,
-          onObserverError: options.onObserverError,
-        });
-        checkOpen();
+        const completedArtifacts = await Promise.all(
+          [
+            ...new Set([
+              "scan-manifest.json",
+              "findings.json",
+              "coverage.json",
+              "report.md",
+              ...result.manifest.scan.artifacts.map(
+                (artifact) => artifact.path,
+              ),
+            ]),
+          ].map(async (name) => ({
+            name,
+            contents: await readFile(
+              await requireScanFile(scanDir, name, name, signal),
+              { signal },
+            ),
+          })),
+        );
+        try {
+          await runScanEvents({
+            thread,
+            events: (await followUp()).events,
+            signal,
+            scanDir,
+            pluginRoot: runtime.plugin.installedRoot,
+            expectation,
+            model,
+            onReconnect: options.onReconnect,
+            onWorkerStatus: options.onWorkerStatus,
+            onObserverError: options.onObserverError,
+          });
+          checkOpen();
+        } catch (error) {
+          if (signal.aborted || this.#closed) throw error;
+          for (const artifact of completedArtifacts) {
+            const path = join(scanDir, artifact.name);
+            const current = await readFile(path, { signal }).catch(
+              (readError: NodeJS.ErrnoException) => {
+                if (readError.code !== "ENOENT") throw readError;
+                return null;
+              },
+            );
+            if (current?.equals(artifact.contents)) continue;
+            const temporary = join(
+              dirname(path),
+              `.${randomUUID()}.${basename(path)}.restore`,
+            );
+            try {
+              await writeFile(temporary, artifact.contents, {
+                flag: "wx",
+                mode: 0o600,
+                signal,
+              });
+              await rename(temporary, path);
+            } finally {
+              await rm(temporary, { force: true });
+            }
+          }
+          await collectResult(
+            result.turnResult,
+            result.threadId,
+            scanDir,
+            runtime.plugin.installedRoot,
+            expectation,
+            signal,
+            true,
+          );
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not run post-scan instructions: ${errorMessage(error)}`,
+          );
+        }
       }
       try {
         const runWorkbench = (args: readonly string[]) =>
@@ -1176,7 +1267,12 @@ export class CodexSecurity {
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
             workbench: runWorkbench,
-            matchFindings: this.#dependencies.matchFindings,
+            matchFindings:
+              this.#dependencies.matchFindings ??
+              ((input, comparisonOptions) =>
+                matchScanFindingsInternal(input, comparisonOptions, {
+                  surface: this.#surface,
+                })),
             environment,
             model,
             signal,
@@ -1204,6 +1300,81 @@ export class CodexSecurity {
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
           : error;
+      if (
+        failure instanceof ScanCostLimitExceededError &&
+        budgetRecovery !== null &&
+        budgetRecovery.threadId !== null &&
+        activeScan !== null &&
+        !this.#abortController.signal.aborted &&
+        options.signal?.aborted !== true
+      ) {
+        try {
+          const completion = await workbench(
+            { ...activeScan.options, signal: undefined },
+            [
+              "complete-budget-exhausted-scan",
+              "--scan-id",
+              activeScan.id,
+              "--cost-json",
+              JSON.stringify(snapshot?.cost ?? failure.cost),
+              "--message",
+              failure.message.slice(0, 2400),
+            ],
+          );
+          activeScan = null;
+          runPostScan = null;
+          const result = await collectResult(
+            {
+              status: "completed",
+              model: budgetRecovery.model,
+              usage: snapshot?.usage ?? null,
+            },
+            budgetRecovery.threadId,
+            scanDir,
+            budgetRecovery.pluginRoot,
+            budgetRecovery.expectation,
+            AbortSignal.any([
+              this.#abortController.signal,
+              ...(options.signal === undefined ? [] : [options.signal]),
+            ]),
+            true,
+          );
+          if (result.coverage.completeness !== "partial") {
+            throw new IncompleteScanError(
+              "Budget-exhausted scan recovery did not report partial coverage.",
+            );
+          }
+          const completedScan = completion["scan"];
+          const targetWarnings = new Set(
+            Array.isArray(completion["targetWarnings"])
+              ? completion["targetWarnings"].filter(
+                  (warning): warning is string => typeof warning === "string",
+                )
+              : [],
+          );
+          const warnings =
+            isRecord(completedScan) && Array.isArray(completedScan["warnings"])
+              ? completedScan["warnings"].filter(
+                  (warning): warning is string => typeof warning === "string",
+                )
+              : [];
+          for (const warning of warnings.length > 0
+            ? warnings
+            : [failure.message]) {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              warning,
+              targetWarnings.has(warning)
+                ? { kind: "target_changed" }
+                : undefined,
+            );
+          }
+          scanFailure = false;
+          return result;
+        } catch {}
+      }
       if (activeScan !== null) {
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
@@ -1277,80 +1448,51 @@ export class CodexSecurity {
   }
 
   public async loginApiKey(apiKey: string): Promise<void> {
-    const { result, runtime } = await this.#runOperation(
-      async (preparedRuntime, signal) => ({
-        runtime: preparedRuntime,
-        result: await persistApiKey(
-          this.#codexCommand(),
-          preparedRuntime.environment,
-          apiKey,
-          signal,
-        ),
-      }),
-      "chatgpt",
-    );
-    if (!result.success) {
-      throw new CodexSecurityError(
-        `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
+    await this.#trackOperation(async () => {
+      const authentication = await this.#authentication();
+      this.#requireOpen();
+      const result = await persistApiKey(
+        this.#codexCommand(),
+        authentication.environment,
+        apiKey,
+        this.#abortController.signal,
       );
-    }
-    if (runtime.persistentCredentialHome === true) {
-      await setCodexSecurityCredentialLogout(runtime.codexHome, false);
-    }
-    runtime.credentialsAvailable = true;
-    this.#runtimeCredentialSource = "api_key";
+      if (!result.success) {
+        throw new CodexSecurityError(
+          `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
+        );
+      }
+      await this.#recordLogin(authentication.codexHome, "api_key");
+      this.#requireOpen();
+    });
   }
 
   public async loginChatGPT(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime(
-      undefined,
-      undefined,
-      undefined,
-      "chatgpt",
-    );
-    this.#requireOpen();
-    const handle = this.#trackLoginHandle(
-      new CodexLoginHandle(
-        this.#codexCommand(),
-        ["login"],
-        runtime.environment,
-        () => {
-          runtime.credentialsAvailable = true;
-          this.#runtimeCredentialSource = "stored_credentials";
-        },
-      ),
-    );
-    await handle.waitForInstructions();
-    this.#requireOpen();
-    return handle;
+    return await this.#startLogin(false);
   }
 
   public async loginChatGPTDeviceCode(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime(
-      undefined,
-      undefined,
-      undefined,
-      "chatgpt",
-    );
+    return await this.#startLogin(true);
+  }
+
+  async #startLogin(deviceCode: boolean): Promise<CodexLoginHandle> {
+    const authentication = await this.#authentication();
     this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
         this.#codexCommand(),
-        ["login", "--device-auth"],
-        runtime.environment,
-        () => {
-          runtime.credentialsAvailable = true;
-          this.#runtimeCredentialSource = "stored_credentials";
-        },
+        deviceCode ? ["login", "--device-auth"] : ["login"],
+        authentication.environment,
+        () => this.#recordLogin(authentication.codexHome, "stored_credentials"),
       ),
     );
-    await handle.waitForInstructions({ deviceCode: true });
+    await handle.waitForInstructions({ deviceCode });
     this.#requireOpen();
     return handle;
   }
 
   public async account(): Promise<AccountStatus> {
-    return await this.#runOperation(async (runtime, signal) => {
+    return await this.#trackOperation(async () => {
       const apiKey = environmentApiKey(this.#dependencies.environment);
       if (apiKey !== null) {
         return {
@@ -1358,31 +1500,35 @@ export class CodexSecurity {
           details: "Authenticated with an API key.",
         };
       }
+      const authentication = await this.#authentication();
+      this.#requireOpen();
       return await accountStatus(
         this.#codexCommand(),
-        runtime.environment,
-        signal,
+        authentication.environment,
+        this.#abortController.signal,
       );
     });
   }
 
   public async logout(): Promise<void> {
-    const runtime = await this.#runOperation(
-      async (preparedRuntime, signal) => {
-        await codexLogout(
-          this.#codexCommand(),
-          preparedRuntime.environment,
-          signal,
-        );
-        return preparedRuntime;
-      },
-      "chatgpt",
-    );
-    if (runtime.persistentCredentialHome === true) {
-      await setCodexSecurityCredentialLogout(runtime.codexHome, true);
-    }
-    runtime.credentialsAvailable = false;
-    this.#runtimeCredentialSource = null;
+    await this.#trackOperation(async () => {
+      const authentication = await this.#authentication();
+      this.#requireOpen();
+      await codexLogout(
+        this.#codexCommand(),
+        authentication.environment,
+        this.#abortController.signal,
+      );
+      if (
+        this.#runtime === null ||
+        this.#runtime.persistentCredentialHome === true
+      ) {
+        await setCodexSecurityCredentialLogout(authentication.codexHome, true);
+      }
+      if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
+      this.#runtimeCredentialSource = null;
+      this.#requireOpen();
+    });
   }
 
   public async close(): Promise<void> {
@@ -1435,23 +1581,39 @@ export class CodexSecurity {
     await this.close();
   }
 
-  async #runOperation<T>(
-    operation: (runtime: PreparedRuntime, signal: AbortSignal) => Promise<T>,
-    auth: ScanAuthMode = "auto",
-  ): Promise<T> {
-    return await this.#trackOperation(async () => {
-      const signal = this.#abortController.signal;
-      const runtime = await this.#ensureRuntime(
-        signal,
-        undefined,
-        undefined,
-        auth,
-      );
-      this.#requireOpen();
-      const result = await operation(runtime, signal);
-      this.#requireOpen();
-      return result;
-    });
+  async #authentication(): Promise<{
+    codexHome: string;
+    environment: Record<string, string>;
+  }> {
+    this.#requireOpen();
+    const environment = selectedScanEnvironment(
+      this.#runtime?.environment ?? this.#dependencies.environment,
+      "chatgpt",
+    );
+    const codexHome =
+      this.#runtime?.codexHome ??
+      (await prepareCodexSecurityCredentialHome(environment));
+    return {
+      codexHome,
+      environment: {
+        ...withoutCodexHome(environment),
+        CODEX_HOME: codexHome,
+      },
+    };
+  }
+
+  async #recordLogin(
+    codexHome: string,
+    source: "api_key" | "stored_credentials",
+  ): Promise<void> {
+    if (
+      this.#runtime === null ||
+      this.#runtime.persistentCredentialHome === true
+    ) {
+      await setCodexSecurityCredentialLogout(codexHome, false);
+    }
+    if (this.#runtime !== null) this.#runtime.credentialsAvailable = true;
+    this.#runtimeCredentialSource = source;
   }
 
   async #trackOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -1477,7 +1639,7 @@ export class CodexSecurity {
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
     auth: ScanAuthMode = "auto",
-    modelProvider?: unknown,
+    requestedConfig?: JsonObject,
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
     if (this.#runtime !== null) return this.#runtime;
@@ -1487,7 +1649,7 @@ export class CodexSecurity {
         temporaryRoot,
         validateLocation,
         auth,
-        modelProvider,
+        requestedConfig,
       );
       this.#runtimePromise = runtimePromise;
       void runtimePromise.catch(() => {
@@ -1515,16 +1677,19 @@ export class CodexSecurity {
   }
 
   #codexCommand(): CodexCommand {
-    return (this.#dependencies.resolveCodexCommand ?? resolveCodexCommand)();
+    return (
+      this.#dependencies.resolveCodexCommand?.() ??
+      resolveCodexCommand(this.#dependencies.environment)
+    );
   }
 
   async #refreshPersistentRuntime(
     runtime: PreparedRuntime,
     environment: ProcessEnvironment,
     signal: AbortSignal,
+    mergedConfig: JsonObject,
   ): Promise<void> {
     throwIfAborted(signal);
-    const mergedConfig = await mergedCodexConfig(this.config);
     const config = await preserveCodexSecurityPluginRegistration(
       runtime.codexHome,
       scanRuntimeCodexConfig(
@@ -1534,16 +1699,11 @@ export class CodexSecurity {
       ),
     );
     await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
-    if (runtime.configPath !== undefined) {
-      await writeCodexConfig(
-        runtime.configPath,
-        scanPreflightCodexConfig(mergedConfig),
-      );
-    }
     runtime.plugin = await bootstrapPlugin(
       runtime.codexHome,
       runtime.plugin.pluginRoot,
       {
+        codexCommand: this.#codexCommand(),
         environment: withoutCodexHome(environment),
         signal,
       },
@@ -1574,6 +1734,8 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const mode = options.mode ?? "standard";
     validateMode(normalized, mode);
+    await validateCommittedDiffCheckout(repo, normalized, signal);
+    throwIfAborted(signal);
     const protectedRoot =
       (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
     const requestedOutput = await validateOutputDir(
@@ -1583,12 +1745,32 @@ export class CodexSecurity {
     if (requestedOutput !== null) {
       requireOutputOutsideRepository(protectedRoot, requestedOutput);
     }
+    const stateDirectory = codexSecurityStateDirectory(
+      this.#dependencies.environment,
+    );
+    let canonicalStateDirectory = stateDirectory;
+    while (true) {
+      try {
+        canonicalStateDirectory = join(
+          await realpath(canonicalStateDirectory),
+          relative(canonicalStateDirectory, stateDirectory),
+        );
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const parent = dirname(canonicalStateDirectory);
+        if (parent === canonicalStateDirectory) throw error;
+        canonicalStateDirectory = parent;
+      }
+    }
+    requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
     return {
       repository: repo,
       target: normalized,
       mode,
       outputDir: requestedOutput,
       protectedRoot,
+      stateDirectory,
     };
   }
 
@@ -1597,11 +1779,15 @@ export class CodexSecurity {
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
     auth: ScanAuthMode = "auto",
-    modelProvider?: unknown,
+    requestedConfig?: JsonObject,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }
+    const modelProvider =
+      requestedConfig === undefined
+        ? undefined
+        : scanModelProvider(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
       this.#dependencies.environment,
       auth,
@@ -1629,7 +1815,8 @@ export class CodexSecurity {
         "CODEX_HOME",
       );
       const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
-      const mergedConfig = await mergedCodexConfig(this.config);
+      const mergedConfig =
+        requestedConfig ?? (await mergedCodexConfig(this.config));
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
         scanRuntimeCodexConfig(
@@ -1640,12 +1827,9 @@ export class CodexSecurity {
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
-      await writeCodexConfig(
-        configPath,
-        scanPreflightCodexConfig(mergedConfig),
-      );
       throwIfAborted(signal);
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
+        codexCommand: this.#codexCommand(),
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
@@ -1725,7 +1909,13 @@ function deepScanOptions(options: ScanOptions): DeepScanOptions {
     if ((options.mode ?? "standard") !== "deep") {
       throw new CodexSecurityError("Deep scan settings require deep mode.");
     }
-    if (!Number.isSafeInteger(value) || value < minimum) {
+    if (name === "maxTimeHours") {
+      if (!Number.isFinite(value) || value <= 0 || value > 96) {
+        throw new CodexSecurityError(
+          "Deep scan maxTimeHours must be a positive number no greater than 96.",
+        );
+      }
+    } else if (!Number.isSafeInteger(value) || value < minimum) {
       throw new CodexSecurityError(
         `Deep scan ${name} must be ${minimum === 0 ? "a non-negative" : "a positive"} integer.`,
       );
@@ -1886,7 +2076,7 @@ export async function runScanEvents(
   let lastStreamError: string | null = null;
   let tacStatusReported = false;
   try {
-    for await (const event of options.events) {
+    for await (const event of scanEventsWithOptionalUsage(options.events)) {
       if (!tacStatusReported) {
         const tacStatus = trustedAccessStatusFromEvent(event);
         if (tacStatus !== null) {
@@ -2042,6 +2232,24 @@ export async function runScanEvents(
         options.scanDir,
         { cause: error },
       );
+    }
+    throw error;
+  }
+}
+
+async function* scanEventsWithOptionalUsage(
+  events: AsyncGenerator<ScanEvent>,
+): AsyncGenerator<ScanEvent> {
+  try {
+    yield* events;
+  } catch (error) {
+    if (
+      error instanceof TypeError &&
+      /\b(?:null|undefined)\b/u.test(error.message) &&
+      /\bcache_write_input_tokens\b/u.test(error.message)
+    ) {
+      yield { type: "turn.completed", usage: null };
+      return;
     }
     throw error;
   }
@@ -2229,7 +2437,7 @@ function scanRecipe(
   mode: ScanMode,
   repositoryRevision: string | null,
   pluginVersion: string,
-  effectiveConfig: JsonObject,
+  preflightConfig: JsonObject,
   failOnSeverity?: SeverityLevel,
   knowledgeBasePaths?: string[],
   maxCostUsd?: number,
@@ -2248,7 +2456,7 @@ function scanRecipe(
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
-    config: scanPreflightCodexConfig(effectiveConfig),
+    config: preflightConfig,
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),
     ...(knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths }),
     ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
@@ -2504,12 +2712,6 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
 }
 
 // A failed turn must fail the scan whatever its error payload looks like.
-//
-// Only `error.message` is reused, because that is the single shape the previous
-// code already surfaced. No other shape is forwarded or stringified: this message
-// reaches `fail-scan --message` and is stored unchanged in `scans.failure_message`,
-// so widening what is copied out of the payload would add a new
-// credential-disclosure path to persistent scan history.
 function turnFailureMessage(error: unknown): string {
   if (isRecord(error) && typeof error["message"] === "string") {
     const message = error["message"].trim();
@@ -2722,11 +2924,16 @@ function requireOutputOutsideRepository(
   pathKind: ProtectedScanPathKind = "output",
 ): void {
   const outputRelative = relative(repository, outputDirectory);
+  const repositoryRelative = relative(outputDirectory, repository);
   if (
     outputRelative === "" ||
     (outputRelative !== ".." &&
       !outputRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(outputRelative))
+      !isAbsolute(outputRelative)) ||
+    (pathKind === "output" &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(repositoryRelative))
   ) {
     throw new OutputInsideProtectedRootError(
       outputDirectory,

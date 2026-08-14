@@ -1,17 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { brotliDecompressSync } from "node:zlib";
 import { expect, test } from "bun:test";
-import { PLUGIN_ROOT } from "./plugin-root.js";
-
-const bundledRuntime = Promise.all(
-  ["000", "001"].map((part) =>
-    readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-  ),
-).then((parts) => brotliDecompressSync(Buffer.concat(parts)).toString("utf8"));
+import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 
 function bundledFunction(runtime: string, name: string): string {
   const source = new RegExp(
@@ -23,7 +15,7 @@ function bundledFunction(runtime: string, name: string): string {
 }
 
 test("keeps every advertised Deep worker tool within Codex's name limit", async () => {
-  const runtime = await bundledRuntime;
+  const runtime = await loadBundledRuntime();
   const method = /  compactArtifactServer\(request\) \{[\s\S]*?\n  \}/u.exec(
     runtime,
   )?.[0];
@@ -112,7 +104,7 @@ test("keeps every advertised Deep worker tool within Codex's name limit", async 
 });
 
 test("classifies owned worker tool failures without exposing their contents", async () => {
-  const runtime = await bundledRuntime;
+  const runtime = await loadBundledRuntime();
   const diagnosticSource = bundledFunction(runtime, "appendSafeItemDiagnostic");
   const recordHelper = /\b(isRecord\d*)\(item\)/u.exec(diagnosticSource)?.[1];
   expect(recordHelper).toBeDefined();
@@ -182,7 +174,7 @@ test("classifies owned worker tool failures without exposing their contents", as
 });
 
 test("resumes only when the exact reducer result is missing", async () => {
-  const runtime = await bundledRuntime;
+  const runtime = await loadBundledRuntime();
   const source = bundledFunction(runtime, "isMissingReducerResult");
   const pathImport = /\(0, (import_node_path\d+)\.join\)/u.exec(source)?.[1];
   expect(pathImport).toBeDefined();

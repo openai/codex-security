@@ -197,12 +197,24 @@ async function selectGitHubOwner(
   prompt: BulkScanPrompt,
   signal?: AbortSignal,
 ): Promise<string> {
-  const [orgs, user] = await Promise.all([
+  const [firstPage, user] = await Promise.all([
     github.request("GET /user/orgs", { per_page: 100, request: { signal } }),
     github.request("GET /user", { request: { signal } }),
   ]);
+  const organizations = [...firstPage.data];
+  let response = firstPage;
+  let page = 1;
+  while (response.headers.link?.includes('rel="next"')) {
+    signal?.throwIfAborted();
+    response = await github.request("GET /user/orgs", {
+      per_page: 100,
+      page: ++page,
+      request: { signal },
+    });
+    organizations.push(...response.data);
+  }
   const personal = user.data.login;
-  const owners = [personal, ...orgs.data.map(({ login }) => login)].sort();
+  const owners = [personal, ...organizations.map(({ login }) => login)].sort();
   if (owners.length > 1) {
     return await prompt.select(
       "Which account or organization should we scan?",

@@ -38,12 +38,12 @@ End each repository-scoped threat model with these two lines:
 
 ## Finding Discovery (Phase 2) Paths
 
-### Deep Scan Discovery
+### Compact Deep And Workbench-Backed Diff Discovery
 
-Workbench-owned Standard scans submit findings and coverage through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Neither creates a source inventory or candidate ledger. Deep scans use the following compact artifacts.
+Workbench-owned Standard scans submit findings and coverage through `record_codex_security_scan_draft`; SDK-owned Standard scans write unsealed canonical files directly. Neither creates a source inventory or candidate ledger. Deep and workbench-backed diff scans use the following compact artifacts.
 
 - The Deep coordinator prepares the source inventory. A bound discovery worker reads its assigned source paths with `list_codex_security_review_items({ cursor?, limit? })`.
-- Each discovery worker calls its bound `record_codex_security_discovery_candidates({ candidates })` tool once. After semantic reduction, the parent reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
+- Each Deep discovery worker calls its bound `record_codex_security_discovery_candidates({ candidates })` tool once. A workbench-backed diff scan records all candidates once with `record_codex_security_discovery_candidates({ scanId, candidates })`. After semantic reduction, the parent reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
   - The writer validates candidates against assigned source paths, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values.
   - After normalization, compact validation adds exactly one `validation` object to every row with `disposition` (`reportable`, `suppressed`, `not_applicable`, or `deferred`), `method`, `confidence` (`high`, `medium`, or `low`), `confidence_rationale`, concise `rubric` and `evidence`, `counterevidence_or_proof_gap`, `remaining_uncertainty`, and optional `artifact_paths`. Add `source`, `control`, `sink`, or `preconditions` only when they clarify or differ from the discovery fields.
   - Compact attack-path analysis adds exactly one `attack_path` object to each validation row marked `reportable` or `deferred`, with `decision` (`reportable`, `ignore`, or `deferred`), `dataflow`, `reachability`, `counterevidence`, `impact` and `likelihood` (`high`, `medium`, `low`, `ignore`, or `unknown`), `severity` (`critical`, `high`, `medium`, `low`, `ignore`, or `unknown`), `severity_rationale`, `change_conditions`, and `proof_gap` when deferred. A `reportable` decision requires severity `critical`, `high`, `medium`, or `low`; `ignore` requires severity `ignore`; `deferred` uses a provisional reportable severity or `unknown`.
@@ -51,7 +51,7 @@ Workbench-owned Standard scans submit findings and coverage through `record_code
 - Optional compact validation evidence: `<discovery_dir>/validation_artifacts/<candidate_id>/`
   - Create this directory only for actual PoCs, crafted inputs, or logs and reference those paths from the row's `validation` object. Do not create placeholder per-candidate directories or narrative reports.
 
-The worklist, per-finding receipt, and phase-report paths below apply to diff scans. Deep scans use the compact candidate records above; Standard scans assemble validated findings directly.
+The worklist, per-finding receipt, and phase-report paths below apply to terminal diff scans without a `scanId`. Deep and workbench-backed diff scans use the compact candidate records above; Standard scans assemble validated findings directly.
 
 ### Diff Discovery And Coverage
 
@@ -81,7 +81,7 @@ The worklist, per-finding receipt, and phase-report paths below apply to diff sc
 
 ## Validation (Phase 3) Paths
 
-Deep scans use the nested candidate `validation` record and optional compact evidence path above. Standard scans include validation directly in their final finding semantics. Diff scans use these paths:
+Deep and workbench-backed diff scans use the nested candidate `validation` record and optional compact evidence path above. Standard scans include validation directly in their final finding semantics. Terminal diff scans without a `scanId` use these paths:
 
 - Scan-level validation summary: `<findings_dir>/validation_summary.md` if applicable
 - Per-finding validation report: `<findings_dir>/<candidate_id>/validation_report.md`
@@ -89,16 +89,16 @@ Deep scans use the nested candidate `validation` record and optional compact evi
 
 ## Attack-Path Analysis (Phase 4) Paths
 
-Deep scans use the nested candidate `attack_path` record above. Standard scans include attack-path analysis directly in their final finding semantics. Diff scans use these paths:
+Deep and workbench-backed diff scans use the nested candidate `attack_path` record above. Standard scans include attack-path analysis directly in their final finding semantics. Terminal diff scans without a `scanId` use these paths:
 
 - Scan-level attack-path analysis report: `<findings_dir>/attack_path_analysis_report.md` if applicable
 - Per-finding attack-path analysis report: `<findings_dir>/<candidate_id>/attack_path_analysis_report.md`
 
 ## Final Report Paths
 
-- Workbench-owned Standard and Deep draft: `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`
+- Workbench-owned Standard, diff, and Deep draft: `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`
 - SDK-owned Standard draft: unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` under the SDK-provided scan directory
-- Deep or explicitly requested Standard completed results: `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`
+- Deep, workbench-backed diff, or explicitly requested Standard completed results: `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`
 - Final scan report: `<scan_dir>/report.md`
 - Detailed vulnerability write-up: `<scan_dir>/findings/<slug>/<slug>.md`
 - Per-finding PoC and supporting files: `<scan_dir>/findings/<slug>/poc/...`

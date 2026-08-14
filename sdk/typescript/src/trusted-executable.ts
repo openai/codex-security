@@ -20,7 +20,7 @@ export async function resolveTrustedExecutable(
   )?.[1];
   const entries: string[] = [];
   for (const entry of path?.split(delimiter) ?? []) {
-    if (entry.length === 0 || !isAbsolute(entry)) continue;
+    if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
     if (canonical === null || isWithin(root, canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);

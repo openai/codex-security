@@ -911,9 +911,15 @@ describe("canonical scan contract", () => {
 
   test("binds requested path scope, mode, and plugin version", async () => {
     const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    manifest["scan"]["scope"]["includePaths"] = ["src"];
+    await writeJson(manifestPath, manifest);
     const coveragePath = join(scanDir, "coverage.json");
     const coverage = await readJson(coveragePath);
     coverage["mode"] = "scoped_path";
+    coverage["inventoryStrategy"] = "scoped_path";
+    coverage["includePaths"] = ["src"];
     await writeJson(coveragePath, coverage);
     await reseal(scanDir);
 

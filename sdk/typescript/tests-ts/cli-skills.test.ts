@@ -10,7 +10,7 @@ import {
   runCodexSkillCommand,
   skillCommandFailure,
 } from "../src/cli.js";
-import { capture, dependencies } from "./support/cli.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 
 describe("CLI skill commands", () => {
   test("runs validation and patch skills with file and literal inputs", async () => {
@@ -511,15 +511,12 @@ describe("CLI skill commands", () => {
     const stderr = capture();
     await expect(
       runCodexSkillCommand(
-        [],
+        [
+          "-e",
+          'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(1024*1024+1)}})+"\\n")',
+        ],
         { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-        {
-          command: process.execPath,
-          prefixArgs: [
-            "-e",
-            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(1024*1024+1)}})+"\\n")',
-          ],
-        },
+        { command: process.execPath },
       ),
     ).resolves.toBe(0);
     expect(stdout.text()).toBe(`${"x".repeat(1024 * 1024 + 1)}\n`);
@@ -583,9 +580,9 @@ describe("CLI skill commands", () => {
       const stderr = capture();
       expect(
         await runCodexSkillCommand(
-          [],
+          ["-e", scenario.source],
           { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-          { command: process.execPath, prefixArgs: ["-e", scenario.source] },
+          { command: process.execPath },
         ),
       ).toBe(scenario.status);
       expect(stdout.text()).toBe(scenario.stdout);
@@ -631,9 +628,9 @@ setInterval(() => {}, 1000);
         `
 import { runCodexSkillCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
 const status = await runCodexSkillCommand(
-  [],
+  [${JSON.stringify(child)}],
   { command: "validate", stdout: process.stdout, stderr: process.stderr },
-  { command: process.execPath, prefixArgs: [${JSON.stringify(child)}] },
+  { command: process.execPath },
 );
 process.exit(status);
 `,
