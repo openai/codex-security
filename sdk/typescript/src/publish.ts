@@ -21,7 +21,21 @@ export interface PublishScanOptions {
   teamId: string;
   projectId: string;
   dryRun?: boolean;
+  onProgress?: (event: PublishScanProgress) => void;
 }
+
+export type PublishScanProgress =
+  | { type: "started"; scanId: string; total: number }
+  | { type: "codex_event"; event: unknown }
+  | {
+      type: "issue_completed";
+      findingId: string;
+      issueIdentifier?: string;
+      error?: string;
+      completed: number;
+      total: number;
+    }
+  | { type: "completed"; created: number; failed: number; total: number };
 
 export interface PublishedScanIssue {
   findingId: string;
@@ -65,6 +79,7 @@ export interface PublishScanDependencies {
     args: readonly string[],
     input: string,
     environment: NodeJS.ProcessEnv,
+    onEvent?: (event: unknown) => void,
   ) => Promise<PublicationCodexResult>;
   writeReceipt?: (
     result: PublishScanResult,
@@ -117,10 +132,17 @@ export async function publishScanInternal(
   }
   if (prepared.issues.length === 0) return result;
 
+  const progressObserver = options.onProgress;
+  reportPublicationProgress(progressObserver, {
+    type: "started",
+    scanId: prepared.scanId,
+    total: prepared.issues.length,
+  });
   const environment = dependencies.environment ?? process.env;
   const command = (dependencies.resolveCodex ?? resolveCodexCommand)(
     environment,
   );
+  const completedFindings = new Set<string>();
   const invocation = await (dependencies.runCodex ?? runPublicationCodex)(
     command,
     [
@@ -136,6 +158,20 @@ export async function publishScanInternal(
     ],
     publicationPrompt(prepared),
     environment,
+    progressObserver === undefined
+      ? undefined
+      : (event) => {
+          reportPublicationProgress(progressObserver, {
+            type: "codex_event",
+            event,
+          });
+          reportCompletedIssue(
+            event,
+            prepared,
+            completedFindings,
+            progressObserver,
+          );
+        },
   );
   const failureMessage =
     invocation.exitCode === 0
@@ -154,7 +190,86 @@ export async function publishScanInternal(
     result,
     environment,
   );
+  reportPublicationProgress(progressObserver, {
+    type: "completed",
+    created: result.counts.created,
+    failed: result.counts.failed,
+    total: result.counts.findings,
+  });
   return result;
+}
+
+function reportPublicationProgress(
+  observer: PublishScanOptions["onProgress"],
+  event: PublishScanProgress,
+): void {
+  if (observer === undefined) return;
+  try {
+    observer(event);
+  } catch {
+    // Optional progress reporting must not stop issue publication.
+  }
+}
+
+function reportCompletedIssue(
+  event: unknown,
+  publication: PreparedScanPublication,
+  completed: Set<string>,
+  observer: NonNullable<PublishScanOptions["onProgress"]>,
+): void {
+  if (!isRecord(event) || event["type"] !== "item.completed") return;
+  const item = event["item"];
+  if (
+    !isRecord(item) ||
+    item["type"] !== "mcp_tool_call" ||
+    item["server"] !== "codex_apps" ||
+    item["tool"] !== "linear_save_issue"
+  ) {
+    return;
+  }
+  const args = item["arguments"];
+  if (!isRecord(args)) return;
+  const issue = publication.issues.find(
+    (candidate) =>
+      candidate.title === args["title"] &&
+      candidate.description === args["description"],
+  );
+  if (issue === undefined || completed.has(issue.findingId)) return;
+  const expected: Record<string, unknown> = {
+    team: publication.destination.teamId,
+    project: publication.destination.projectId,
+    title: issue.title,
+    description: issue.description,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+  };
+  const keys = Object.keys(args);
+  if (
+    keys.length !== Object.keys(expected).length ||
+    !keys.every(
+      (key) =>
+        Object.hasOwn(expected, key) && Object.is(args[key], expected[key]),
+    )
+  ) {
+    return;
+  }
+  const verified = collectPublicationEvents(
+    JSON.stringify(event),
+    { ...publication, issues: [issue] },
+    "Linear issue creation failed.",
+  );
+  const created = verified.created[0];
+  const failed = verified.failed[0];
+  if (created === undefined && failed === undefined) return;
+  completed.add(issue.findingId);
+  reportPublicationProgress(observer, {
+    type: "issue_completed",
+    findingId: issue.findingId,
+    ...(created === undefined
+      ? { error: failed!.error }
+      : { issueIdentifier: created.issueIdentifier }),
+    completed: completed.size,
+    total: publication.issues.length,
+  });
 }
 
 function publicationPrompt(publication: PreparedScanPublication): string {
@@ -206,6 +321,7 @@ async function runPublicationCodex(
   args: readonly string[],
   input: string,
   environment: NodeJS.ProcessEnv,
+  onEvent?: (event: unknown) => void,
 ): Promise<PublicationCodexResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command.command, [...args], {
@@ -215,9 +331,22 @@ async function runPublicationCodex(
     });
     let stdout = "";
     let stderr = "";
+    let partialLine = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
+      if (onEvent === undefined) return;
+      partialLine += chunk;
+      let lineEnd: number;
+      while ((lineEnd = partialLine.indexOf("\n")) !== -1) {
+        reportCodexEvent(partialLine.slice(0, lineEnd), onEvent);
+        partialLine = partialLine.slice(lineEnd + 1);
+      }
+    });
+    child.stdout.once("end", () => {
+      if (onEvent !== undefined && partialLine.length > 0) {
+        reportCodexEvent(partialLine, onEvent);
+      }
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -245,6 +374,19 @@ async function runPublicationCodex(
   });
 }
 
+function reportCodexEvent(
+  line: string,
+  onEvent: (event: unknown) => void,
+): void {
+  if (line.trim().length === 0) return;
+  try {
+    const event = JSON.parse(line) as unknown;
+    onEvent(event);
+  } catch {
+    // Ignore malformed diagnostic lines and optional observer failures.
+  }
+}
+
 async function writePublicationReceipt(
   result: PublishScanResult,
   environment: NodeJS.ProcessEnv,
@@ -260,4 +402,8 @@ async function writePublicationReceipt(
     encoding: "utf8",
     mode: 0o600,
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

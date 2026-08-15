@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -8,6 +9,7 @@ import {
   type PublicationCodexResult,
   type PublishScanDependencies,
   type PublishScanOptions,
+  type PublishScanProgress,
 } from "../src/publish.js";
 import type {
   PreparedPublicationIssue,
@@ -243,6 +245,238 @@ describe("connected Linear publication", () => {
       dryRun: true,
       issues: publication.issues,
     });
+  });
+
+  test("reports Codex activity and verified issue creation before publication completes", async () => {
+    const publication = preparedPublication(2);
+    const updates: PublishScanProgress[] = [];
+    const reasoning = {
+      type: "item.completed",
+      item: {
+        type: "reasoning",
+        text: "Checking the connected Linear project.",
+      },
+    };
+    const success = JSON.parse(issueEvent(publication.issues[0]!)) as unknown;
+    const failure = JSON.parse(
+      issueEvent(publication.issues[1]!, {
+        status: "failed",
+        error: "The destination rejected this finding.",
+      }),
+    ) as unknown;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      { ...OPTIONS, onProgress: (event) => updates.push(event) },
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_codex, _args, _input, _environment, onEvent) => {
+            expect(updates).toEqual([
+              { type: "started", scanId: "scan-example", total: 2 },
+            ]);
+
+            onEvent!(reasoning);
+            expect(updates.at(-1)).toEqual({
+              type: "codex_event",
+              event: reasoning,
+            });
+
+            onEvent!(success);
+            expect(updates.at(-1)).toEqual({
+              type: "issue_completed",
+              findingId: "finding-1",
+              issueIdentifier: "SEC-1",
+              completed: 1,
+              total: 2,
+            });
+
+            onEvent!(failure);
+            expect(updates.at(-1)).toEqual({
+              type: "issue_completed",
+              findingId: "finding-2",
+              error: "The destination rejected this finding.",
+              completed: 2,
+              total: 2,
+            });
+
+            return {
+              exitCode: 0,
+              stdout: [reasoning, success, failure]
+                .map((event) => JSON.stringify(event))
+                .join("\n"),
+              stderr: "",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(result.counts).toEqual({ findings: 2, created: 1, failed: 1 });
+    expect(updates).toHaveLength(7);
+    expect(updates.at(-1)).toEqual({
+      type: "completed",
+      created: 1,
+      failed: 1,
+      total: 2,
+    });
+  });
+
+  test("streams fragmented Codex JSONL and flushes an unterminated final event", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-stream-"),
+    );
+    temporaryDirectories.push(directory);
+    const publication = preparedPublication();
+    const preload = join(directory, "codex-preload.cjs");
+    await writeFile(
+      preload,
+      [
+        'const fs = require("node:fs");',
+        'const prompt = fs.readFileSync(0, "utf8");',
+        'if (!prompt.includes("BEGIN UNTRUSTED PUBLICATION DATA")) process.exit(2);',
+        "const lines = JSON.parse(process.env.CODEX_PUBLICATION_TEST_EVENTS);",
+        'fs.writeSync(1, "not-json\\n");',
+        "const first = JSON.stringify(lines[0]);",
+        "const boundary = Math.floor(first.length / 2);",
+        "fs.writeSync(1, first.slice(0, boundary));",
+        "fs.writeSync(1, `${first.slice(boundary)}\\r\\n`);",
+        "fs.writeSync(1, JSON.stringify(lines[1]));",
+        "process.exit(0);",
+      ].join("\n"),
+      "utf8",
+    );
+    const reasoning = {
+      type: "item.completed",
+      item: { type: "reasoning", text: "Creating the requested issue." },
+    };
+    const issue = JSON.parse(issueEvent(publication.issues[0]!)) as unknown;
+    const updates: PublishScanProgress[] = [];
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        environment: {
+          ...process.env,
+          NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+          CODEX_PUBLICATION_TEST_EVENTS: JSON.stringify([reasoning, issue]),
+        },
+        resolveCodex: () => ({
+          command: execFileSync("node", ["-p", "process.execPath"], {
+            encoding: "utf8",
+          }).trim(),
+        }),
+      },
+    );
+    delete injected.runCodex;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      { ...OPTIONS, onProgress: (event) => updates.push(event) },
+      injected,
+    );
+
+    expect(result.failed).toEqual([]);
+    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+    expect(updates).toEqual([
+      { type: "started", scanId: "scan-example", total: 1 },
+      { type: "codex_event", event: reasoning },
+      { type: "codex_event", event: issue },
+      {
+        type: "issue_completed",
+        findingId: "finding-1",
+        issueIdentifier: "SEC-1",
+        completed: 1,
+        total: 1,
+      },
+      { type: "completed", created: 1, failed: 0, total: 1 },
+    ]);
+  });
+
+  test("never reports an issue for unverified destinations or repeated tool events", async () => {
+    const publication = preparedPublication();
+    const updates: PublishScanProgress[] = [];
+    const unexpected = JSON.parse(issueEvent(publication.issues[0]!)) as Record<
+      string,
+      unknown
+    >;
+    const item = unexpected["item"] as Record<string, unknown>;
+    const args = item["arguments"] as Record<string, unknown>;
+    args["team"] = "another-team";
+    const valid = JSON.parse(issueEvent(publication.issues[0]!)) as unknown;
+
+    await publishScanInternal(
+      publication.scanDirectory,
+      { ...OPTIONS, onProgress: (event) => updates.push(event) },
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_codex, _args, _input, _environment, onEvent) => {
+            onEvent!(unexpected);
+            expect(updates.at(-1)).toEqual({
+              type: "codex_event",
+              event: unexpected,
+            });
+            onEvent!(valid);
+            onEvent!(valid);
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify(valid),
+              stderr: "",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(updates.filter((event) => event.type === "issue_completed")).toEqual(
+      [
+        {
+          type: "issue_completed",
+          findingId: "finding-1",
+          issueIdentifier: "SEC-1",
+          completed: 1,
+          total: 1,
+        },
+      ],
+    );
+  });
+
+  test("does not allow a failing progress observer to stop issue publication", async () => {
+    const publication = preparedPublication();
+    let observations = 0;
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        onProgress: () => {
+          observations += 1;
+          throw new Error("The optional progress display failed.");
+        },
+      },
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_codex, _args, _input, _environment, onEvent) => {
+            const event = JSON.parse(
+              issueEvent(publication.issues[0]!),
+            ) as unknown;
+            onEvent!(event);
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify(event),
+              stderr: "",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+    expect(observations).toBe(4);
   });
 
   test("does not start Codex or write a receipt when the scan has no findings", async () => {
