@@ -421,8 +421,6 @@ try {
         "linear",
         "--linear-team",
         "team-example",
-        "--project",
-        "project-example",
         "--dry-run",
         "--json",
       ],
@@ -431,6 +429,7 @@ try {
         capture: true,
         env: {
           ...process.env,
+          CODEX_SECURITY_LINEAR_PROJECT: "",
           CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
         },
       },
@@ -438,6 +437,10 @@ try {
   );
   assert.equal(publication.scanId, "scan_example_001");
   assert.equal(publication.uploadId, publication.scanId);
+  assert.deepEqual(publication.destination, {
+    type: "linear",
+    teamId: "team-example",
+  });
   assert.equal(publication.dryRun, true);
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);

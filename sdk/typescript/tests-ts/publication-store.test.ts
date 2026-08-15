@@ -168,7 +168,7 @@ describe("persisted finding publication associations", () => {
   test("upgrades existing scan history and verifies every completed finding before publication", async () => {
     const fixture = await publicationFixture();
     databaseRows(fixture, "DROP TABLE finding_publications");
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version = ?", [
+    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
       29,
     ]);
 
@@ -179,11 +179,15 @@ describe("persisted finding publication associations", () => {
     expect(
       databaseRows(
         fixture,
-        "SELECT version, name FROM schema_migrations WHERE version = ?",
+        "SELECT version, name FROM schema_migrations WHERE version >= ? ORDER BY version",
         [29],
       ),
     ).toEqual([
       { version: 29, name: "persist finding publication associations" },
+      {
+        version: 30,
+        name: "preserve team-only finding publication associations",
+      },
     ]);
     expect(
       databaseRows(
@@ -191,6 +195,56 @@ describe("persisted finding publication associations", () => {
         "SELECT COUNT(*) AS count FROM finding_publications",
       ),
     ).toEqual([{ count: 0 }]);
+  });
+
+  test("upgrades existing project-scoped associations without changing recorded issues", async () => {
+    const fixture = await publicationFixture({ count: 1 });
+    const original = publishedIssue(fixture.publication, 0, "EXAMPLE-401");
+    await recordPublishedIssues(
+      fixture.publication,
+      [original],
+      fixture.environment,
+    );
+
+    databaseRows(
+      fixture,
+      "DROP INDEX finding_publications_team_only_occurrence",
+    );
+    databaseRows(
+      fixture,
+      "DROP INDEX finding_publications_team_only_external_issue",
+    );
+    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version = ?", [
+      30,
+    ]);
+
+    await expect(
+      preparePublicationStore(fixture.publication, fixture.environment),
+    ).resolves.toBeUndefined();
+
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT version, name FROM schema_migrations WHERE version = ?",
+        [30],
+      ),
+    ).toEqual([
+      {
+        version: 30,
+        name: "preserve team-only finding publication associations",
+      },
+    ]);
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT project_id, external_id FROM finding_publications",
+      ),
+    ).toEqual([
+      {
+        project_id: "project-example",
+        external_id: original.issueIdentifier,
+      },
+    ]);
   });
 
   test("rejects a missing local scan-history database without creating one", async () => {
@@ -347,6 +401,64 @@ describe("persisted finding publication associations", () => {
     expect(
       databaseRows(fixture, "SELECT external_url FROM finding_publications"),
     ).toEqual([{ external_url: null }]);
+  });
+
+  test("persists team-only issues with a null project and rejects conflicting associations", async () => {
+    const fixture = await publicationFixture();
+    const publication: PreparedScanPublication = {
+      ...fixture.publication,
+      destination: {
+        type: "linear",
+        teamId: fixture.publication.destination.teamId,
+      },
+    };
+    const first = publishedIssue(publication, 0, "EXAMPLE-411");
+    const second = publishedIssue(publication, 1, "EXAMPLE-412");
+
+    await expect(
+      preparePublicationStore(publication, fixture.environment),
+    ).resolves.toBeUndefined();
+    await expect(
+      recordPublishedIssues(publication, [first], fixture.environment),
+    ).resolves.toEqual([first]);
+    await expect(
+      recordPublishedIssues(publication, [first], fixture.environment),
+    ).resolves.toEqual([first]);
+
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT project_id, external_id FROM finding_publications",
+      ),
+    ).toEqual([{ project_id: null, external_id: first.issueIdentifier }]);
+
+    await expect(
+      recordPublishedIssues(
+        publication,
+        [{ ...second, issueIdentifier: first.issueIdentifier }],
+        fixture.environment,
+      ),
+    ).rejects.toThrow(/already associated with a different finding/u);
+    await expect(
+      recordPublishedIssues(
+        publication,
+        [{ ...first, url: "https://linear.app/example/issue/EXAMPLE-OTHER" }],
+        fixture.environment,
+      ),
+    ).rejects.toThrow(/already associated with a different URL/u);
+
+    await expect(
+      recordPublishedIssues(publication, [first, second], fixture.environment),
+    ).resolves.toEqual([first, second]);
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT project_id, external_id FROM finding_publications ORDER BY id",
+      ),
+    ).toEqual([
+      { project_id: null, external_id: first.issueIdentifier },
+      { project_id: null, external_id: second.issueIdentifier },
+    ]);
   });
 
   test("replays exact associations without suppressing distinct issues on republish", async () => {

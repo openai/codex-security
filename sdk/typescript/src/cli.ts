@@ -1489,7 +1489,7 @@ export async function main(
       project: optionValue("--project")
         .optional()
         .describe(
-          "Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
+          "Optional Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
         ),
       assigneeId: optionValue("--assignee-id")
         .optional()
@@ -1538,14 +1538,14 @@ export async function main(
             "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required.",
           );
         }
-        const projectId =
-          options.project?.trim() ||
-          dependencies.environment["CODEX_SECURITY_LINEAR_PROJECT"]?.trim();
-        if (!projectId) {
-          throw new CodexSecurityError(
-            "--project or CODEX_SECURITY_LINEAR_PROJECT is required.",
-          );
+        const selectedProject = options.project?.trim();
+        if (options.project !== undefined && !selectedProject) {
+          throw new CodexSecurityError("--project must not be empty.");
         }
+        const projectId =
+          selectedProject ||
+          dependencies.environment["CODEX_SECURITY_LINEAR_PROJECT"]?.trim() ||
+          undefined;
 
         let scanDir = args.scanDir;
         let publicationRepository =
@@ -1560,7 +1560,7 @@ export async function main(
             }).prompt;
           if (!prompt.isInteractive()) {
             throw new CodexSecurityError(
-              "Interactive scan selection requires a terminal. Provide a completed scan directory: codex-security publish scan /path/to/sealed-scan --to linear --linear-team TEAM_ID --project PROJECT_ID.",
+              "Interactive scan selection requires a terminal. Provide a completed scan directory: codex-security publish scan /path/to/sealed-scan --to linear --linear-team TEAM_ID.",
             );
           }
           const saved = await dependencies.runWorkbench([
@@ -1726,7 +1726,7 @@ export async function main(
             {
               destination: options.to,
               teamId,
-              projectId,
+              ...(projectId === undefined ? {} : { projectId }),
               dryRun: options.dryRun,
               ...(linearApiKey === undefined ? {} : { linearApiKey }),
               ...(assigneeId === undefined ? {} : { assigneeId }),

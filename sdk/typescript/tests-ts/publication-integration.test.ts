@@ -22,6 +22,7 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "../src/models.js";
+import { recordPublishedIssues } from "../src/publication-store.js";
 import {
   publishScanInternal,
   type PublishScanProgress,
@@ -56,7 +57,7 @@ interface PromptFinding {
 
 interface PublicationPrompt {
   scanId: string;
-  destination: { type: "linear"; teamId: string; projectId: string };
+  destination: { type: "linear"; teamId: string; projectId?: string };
   handoffFile: string;
   publicationFile: string;
   batches: Array<Array<Omit<PromptFinding, "arguments">>>;
@@ -512,6 +513,34 @@ describe("database-backed Linear publication integration", () => {
     cli.publishScan = async (directory, options) => {
       sdkResult = await publishScanInternal(directory, options, {
         environment,
+        recordPublishedIssues: async (
+          publication,
+          issues,
+          currentEnvironment,
+        ) => {
+          const handoffs = join(
+            completed.stateDirectory,
+            "publications",
+            "linear",
+            "handoffs",
+          );
+          const directories = await readdir(handoffs);
+          expect(directories).toHaveLength(1);
+          const records = (
+            await readFile(
+              join(handoffs, directories[0]!, "issues.jsonl"),
+              "utf8",
+            )
+          )
+            .trim()
+            .split(/\r?\n/u)
+            .map((line) => JSON.parse(line) as { arguments: unknown });
+          expect(records).toHaveLength(issues.length);
+          for (const record of records) {
+            expect(record.arguments).not.toHaveProperty("project");
+          }
+          return recordPublishedIssues(publication, issues, currentEnvironment);
+        },
         resolveCodex: () => {
           throw new Error("direct API publication must not resolve Codex");
         },
@@ -788,7 +817,7 @@ describe("database-backed Linear publication integration", () => {
     ).toBe(false);
   });
 
-  test("retains database-backed partial successes when a later batch fails", async () => {
+  test("retains team-only database-backed partial successes when a later batch fails", async () => {
     const completed = await fixture(22);
     const sealed = await artifactDigests(completed.scanDirectory);
     const stdout = capture();
@@ -800,19 +829,26 @@ describe("database-backed Linear publication integration", () => {
         resolveCodex: () => ({ command: "synthetic-codex" }),
         runCodex: async (_command, _args, prompt) => {
           const payload = await publicationPayload(prompt);
+          expect(payload.destination).toEqual({
+            type: "linear",
+            teamId: OPTIONS.teamId,
+          });
           expect(payload.batches.map((batch) => batch.length)).toEqual([20, 2]);
           for (const [batchIndex, batch] of payload.batches.entries()) {
-            const records = batch.map((finding, index) => ({
-              scanId: payload.scanId,
-              findingId: finding.findingId,
-              occurrenceId: finding.occurrenceId,
-              arguments: finding.arguments,
-              ...(batchIndex === 1 && index === 0
-                ? { error: "The second batch issue failed." }
-                : {
-                    issueIdentifier: `SEC-${900 + batchIndex * 20 + index}`,
-                  }),
-            }));
+            const records = batch.map((finding, index) => {
+              expect(finding.arguments).not.toHaveProperty("project");
+              return {
+                scanId: payload.scanId,
+                findingId: finding.findingId,
+                occurrenceId: finding.occurrenceId,
+                arguments: finding.arguments,
+                ...(batchIndex === 1 && index === 0
+                  ? { error: "The second batch issue failed." }
+                  : {
+                      issueIdentifier: `SEC-${900 + batchIndex * 20 + index}`,
+                    }),
+              };
+            });
             await appendFile(
               payload.handoffFile,
               `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
@@ -832,8 +868,6 @@ describe("database-backed Linear publication integration", () => {
           "linear",
           "--linear-team",
           OPTIONS.teamId,
-          "--project",
-          OPTIONS.projectId,
           "--json",
         ],
         stdout.stream,
@@ -843,6 +877,10 @@ describe("database-backed Linear publication integration", () => {
     ).toBe(2);
 
     const result = JSON.parse(stdout.text()) as PublishScanResult;
+    expect(result.destination).toEqual({
+      type: "linear",
+      teamId: OPTIONS.teamId,
+    });
     expect(result.counts).toEqual({ findings: 22, created: 21, failed: 1 });
     expect(result.failed).toEqual([
       {
@@ -852,6 +890,7 @@ describe("database-backed Linear publication integration", () => {
     ]);
     const persisted = storedPublications(completed);
     expect(persisted).toHaveLength(21);
+    expect(persisted.every(({ project_id }) => project_id === null)).toBe(true);
     expect(
       persisted.some(
         ({ finding_id }) => finding_id === result.failed[0]!.findingId,
