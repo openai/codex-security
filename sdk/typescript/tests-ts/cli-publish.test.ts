@@ -1,7 +1,8 @@
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 
@@ -13,6 +14,28 @@ const DESTINATION_OPTIONS = [
   "--project",
   "project-from-flags",
 ] as const;
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+async function publicationScanDirectories(count: number): Promise<string[]> {
+  const root = await mkdtemp(join(tmpdir(), "codex-security-publish-picker-"));
+  temporaryDirectories.push(root);
+  return Promise.all(
+    Array.from({ length: count }, async (_, index) => {
+      const directory = join(root, `scan-${index}`);
+      await mkdir(directory, { mode: 0o700 });
+      return directory;
+    }),
+  );
+}
 
 function publicationResult(
   failed: { findingId: string; error: string }[] = [],
@@ -206,6 +229,64 @@ describe("publish scan", () => {
       expect(stdout.text()).not.toContain(privateValue);
     }
     expect(stderr.text()).toBe("");
+  });
+
+  test("reports sanitized receipt warnings after terminal restoration without contaminating publication output", async () => {
+    const warning =
+      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+    const unsafeWarning = "Injected\u001B[31m\nsecond line\u0007";
+    for (const { json, tty, failed } of [
+      { json: false, tty: false, failed: false },
+      { json: true, tty: false, failed: false },
+      { json: true, tty: true, failed: false },
+      { json: false, tty: true, failed: true },
+    ]) {
+      const stdout = capture();
+      const stderr = capture(tty);
+      const result = {
+        ...publicationResult(
+          failed ? [{ findingId: "finding-2", error: "Private details" }] : [],
+        ),
+        warnings: [warning, unsafeWarning],
+      };
+      const deps = dependencies();
+      deps.publishScan = async () => result;
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            ...(json ? ["--json"] : []),
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(failed ? 2 : 0);
+
+      expect(stderr.text()).toContain(`codex-security: ${warning}\n`);
+      expect(stderr.text()).toContain(
+        "codex-security: Injected [31m second line \n",
+      );
+      expect(stderr.text()).not.toContain("\nsecond line");
+      expect(stderr.text()).not.toContain("\u0007");
+      if (tty) {
+        expect(stderr.text().indexOf("\u001B[?25h\u001B[?1049l")).toBeLessThan(
+          stderr.text().indexOf(`codex-security: ${warning}`),
+        );
+      }
+      if (json) {
+        expect(JSON.parse(stdout.text())).toEqual(result);
+        expect(stdout.text()).not.toContain("\u001B");
+      } else {
+        expect(stdout.text()).toContain("Linear publication");
+        expect(stdout.text()).not.toContain("publication receipt");
+        expect(stdout.text()).not.toContain("Injected");
+      }
+    }
   });
 
   test("omits the issue-list ellipsis when zero to five issues were created", async () => {
@@ -503,8 +584,19 @@ describe("publish scan", () => {
   });
 
   test("interactively selects a completed scan across all repositories", async () => {
-    const firstDirectory = join(tmpdir(), "first-completed-scan");
-    const selectedDirectory = join(tmpdir(), "selected-completed-scan");
+    const directories = await publicationScanDirectories(2);
+    const firstDirectory = directories[0]!;
+    const selectedDirectory = directories[1]!;
+    const root = dirname(firstDirectory);
+    const missingDirectory = join(root, "missing-scan");
+    const replacedDirectory = join(root, "replaced-scan");
+    const linkedDirectory = join(root, "linked-scan");
+    await writeFile(replacedDirectory, "this scan is now a regular file");
+    await symlink(
+      firstDirectory,
+      linkedDirectory,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     const stdout = capture();
     const stderr = capture(true);
     let question = "";
@@ -518,6 +610,16 @@ describe("publish scan", () => {
         workbenchArguments = args;
         return {
           scans: [
+            ...[missingDirectory, replacedDirectory, linkedDirectory].map(
+              (scanDir, index) => ({
+                scanId: `unavailable-scan-${index}`,
+                scanDir,
+                targetSummary: "unavailable-repository-must-not-expand-columns",
+                completedAt: "2026-08-15T01:05:00Z",
+                findingCount: 999,
+                progress: { status: "complete" },
+              }),
+            ),
             {
               scanId: "11111111-2222-3333-4444-555555abc123",
               scanDir: firstDirectory,
@@ -584,6 +686,7 @@ describe("publish scan", () => {
     expect(choices).toHaveLength(2);
     expect(header).toContain("REPOSITORY");
     expect(header).toContain("SCAN ID");
+    expect(header).not.toContain("unavailable");
     expect(choices[0]!.label).toContain("first-repository");
     expect(choices[0]!.label).toContain("...abc123");
     expect(choices[0]!.label).toContain("1 hour ago");
@@ -599,6 +702,9 @@ describe("publish scan", () => {
     expect(choices[1]!.label).not.toContain("2026-08-15T02:15:00Z");
     expect(choices[1]!.label).not.toContain("COMPLETE");
     expect(choices.every((choice) => !choice.label.includes("\n"))).toBe(true);
+    expect(
+      choices.every((choice) => !choice.label.includes("unavailable")),
+    ).toBe(true);
     expect(publishedDirectory).toBe(selectedDirectory);
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
     expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
@@ -704,6 +810,7 @@ describe("publish scan", () => {
       "AGE".padEnd(ageWidth),
       "SCAN ID",
     ].join("  ");
+    const directories = await publicationScanDirectories(scans.length);
 
     for (const color of [true, false]) {
       let header: string | undefined;
@@ -714,7 +821,7 @@ describe("publish scan", () => {
         onWorkbench: () => ({
           scans: scans.map(({ repository, findingCount, elapsed }, index) => ({
             scanId: `synthetic-scan-${String(index).padStart(6, "0")}`,
-            scanDir: join(tmpdir(), `synthetic-scan-${index}`),
+            scanDir: directories[index]!,
             targetSummary: repository,
             completedAt: Number.isNaN(elapsed)
               ? "not-a-timestamp"
@@ -853,6 +960,7 @@ describe("publish scan", () => {
   });
 
   test("removes repository-controlled terminal escapes while retaining intentional choice emphasis", async () => {
+    const directory = (await publicationScanDirectories(1))[0]!;
     for (const color of [true, false]) {
       let choice = "";
       const deps = dependencies({
@@ -861,7 +969,7 @@ describe("publish scan", () => {
           scans: [
             {
               scanId: "prefix-\u001B[31m\u0007def456",
-              scanDir: join(tmpdir(), "completed-scan"),
+              scanDir: directory,
               targetSummary: "payments\u001B[2J-api\u0007\nservice\u0008",
               completedAt: "2026-08-15T01:00:00Z",
               findingCount: 1,
