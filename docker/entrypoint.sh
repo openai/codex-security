@@ -37,7 +37,7 @@ for argument do
             fi
             ;;
         --output-dir|--workers|--mode|--model|--effort|--provider|\
-            --knowledge-base|--max-attempts|--plugin-path|--python|\
+            --knowledge-base|--max-attempts|--max-cost|--plugin-path|--python|\
             --codex|--filter-output|--format|\
             --scan-prompt-file|--post-scan-prompt-file|\
             --token-limit|--token-offset)

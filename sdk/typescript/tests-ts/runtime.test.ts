@@ -1795,7 +1795,8 @@ describe("plugin runtime preparation", () => {
   });
 
   test("uses an explicit Codex executable override", () => {
-    const configured = join(tmpdir(), "custom codex", "codex");
+    const executable = process.platform === "win32" ? "codex.exe" : "codex";
+    const configured = join(tmpdir(), "custom codex", executable);
 
     expect(resolveCodexCommand({ CODEX_CLI_PATH: ` ${configured} ` })).toEqual({
       command: configured,
@@ -1803,12 +1804,37 @@ describe("plugin runtime preparation", () => {
     expect(resolveCodexCommand({ CODEX_CLI_PATH: "   " })).toEqual(
       resolveCodexCommand({}),
     );
-    expect(resolveCodexCommand({ CODEX_CLI_PATH: "./bin/codex" })).toEqual({
-      command: join(process.cwd(), "bin", "codex"),
-    });
+    expect(
+      resolveCodexCommand({ CODEX_CLI_PATH: `./bin/${executable}` }),
+    ).toEqual({ command: join(process.cwd(), "bin", executable) });
     expect(resolveCodexCommand({ Codex_Cli_Path: configured })).toEqual({
       command: configured,
     });
+  });
+
+  test("replaces unspawnable Windows Codex shims with the bundled executable", () => {
+    const fallback = resolveCodexCommand({});
+
+    for (const name of ["codex", "codex.cmd", "CODEX.CMD", "codex.bat"]) {
+      const configured = join(tmpdir(), "npm shims", name);
+      expect(resolveCodexCommand({ CODEX_CLI_PATH: configured })).toEqual(
+        process.platform === "win32" ? fallback : { command: configured },
+      );
+      expect(
+        pluginExecutionEnvironment("/managed/python", {
+          CODEX_CLI_PATH: configured,
+        })["CODEX_CLI_PATH"],
+      ).toBe(process.platform === "win32" ? fallback.command : configured);
+    }
+
+    if (process.platform === "win32") {
+      const result = spawnSync(fallback.command, ["--version"], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^codex-cli\s+\d/u);
+    }
   });
 
   test("launches the bundled Codex through the Deep Scan MCP environment without a global executable", async () => {
@@ -1853,7 +1879,11 @@ describe("plugin runtime preparation", () => {
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
-    const configured = join(tmpdir(), "custom codex", "codex");
+    const configured = join(
+      tmpdir(),
+      "custom codex",
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
 
     expect(
       pluginExecutionEnvironment("/managed/python", {
@@ -4668,6 +4698,24 @@ describe("runtime directories and plugin Python boundary", () => {
         process.umask(previousUmask);
       }
     }
+  });
+
+  test("resolves inherited Python names case-insensitively", async () => {
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+
+    expect(
+      await resolvePluginPython({
+        environment: {
+          PATH: "",
+          Python: interpreter!,
+          ...(process.env["SystemRoot"] === undefined
+            ? {}
+            : { SystemRoot: process.env["SystemRoot"] }),
+        },
+      }),
+    ).toBe(await realpath(interpreter!));
   });
 
   testPosix("uses configured, inherited, and managed Python", async () => {

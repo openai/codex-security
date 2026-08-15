@@ -7,9 +7,17 @@ import {
   existsSync,
   lstatSync,
   realpathSync,
+  type Stats,
   writeSync,
 } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -260,19 +268,69 @@ async function readPromptFiles(
   directory: string,
   scanPromptFile?: string,
   postScanPromptFile?: string,
+  repository = directory,
 ): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
   const [scanPrompt, postScanPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, scanPromptFile), "utf8"),
+      : readRegularInputFile(resolve(directory, scanPromptFile), repository),
     postScanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+      : readRegularInputFile(
+          resolve(directory, postScanPromptFile),
+          repository,
+        ),
   ]);
   return {
     ...(scanPrompt?.trim() ? { scanPrompt } : {}),
     ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
   };
+}
+
+async function readRegularInputFile(
+  path: string,
+  repository: string,
+  metadata?: Pick<Stats, "isFile" | "dev" | "ino">,
+): Promise<string> {
+  const selected = metadata ?? (await lstat(path));
+  if (!selected.isFile()) {
+    throw new CodexSecurityError("Input files must be regular files.");
+  }
+  const canonicalRepository = await realpath(repository);
+  const canonicalParent = await realpath(dirname(path));
+  if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
+    for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+      if (
+        !isOutsidePath(relative(canonicalRepository, await realpath(ancestor)))
+      ) {
+        throw new CodexSecurityError(
+          "Input files must not follow repository directory links outside the selected repository.",
+        );
+      }
+      if (dirname(ancestor) === ancestor) {
+        break;
+      }
+    }
+  }
+  const file = await open(
+    join(canonicalParent, basename(path)),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const opened = await file.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== selected.dev ||
+      opened.ino !== selected.ino
+    ) {
+      throw new CodexSecurityError("Input files must remain regular files.");
+    }
+    return await file.readFile({ encoding: "utf8" });
+  } finally {
+    await file.close();
+  }
 }
 
 interface ScanArguments extends DeepScanOptions {
@@ -1474,6 +1532,13 @@ export async function main(
           .positive()
           .default(1)
           .describe("Maximum scan attempts per repository."),
+        maxCost: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+          ),
         pluginPath: z
           .string()
           .min(1)
@@ -1554,6 +1619,9 @@ export async function main(
             workers: options.workers,
             mode: options.mode,
             maxAttempts: options.maxAttempts,
+            ...(options.maxCost === undefined
+              ? {}
+              : { maxCostUsd: options.maxCost }),
             knowledgeBasePaths: options.knowledgeBase,
             ...prompts,
             config: {
@@ -2394,7 +2462,7 @@ async function runSkill(
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
       const path = resolve(directory, input);
-      const metadata = await stat(path).catch((error: unknown) => {
+      const metadata = await lstat(path).catch((error: unknown) => {
         if (
           typeof error === "object" &&
           error !== null &&
@@ -2417,7 +2485,11 @@ async function runSkill(
           );
         }
         try {
-          contentsOrLiteral = await readFile(path, "utf8");
+          contentsOrLiteral = await readRegularInputFile(
+            path,
+            directory,
+            metadata,
+          );
         } catch {
           throw new CodexSecurityError(
             "Could not read the finding or issue input.",
@@ -2803,12 +2875,14 @@ async function executeScan(
   let failed = false;
   let failure: unknown;
   try {
-    const repository = arguments_.repository ?? dependencies.currentDirectory();
+    const directory = dependencies.currentDirectory();
+    const repository = arguments_.repository ?? directory;
     const target = targetFromArguments(arguments_);
     const prompts = await readPromptFiles(
-      dependencies.currentDirectory(),
+      directory,
       arguments_.scanPromptFile,
       arguments_.postScanPromptFile,
+      resolve(directory, repository),
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,

@@ -311,6 +311,8 @@ describe("CodexSecurity preflight configuration", () => {
   test("uses a root-read filesystem profile with writable workspace and workbench state", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",
@@ -324,6 +326,7 @@ describe("CodexSecurity preflight configuration", () => {
     };
 
     expect(scanRuntimeCodexConfig(original, stateDirectory)).toEqual({
+      approval_policy: "never",
       allow_login_shell: false,
       default_permissions: "codex_security_scan",
       permissions: {
@@ -338,6 +341,8 @@ describe("CodexSecurity preflight configuration", () => {
       },
     });
     expect(original).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",
@@ -360,6 +365,49 @@ describe("CodexSecurity preflight configuration", () => {
           },
         },
       },
+    });
+  });
+
+  test("removes execution and permission overrides from every configured profile", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+    const original = {
+      profile: "selected",
+      profiles: {
+        selected: {
+          model: "profile-model",
+          approval_policy: "on-request",
+          approvals_reviewer: "auto_review",
+          default_permissions: "unsafe",
+          permissions: { unsafe: { filesystem: { ":root": "write" } } },
+          sandbox_mode: "danger-full-access",
+        },
+        other: {
+          model_reasoning_effort: "high",
+          approval_policy: "untrusted",
+          approvals_reviewer: "guardian_subagent",
+          default_permissions: "other-unsafe",
+          permissions: { "other-unsafe": { filesystem: { ":root": "write" } } },
+          sandbox_mode: "workspace-write",
+        },
+      },
+    };
+
+    const hardened = scanRuntimeCodexConfig(original, stateDirectory);
+    expect(hardened).toMatchObject({
+      approval_policy: "never",
+      default_permissions: "codex_security_scan",
+      profile: "selected",
+    });
+    expect(hardened["profiles"]).toEqual({
+      selected: { model: "profile-model" },
+      other: { model_reasoning_effort: "high" },
+    });
+    expect(original.profiles.selected).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
+      default_permissions: "unsafe",
+      permissions: { unsafe: { filesystem: { ":root": "write" } } },
+      sandbox_mode: "danger-full-access",
     });
   });
 

@@ -244,6 +244,67 @@ describe("compact diff scan", () => {
     ]);
   });
 
+  test("omits committed symlinks from the revision inventory", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/handler.py", "value = 1\n");
+    writeSource(repository, "src/deleted-link.py", "handler.py");
+    git(repository, "add", ".");
+    const deletedLink = git(repository, "hash-object", "src/deleted-link.py");
+    git(
+      repository,
+      "update-index",
+      "--cacheinfo",
+      `120000,${deletedLink},src/deleted-link.py`,
+    );
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+
+    rmSync(join(repository, "src", "deleted-link.py"));
+    writeSource(repository, "src/handler.py", "value = 2\n");
+    writeSource(repository, "src/丁.py", "value = 3\n");
+    writeSource(repository, "src/added-link.py", "handler.py");
+    git(repository, "add", ".");
+    const addedLink = git(repository, "hash-object", "src/added-link.py");
+    git(
+      repository,
+      "update-index",
+      "--cacheinfo",
+      `120000,${addedLink},src/added-link.py`,
+    );
+    git(repository, "commit", "-qm", "selected changes");
+    const head = git(repository, "rev-parse", "HEAD");
+    const output = join(root, "in-scope.txt");
+
+    const executable = Bun.which("python3") ?? Bun.which("python");
+    expect(executable).not.toBeNull();
+    const result = spawnSync(
+      executable!,
+      [
+        "-B",
+        "-c",
+        "import locale, runpy, sys; locale.setlocale(locale.LC_CTYPE, 'C'); runpy.run_path(sys.argv.pop(1), run_name='__main__')",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--diff-base",
+        base,
+        "--diff-head",
+        head,
+        "--out",
+        output,
+      ],
+      { encoding: "utf8", env: { ...process.env, PYTHONUTF8: "0" } },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(output, "utf8").split("\n").filter(Boolean)).toEqual([
+      "src/handler.py",
+      "src/丁.py",
+    ]);
+  });
+
   test("keeps staged, unstaged, and untracked working-tree inputs aligned", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");

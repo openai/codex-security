@@ -20,6 +20,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
@@ -209,11 +210,13 @@ describe("multiscan", () => {
             "Review boundaries.\n\nFocus on authentication, authorization.",
           );
           expect(scanOptions.postScanPrompt).toBe("Draft confirmed fixes.");
+          expect(scanOptions.maxCostUsd).toBe(12.5);
           return await completedScan(scanOptions.outputDir!);
         }),
         {
           scanPrompt: "Review boundaries.",
           postScanPrompt: "Draft confirmed fixes.",
+          maxCostUsd: 12.5,
         },
       ),
     );
@@ -227,6 +230,7 @@ describe("multiscan", () => {
     ).toMatchObject({
       scanPrompt: "Review boundaries.",
       postScanPrompt: "Draft confirmed fixes.",
+      maxCostUsd: 12.5,
       tasks: [
         { id: "payments", prompt: "Focus on authentication, authorization." },
       ],
@@ -262,6 +266,89 @@ describe("multiscan", () => {
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "priced", status: "completed", coverage: "complete", cost },
     ]);
+  });
+
+  test("records an exhausted repository budget without retrying the scan", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "over-budget");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nover-budget,${source.path},${source.revision}\n`,
+    );
+    const cost = {
+      model: "gpt-5.6-sol",
+      inputTokens: 1_250,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 0,
+      outputTokens: 30,
+      estimatedUsd: 25.25,
+    };
+    let attempts = 0;
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          attempts += 1;
+          throw new ScanCostLimitExceededError(
+            25,
+            cost,
+            scanOptions.outputDir!,
+          );
+        }),
+        { maxAttempts: 3, maxCostUsd: 25 },
+      ),
+    );
+
+    expect(attempts).toBe(1);
+    expect(summary).toMatchObject({ completed: 0, failed: 1 });
+    expect(await results(summary.resultsPath)).toMatchObject([
+      { id: "over-budget", status: "failed", attempt: 1, cost },
+    ]);
+  });
+
+  test("forwards a bulk CLI cost limit and rejects zero", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "sample");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
+    );
+    const stdout = capture();
+    const stderr = capture();
+    let scanOptions: unknown;
+
+    expect(
+      await main(
+        [
+          "bulk-scan",
+          "repositories.csv",
+          "--output-dir",
+          "results",
+          "--max-cost",
+          "12.5",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: paths.root,
+          onTurn: (_repository, options) => (scanOptions = options),
+        }),
+      ),
+    ).toBe(0);
+    expect(scanOptions).toMatchObject({ maxCostUsd: 12.5 });
+
+    const invalid = capture();
+    expect(
+      await main(
+        ["bulk-scan", "--max-cost=0"],
+        capture().stream,
+        invalid.stream,
+        dependencies({ currentDirectory: paths.root }),
+      ),
+    ).toBe(2);
+    expect(invalid.text()).toContain("expected number to be >0");
   });
 
   test("surfaces optional post-scan warnings without failing completed scans", async () => {
@@ -1428,6 +1515,7 @@ describe("multiscan", () => {
     for (const prompts of [
       { scanPrompt: "Review different boundaries." },
       { postScanPrompt: "Draft confirmed fixes." },
+      { maxCostUsd: 12.5 },
     ]) {
       await expect(
         runMultiscan(options(paths, security, prompts)),
@@ -1516,6 +1604,70 @@ describe("multiscan", () => {
     } finally {
       process.chdir(previousDirectory);
       for (const [name, value] of environment) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  test("removes mixed-case repository Git variables before cloning", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "isolated");
+    const trace = join(paths.root, "git-events.jsonl");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nisolated,${source.path},${source.revision}\n`,
+    );
+    const repositoryVariables = [
+      "Git_Dir",
+      "gIt_Work_Tree",
+      "Git_Index_File",
+      "gIt_Object_Directory",
+      "Git_Alternate_Object_Directories",
+    ];
+    const previous = new Map(
+      [...repositoryVariables, "GIT_TRACE2_EVENT", "GIT_TRACE2_ENV_VARS"].map(
+        (name) => [name, process.env[name]] as const,
+      ),
+    );
+
+    try {
+      for (const name of repositoryVariables) {
+        process.env[name] = join(paths.root, `missing-${name}`);
+      }
+      process.env["GIT_TRACE2_EVENT"] = trace;
+      process.env["GIT_TRACE2_ENV_VARS"] = repositoryVariables.join(",");
+
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) =>
+            completedScan(scanOptions.outputDir!),
+          ),
+        ),
+      );
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
+
+      const leakedVariables = (await readFile(trace, "utf8"))
+        .trim()
+        .split("\n")
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              event: string;
+              param?: string;
+              value?: string;
+            },
+        )
+        .filter(
+          (event) =>
+            event.event === "def_param" &&
+            repositoryVariables.includes(event.param ?? "") &&
+            event.value === join(paths.root, `missing-${event.param}`),
+        );
+      expect(leakedVariables).toEqual([]);
+    } finally {
+      for (const [name, value] of previous) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
@@ -1808,6 +1960,25 @@ describe("multiscan", () => {
       {
         name: "task-id",
         row: `../escape,${source.path},${source.revision},.`,
+      },
+      ...[
+        "CON",
+        "con.txt",
+        "NUL",
+        "AUX.txt",
+        "PRN",
+        "COM1",
+        "com9.log",
+        "LPT1",
+        "lpt9.txt",
+        "report.",
+      ].map((id) => ({
+        name: `task-id-${id}`,
+        row: `${id},${source.path},${source.revision},.`,
+      })),
+      {
+        name: "windows-alias",
+        row: `report,${source.path},${source.revision},.\nreport.,${source.path},${source.revision},.`,
       },
       {
         name: "scope",
