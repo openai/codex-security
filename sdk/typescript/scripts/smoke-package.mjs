@@ -443,6 +443,53 @@ try {
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
 
+  const networkGuard = join(consumer, "reject-publication-network.cjs");
+  await writeFile(
+    networkGuard,
+    'globalThis.fetch = async () => { throw new Error("Publication dry runs must not make network requests."); };\n',
+  );
+  const directPublicationText = run(
+    process.execPath,
+    [
+      "--require",
+      networkGuard,
+      launcher,
+      "publish",
+      "scan",
+      publicationScan,
+      "--to",
+      "linear",
+      "--linear-team",
+      "team-example",
+      "--project",
+      "project-example",
+      "--linear-api-key",
+      "lin_api_SYNTHETIC_INSTALLED_OVERRIDE",
+      "--assignee-id",
+      "security@example.test",
+      "--dry-run",
+      "--json",
+    ],
+    {
+      cwd: consumer,
+      capture: true,
+      env: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+        CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_INSTALLED_ENV",
+      },
+    },
+  );
+  const directPublication = JSON.parse(directPublicationText);
+  assert.equal(directPublication.scanId, publication.scanId);
+  assert.equal(directPublication.dryRun, true);
+  assert.equal(directPublication.counts.findings, 1);
+  assert.equal(directPublication.counts.created, 0);
+  assert.doesNotMatch(
+    directPublicationText,
+    /lin_api_|security@example\.test/u,
+  );
+
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(

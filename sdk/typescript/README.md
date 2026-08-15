@@ -426,6 +426,8 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default Linear team and project for completed-scan publication.                               |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Publish directly to Linear with a personal API key; safer than a command-line key.            |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
@@ -568,10 +570,32 @@ Interactive publication shows a full-screen activity view with live Codex
 output and issue-creation progress. Other terminals receive plain progress on
 stderr, so `--json` output remains machine-readable.
 
-Publishing starts Codex with your existing Codex configuration and connected
-Linear app. Sign in to Codex and connect Linear before publishing. The command
-does not require a Linear API token and does not use the isolated Codex home
-created for security scans.
+By default, publishing starts Codex with your existing Codex configuration and
+connected Linear app. Sign in to Codex and connect Linear before publishing in
+this mode. No separate Linear API token is required, and publication does not
+use the isolated Codex home created for security scans.
+
+To publish directly through the Linear API without starting Codex, configure a
+Linear personal API key:
+
+```bash
+export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID \
+  --project PROJECT_ID
+```
+
+Direct API publication assigns every issue to the authenticated Linear user by
+default. Pass `--assignee-id teammate@example.com` or `--assignee-id USER_ID` to
+assign the issues to another Linear user by email address or user ID.
+`--assignee-id` requires direct API publication.
+
+You can also pass `--linear-api-key KEY`, which takes precedence over
+`CODEX_SECURITY_LINEAR_API_KEY`. Prefer the environment variable to avoid
+exposing your API key in shell history and process listings. API keys are never
+included in publication results, progress output, receipts, scan history, or
+sealed scan artifacts. `--dry-run` never contacts Linear in either mode.
 
 Each finding creates a separate new issue titled
 `[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
@@ -609,6 +633,20 @@ const publication = await publishScan("/path/to/completed-scan", {
 
 console.log(publication.scanId);
 console.log(publication.created.length);
+```
+
+Pass `linearApiKey` to publish directly through the Linear API. Omit
+`assigneeId` to assign issues to the authenticated user, or supply a Linear
+user ID or email address to select another assignee:
+
+```ts
+const directPublication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  projectId: "PROJECT_ID",
+  linearApiKey: process.env["CODEX_SECURITY_LINEAR_API_KEY"],
+  assigneeId: "teammate@example.com",
+});
 ```
 
 ### Scan history and reruns

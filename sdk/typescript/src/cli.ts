@@ -222,7 +222,9 @@ const VALUE_OPTIONS = new Set([
   "--reason",
   "--to",
   "--linear-team",
+  "--linear-api-key",
   "--project",
+  "--assignee-id",
 ]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
@@ -1479,10 +1481,20 @@ export async function main(
       linearTeam: optionValue("--linear-team")
         .optional()
         .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
+      linearApiKey: optionValue("--linear-api-key")
+        .optional()
+        .describe(
+          "Linear personal API key; defaults to CODEX_SECURITY_LINEAR_API_KEY.",
+        ),
       project: optionValue("--project")
         .optional()
         .describe(
           "Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
+        ),
+      assigneeId: optionValue("--assignee-id")
+        .optional()
+        .describe(
+          "Linear assignee email or user ID; API-key publication defaults to its owner.",
         ),
       dryRun: z
         .boolean()
@@ -1500,7 +1512,24 @@ export async function main(
       const onInterrupt = (): void => cancel("SIGINT");
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
+      let linearApiKey: string | undefined;
       try {
+        const selectedApiKey =
+          options.linearApiKey ??
+          dependencies.environment["CODEX_SECURITY_LINEAR_API_KEY"];
+        linearApiKey = selectedApiKey?.trim() || undefined;
+        if (options.linearApiKey !== undefined && linearApiKey === undefined) {
+          throw new CodexSecurityError("--linear-api-key must not be empty.");
+        }
+        const assigneeId = options.assigneeId?.trim();
+        if (options.assigneeId !== undefined && !assigneeId) {
+          throw new CodexSecurityError("--assignee-id must not be empty.");
+        }
+        if (assigneeId !== undefined && linearApiKey === undefined) {
+          throw new CodexSecurityError(
+            "--assignee-id requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
+          );
+        }
         const teamId =
           options.linearTeam?.trim() ||
           dependencies.environment["CODEX_SECURITY_LINEAR_TEAM"]?.trim();
@@ -1699,12 +1728,26 @@ export async function main(
               teamId,
               projectId,
               dryRun: options.dryRun,
+              ...(linearApiKey === undefined ? {} : { linearApiKey }),
+              ...(assigneeId === undefined ? {} : { assigneeId }),
               ...(options.dryRun
                 ? {}
                 : {
                     signal: controller.signal,
                     onProgress: (event: PublishScanProgress) =>
-                      progress.observe(event),
+                      progress.observe(
+                        linearApiKey !== undefined &&
+                          event.type === "issue_completed" &&
+                          event.error !== undefined
+                          ? {
+                              ...event,
+                              error: event.error.replaceAll(
+                                linearApiKey,
+                                "[redacted]",
+                              ),
+                            }
+                          : event,
+                      ),
                   }),
             },
           );
@@ -1712,12 +1755,33 @@ export async function main(
           progress.stop();
         }
         controller.signal.throwIfAborted();
+        if (linearApiKey !== undefined) {
+          const sensitiveKey = linearApiKey;
+          result = {
+            ...result,
+            failed: result.failed.map((issue) => ({
+              ...issue,
+              error: issue.error.replaceAll(sensitiveKey, "[redacted]"),
+            })),
+            ...(result.warnings === undefined
+              ? {}
+              : {
+                  warnings: result.warnings.map((warning) =>
+                    warning.replaceAll(sensitiveKey, "[redacted]"),
+                  ),
+                }),
+          };
+        }
         if (result.failed.length > 0) exitCode = 2;
         if ("warnings" in result && Array.isArray(result.warnings)) {
           for (const warning of result.warnings) {
             if (typeof warning !== "string") continue;
+            const safeWarning =
+              linearApiKey === undefined
+                ? warning
+                : warning.replaceAll(linearApiKey, "[redacted]");
             errorOutput.write(
-              `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
+              `codex-security: ${diagnosticValue(safeErrorMessage(safeWarning))}\n`,
             );
           }
         }
@@ -1745,11 +1809,28 @@ export async function main(
           const recovery =
             error === signal
               ? ""
-              : ` ${diagnosticValue(safeErrorMessage(error))}`;
+              : ` ${diagnosticValue(
+                  safeErrorMessage(
+                    linearApiKey === undefined
+                      ? error
+                      : errorMessage(error).replaceAll(
+                          linearApiKey,
+                          "[redacted]",
+                        ),
+                  ),
+                )}`;
           errorOutput.write(`codex-security: ${reason}${recovery}\n`);
           exitCode = signal === "SIGINT" ? 130 : 143;
         } else {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          const message =
+            linearApiKey === undefined
+              ? errorMessage(error)
+              : diagnosticValue(
+                  safeErrorMessage(
+                    errorMessage(error).replaceAll(linearApiKey, "[redacted]"),
+                  ),
+                );
+          errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
         }
         return undefined;

@@ -170,6 +170,7 @@ const distFiles = new Set(
     "errors",
     "index",
     "knowledge-base",
+    "linear-api",
     "models",
     "multiscan",
     "publication",

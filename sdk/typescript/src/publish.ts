@@ -15,6 +15,10 @@ import {
   safeErrorMessage,
 } from "./errors.js";
 import {
+  prepareLinearApiPublication,
+  type PreparedLinearApiPublication,
+} from "./linear-api.js";
+import {
   prepareScanPublication,
   type LinearPublicationDestination,
   type PreparedPublicationIssue,
@@ -38,6 +42,8 @@ export interface PublishScanOptions {
   destination: "linear";
   teamId: string;
   projectId: string;
+  linearApiKey?: string;
+  assigneeId?: string;
   dryRun?: boolean;
   signal?: AbortSignal;
   onProgress?: (event: PublishScanProgress) => void;
@@ -92,6 +98,7 @@ export interface PublicationCodexResult {
 
 export interface PublishScanDependencies {
   environment?: NodeJS.ProcessEnv;
+  linearFetch?: typeof fetch;
   prepare?: typeof prepareScanPublication;
   resolveCodex?: (environment: NodeJS.ProcessEnv) => CodexCommand;
   runCodex?: (
@@ -135,6 +142,17 @@ export async function publishScanInternal(
     );
   }
 
+  const environment = dependencies.environment ?? process.env;
+  const linearApiKey =
+    options.linearApiKey?.trim() ||
+    environment["CODEX_SECURITY_LINEAR_API_KEY"]?.trim() ||
+    undefined;
+  if (options.assigneeId !== undefined && linearApiKey === undefined) {
+    throw new ConfigurationError(
+      "A Linear API key is required to select a publication assignee.",
+    );
+  }
+
   const prepared = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
     options,
@@ -157,11 +175,21 @@ export async function publishScanInternal(
   }
   if (prepared.issues.length === 0) return result;
 
-  const environment = dependencies.environment ?? process.env;
   await (dependencies.preparePublicationStore ?? preparePublicationStore)(
     prepared,
     environment,
   );
+  options.signal?.throwIfAborted();
+  const directPublication =
+    linearApiKey === undefined
+      ? undefined
+      : await prepareLinearApiPublication(
+          prepared,
+          linearApiKey,
+          options.assigneeId,
+          dependencies.linearFetch ?? fetch,
+          options.signal,
+        );
   options.signal?.throwIfAborted();
   const handoff = await createPublicationHandoff(prepared, environment);
   const progressObserver = options.onProgress;
@@ -170,52 +198,69 @@ export async function publishScanInternal(
     scanId: prepared.scanId,
     total: prepared.issues.length,
   });
-  const command = (dependencies.resolveCodex ?? resolveCodexCommand)(
-    environment,
-  );
-  options.signal?.throwIfAborted();
   const completedFindings = new Set<string>();
-  const invocation = await (dependencies.runCodex ?? runPublicationCodex)(
-    command,
-    [
-      "exec",
-      "--model",
-      "gpt-5.6-luna",
-      "-c",
-      'model_reasoning_effort="low"',
-      "--ephemeral",
-      "--json",
-      "--sandbox",
-      "workspace-write",
-      "--skip-git-repo-check",
-      "--cd",
-      handoff.directory,
-      "-",
-    ],
-    publicationPrompt(prepared, handoff.file, handoff.publicationFile),
-    environment,
-    progressObserver === undefined
-      ? undefined
-      : (event) => {
-          reportPublicationProgress(progressObserver, {
-            type: "codex_event",
-            event,
-          });
-          reportCompletedIssue(
-            event,
-            prepared,
-            completedFindings,
-            progressObserver,
-          );
-        },
-    options.signal,
-  );
+  let invocation: PublicationCodexResult | undefined;
+  if (directPublication !== undefined && linearApiKey !== undefined) {
+    await publishLinearApiIssues(
+      prepared,
+      handoff.file,
+      directPublication,
+      completedFindings,
+      progressObserver,
+      linearApiKey,
+      options.signal,
+    );
+  } else {
+    const command = (dependencies.resolveCodex ?? resolveCodexCommand)(
+      environment,
+    );
+    options.signal?.throwIfAborted();
+    invocation = await (dependencies.runCodex ?? runPublicationCodex)(
+      command,
+      [
+        "exec",
+        "--model",
+        "gpt-5.6-luna",
+        "-c",
+        'model_reasoning_effort="low"',
+        "--ephemeral",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "--cd",
+        handoff.directory,
+        "-",
+      ],
+      publicationPrompt(prepared, handoff.file, handoff.publicationFile),
+      environment,
+      progressObserver === undefined
+        ? undefined
+        : (event) => {
+            reportPublicationProgress(progressObserver, {
+              type: "codex_event",
+              event,
+            });
+            reportCompletedIssue(
+              event,
+              prepared,
+              completedFindings,
+              progressObserver,
+            );
+          },
+      options.signal,
+    );
+  }
   const failureMessage =
-    invocation.exitCode === 0
-      ? "Codex did not create a Linear issue for this finding."
-      : codexFailureMessage(invocation.stderr, invocation.exitCode);
+    directPublication !== undefined
+      ? options.signal?.aborted
+        ? "Linear API publication was interrupted before this finding could be created."
+        : "The Linear API did not create an issue for this finding."
+      : invocation!.exitCode === 0
+        ? "Codex did not create a Linear issue for this finding."
+        : codexFailureMessage(invocation!.stderr, invocation!.exitCode);
   const events = collectPublicationEvents(
-    invocation.stdout,
+    invocation?.stdout ?? "",
     prepared,
     failureMessage,
   );
@@ -236,7 +281,7 @@ export async function publishScanInternal(
         dependencies.recordPublishedIssues ?? recordPublishedIssues
       )(prepared, handoffResults.created, environment);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = publicationErrorDetail(error, linearApiKey);
       throw new CodexSecurityError(
         `Could not persist created Linear issues: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
@@ -253,7 +298,7 @@ export async function publishScanInternal(
         environment,
       );
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = publicationErrorDetail(error, linearApiKey);
       throw new CodexSecurityError(
         `Linear publication was interrupted and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
@@ -291,7 +336,7 @@ export async function publishScanInternal(
     if (result.created.length === 0 || options.signal?.aborted) throw error;
     result.warnings = [
       ...(result.warnings ?? []),
-      `Could not save the publication receipt: ${safeErrorMessage(error)}. Linear issues were already created; do not retry publication.`,
+      `Could not save the publication receipt: ${safeErrorMessage(publicationErrorDetail(error, linearApiKey))}. Linear issues were already created; do not retry publication.`,
     ];
   }
   options.signal?.throwIfAborted();
@@ -302,6 +347,104 @@ export async function publishScanInternal(
     total: result.counts.findings,
   });
   return result;
+}
+
+async function publishLinearApiIssues(
+  publication: PreparedScanPublication,
+  handoffFile: string,
+  client: PreparedLinearApiPublication,
+  completed: Set<string>,
+  observer: PublishScanOptions["onProgress"],
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  let handoffWrites = Promise.resolve();
+  const appendHandoff = async (
+    record: Record<string, unknown>,
+  ): Promise<void> => {
+    const pending = handoffWrites.then(async () => {
+      await appendFile(handoffFile, `${JSON.stringify(record)}\n`, "utf8");
+    });
+    handoffWrites = pending.catch(() => undefined);
+    await pending;
+  };
+
+  for (let index = 0; index < publication.issues.length; index += 20) {
+    if (signal?.aborted) break;
+    const batch = publication.issues.slice(index, index + 20);
+    const settled = await Promise.allSettled(
+      batch.map(async (issue) => {
+        const arguments_ = {
+          team: publication.destination.teamId,
+          project: publication.destination.projectId,
+          title: issue.title,
+          description: issue.description,
+          ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+        };
+        let created: Awaited<
+          ReturnType<PreparedLinearApiPublication["create"]>
+        >;
+        try {
+          created = await client.create(issue);
+        } catch (error) {
+          if (signal?.aborted) return;
+          const message = safeErrorMessage(
+            publicationErrorDetail(error, apiKey),
+          );
+          await appendHandoff({
+            scanId: publication.scanId,
+            findingId: issue.findingId,
+            occurrenceId: issue.occurrenceId,
+            error: message,
+            arguments: arguments_,
+          });
+          completed.add(issue.findingId);
+          reportPublicationProgress(observer, {
+            type: "issue_completed",
+            findingId: issue.findingId,
+            error: message,
+            completed: completed.size,
+            total: publication.issues.length,
+          });
+          return;
+        }
+
+        await appendHandoff({
+          scanId: publication.scanId,
+          findingId: issue.findingId,
+          occurrenceId: issue.occurrenceId,
+          issueIdentifier: created.issueIdentifier,
+          ...(created.url === undefined ? {} : { url: created.url }),
+          arguments: arguments_,
+        });
+        completed.add(issue.findingId);
+        reportPublicationProgress(observer, {
+          type: "issue_completed",
+          findingId: issue.findingId,
+          issueIdentifier: created.issueIdentifier,
+          completed: completed.size,
+          total: publication.issues.length,
+        });
+      }),
+    );
+    const rejected = settled.find(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === "rejected",
+    );
+    if (rejected !== undefined) {
+      throw new CodexSecurityError(
+        `Could not preserve created Linear issues: ${safeErrorMessage(publicationErrorDetail(rejected.reason, apiKey))}. The publication handoff remains at ${handoffFile}; recover it before retrying to avoid creating duplicate issues.`,
+        { cause: rejected.reason },
+      );
+    }
+  }
+}
+
+function publicationErrorDetail(error: unknown, apiKey?: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return apiKey === undefined
+    ? message
+    : message.replaceAll(apiKey, "[redacted]");
 }
 
 function reportPublicationProgress(

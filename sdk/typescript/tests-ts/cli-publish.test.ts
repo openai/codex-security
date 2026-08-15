@@ -118,6 +118,222 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("publishes directly with an explicit Linear API key or its environment default", async () => {
+    const environmentKey = "SYNTHETIC_LINEAR_ENVIRONMENT_SECRET_123";
+    const explicitKey = "SYNTHETIC_LINEAR_ARGUMENT_SECRET_456";
+    for (const { arguments_, environment, expectedKey } of [
+      {
+        arguments_: [],
+        environment: {
+          CODEX_SECURITY_LINEAR_API_KEY: `  ${environmentKey}  `,
+        },
+        expectedKey: environmentKey,
+      },
+      {
+        arguments_: ["--linear-api-key", `  ${explicitKey}  `],
+        environment: {},
+        expectedKey: explicitKey,
+      },
+      {
+        arguments_: [`--linear-api-key=${explicitKey}`],
+        environment: { CODEX_SECURITY_LINEAR_API_KEY: environmentKey },
+        expectedKey: explicitKey,
+      },
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies({ environment });
+      let received: Record<string, unknown> | undefined;
+      deps.publishScan = async (_scanDirectory, options) => {
+        received = { ...options };
+        return publicationResult();
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            ...arguments_,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(received).toMatchObject({
+        destination: "linear",
+        teamId: "team-from-flags",
+        projectId: "project-from-flags",
+        linearApiKey: expectedKey,
+      });
+      expect(received).not.toHaveProperty("assigneeId");
+      expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+      for (const key of [environmentKey, explicitKey]) {
+        expect(stdout.text()).not.toContain(key);
+        expect(stderr.text()).not.toContain(key);
+      }
+    }
+  });
+
+  test("forwards a direct-publication assignee by email address or Linear user ID", async () => {
+    const apiKey = "SYNTHETIC_LINEAR_ASSIGNEE_SECRET_123";
+    for (const assigneeId of [
+      "teammate@example.com",
+      "00000000-1111-2222-3333-444444444444",
+    ]) {
+      const stdout = capture();
+      const stderr = capture(true);
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_LINEAR_API_KEY: apiKey },
+      });
+      let received: Record<string, unknown> | undefined;
+      deps.publishScan = async (_scanDirectory, options) => {
+        received = { ...options };
+        options.onProgress?.({
+          type: "started",
+          scanId: "scan-123",
+          total: 1,
+        });
+        options.onProgress?.({
+          type: "issue_completed",
+          findingId: "finding-1",
+          issueIdentifier: "SEC-123",
+          completed: 1,
+          total: 1,
+        });
+        options.onProgress?.({
+          type: "completed",
+          created: 1,
+          failed: 0,
+          total: 1,
+        });
+        return publicationResult();
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--assignee-id",
+            `  ${assigneeId}  `,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(received).toMatchObject({ linearApiKey: apiKey, assigneeId });
+      expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+      expect(stripVTControlCharacters(stderr.text())).toContain("SEC-123");
+      expect(stdout.text()).not.toContain(apiKey);
+      expect(stderr.text()).not.toContain(apiKey);
+    }
+  });
+
+  test("documents direct Linear authentication and assignment in command help", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.publishScan = async () => {
+      throw new Error("Command help must not publish findings.");
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "--help"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("--linear-api-key");
+    expect(stdout.text()).toContain("CODEX_SECURITY_LINEAR_API_KEY");
+    expect(stdout.text()).toContain("--assignee-id");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("rejects an assignee override without direct Linear API authentication", async () => {
+    for (const environment of [{}, { CODEX_SECURITY_LINEAR_API_KEY: "   " }]) {
+      const stdout = capture();
+      const stderr = capture();
+      let published = false;
+      const deps = dependencies({ environment });
+      deps.publishScan = async () => {
+        published = true;
+        return publicationResult();
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--assignee-id",
+            "teammate@example.com",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(
+        "--assignee-id requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
+      );
+      expect(stdout.text()).toBe("");
+      expect(published).toBe(false);
+    }
+  });
+
+  test("redacts direct Linear API keys from publisher failures and interrupted recovery", async () => {
+    const apiKey = "SYNTHETIC_OPAQUE_LINEAR_CREDENTIAL_123";
+    for (const signal of [undefined, "SIGINT", "SIGTERM"] as const) {
+      const stdout = capture();
+      const stderr = capture(signal !== undefined);
+      const signals = new FakeSignals();
+      const deps = dependencies({ signals });
+      deps.publishScan = async (_scanDirectory, options) => {
+        if (signal !== undefined) signals.emit(signal);
+        expect(options.linearApiKey).toBe(apiKey);
+        throw new Error(`Linear transport rejected ${apiKey}\nNext line.`);
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--linear-api-key",
+            apiKey,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2);
+      expect(stderr.text()).toContain("[redacted]");
+      expect(stdout.text()).toBe("");
+      expect(stdout.text()).not.toContain(apiKey);
+      expect(stderr.text()).not.toContain(apiKey);
+      if (signal !== undefined) {
+        expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+      }
+    }
+  });
+
   test("waits for interrupted publication recovery before honoring either terminal signal", async () => {
     for (const [signal, expectedCode, expectedMessage] of [
       ["SIGINT", 130, "Publication canceled by Ctrl-C."],
@@ -1680,6 +1896,50 @@ describe("publish scan", () => {
         ],
         "Missing value for flag: --project",
       ],
+      [
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--linear-api-key",
+        ],
+        "Missing value for flag: --linear-api-key",
+      ],
+      [
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--assignee-id",
+        ],
+        "Missing value for flag: --assignee-id",
+      ],
+      [
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--linear-api-key",
+          "   ",
+        ],
+        "--linear-api-key must not be empty.",
+      ],
+      [
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--linear-api-key",
+          "SYNTHETIC_LINEAR_KEY",
+          "--assignee-id",
+          "   ",
+        ],
+        "--assignee-id must not be empty.",
+      ],
     ];
 
     for (const [argv, expected] of cases) {
@@ -1770,6 +2030,161 @@ describe("publish scan", () => {
       issues: [],
     });
     expect(stderr.text()).toBe("");
+  });
+
+  test("passes direct Linear credentials and assignee through dry runs without exposing them", async () => {
+    const apiKey = "SYNTHETIC_LINEAR_DRY_RUN_SECRET_123";
+    const stdout = capture();
+    const stderr = capture(true);
+    const signals = new FakeSignals();
+    const deps = dependencies({
+      signals,
+      environment: { CODEX_SECURITY_LINEAR_API_KEY: apiKey },
+    });
+    let received: Record<string, unknown> | undefined;
+    deps.publishScan = async (_scanDirectory, options) => {
+      received = { ...options };
+      return { ...publicationResult(), dryRun: true, issues: [] };
+    };
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--assignee-id",
+          "teammate@example.com",
+          "--dry-run",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(received).toMatchObject({
+      dryRun: true,
+      linearApiKey: apiKey,
+      assigneeId: "teammate@example.com",
+    });
+    expect(received).not.toHaveProperty("signal");
+    expect(received).not.toHaveProperty("onProgress");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanId: "scan-123",
+      dryRun: true,
+      issues: [],
+    });
+    expect(stdout.text()).not.toContain(apiKey);
+    expect(stderr.text()).toBe("");
+    expect(signals.listeners.size).toBe(0);
+  });
+
+  test("redacts opaque direct Linear API keys from human and JSON publication warnings", async () => {
+    const apiKey = "SYNTHETIC_OPAQUE_WARNING_CREDENTIAL_123";
+    for (const json of [false, true]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_LINEAR_API_KEY: apiKey },
+      });
+      deps.publishScan = async () => ({
+        ...publicationResult(),
+        warnings: [`Receipt warning included ${apiKey}.`],
+      });
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            ...(json ? ["--json"] : []),
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      if (json) {
+        expect(JSON.parse(stdout.text())).toEqual({
+          ...publicationResult(),
+          warnings: ["Receipt warning included [redacted]."],
+        });
+      }
+      expect(stdout.text()).not.toContain(apiKey);
+      expect(stderr.text()).toContain("Receipt warning included [redacted].");
+      expect(stderr.text()).not.toContain(apiKey);
+    }
+  });
+
+  test("redacts opaque direct Linear API keys from partial JSON results and live progress", async () => {
+    const apiKey = "SYNTHETIC_OPAQUE_FAILURE_CREDENTIAL_456";
+    for (const interactive of [false, true]) {
+      const stdout = capture();
+      const stderr = capture(interactive);
+      const deps = dependencies({
+        environment: { CODEX_SECURITY_LINEAR_API_KEY: apiKey },
+      });
+      deps.publishScan = async (_scanDirectory, options) => {
+        options.onProgress?.({
+          type: "started",
+          scanId: "scan-123",
+          total: 2,
+        });
+        options.onProgress?.({
+          type: "issue_completed",
+          findingId: "finding-2",
+          error: `Linear rejected ${apiKey}.`,
+          completed: 1,
+          total: 2,
+        });
+        return {
+          ...publicationResult([
+            {
+              findingId: "finding-2",
+              error: `Linear rejected ${apiKey}.`,
+            },
+          ]),
+          warnings: [`Receipt warning included ${apiKey}.`],
+        };
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        failed: [
+          {
+            findingId: "finding-2",
+            error: "Linear rejected [redacted].",
+          },
+        ],
+        warnings: ["Receipt warning included [redacted]."],
+        counts: { findings: 2, created: 1, failed: 1 },
+      });
+      expect(stripVTControlCharacters(stderr.text())).toContain(
+        "Linear rejected [redacted].",
+      );
+      expect(stripVTControlCharacters(stderr.text())).toContain(
+        "Receipt warning included [redacted].",
+      );
+      expect(stdout.text()).not.toContain(apiKey);
+      expect(stderr.text()).not.toContain(apiKey);
+    }
   });
 
   test("surfaces receipt warnings without changing published issues or JSON output", async () => {

@@ -105,7 +105,10 @@ function setFindingIdentity(manifest: ScanManifest, finding: Finding): void {
   ).slice(0, 24)}`;
 }
 
-async function fixture(count: number): Promise<PublicationFixture> {
+async function fixture(
+  count: number,
+  includeCodeEvidence = false,
+): Promise<PublicationFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-publication-integration-")),
   );
@@ -140,6 +143,19 @@ async function fixture(count: number): Promise<PublicationFixture> {
     const finding = structuredClone(example);
     finding.identity.anchor = `${example.identity.anchor}-${index + 1}`;
     finding.title = `Synthetic finding ${index + 1}`;
+    if (includeCodeEvidence) {
+      finding.codeEvidence = [
+        {
+          id: `synthetic-evidence-${index + 1}`,
+          label: "Untrusted archive destination",
+          path: "src/extract.py",
+          startLine: 41,
+          language: "python",
+          code: `write(destination_${index + 1}, user_input)`,
+          explanation: "The requested archive path reaches a filesystem write.",
+        },
+      ];
+    }
     setFindingIdentity(manifest, finding);
     return finding;
   });
@@ -279,6 +295,205 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
+  test("publishes 23 sealed findings directly through authenticated GraphQL and real SQLite", async () => {
+    const completed = await fixture(23, true);
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const key = "opaque-sqlite-direct-api-secret-31415";
+    const stdout = capture();
+    const stderr = capture();
+    const progress: PublishScanProgress[] = [];
+    const requests: Array<{
+      query: string;
+      variables: Record<string, unknown>;
+    }> = [];
+    let active = 0;
+    let maximum = 0;
+    let settled = 0;
+    let sdkResult: PublishScanResult | undefined;
+    const cli = dependencies({ environment: completed.environment });
+    cli.publishScan = async (directory, options) => {
+      sdkResult = await publishScanInternal(
+        directory,
+        {
+          ...options,
+          onProgress: (event) => {
+            progress.push(event);
+            options.onProgress?.(event);
+          },
+        },
+        {
+          environment: completed.environment,
+          resolveCodex: () => {
+            throw new Error("direct API publication must not resolve Codex");
+          },
+          runCodex: async () => {
+            throw new Error("direct API publication must not invoke Codex");
+          },
+          linearFetch: (async (
+            resource: Parameters<typeof fetch>[0],
+            init?: Parameters<typeof fetch>[1],
+          ) => {
+            expect(String(resource)).toBe("https://api.linear.app/graphql");
+            expect(init?.method).toBe("POST");
+            expect(init?.redirect).toBe("error");
+            expect(new Headers(init?.headers).get("authorization")).toBe(key);
+            const request = JSON.parse(String(init?.body)) as {
+              query: string;
+              variables: Record<string, unknown>;
+            };
+            requests.push(request);
+
+            if (request.query.includes("CodexSecurityLinearDestination")) {
+              expect(request.variables).toEqual({
+                teamId: OPTIONS.teamId,
+                projectId: OPTIONS.projectId,
+              });
+              return Response.json({
+                data: {
+                  viewer: { id: "viewer-self" },
+                  team: { id: OPTIONS.teamId },
+                  project: {
+                    id: OPTIONS.projectId,
+                    teams: { nodes: [{ id: OPTIONS.teamId }] },
+                  },
+                },
+              });
+            }
+            if (request.query.includes("CodexSecurityLinearAssigneeByEmail")) {
+              expect(request.variables).toEqual({
+                email: "owner@example.test",
+              });
+              return Response.json({
+                data: {
+                  users: {
+                    nodes: [
+                      { id: "assigned-owner", email: "owner@example.test" },
+                    ],
+                  },
+                },
+              });
+            }
+
+            const input = request.variables["input"] as Record<string, unknown>;
+            const description = input["description"];
+            const index = completed.findings.findIndex(
+              (finding) =>
+                typeof description === "string" &&
+                description.includes(finding.findingId),
+            );
+            expect(index).toBeGreaterThanOrEqual(0);
+            expect(input).toEqual({
+              teamId: OPTIONS.teamId,
+              projectId: OPTIONS.projectId,
+              title: `[Codex Security][HIGH] Synthetic finding ${index + 1}`,
+              description,
+              priority: 2,
+              assigneeId: "assigned-owner",
+            });
+            expect(description).toContain("## Source-code evidence");
+            expect(description).toContain(
+              `write(destination_${index + 1}, user_input)`,
+            );
+            if (index >= 20) expect(settled).toBeGreaterThanOrEqual(20);
+            active += 1;
+            maximum = Math.max(maximum, active);
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            active -= 1;
+            settled += 1;
+            const identifier = `SEC-${900 + index}`;
+            return Response.json({
+              data: {
+                issueCreate: {
+                  success: true,
+                  issue: {
+                    identifier,
+                    url: `https://linear.app/example/issue/${identifier}`,
+                    title: input["title"],
+                    description,
+                    priority: input["priority"],
+                    team: { id: input["teamId"] },
+                    project: { id: input["projectId"] },
+                    assignee: { id: input["assigneeId"] },
+                  },
+                },
+              },
+            });
+          }) as typeof fetch,
+        },
+      );
+      return sdkResult;
+    };
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--project",
+          OPTIONS.projectId,
+          "--linear-api-key",
+          key,
+          "--assignee-id",
+          "owner@example.test",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      ),
+    ).toBe(0);
+
+    expect(requests).toHaveLength(25);
+    expect(maximum).toBe(20);
+    expect(sdkResult?.counts).toEqual({
+      findings: 23,
+      created: 23,
+      failed: 0,
+    });
+    expect(
+      sdkResult?.created.map(({ issueIdentifier }) => issueIdentifier),
+    ).toEqual(Array.from({ length: 23 }, (_, index) => `SEC-${900 + index}`));
+    expect(JSON.parse(stdout.text())).toEqual(sdkResult);
+    expect(JSON.parse(await readFile(receiptPath(completed), "utf8"))).toEqual(
+      sdkResult,
+    );
+    expect(storedPublications(completed)).toEqual(
+      completed.findings.map((finding, index) => ({
+        scan_id: SCAN_ID,
+        finding_id: finding.findingId,
+        occurrence_id: finding.occurrenceId,
+        destination_type: "linear",
+        team_id: OPTIONS.teamId,
+        project_id: OPTIONS.projectId,
+        external_id: `SEC-${900 + index}`,
+        external_url: `https://linear.app/example/issue/SEC-${900 + index}`,
+      })),
+    );
+    expect(
+      progress.filter(({ type }) => type === "issue_completed"),
+    ).toHaveLength(23);
+    expect(progress.at(-1)).toEqual({
+      type: "completed",
+      created: 23,
+      failed: 0,
+      total: 23,
+    });
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+    expect(stdout.text()).not.toContain(key);
+    expect(stderr.text()).not.toContain(key);
+    expect(await readFile(receiptPath(completed), "utf8")).not.toContain(key);
+    expect(
+      (
+        await readFile(join(completed.stateDirectory, "workbench.sqlite3"))
+      ).includes(Buffer.from(key)),
+    ).toBe(false);
+  });
+
   test("publishes 23 sealed findings through a durable handoff without Codex JSON", async () => {
     const completed = await fixture(23);
     const sealed = await artifactDigests(completed.scanDirectory);

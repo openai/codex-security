@@ -4,6 +4,7 @@ import {
   appendFile,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   writeFile,
@@ -141,6 +142,93 @@ function dependencies(
   };
 }
 
+interface LinearApiRequest {
+  query: string;
+  variables: Record<string, unknown>;
+  authorization: string | null;
+  signal: AbortSignal | null;
+}
+
+function linearApiFetch(
+  publication: PreparedScanPublication,
+  options: {
+    onRequest?: (
+      request: LinearApiRequest,
+    ) => Response | undefined | Promise<Response | undefined>;
+  } = {},
+): typeof fetch {
+  return (async (
+    resource: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ) => {
+    expect(String(resource)).toBe("https://api.linear.app/graphql");
+    expect(init?.method).toBe("POST");
+    expect(init?.redirect).toBe("error");
+    const request = JSON.parse(String(init?.body)) as {
+      query: string;
+      variables: Record<string, unknown>;
+    };
+    const observed = {
+      ...request,
+      authorization: new Headers(init?.headers).get("authorization"),
+      signal: init?.signal ?? null,
+    };
+    const custom = await options.onRequest?.(observed);
+    if (custom !== undefined) return custom;
+
+    if (request.query.includes("CodexSecurityLinearDestination")) {
+      return Response.json({
+        data: {
+          viewer: { id: "viewer-self" },
+          team: { id: publication.destination.teamId },
+          project: {
+            id: publication.destination.projectId,
+            teams: { nodes: [{ id: publication.destination.teamId }] },
+          },
+        },
+      });
+    }
+    if (request.query.includes("CodexSecurityLinearAssigneeByEmail")) {
+      return Response.json({
+        data: {
+          users: {
+            nodes: [
+              { id: "assignee-from-email", email: request.variables["email"] },
+            ],
+          },
+        },
+      });
+    }
+    if (request.query.includes("CodexSecurityLinearAssigneeById")) {
+      return Response.json({ data: { user: { id: request.variables["id"] } } });
+    }
+
+    const input = request.variables["input"] as Record<string, unknown>;
+    const index = publication.issues.findIndex(
+      (issue) => issue.title === input["title"],
+    );
+    expect(index).toBeGreaterThanOrEqual(0);
+    const identifier = `SEC-${index + 1}`;
+    return Response.json({
+      data: {
+        issueCreate: {
+          success: true,
+          issue: {
+            identifier,
+            url: `https://linear.app/example/issue/${identifier}`,
+            title: input["title"],
+            description: input["description"],
+            priority: input["priority"] ?? 0,
+            team: { id: input["teamId"] },
+            project: { id: input["projectId"] },
+            assignee: { id: input["assigneeId"] },
+          },
+        },
+      },
+    });
+  }) as typeof fetch;
+}
+
 interface PublicationPromptData {
   scanId: string;
   handoffFile: string;
@@ -226,6 +314,420 @@ async function processHasExited(pid: number): Promise<boolean> {
   }
   return false;
 }
+
+describe("direct Linear API publication", () => {
+  test("uses explicit API keys before environment defaults and never exposes opaque credentials", async () => {
+    for (const scenario of [
+      { explicit: undefined, expected: "lin_api_SYNTHETIC_ENVIRONMENT" },
+      {
+        explicit: "opaque-secret-value-81729",
+        expected: "opaque-secret-value-81729",
+      },
+    ]) {
+      const publication = preparedPublication();
+      const requests: LinearApiRequest[] = [];
+      let persistedHandoff = "";
+      let receipt = "";
+      const injected = dependencies(
+        publication,
+        {},
+        {
+          linearFetch: linearApiFetch(publication, {
+            onRequest: (request) => {
+              requests.push(request);
+              return undefined;
+            },
+          }),
+          resolveCodex: () => {
+            throw new Error("direct publication must not resolve Codex");
+          },
+          runCodex: async () => {
+            throw new Error("direct publication must not invoke Codex");
+          },
+          recordPublishedIssues: async (_prepared, issues) => {
+            const root = join(
+              injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+              "publications",
+              "linear",
+              "handoffs",
+            );
+            const [directory] = await readdir(root);
+            persistedHandoff = await readFile(
+              join(root, directory!, "issues.jsonl"),
+              "utf8",
+            );
+            return [...issues];
+          },
+          writeReceipt: async (result) => {
+            receipt = JSON.stringify(result);
+            if (scenario.explicit !== undefined) {
+              throw new Error(`Receipt rejected ${scenario.expected}`);
+            }
+          },
+        },
+      );
+      injected.environment!["CODEX_SECURITY_LINEAR_API_KEY"] =
+        "lin_api_SYNTHETIC_ENVIRONMENT";
+
+      const result = await publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          ...(scenario.explicit === undefined
+            ? {}
+            : { linearApiKey: scenario.explicit }),
+        },
+        injected,
+      );
+
+      expect(requests.map(({ authorization }) => authorization)).toEqual([
+        scenario.expected,
+        scenario.expected,
+      ]);
+      expect(requests[1]!.variables["input"]).toMatchObject({
+        teamId: OPTIONS.teamId,
+        projectId: OPTIONS.projectId,
+        assigneeId: "viewer-self",
+        title: publication.issues[0]!.title,
+        description: publication.issues[0]!.description,
+        priority: 2,
+      });
+      expect(result.created[0]!.issueIdentifier).toBe("SEC-1");
+      expect(result.warnings).toEqual(
+        scenario.explicit === undefined
+          ? undefined
+          : [
+              "Could not save the publication receipt: Receipt rejected [redacted]. Linear issues were already created; do not retry publication.",
+            ],
+      );
+      expect(persistedHandoff).toContain("SEC-1");
+      for (const material of [
+        persistedHandoff,
+        receipt,
+        JSON.stringify(result),
+      ]) {
+        expect(material).not.toContain(scenario.expected);
+        expect(material).not.toContain("lin_api_SYNTHETIC_ENVIRONMENT");
+      }
+    }
+  });
+
+  test("resolves requested issue assignees by email and user ID before mutation", async () => {
+    for (const scenario of [
+      { requested: "owner@example.test", resolved: "assignee-from-email" },
+      { requested: "specific-user-id", resolved: "specific-user-id" },
+    ]) {
+      const publication = preparedPublication();
+      const requests: LinearApiRequest[] = [];
+      const result = await publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: "lin_api_SYNTHETIC_ASSIGNMENT",
+          assigneeId: scenario.requested,
+        },
+        dependencies(
+          publication,
+          {},
+          {
+            linearFetch: linearApiFetch(publication, {
+              onRequest: (request) => {
+                requests.push(request);
+                return undefined;
+              },
+            }),
+          },
+        ),
+      );
+
+      expect(requests).toHaveLength(3);
+      expect(requests[1]!.query).toContain(
+        scenario.requested.includes("@") ? "AssigneeByEmail" : "AssigneeById",
+      );
+      expect(requests[2]!.variables["input"]).toMatchObject({
+        assigneeId: scenario.resolved,
+      });
+      expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+    }
+  });
+
+  test("starts direct requests in batches of 20, persists each result, and retains later failures", async () => {
+    const publication = preparedPublication(23);
+    const progress: PublishScanProgress[] = [];
+    let active = 0;
+    let maximum = 0;
+    let firstBatchCompleted = 0;
+    let handoffAtSecondBatch = "";
+    let persistedHandoff = "";
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        linearFetch: linearApiFetch(publication, {
+          onRequest: async (request) => {
+            if (!request.query.includes("IssueCreate")) return undefined;
+            const input = request.variables["input"] as Record<string, unknown>;
+            const index = publication.issues.findIndex(
+              (issue) => issue.title === input["title"],
+            );
+            if (index >= 20) {
+              expect(firstBatchCompleted).toBe(20);
+              const root = join(
+                injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+                "publications",
+                "linear",
+                "handoffs",
+              );
+              const [directory] = await readdir(root);
+              handoffAtSecondBatch = await readFile(
+                join(root, directory!, "issues.jsonl"),
+                "utf8",
+              );
+            }
+            active += 1;
+            maximum = Math.max(maximum, active);
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            active -= 1;
+            if (index < 20) firstBatchCompleted += 1;
+            return index === 21
+              ? Response.json({
+                  errors: [
+                    {
+                      message:
+                        "Linear rejected opaque-direct-publication-secret.",
+                    },
+                  ],
+                })
+              : undefined;
+          },
+        }),
+        recordPublishedIssues: async (_prepared, issues) => {
+          const root = join(
+            injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+            "publications",
+            "linear",
+            "handoffs",
+          );
+          const [directory] = await readdir(root);
+          persistedHandoff = await readFile(
+            join(root, directory!, "issues.jsonl"),
+            "utf8",
+          );
+          return [...issues];
+        },
+      },
+    );
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "opaque-direct-publication-secret",
+        onProgress: (event) => progress.push(event),
+      },
+      injected,
+    );
+
+    expect(maximum).toBe(20);
+    expect(handoffAtSecondBatch.trim().split("\n")).toHaveLength(20);
+    expect(result.counts).toEqual({ findings: 23, created: 22, failed: 1 });
+    expect(result.failed).toEqual([
+      { findingId: "finding-22", error: "Linear issue creation was rejected." },
+    ]);
+    expect(
+      result.created.map(({ issueIdentifier }) => issueIdentifier),
+    ).toEqual(
+      Array.from({ length: 23 }, (_, index) => `SEC-${index + 1}`).filter(
+        (identifier) => identifier !== "SEC-22",
+      ),
+    );
+    expect(
+      progress.filter(({ type }) => type === "issue_completed"),
+    ).toHaveLength(23);
+    expect(progress.at(-1)).toEqual({
+      type: "completed",
+      created: 22,
+      failed: 1,
+      total: 23,
+    });
+    expect(persistedHandoff).not.toContain("opaque-direct-publication-secret");
+    expect(JSON.stringify(result)).not.toContain(
+      "opaque-direct-publication-secret",
+    );
+  });
+
+  test("retains validated direct issue mappings when local persistence fails", async () => {
+    const publication = preparedPublication(2);
+    const key = "opaque-recovery-secret-98217";
+    let handoffFile = "";
+    let attempts = 0;
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        linearFetch: linearApiFetch(publication, {
+          onRequest: (request) => {
+            if (request.query.includes("IssueCreate")) attempts += 1;
+            return undefined;
+          },
+        }),
+        recordPublishedIssues: async () => {
+          const root = join(
+            injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+            "publications",
+            "linear",
+            "handoffs",
+          );
+          const [directory] = await readdir(root);
+          handoffFile = join(root, directory!, "issues.jsonl");
+          throw new Error(`Database refused ${key}`);
+        },
+      },
+    );
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, linearApiKey: key },
+        injected,
+      ),
+    ).rejects.toThrow(
+      /Database refused \[redacted\].*publication handoff remains at.*avoid creating duplicate issues/u,
+    );
+
+    expect(attempts).toBe(2);
+    const recovered = await readFile(handoffFile, "utf8");
+    expect(recovered).toContain("SEC-1");
+    expect(recovered).toContain("SEC-2");
+    expect(recovered).not.toContain(key);
+  });
+
+  test("awaits canceled direct requests and recovers verified issues before stopping later batches", async () => {
+    const publication = preparedPublication(23);
+    const controller = new AbortController();
+    const key = "opaque-cancellation-secret-27182";
+    let started = 0;
+    let stopped = 0;
+    let handoffFile = "";
+    let receipt: unknown;
+    let persisted: string[] = [];
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        linearFetch: linearApiFetch(publication, {
+          onRequest: async (request) => {
+            if (!request.query.includes("IssueCreate")) return undefined;
+            started += 1;
+            const input = request.variables["input"] as Record<string, unknown>;
+            if (input["title"] === publication.issues[0]!.title) {
+              return undefined;
+            }
+            return await new Promise<Response>((_resolve, reject) => {
+              request.signal?.addEventListener(
+                "abort",
+                () => {
+                  stopped += 1;
+                  reject(new Error(`Canceled request for ${key}`));
+                },
+                { once: true },
+              );
+            });
+          },
+        }),
+        recordPublishedIssues: async (_prepared, issues) => {
+          expect(started).toBe(20);
+          expect(stopped).toBe(19);
+          persisted = issues.map((issue) => issue.issueIdentifier);
+          const root = join(
+            injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+            "publications",
+            "linear",
+            "handoffs",
+          );
+          const [directory] = await readdir(root);
+          handoffFile = join(root, directory!, "issues.jsonl");
+          return [...issues];
+        },
+        writeReceipt: async (result) => {
+          receipt = result;
+        },
+      },
+    );
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: key,
+          signal: controller.signal,
+          onProgress: (event) => {
+            if (
+              event.type === "issue_completed" &&
+              event.findingId === publication.issues[0]!.findingId
+            ) {
+              controller.abort("SIGINT");
+            }
+          },
+        },
+        injected,
+      ),
+    ).rejects.toThrow(
+      /Linear publication was interrupted.*publication handoff remains at.*avoid creating duplicate issues/u,
+    );
+
+    expect(started).toBe(20);
+    expect(stopped).toBe(19);
+    expect(persisted).toEqual(["SEC-1"]);
+    expect(receipt).toMatchObject({
+      created: [{ findingId: "finding-1", issueIdentifier: "SEC-1" }],
+      counts: { findings: 23, created: 1, failed: 22 },
+    });
+    const recovery = await readFile(handoffFile, "utf8");
+    expect(recovery).toContain("SEC-1");
+    expect(recovery).not.toContain(key);
+    expect(JSON.stringify(receipt)).not.toContain(key);
+  });
+
+  test("previews direct publication without network access and rejects assignees without API keys", async () => {
+    const publication = preparedPublication();
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "lin_api_SYNTHETIC_DRY_RUN",
+        assigneeId: "owner@example.test",
+        dryRun: true,
+      },
+      dependencies(
+        publication,
+        {},
+        {
+          linearFetch: (() => {
+            throw new Error("dry runs must not access the Linear API");
+          }) as unknown as typeof fetch,
+          preparePublicationStore: async () => {
+            throw new Error("dry runs must not inspect publication storage");
+          },
+        },
+      ),
+    );
+
+    expect(result.dryRun).toBe(true);
+    expect(result.issues).toEqual(publication.issues);
+    expect(JSON.stringify(result)).not.toContain("lin_api_SYNTHETIC_DRY_RUN");
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, assigneeId: "owner@example.test" },
+        dependencies(publication),
+      ),
+    ).rejects.toThrow(
+      "A Linear API key is required to select a publication assignee.",
+    );
+  });
+});
 
 describe("connected Linear publication", () => {
   test("rejects pre-aborted publication before preparing scans or touching local state", async () => {
