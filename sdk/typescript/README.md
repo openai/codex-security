@@ -207,6 +207,7 @@ npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --headless
 npx @openai/codex-security scan /path/to/repository --patch
 npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --json
+npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --create-pr
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -254,6 +255,7 @@ npx @openai/codex-security patch /path/outside/repository/findings.json "Missing
 npx @openai/codex-security patch "Missing authorization check" --effort high
 npx @openai/codex-security patch OCCURRENCE_ID
 npx @openai/codex-security patch --scan SCAN_ID --severity high --json
+npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
 npx @openai/codex-security patch --scan latest --severity medium
 npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
 npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
@@ -346,10 +348,14 @@ ask whether to open a color-coded finding browser with complete finding details
 and a separate patch-instructions panel. Use the arrow keys to
 browse, `Tab` to inspect details, `Space` to select individual findings, `i` to
 edit instructions for the focused finding, `1`–`4` to select by severity, and
-`Enter` to patch. Press `q` to keep the checkout unchanged. JSON scan results
-include `patchSeverity` and one `patches` entry per selected finding, with status
-`verified`, `no_change`, `blocked`, or `failed`. When `--fail-on-severity` is
-also set, verified and already-fixed findings no longer fail the policy.
+`r` to optionally create a GitHub pull request after patching. Press `Enter` to
+patch or `q` to keep the checkout unchanged. Add `--create-pr` to `scan --patch`
+or a saved-finding `patch` command to commit only verified patch files and open
+a pull request with `gh`. JSON scan results include `patchSeverity`. Scan and
+saved-finding results include one `patches` entry per selected finding with
+status `verified`, `no_change`, `blocked`, or `failed`, plus `pullRequest` when
+one is created. When `--fail-on-severity` is also set, verified and already-fixed
+findings no longer fail the policy.
 
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
 the implied provider. Use `--model gpt-5.6-terra` to switch models and

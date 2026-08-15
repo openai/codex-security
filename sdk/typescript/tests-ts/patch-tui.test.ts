@@ -100,6 +100,9 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).toContain("DETAILS");
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");
     expect(app.lastFrame()).toContain("Add instructions for this finding.");
+    expect(app.lastFrame()).toContain(
+      "[ ] Create GitHub pull request after patching",
+    );
     expect(app.lastFrame()).toContain("3/3 selected");
     expect(app.lastFrame()).toContain("SUMMARY");
     expect(app.lastFrame()).toContain("Attacker-controlled input");
@@ -297,6 +300,37 @@ describe("interactive patch finding browser", () => {
         instructions: {
           occ_1: "Use the shared 2FA helper, not a new dependency.",
         },
+      },
+    ]);
+  });
+
+  test("optionally creates a pull request after selected patches", async () => {
+    const selected: (PatchSelection | null)[] = [];
+    const app = render(
+      createElement(PatchTui, {
+        repository: "/work/example",
+        findings: findings(["high"]),
+        color: false,
+        onComplete: (value) => selected.push(value),
+      }),
+    );
+
+    expect(app.lastFrame()).toContain(
+      "[ ] Create GitHub pull request after patching",
+    );
+    app.stdin.write("r");
+    await settle();
+    expect(app.lastFrame()).toContain(
+      "[✓] Create GitHub pull request after patching",
+    );
+    app.stdin.write("\r");
+    await settle();
+
+    expect(selected).toEqual([
+      {
+        severity: "high",
+        occurrenceIds: ["occ_1"],
+        createPullRequest: true,
       },
     ]);
   });

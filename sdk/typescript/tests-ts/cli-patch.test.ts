@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
@@ -177,6 +181,209 @@ describe("scan and patch workflow", () => {
     expect(invocation).toContain(
       'model_providers.fireworks.env_key="FIREWORKS_API_KEY"',
     );
+  });
+
+  test("creates a GitHub pull request from verified scan patch files", async () => {
+    const result = resultWithFindings(["high", "medium"]);
+    result.findings.findings[0]!.title = "Synthetic private finding";
+    const commands: Array<{
+      command: "git" | "gh";
+      args: readonly string[];
+      repository: string;
+    }> = [];
+    const url = "https://github.example.test/example/repository/pull/12";
+    const outcome = await runWorkflow(
+      ["scan", "--patch", "--patch-severity", "high", "--create-pr", "--json"],
+      {
+        result,
+        onCodex: (args, output) => {
+          completePatches(args, output);
+          return 0;
+        },
+        onRepositoryCommand: (command, args, repository) => {
+          commands.push({ command, args, repository });
+          return command === "gh" ? url : "";
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(0);
+    expect(commands).toEqual([
+      {
+        command: "git",
+        args: ["switch", "-c", "codex-security/patch-scan"],
+        repository: "/current/repository",
+      },
+      {
+        command: "git",
+        args: ["--literal-pathspecs", "add", "--", "src/finding-1.ts"],
+        repository: "/current/repository",
+      },
+      {
+        command: "git",
+        args: [
+          "--literal-pathspecs",
+          "commit",
+          "--only",
+          "-m",
+          "fix: patch verified security findings",
+          "--",
+          "src/finding-1.ts",
+        ],
+        repository: "/current/repository",
+      },
+      {
+        command: "git",
+        args: ["push", "--set-upstream", "origin", "codex-security/patch-scan"],
+        repository: "/current/repository",
+      },
+      {
+        command: "gh",
+        args: [
+          "pr",
+          "create",
+          "--head",
+          "codex-security/patch-scan",
+          "--title",
+          "fix: patch verified security findings",
+          "--body",
+          "Applies verified security fixes from a completed scan.",
+        ],
+        repository: "/current/repository",
+      },
+    ]);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      pullRequest: { branch: "codex-security/patch-scan", url },
+    });
+    expect(outcome.stderr).toContain(`Pull request: ${url}`);
+    expect(JSON.stringify(commands)).not.toContain("Synthetic private finding");
+  });
+
+  test("pushes only verified patch files and preserves unrelated staged changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-pr-"));
+    const repository = join(directory, "repository");
+    const remote = join(directory, "remote.git");
+    await mkdir(join(repository, "src"), { recursive: true });
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repository,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+
+    try {
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("config", "commit.gpgsign", "false");
+      await writeFile(join(repository, "src", "finding-1.ts"), "unsafe\n");
+      await writeFile(join(repository, "unrelated.ts"), "original\n");
+      git("add", "--", ".");
+      git("commit", "-m", "Initial synthetic checkout");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      git("push", "--set-upstream", "origin", "main");
+      await writeFile(join(repository, "unrelated.ts"), "staged separately\n");
+      git("add", "--", "unrelated.ts");
+
+      const outcome = await runWorkflow(
+        ["scan", "--patch", "--create-pr", "--json"],
+        {
+          currentDirectory: repository,
+          result: resultWithFindings(["high"]),
+          onCodex: async (args, output) => {
+            await writeFile(join(repository, "src", "finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (command, args) =>
+            command === "git"
+              ? git(...args)
+              : "https://github.example.test/example/repository/pull/15",
+        },
+      );
+
+      expect(outcome.exitCode).toBe(0);
+      expect(git("branch", "--show-current")).toBe("codex-security/patch-scan");
+      expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
+        "src/finding-1.ts",
+      );
+      expect(git("diff", "--cached", "--name-only")).toBe("unrelated.ts");
+      expect(git("rev-parse", "HEAD")).toBe(
+        git("rev-parse", "origin/codex-security/patch-scan"),
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("does not publish blocked, unchanged, or repository-external patches", async () => {
+    for (const status of ["blocked", "no_change", "outside"] as const) {
+      let commandStarted = false;
+      const outcome = await runWorkflow(
+        ["scan", "--patch", "--create-pr", "--json"],
+        {
+          result: resultWithFindings(["high"]),
+          onCodex: (_args, output) => {
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: status === "outside" ? "verified" : status,
+                    files: status === "outside" ? ["../outside.ts"] : [],
+                    ...(status === "outside"
+                      ? { verification: "Focused checks pass." }
+                      : status === "blocked"
+                        ? { reason: "A required service is unavailable." }
+                        : {}),
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+          onRepositoryCommand: () => {
+            commandStarted = true;
+            return "";
+          },
+        },
+      );
+
+      expect(commandStarted).toBe(false);
+      expect(outcome.exitCode).toBe(
+        status === "blocked" ? 1 : status === "outside" ? 2 : 0,
+      );
+      expect(JSON.parse(outcome.stdout)).not.toHaveProperty("pullRequest");
+      if (status === "outside") {
+        expect(outcome.stderr).toContain(
+          "Patch files must remain inside the scanned repository.",
+        );
+      }
+    }
+  });
+
+  test("keeps verified scan results when pull request creation fails", async () => {
+    const outcome = await runWorkflow(
+      ["scan", "--patch", "--create-pr", "--json"],
+      {
+        result: resultWithFindings(["high"]),
+        onCodex: (args, output) => {
+          completePatches(args, output);
+          return 0;
+        },
+        onRepositoryCommand: () => {
+          throw new Error("GitHub authentication failed.");
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("GitHub authentication failed.");
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      patchSeverity: "low",
+      patches: [{ occurrenceId: "occ_1", status: "verified" }],
+    });
   });
 
   test("keeps blocked findings in the failure policy and rejects unverified results", async () => {
@@ -444,6 +651,39 @@ describe("scan and patch workflow", () => {
     expect(patched[0]).not.toHaveProperty("instructions");
   });
 
+  test("creates a pull request when selected in the interactive review", async () => {
+    let published = false;
+    const url = "https://github.example.test/example/repository/pull/13";
+    const outcome = await runWorkflow(
+      ["scan"],
+      {
+        result: resultWithFindings(["high"]),
+        onCodex: (args, output) => {
+          completePatches(args, output);
+          return 0;
+        },
+        onRepositoryCommand: (command) => {
+          published ||= command === "gh";
+          return command === "gh" ? url : "";
+        },
+      },
+      {
+        interactive: true,
+        configure: (value) => {
+          value.patchEditor = async () => ({
+            severity: "high",
+            occurrenceIds: ["occ_1"],
+            createPullRequest: true,
+          });
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(0);
+    expect(published).toBe(true);
+    expect(outcome.stderr).toContain(`Pull request: ${url}`);
+  });
+
   test("patches a saved scan by severity and supports structured output", async () => {
     const result = resultWithFindings(["high", "medium"]);
     let patched: Finding[] = [];
@@ -476,6 +716,66 @@ describe("scan and patch workflow", () => {
       repository: "/saved/repository",
       patches: [{ occurrenceId: "occ_1", status: "verified" }],
     });
+  });
+
+  test("creates a pull request for verified saved-finding patches", async () => {
+    const result = resultWithFindings(["high"]);
+    const url = "https://github.example.test/example/repository/pull/14";
+    let repository = "";
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        onWorkbench: (): JsonObject => ({
+          scan: {
+            scanId: "scan-1",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: (args, output) => {
+          completePatches(args, output);
+          return 0;
+        },
+        onRepositoryCommand: (command, _args, target) => {
+          repository = target;
+          return command === "gh" ? url : "";
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(0);
+    expect(repository).toBe("/saved/repository");
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      scanId: "scan-1",
+      pullRequest: { branch: "codex-security/patch-scan-1", url },
+    });
+  });
+
+  test("redacts credentials when saved-finding pull request creation fails", async () => {
+    const result = resultWithFindings(["high"]);
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr"],
+      {
+        onWorkbench: (): JsonObject => ({
+          scan: {
+            scanId: "scan-1",
+            targetPath: "/saved/repository",
+            findings: result.findings.findings as unknown as JsonObject[],
+          },
+        }),
+        onCodex: (args, output) => {
+          completePatches(args, output);
+          return 0;
+        },
+        onRepositoryCommand: () => {
+          throw new Error("GitHub rejected github_pat_SYNTHETIC_SECRET_123");
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain("[redacted]");
+    expect(outcome.stderr).not.toContain("SYNTHETIC_SECRET_123");
   });
 
   test("resolves a finding identifier to its saved scan and checkout", async () => {
@@ -608,5 +908,21 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(["scan", "--patch-severity", "high"]);
     expect(outcome.exitCode).toBe(2);
     expect(outcome.stderr).toContain("--patch-severity requires --patch");
+  });
+
+  test("requires verified patching before creating a pull request", async () => {
+    const scan = await runWorkflow(["scan", "--create-pr"]);
+    expect(scan.exitCode).toBe(2);
+    expect(scan.stderr).toContain("--create-pr requires --patch");
+
+    const literal = await runWorkflow([
+      "patch",
+      "Synthetic security issue",
+      "--create-pr",
+    ]);
+    expect(literal.exitCode).toBe(2);
+    expect(literal.stderr).toContain(
+      "--create-pr requires a saved finding identifier or --scan",
+    );
   });
 });

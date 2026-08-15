@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
-import { execFileSync, spawn } from "node:child_process";
+import {
+  execFile as execFileCallback,
+  execFileSync,
+  spawn,
+} from "node:child_process";
 import {
   accessSync,
   constants,
@@ -33,9 +37,8 @@ import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { stripVTControlCharacters } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { stripVTControlCharacters } from "node:util";
+import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -133,6 +136,7 @@ import {
   type ScanMode,
   type ScanTarget,
 } from "./targets.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -145,6 +149,7 @@ import {
 } from "./version.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
+const execFile = promisify(execFileCallback);
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
@@ -676,6 +681,7 @@ interface ScanArguments extends DeepScanOptions {
   failOnSeverity?: FailureSeverity;
   patch?: boolean;
   patchSeverity?: FailureSeverity;
+  createPr?: boolean;
   maxCostUsd?: number;
   headless?: boolean;
   dryRun: boolean;
@@ -743,6 +749,11 @@ interface SelectedFindings {
   findings: Finding[];
 }
 
+interface CreatedPullRequest {
+  branch: string;
+  url: string;
+}
+
 interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
@@ -777,6 +788,11 @@ interface CliDependencies {
     output?: SkillCommandOutput,
     environment?: NodeJS.ProcessEnv,
   ): Promise<number>;
+  runRepositoryCommand(
+    command: "git" | "gh",
+    args: readonly string[],
+    repository: string,
+  ): Promise<string>;
   bulkScan?: BulkScanDiscoveryDependencies;
   linearClient?: LinearClientFactory;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
@@ -844,6 +860,24 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       resolveCodexCommand(environment),
       environment,
     ),
+  runRepositoryCommand: async (command, args, repository) => {
+    const executable = await resolveTrustedExecutable(
+      command,
+      process.env,
+      repository,
+    );
+    if (executable === null) {
+      throw new CodexSecurityError(
+        `${command} is not available on a trusted PATH.`,
+      );
+    }
+    const { stdout } = await execFile(executable.executable, [...args], {
+      cwd: repository,
+      env: executable.environment,
+      windowsHide: true,
+    });
+    return stdout.trim();
+  },
   exportFindings: async (arguments_, output) => {
     const environment = exportEnvironment();
     const python = await resolvePluginPython({
@@ -2052,6 +2086,10 @@ export async function main(
             .enum(REPORTABLE_SEVERITIES)
             .optional()
             .describe("Patch findings at or above LEVEL; requires --patch."),
+          createPr: z
+            .boolean()
+            .default(false)
+            .describe("Create a GitHub pull request after verified patches."),
           maxCost: z
             .number()
             .positive()
@@ -2100,6 +2138,9 @@ export async function main(
             message: "--patch-severity requires --patch.",
           },
         )
+        .refine((options) => !options.createPr || options.patch, {
+          message: "--create-pr requires --patch.",
+        })
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
@@ -2170,6 +2211,7 @@ export async function main(
             failOnSeverity: options.failOnSeverity,
             patch: options.patch,
             patchSeverity: options.patchSeverity,
+            createPr: options.createPr,
             maxCostUsd: options.maxCost,
             headless: options.headless,
             dryRun: options.dryRun,
@@ -2588,6 +2630,10 @@ export async function main(
           .optional()
           .describe("JSON Linear issue filter for --linear-project."),
         linearApiKey: linearApiKeyOption(),
+        createPr: z
+          .boolean()
+          .default(false)
+          .describe("Create a GitHub pull request after verified patches."),
         codex: z
           .array(optionValue("--codex"))
           .default([])
@@ -2638,11 +2684,21 @@ export async function main(
               dependencies,
             );
             exitCode = patchExitCode(patches);
+            const pullRequest =
+              options.createPr && exitCode === 0
+                ? await createPatchPullRequest(
+                    selected,
+                    patches,
+                    errorOutput,
+                    dependencies,
+                  )
+                : undefined;
             if (format === "json" || format === "jsonl") {
               return {
                 scanId: selected.scanId,
                 repository: selected.repository,
                 patches,
+                ...(pullRequest === undefined ? {} : { pullRequest }),
               };
             }
             return;
@@ -2655,6 +2711,11 @@ export async function main(
           if (options.severity !== undefined) {
             throw new CodexSecurityError(
               "--severity requires a saved finding identifier or --scan.",
+            );
+          }
+          if (options.createPr) {
+            throw new CodexSecurityError(
+              "--create-pr requires a saved finding identifier or --scan.",
             );
           }
           if (format === "json" || format === "jsonl") {
@@ -2696,7 +2757,7 @@ export async function main(
           );
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
         }
       },
     })
@@ -3480,6 +3541,71 @@ async function selectSavedFindings(
 function patchExitCode(patches: readonly FindingPatch[]): number {
   if (patches.some(({ status }) => status === "failed")) return 2;
   return patches.some(({ status }) => status === "blocked") ? 1 : 0;
+}
+
+async function createPatchPullRequest(
+  selected: SelectedFindings,
+  patches: readonly FindingPatch[],
+  stderr: Writable,
+  dependencies: CliDependencies,
+): Promise<CreatedPullRequest | undefined> {
+  const files = [
+    ...new Set(
+      patches
+        .filter(({ status }) => status === "verified")
+        .flatMap(({ files }) => files),
+    ),
+  ].map((file) => {
+    const path = relative(
+      selected.repository,
+      resolve(selected.repository, file),
+    );
+    if (
+      path === "" ||
+      path === ".." ||
+      path.startsWith(`..${sep}`) ||
+      isAbsolute(path)
+    ) {
+      throw new CodexSecurityError(
+        "Patch files must remain inside the scanned repository.",
+      );
+    }
+    return path;
+  });
+  if (files.length === 0) {
+    stderr.write("No verified patch changes to publish.\n");
+    return;
+  }
+
+  const branch = `codex-security/patch-${selected.scanId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
+  const title = "fix: patch verified security findings";
+  const run = (command: "git" | "gh", args: string[]) =>
+    dependencies.runRepositoryCommand(command, args, selected.repository);
+  stderr.write("Creating a GitHub pull request for verified patches...\n");
+  await run("git", ["switch", "-c", branch]);
+  await run("git", ["--literal-pathspecs", "add", "--", ...files]);
+  await run("git", [
+    "--literal-pathspecs",
+    "commit",
+    "--only",
+    "-m",
+    title,
+    "--",
+    ...files,
+  ]);
+  await run("git", ["push", "--set-upstream", "origin", branch]);
+  const url = await run("gh", [
+    "pr",
+    "create",
+    "--head",
+    branch,
+    "--title",
+    title,
+    "--body",
+    "Applies verified security fixes from a completed scan.",
+  ]);
+  stderr.write(`Pull request: ${safePatchText(url)}\n`);
+  return { branch, url };
 }
 
 function safePatchText(value: string): string {
@@ -4862,12 +4988,26 @@ async function executeScan(
           findingInstructions: patchSelection?.instructions,
         },
       );
+      scanData = { ...scanData, patchSeverity: patchThreshold, patches };
+      if (
+        (arguments_.createPr || patchSelection?.createPullRequest) &&
+        patchExitCode(patches) === 0
+      ) {
+        const pullRequest = await createPatchPullRequest(
+          selected,
+          patches,
+          errorOutput,
+          dependencies,
+        );
+        if (pullRequest !== undefined) {
+          scanData = { ...scanData, pullRequest };
+        }
+      }
     } catch (error) {
       errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
       scanData = { ...scanData, patches };
       return completedScan(2);
     }
-    scanData = { ...scanData, patchSeverity: patchThreshold, patches };
   }
 
   const resolved = new Set(

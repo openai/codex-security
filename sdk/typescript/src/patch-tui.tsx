@@ -46,6 +46,7 @@ export interface PatchSelection {
   severity: PatchSeverity;
   occurrenceIds: string[];
   instructions?: Record<string, string>;
+  createPullRequest?: boolean;
 }
 
 interface PatchTuiProps {
@@ -372,6 +373,7 @@ export function PatchTui({
   const [offset, setOffset] = useState(0);
   const [preset, setPreset] = useState<PatchSeverity>("low");
   const [instructions, setInstructions] = useState<Record<string, string>>({});
+  const [createPullRequest, setCreatePullRequest] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [selected, setSelected] = useState(
@@ -379,7 +381,7 @@ export function PatchTui({
   );
   const rows = stdout.rows ?? 28;
   const columns = stdout.columns ?? 100;
-  const visibleRows = Math.max(4, rows - 14);
+  const visibleRows = Math.max(4, rows - 15);
   const listStart = Math.max(
     0,
     Math.min(focused - visibleRows + 1, findings.length - visibleRows),
@@ -460,9 +462,12 @@ export function PatchTui({
           ...(Object.keys(findingInstructions).length === 0
             ? {}
             : { instructions: findingInstructions }),
+          ...(createPullRequest ? { createPullRequest: true } : {}),
         });
       }
       exit();
+    } else if (input === "r") {
+      setCreatePullRequest((previous) => !previous);
     } else if (input === "i") {
       const occurrenceId = findings[focusedFinding.current]!.occurrenceId;
       setDraft(instructions[occurrenceId] ?? "");
@@ -643,6 +648,14 @@ export function PatchTui({
           </Text>
         )}
       </Box>
+
+      <Text wrap="truncate-end">
+        <Text color={createPullRequest ? success : muted}>
+          {createPullRequest ? "[✓]" : "[ ]"}
+        </Text>
+        {" Create GitHub pull request after patching "}
+        <Text dimColor>(r toggle)</Text>
+      </Text>
 
       <Text dimColor wrap="truncate-end">
         <Text color={accent}>↑↓</Text> browse · <Text color={accent}>Tab</Text>{" "}
