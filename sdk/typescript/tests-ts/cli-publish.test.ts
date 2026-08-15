@@ -87,6 +87,303 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("prints the first five persisted Linear issues and database-backed totals", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = publicationResult();
+    result.created = Array.from({ length: 7 }, (_, index) => ({
+      findingId: `private-finding-${index + 1}`,
+      occurrenceId: `private-occurrence-${index + 1}`,
+      issueIdentifier: `SEC-${200 + index}`,
+      url: `https://linear.app/example/issue/SEC-${200 + index}`,
+    }));
+    result.counts.findings = 999;
+    result.counts.created = 999;
+    result.counts.failed = 999;
+    const deps = dependencies();
+    deps.publishScan = async () => result;
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+
+    expect(stdout.text()).toBe(
+      [
+        "✓ Linear publication complete",
+        "",
+        "  SEC-200  https://linear.app/example/issue/SEC-200",
+        "  SEC-201  https://linear.app/example/issue/SEC-201",
+        "  SEC-202  https://linear.app/example/issue/SEC-202",
+        "  SEC-203  https://linear.app/example/issue/SEC-203",
+        "  SEC-204  https://linear.app/example/issue/SEC-204",
+        "  ...",
+        "",
+        "7 total issues created",
+        "0 total issues failed",
+        "",
+      ].join("\n"),
+    );
+    for (const privateValue of [
+      "scan-123",
+      "uploadId",
+      "team-from-flags",
+      "project-from-flags",
+      "private-finding-",
+      "private-occurrence-",
+      "SEC-205",
+      "SEC-206",
+      "999",
+    ]) {
+      expect(stdout.text()).not.toContain(privateValue);
+    }
+    expect(stderr.text()).toBe("");
+  });
+
+  test("omits the issue-list ellipsis when zero to five issues were created", async () => {
+    for (const total of [0, 1, 5]) {
+      const stdout = capture();
+      const stderr = capture();
+      const result = publicationResult();
+      result.created = Array.from({ length: total }, (_, index) => ({
+        findingId: `finding-${index + 1}`,
+        occurrenceId: `occurrence-${index + 1}`,
+        issueIdentifier: `SEC-${300 + index}`,
+        url: `https://linear.app/example/issue/SEC-${300 + index}`,
+      }));
+      result.counts.findings = total;
+      result.counts.created = total;
+      const deps = dependencies();
+      deps.publishScan = async () => result;
+
+      expect(
+        await main(
+          ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(stdout.text()).not.toContain("\n  ...\n");
+      expect(stdout.text()).toContain(
+        `${total} total issue${total === 1 ? "" : "s"} created\n`,
+      );
+      expect(stdout.text()).toContain("0 total issues failed\n");
+      expect(
+        stdout.text().match(/https:\/\/linear\.app\//gu) ?? [],
+      ).toHaveLength(total);
+      if (total === 0) {
+        expect(stdout.text()).toBe(
+          "✓ Linear publication complete\n\n0 total issues created\n0 total issues failed\n",
+        );
+      }
+    }
+  });
+
+  test("renders partial failures without exposing finding errors or changing exit codes", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const failures = [
+      {
+        findingId: "private-finding-2",
+        error: "PRIVATE_CONNECTOR_FAILURE_DETAILS",
+      },
+    ];
+    const result = publicationResult(failures);
+    result.counts.created = 100;
+    result.counts.failed = 200;
+    const deps = dependencies();
+    deps.publishScan = async () => result;
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe(
+      [
+        "! Linear publication completed with failures",
+        "",
+        "  SEC-123  https://linear.app/example/issue/SEC-123",
+        "",
+        "1 total issue created",
+        "1 total issue failed",
+        "",
+      ].join("\n"),
+    );
+    expect(stdout.text()).not.toContain("private-finding-2");
+    expect(stdout.text()).not.toContain("PRIVATE_CONNECTOR_FAILURE_DETAILS");
+    expect(stdout.text()).not.toContain("100");
+    expect(stdout.text()).not.toContain("200");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("omits missing or unsafe issue links and sanitizes issue identifiers", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const initial = publicationResult();
+    const base = initial.created[0]!;
+    const { url: _unusedUrl, ...withoutUrl } = base;
+    const created = [
+      {
+        ...base,
+        issueIdentifier: "\u001B[31mSEC-400\u001B[0m\n\u009Fsafe",
+        url: "javascript:alert(1)",
+      },
+      {
+        ...base,
+        issueIdentifier: "SEC-401",
+        url: "https://user:PRIVATE_PASSWORD@linear.app/example/issue/SEC-401",
+      },
+      {
+        ...base,
+        issueIdentifier: "SEC-402",
+        url: "https://linear.app/example/issue/SEC-402?token=PRIVATE_TOKEN",
+      },
+      {
+        ...base,
+        issueIdentifier: "SEC-403",
+        url: "https://unsafe.example/issue/SEC-403",
+      },
+      { ...withoutUrl, issueIdentifier: "SEC-404" },
+    ];
+    const result = {
+      ...initial,
+      created,
+      counts: { findings: created.length, created: created.length, failed: 0 },
+    };
+    const deps = dependencies();
+    deps.publishScan = async () => result;
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("  SEC-400\n");
+    for (const identifier of ["SEC-401", "SEC-402", "SEC-403", "SEC-404"]) {
+      expect(stdout.text()).toContain(`  ${identifier}\n`);
+    }
+    expect(stdout.text()).not.toContain("javascript:");
+    expect(stdout.text()).not.toContain("PRIVATE_PASSWORD");
+    expect(stdout.text()).not.toContain("PRIVATE_TOKEN");
+    expect(stdout.text()).not.toContain("unsafe.example");
+    expect(stdout.text()).not.toContain("\u001B");
+    expect(stdout.text()).not.toContain("\u009F");
+    expect(stdout.text()).toContain("5 total issues created\n");
+    expect(stdout.text()).not.toContain("\n  ...\n");
+  });
+
+  test("colors publication headings only for color-enabled stdout terminals", async () => {
+    const scenarios = [
+      { interactive: false, environment: {}, color: false },
+      { interactive: true, environment: {}, color: true },
+      { interactive: true, environment: { NO_COLOR: "1" }, color: false },
+      { interactive: true, environment: { TERM: "dumb" }, color: false },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const stdout = capture(scenario.interactive);
+      const stderr = capture();
+      const deps = dependencies({ environment: scenario.environment });
+      deps.publishScan = async () => publicationResult();
+
+      expect(
+        await main(
+          ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(stripVTControlCharacters(stdout.text())).toContain(
+        "✓ Linear publication complete\n",
+      );
+      if (scenario.color) {
+        expect(stdout.text()).toContain("\u001B[32m✓\u001B[39m");
+        expect(stdout.text()).toContain(
+          "\u001B[1mLinear publication complete\u001B[22m",
+        );
+      } else {
+        expect(stdout.text()).not.toContain("\u001B");
+      }
+    }
+  });
+
+  test("preserves explicit structured output formats and prepared dry-run previews", async () => {
+    for (const format of [
+      { flags: ["--json"], json: true },
+      { flags: ["--format", "json"], json: true },
+      { flags: ["--format", "toon"], json: false },
+      { flags: ["--full-output"], json: false },
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const result = publicationResult();
+      const deps = dependencies();
+      deps.publishScan = async () => result;
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            ...format.flags,
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      if (format.json) {
+        expect(JSON.parse(stdout.text())).toEqual(result);
+      } else {
+        expect(stdout.text()).toContain("scanId: scan-123");
+        expect(stdout.text()).toContain("uploadId: scan-123");
+      }
+      expect(stdout.text()).not.toContain("Linear publication complete");
+    }
+
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.publishScan = async () => ({
+      ...publicationResult(),
+      dryRun: true,
+      issues: [],
+    });
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--dry-run",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("dryRun: true");
+    expect(stdout.text()).not.toContain("Linear publication complete");
+    expect(stderr.text()).toBe("");
+  });
+
   test("reports every created Linear issue with a successful exit code", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -291,7 +588,8 @@ describe("publish scan", () => {
     const stdout = capture();
     const stderr = capture(true);
     let question = "";
-    let choices: readonly { label: string; value: string }[] = [];
+    let choices: readonly { label: string; short?: string; value: string }[] =
+      [];
     let header: string | undefined;
     let workbenchArguments: readonly string[] | undefined;
     let publishedDirectory: string | undefined;
@@ -339,7 +637,7 @@ describe("publish scan", () => {
       isInteractive: () => true,
       select: async <Value extends string>(
         message: string,
-        options: readonly { label: string; value: Value }[],
+        options: readonly { label: string; short?: string; value: Value }[],
         presentation?: { header?: string },
       ): Promise<Value> => {
         question = message;
@@ -378,12 +676,20 @@ describe("publish scan", () => {
     expect(choices[0]!.label).toContain("...abc123");
     expect(choices[0]!.label).toContain("1 hour ago");
     expect(choices[0]!.label).toContain("1 finding");
+    expect(stripVTControlCharacters(choices[0]!.short!)).toBe(
+      "first-repository · ...abc123",
+    );
     expect(choices[1]!.label).toStartWith(
       "\u001B[1msecond-repository\u001B[22m",
     );
     expect(choices[1]!.label).toContain("...def456");
     expect(choices[1]!.label).toContain("2 minutes ago");
     expect(choices[1]!.label).toContain("3 findings");
+    expect(stripVTControlCharacters(choices[1]!.short!)).toBe(
+      "second-repository · ...def456",
+    );
+    expect(choices[1]!.short).not.toContain("3 findings");
+    expect(choices[1]!.short).not.toContain("2 minutes ago");
     const firstRow = stripVTControlCharacters(choices[0]!.label);
     const secondRow = stripVTControlCharacters(choices[1]!.label);
     expect(firstRow.indexOf("1 finding")).toBe(header!.indexOf("FINDINGS"));
@@ -501,7 +807,8 @@ describe("publish scan", () => {
 
     for (const color of [true, false]) {
       let header: string | undefined;
-      let choices: readonly { label: string; value: string }[] = [];
+      let choices: readonly { label: string; short?: string; value: string }[] =
+        [];
       const deps = dependencies({
         environment: color ? {} : { NO_COLOR: "1" },
         onWorkbench: () => ({
@@ -520,7 +827,7 @@ describe("publish scan", () => {
         isInteractive: () => true,
         select: async <Value extends string>(
           _message: string,
-          options: readonly { label: string; value: Value }[],
+          options: readonly { label: string; short?: string; value: Value }[],
           presentation?: { header?: string },
         ): Promise<Value> => {
           header = presentation?.header;
@@ -550,15 +857,23 @@ describe("publish scan", () => {
           `...${String(index).padStart(6, "0")}`,
         ].join("  ");
         const label = choices[index]!.label;
+        const selected = choices[index]!.short!;
 
         expect(stripVTControlCharacters(label)).toBe(expectedRow);
+        expect(stripVTControlCharacters(selected)).toBe(
+          `${scan.repository} · ...${String(index).padStart(6, "0")}`,
+        );
+        expect(selected).not.toContain("finding");
+        expect(selected).not.toContain(" ago");
         expect(label).not.toContain("\n");
         expect(label).not.toContain(" · ");
         expect(label).not.toContain("ran ");
         if (color) {
           expect(label).toStartWith(`\u001B[1m${scan.repository}\u001B[22m`);
+          expect(selected).toStartWith(`\u001B[1m${scan.repository}\u001B[22m`);
         } else {
           expect(label).not.toContain("\u001B");
+          expect(selected).not.toContain("\u001B");
         }
       }
     }

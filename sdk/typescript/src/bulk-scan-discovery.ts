@@ -58,7 +58,7 @@ export interface BulkScanPrompt {
   input(question: string, defaultValue?: string): Promise<string>;
   select<Value extends string>(
     question: string,
-    options: readonly { label: string; value: Value }[],
+    options: readonly { label: string; value: Value; short?: string }[],
     presentation?: { header?: string },
   ): Promise<Value>;
 }
@@ -368,7 +368,11 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
               .filter(({ label }) =>
                 label.toLowerCase().includes(term?.toLowerCase() ?? ""),
               )
-              .map(({ label, value }) => ({ name: label, value })),
+              .map(({ label, value, short }) => ({
+                name: label,
+                value,
+                ...(short === undefined ? {} : { short }),
+              })),
         },
         context(),
       ),

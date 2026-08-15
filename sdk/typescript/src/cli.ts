@@ -83,7 +83,11 @@ import {
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
 import { runMultiscan } from "./multiscan.js";
-import { publishScan, type PublishScanProgress } from "./publish.js";
+import {
+  publishScan,
+  type PublishScanProgress,
+  type PublishScanResult,
+} from "./publish.js";
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
@@ -274,6 +278,73 @@ function publicationDisplayWidth(value: string): number {
 
 function padPublicationColumn(value: string, width: number): string {
   return `${value}${" ".repeat(width - publicationDisplayWidth(value))}`;
+}
+
+function publicationIssueUrl(value: string | undefined): string | undefined {
+  if (
+    value === undefined ||
+    value !== value.trim() ||
+    value !== stripVTControlCharacters(value) ||
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u.test(value) ||
+    safeErrorMessage(value) !== value
+  ) {
+    return undefined;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+
+  if (
+    url.protocol !== "https:" ||
+    (url.hostname !== "linear.app" && !url.hostname.endsWith(".linear.app")) ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function renderPublicationSummary(
+  result: PublishScanResult,
+  color: boolean,
+): string {
+  const created = result.created.length;
+  const failed = result.failed.length;
+  const marker = failed === 0 ? "✓" : "!";
+  const title =
+    failed === 0
+      ? "Linear publication complete"
+      : "Linear publication completed with failures";
+  const heading = color
+    ? `\u001B[${failed === 0 ? "32" : "33"}m${marker}\u001B[39m \u001B[1m${title}\u001B[22m`
+    : `${marker} ${title}`;
+  const lines = [heading, ""];
+
+  for (const issue of result.created.slice(0, 5)) {
+    const identifier =
+      stripVTControlCharacters(safeErrorMessage(issue.issueIdentifier))
+        .replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ")
+        .replace(/\s+/gu, " ")
+        .trim() || "Unknown Linear issue";
+    const url = publicationIssueUrl(issue.url);
+    lines.push(`  ${identifier}${url === undefined ? "" : `  ${url}`}`);
+  }
+  if (created > 5) lines.push("  ...");
+  if (created > 0) lines.push("");
+
+  lines.push(
+    `${created} total issue${created === 1 ? "" : "s"} created`,
+    `${failed} total issue${failed === 1 ? "" : "s"} failed`,
+  );
+  return `${lines.join("\n")}\n`;
 }
 
 class PublicationProgressPresenter {
@@ -1023,6 +1094,7 @@ export async function main(
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
   let renderedHistory: string | undefined;
+  let renderedPublication: string | undefined;
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1434,7 +1506,7 @@ export async function main(
         .describe("Preview the findings without creating Linear issues."),
     }),
     output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args, options }) {
+    async run({ args, format, formatExplicit, options }) {
       try {
         const teamId =
           options.linearTeam?.trim() ||
@@ -1582,6 +1654,7 @@ export async function main(
                 padPublicationColumn(row.age, ageWidth),
                 row.scanId,
               ].join("  "),
+              short: `${repository} · ${row.scanId}`,
               value: row.value,
             };
           });
@@ -1621,6 +1694,19 @@ export async function main(
           progress.stop();
         }
         if (result.failed.length > 0) exitCode = 2;
+        if (
+          format === "toon" &&
+          !formatExplicit &&
+          !options.dryRun &&
+          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+        ) {
+          renderedPublication = renderPublicationSummary(
+            result,
+            output.isTTY === true &&
+              dependencies.environment["NO_COLOR"] === undefined &&
+              dependencies.environment["TERM"] !== "dumb",
+          );
+        }
         return { ...result };
       } catch (error) {
         errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
@@ -2450,7 +2536,10 @@ export async function main(
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
-    await writeCliOutput(output, renderedHistory ?? frameworkOutput);
+    await writeCliOutput(
+      output,
+      renderedPublication ?? renderedHistory ?? frameworkOutput,
+    );
     return exitCode;
   } catch (error) {
     errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
