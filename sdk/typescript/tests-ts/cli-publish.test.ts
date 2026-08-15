@@ -292,6 +292,7 @@ describe("publish scan", () => {
     const stderr = capture(true);
     let question = "";
     let choices: readonly { label: string; value: string }[] = [];
+    let header: string | undefined;
     let workbenchArguments: readonly string[] | undefined;
     let publishedDirectory: string | undefined;
     const deps = dependencies({
@@ -339,9 +340,11 @@ describe("publish scan", () => {
       select: async <Value extends string>(
         message: string,
         options: readonly { label: string; value: Value }[],
+        presentation?: { header?: string },
       ): Promise<Value> => {
         question = message;
         choices = options;
+        header = presentation?.header;
         return options[1]!.value;
       },
     };
@@ -361,18 +364,38 @@ describe("publish scan", () => {
     expect(workbenchArguments).toEqual(["list-scans", "--status", "complete"]);
     expect(question).toBe("Which completed scan would you like to publish?");
     expect(choices).toHaveLength(2);
+    expect(header).toBe(
+      [
+        "REPOSITORY".padEnd("second-repository".length),
+        "FINDINGS".padEnd("3 findings".length),
+        "AGE".padEnd("2 minutes ago".length),
+        "SCAN ID",
+      ].join("  "),
+    );
     expect(choices[0]!.label).toStartWith(
       "\u001B[1mfirst-repository\u001B[22m",
     );
     expect(choices[0]!.label).toContain("...abc123");
-    expect(choices[0]!.label).toContain("ran 1 hour ago");
+    expect(choices[0]!.label).toContain("1 hour ago");
     expect(choices[0]!.label).toContain("1 finding");
     expect(choices[1]!.label).toStartWith(
       "\u001B[1msecond-repository\u001B[22m",
     );
     expect(choices[1]!.label).toContain("...def456");
-    expect(choices[1]!.label).toContain("ran 2 minutes ago");
+    expect(choices[1]!.label).toContain("2 minutes ago");
     expect(choices[1]!.label).toContain("3 findings");
+    const firstRow = stripVTControlCharacters(choices[0]!.label);
+    const secondRow = stripVTControlCharacters(choices[1]!.label);
+    expect(firstRow.indexOf("1 finding")).toBe(header!.indexOf("FINDINGS"));
+    expect(secondRow.indexOf("3 findings")).toBe(header!.indexOf("FINDINGS"));
+    expect(firstRow.indexOf("1 hour ago")).toBe(header!.indexOf("AGE"));
+    expect(secondRow.indexOf("2 minutes ago")).toBe(header!.indexOf("AGE"));
+    expect(firstRow.indexOf("...abc123")).toBe(header!.indexOf("SCAN ID"));
+    expect(secondRow.indexOf("...def456")).toBe(header!.indexOf("SCAN ID"));
+    expect(choices.every((choice) => !choice.label.includes("ran "))).toBe(
+      true,
+    );
+    expect(choices.every((choice) => !choice.label.includes(" · "))).toBe(true);
     expect(choices[0]!.label).not.toContain("11111111-2222-3333");
     expect(choices[1]!.label).not.toContain("2026-08-15T02:15:00Z");
     expect(choices[1]!.label).not.toContain("COMPLETE");
@@ -385,6 +408,160 @@ describe("publish scan", () => {
     );
     expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
     expect(stderr.text()).not.toContain("66666666-7777-8888-9999");
+  });
+
+  test("aligns repository, findings, age, and scan ID columns by visible terminal width", async () => {
+    const currentTime = Date.parse("2030-01-01T12:00:00Z");
+    const scans = [
+      {
+        repository: "tiny",
+        width: 4,
+        findingCount: 1,
+        elapsed: 60_000,
+        age: "1 minute ago",
+      },
+      {
+        repository: "service-alpha",
+        width: 13,
+        findingCount: 120,
+        elapsed: 4 * 24 * 60 * 60_000,
+        age: "4 days ago",
+      },
+      {
+        repository: "服务",
+        width: 4,
+        findingCount: 22,
+        elapsed: 30_000,
+        age: "30 seconds ago",
+      },
+      {
+        repository: "cafe\u0301",
+        width: 4,
+        findingCount: 3,
+        elapsed: 2 * 60 * 60_000,
+        age: "2 hours ago",
+      },
+      {
+        repository: "👩‍💻-api",
+        width: 6,
+        findingCount: 9,
+        elapsed: 0,
+        age: "just now",
+      },
+      {
+        repository: "🇺🇸-edge",
+        width: 7,
+        findingCount: 0,
+        elapsed: 8 * 24 * 60 * 60_000,
+        age: "1 week ago",
+      },
+      {
+        repository: "1️⃣-key",
+        width: 6,
+        findingCount: 44,
+        elapsed: 32 * 24 * 60 * 60_000,
+        age: "1 month ago",
+      },
+      {
+        repository: "♥-text",
+        width: 6,
+        findingCount: 8,
+        elapsed: 60_000,
+        age: "1 minute ago",
+      },
+      {
+        repository: "♥️-emoji",
+        width: 8,
+        findingCount: 7,
+        elapsed: 60_000,
+        age: "1 minute ago",
+      },
+    ] as const;
+    const repositoryWidth = Math.max(
+      "REPOSITORY".length,
+      ...scans.map(({ width }) => width),
+    );
+    const findingsWidth = Math.max(
+      "FINDINGS".length,
+      ...scans.map(
+        ({ findingCount }) =>
+          `${findingCount} finding${findingCount === 1 ? "" : "s"}`.length,
+      ),
+    );
+    const ageWidth = Math.max(
+      "AGE".length,
+      ...scans.map(({ age }) => age.length),
+    );
+    const expectedHeader = [
+      "REPOSITORY".padEnd(repositoryWidth),
+      "FINDINGS".padEnd(findingsWidth),
+      "AGE".padEnd(ageWidth),
+      "SCAN ID",
+    ].join("  ");
+
+    for (const color of [true, false]) {
+      let header: string | undefined;
+      let choices: readonly { label: string; value: string }[] = [];
+      const deps = dependencies({
+        environment: color ? {} : { NO_COLOR: "1" },
+        onWorkbench: () => ({
+          scans: scans.map(({ repository, findingCount, elapsed }, index) => ({
+            scanId: `synthetic-scan-${String(index).padStart(6, "0")}`,
+            scanDir: join(tmpdir(), `synthetic-scan-${index}`),
+            targetSummary: repository,
+            completedAt: new Date(currentTime - elapsed).toISOString(),
+            findingCount,
+            progress: { status: "complete" },
+          })),
+        }),
+      });
+      deps.now = () => currentTime;
+      deps.publishPrompt = {
+        isInteractive: () => true,
+        select: async <Value extends string>(
+          _message: string,
+          options: readonly { label: string; value: Value }[],
+          presentation?: { header?: string },
+        ): Promise<Value> => {
+          header = presentation?.header;
+          choices = options;
+          return options[0]!.value;
+        },
+      };
+      deps.publishScan = async () => publicationResult();
+
+      expect(
+        await main(
+          ["publish", "scan", ...DESTINATION_OPTIONS, "--json"],
+          capture().stream,
+          capture(true).stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(header).toBe(expectedHeader);
+      expect(header).not.toContain("\u001B");
+
+      for (const [index, scan] of scans.entries()) {
+        const findings = `${scan.findingCount} finding${scan.findingCount === 1 ? "" : "s"}`;
+        const expectedRow = [
+          `${scan.repository}${" ".repeat(repositoryWidth - scan.width)}`,
+          findings.padEnd(findingsWidth),
+          scan.age.padEnd(ageWidth),
+          `...${String(index).padStart(6, "0")}`,
+        ].join("  ");
+        const label = choices[index]!.label;
+
+        expect(stripVTControlCharacters(label)).toBe(expectedRow);
+        expect(label).not.toContain("\n");
+        expect(label).not.toContain(" · ");
+        expect(label).not.toContain("ran ");
+        if (color) {
+          expect(label).toStartWith(`\u001B[1m${scan.repository}\u001B[22m`);
+        } else {
+          expect(label).not.toContain("\u001B");
+        }
+      }
+    }
   });
 
   test("shows actual Codex reasoning and Linear activity in a full-screen publication dashboard", async () => {
@@ -499,7 +676,7 @@ describe("publish scan", () => {
       ).toBe(0);
 
       expect(stripVTControlCharacters(choice)).toContain(
-        "payments-api service  ·  1 finding  ·  ran 1 minute ago  ·  ...def456",
+        "payments-api service  1 finding  1 minute ago  ...def456",
       );
       expect(choice).not.toContain("\u001B[2J");
       expect(choice).not.toContain("\u001B[31m");
@@ -866,16 +1043,16 @@ describe("publish scan", () => {
   test("formats scan choices as compact single lines with relative ages", async () => {
     const currentTime = Date.parse("2026-08-15T12:00:00Z");
     const scenarios = [
-      { age: 0, expected: "ran just now" },
-      { age: 30_000, expected: "ran 30 seconds ago" },
-      { age: 60_000, expected: "ran 1 minute ago" },
-      { age: 2 * 60_000, expected: "ran 2 minutes ago" },
-      { age: 60 * 60_000, expected: "ran 1 hour ago" },
-      { age: 4 * 24 * 60 * 60_000, expected: "ran 4 days ago" },
-      { age: 8 * 24 * 60 * 60_000, expected: "ran 1 week ago" },
-      { age: 32 * 24 * 60 * 60_000, expected: "ran 1 month ago" },
-      { age: 366 * 24 * 60 * 60_000, expected: "ran 1 year ago" },
-      { age: -30_000, expected: "ran just now" },
+      { age: 0, expected: "just now" },
+      { age: 30_000, expected: "30 seconds ago" },
+      { age: 60_000, expected: "1 minute ago" },
+      { age: 2 * 60_000, expected: "2 minutes ago" },
+      { age: 60 * 60_000, expected: "1 hour ago" },
+      { age: 4 * 24 * 60 * 60_000, expected: "4 days ago" },
+      { age: 8 * 24 * 60 * 60_000, expected: "1 week ago" },
+      { age: 32 * 24 * 60 * 60_000, expected: "1 month ago" },
+      { age: 366 * 24 * 60 * 60_000, expected: "1 year ago" },
+      { age: -30_000, expected: "just now" },
     ] as const;
     let choices: readonly { label: string; value: string }[] = [];
     const deps = dependencies({
@@ -925,11 +1102,11 @@ describe("publish scan", () => {
 
     for (const [index, scenario] of scenarios.entries()) {
       expect(choices[index]!.label).toBe(
-        `payments api  ·  2 findings  ·  ${scenario.expected}  ·  ...${String(index).padStart(6, "0")}`,
+        `payments api  2 findings  ${scenario.expected.padEnd("30 seconds ago".length)}  ...${String(index).padStart(6, "0")}`,
       );
     }
     expect(choices.at(-1)!.label).toBe(
-      "payments api  ·  0 findings  ·  run time unknown  ·  ...999999",
+      `payments api  0 findings  ${"unknown".padEnd("30 seconds ago".length)}  ...999999`,
     );
     expect(choices.every((choice) => !choice.label.includes("\n"))).toBe(true);
   });

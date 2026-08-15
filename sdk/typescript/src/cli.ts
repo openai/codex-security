@@ -136,6 +136,9 @@ const SCAN_HISTORY_OUTPUT_OPTION =
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
+const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
+  granularity: "grapheme",
+});
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
@@ -228,7 +231,7 @@ function optionValue(flag: string) {
 
 function publicationScanAge(timestamp: string, now: number): string {
   const completedAt = Date.parse(timestamp);
-  if (!Number.isFinite(completedAt)) return "run time unknown";
+  if (!Number.isFinite(completedAt)) return "unknown";
 
   const elapsed = Math.max(0, now - completedAt);
   const units = [
@@ -244,10 +247,33 @@ function publicationScanAge(timestamp: string, now: number): string {
   for (const [unit, duration] of units) {
     const count = Math.floor(elapsed / duration);
     if (count > 0) {
-      return `ran ${count} ${unit}${count === 1 ? "" : "s"} ago`;
+      return `${count} ${unit}${count === 1 ? "" : "s"} ago`;
     }
   }
-  return "ran just now";
+  return "just now";
+}
+
+function publicationDisplayWidth(value: string): number {
+  const segments = PUBLICATION_GRAPHEME_SEGMENTER.segment(
+    stripVTControlCharacters(value),
+  );
+  let width = 0;
+
+  for (const { segment } of segments) {
+    if (/^[\p{Mark}\p{Cf}]+$/u.test(segment)) continue;
+    width +=
+      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Emoji_Presentation}\p{Regional_Indicator}\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6\u20E3\uFE0F]/u.test(
+        segment,
+      )
+        ? 2
+        : 1;
+  }
+
+  return width;
+}
+
+function padPublicationColumn(value: string, width: number): string {
+  return `${value}${" ".repeat(width - publicationDisplayWidth(value))}`;
 }
 
 class PublicationProgressPresenter {
@@ -1460,7 +1486,7 @@ export async function main(
             dependencies.environment["NO_COLOR"] === undefined &&
             dependencies.environment["TERM"] !== "dumb";
           const repositories = new Map<string, string>();
-          const choices = scans.flatMap((scan) => {
+          const rows = scans.flatMap((scan) => {
             if (!isJsonObject(scan)) return [];
             const progress = scan["progress"];
             const scanId = scan["scanId"];
@@ -1504,9 +1530,6 @@ export async function main(
               typeof findingCount === "number"
                 ? `${findingCount} finding${findingCount === 1 ? "" : "s"}`
                 : "unknown findings";
-            const name = emphasizeRepository
-              ? `\u001B[1m${repository}\u001B[22m`
-              : repository;
             const shortScanId = `...${stripVTControlCharacters(scanId)
               .replaceAll(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
               .replace(/\s+/gu, " ")
@@ -1514,19 +1537,58 @@ export async function main(
             repositories.set(directory, repository);
             return [
               {
-                label: `${name}  ·  ${findings}  ·  ${publicationScanAge(timestamp, now)}  ·  ${shortScanId}`,
+                repository,
+                findings,
+                age: publicationScanAge(timestamp, now),
+                scanId: shortScanId,
                 value: directory,
               },
             ];
           });
-          if (choices.length === 0) {
+          if (rows.length === 0) {
             throw new CodexSecurityError(
               "No completed Codex Security scans are available to publish.",
             );
           }
+          const repositoryWidth = Math.max(
+            publicationDisplayWidth("REPOSITORY"),
+            ...rows.map(({ repository }) =>
+              publicationDisplayWidth(repository),
+            ),
+          );
+          const findingsWidth = Math.max(
+            publicationDisplayWidth("FINDINGS"),
+            ...rows.map(({ findings }) => publicationDisplayWidth(findings)),
+          );
+          const ageWidth = Math.max(
+            publicationDisplayWidth("AGE"),
+            ...rows.map(({ age }) => publicationDisplayWidth(age)),
+          );
+          const header = [
+            padPublicationColumn("REPOSITORY", repositoryWidth),
+            padPublicationColumn("FINDINGS", findingsWidth),
+            padPublicationColumn("AGE", ageWidth),
+            "SCAN ID",
+          ].join("  ");
+          const choices = rows.map((row) => {
+            const repository = emphasizeRepository
+              ? `\u001B[1m${row.repository}\u001B[22m`
+              : row.repository;
+
+            return {
+              label: [
+                padPublicationColumn(repository, repositoryWidth),
+                padPublicationColumn(row.findings, findingsWidth),
+                padPublicationColumn(row.age, ageWidth),
+                row.scanId,
+              ].join("  "),
+              value: row.value,
+            };
+          });
           scanDir = await prompt.select(
             "Which completed scan would you like to publish?",
             choices,
+            { header },
           );
           publicationRepository =
             repositories.get(scanDir) ?? basename(scanDir);

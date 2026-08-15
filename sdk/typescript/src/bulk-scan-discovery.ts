@@ -59,6 +59,7 @@ export interface BulkScanPrompt {
   select<Value extends string>(
     question: string,
     options: readonly { label: string; value: Value }[],
+    presentation?: { header?: string },
   ): Promise<Value>;
 }
 
@@ -79,6 +80,7 @@ export interface BulkScanWizardResult {
 interface PromptOutput {
   write(value: string): unknown;
   readonly isTTY?: boolean;
+  readonly columns?: number;
 }
 
 export function createBulkScanDiscoveryDependencies(options: {
@@ -324,15 +326,19 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
 }
 
 function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
-  const context = () => ({
-    input: stdin,
-    output: new Writable({
+  const context = () => {
+    const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {
         output.write(chunk.toString("utf8"));
         callback();
       },
-    }),
-  });
+    });
+    Object.defineProperty(stream, "columns", {
+      configurable: true,
+      get: () => output.columns,
+    });
+    return { input: stdin, output: stream };
+  };
 
   return {
     isInteractive: () => stdin.isTTY === true && output.isTTY === true,
@@ -343,10 +349,20 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       confirm({ message, default: defaultValue }, context()),
     input: (message, defaultValue) =>
       input({ message, default: defaultValue }, context()),
-    select: (message, options) =>
+    select: (message, options, presentation) =>
       search(
         {
           message,
+          ...(presentation?.header === undefined
+            ? {}
+            : {
+                theme: {
+                  style: {
+                    searchTerm: (term: string) =>
+                      `${term}\n  ${presentation.header}`,
+                  },
+                },
+              }),
           source: (term) =>
             options
               .filter(({ label }) =>
