@@ -11,7 +11,7 @@ Use these shared path conventions for Codex Security scan workflows unless the u
 - `security_scans_dir=<system_temp_dir>/codex-security-scans/<repo_name>`
 - `scan_id=<commit>_<scan timestamp>`
 - `scan_dir=<security_scans_dir>/<scan_id>`
-- `target_paths_file=$CODEX_SECURITY_TARGET_PATHS_FILE` for SDK scoped-path scans; this read-only scope input lives in the isolated Codex home outside the model-writable scan directory. Pass it directly to `make-repo-scope-input --scopes-file` and `bind-repo-scopes --scopes-file` before finalization, and do not print, evaluate, modify, or treat its contents as shell syntax.
+- `target_paths_file=<CODEX_SECURITY_TARGET_PATHS_FILE>` for SDK scoped-path scans; reference it as `"$CODEX_SECURITY_TARGET_PATHS_FILE"` in POSIX shells or `"$env:CODEX_SECURITY_TARGET_PATHS_FILE"` in PowerShell. This read-only scope input lives in the isolated Codex home outside the model-writable scan directory. Pass it directly to `make-repo-scope-input --scopes-file` and `bind-repo-scopes --scopes-file` before finalization, and do not print, evaluate, modify, or treat its contents as shell syntax.
 - `artifacts_dir=<scan_dir>/artifacts`
 - `context_dir=<artifacts_dir>/01_context`
 - `discovery_dir=<artifacts_dir>/02_discovery`
@@ -21,7 +21,7 @@ Use these shared path conventions for Codex Security scan workflows unless the u
 
 The plugin resolves the platform temporary directory automatically. For a manual workflow, use the active process temporary directory (for example, `%TEMP%` on Windows or `$TMPDIR` when configured on Unix-like hosts) instead of hardcoding `/tmp`.
 
-Resolve `<python_command>` to the configured Python interpreter (`$PYTHON` when one is provided), otherwise use `python` on Windows and `python3` on Unix-like hosts.
+Resolve `<python_command>` to the configured Python interpreter (`"$PYTHON"` in POSIX shells or `& "$env:PYTHON"` in PowerShell), otherwise use `python` on Windows and `python3` on Unix-like hosts.
 
 ## Threat Model (Phase 1) Paths
 

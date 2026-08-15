@@ -333,6 +333,7 @@ configuration. Each scan starts with a private runtime and these Codex
 defaults:
 
 ```toml
+approval_policy = "never"
 cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
@@ -434,6 +435,10 @@ The CLI and SDK recognize the following user-configurable environment:
 | `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                             |
 | `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
 | `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
+
+On Windows, `CODEX_CLI_PATH` must name a native `.exe` or `.com`. Command
+shims such as `codex.cmd` automatically use the bundled Codex executable
+instead.
 
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
 the managed Codex runtime, and finally `python3` or `python` from `PATH`.
@@ -693,12 +698,13 @@ repository, Git installation, configured tools, and other scans under the
 same account are not separate security principals.
 
 Every scan uses the `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. It can read the local filesystem and write to
-workspace roots and the selected scan state directory. Scans do not request
-interactive approval. Setting `approval_policy`, `sandbox_mode`, or permissions
+`approvalPolicy: "never"`. Its profile allows reads of the local filesystem and
+writes to workspace roots and the selected scan state directory. Scans do not
+request interactive approval or grant filesystem escalations. Setting
+`approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permissions
 through `--codex` or SDK `codexOverrides` does not replace these controls or
-make them more restrictive. Independently enforced host and network
-restrictions still apply.
+make the filesystem profile more restrictive. Independently enforced host and
+network restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment, including
 unrelated API tokens and cloud credentials. Start a scan with only the

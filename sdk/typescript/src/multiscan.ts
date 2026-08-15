@@ -696,7 +696,11 @@ function parseInventory(
     const get = (name: string): string =>
       fields[headers.indexOf(name)]?.trim() ?? "";
     const id = get("id");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id)) {
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) ||
+      id.endsWith(".") ||
+      /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(id)
+    ) {
       throw new Error("Multiscan task IDs must be safe, unique path names.");
     }
     if (seen.has(id.toLowerCase()))
@@ -769,14 +773,15 @@ async function checkoutRevision(
   githubHost?: string,
 ): Promise<void> {
   const environment = { ...process.env };
-  for (const name of [
+  const repositoryVariables = new Set([
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  ]) {
-    delete environment[name];
+  ]);
+  for (const name of Object.keys(environment)) {
+    if (repositoryVariables.has(name.toUpperCase())) delete environment[name];
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
