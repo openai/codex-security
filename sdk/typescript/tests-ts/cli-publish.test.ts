@@ -138,6 +138,153 @@ describe("publish scan", () => {
     expect(stderr.text()).toContain("Published 2/2 findings.\n");
   });
 
+  test("prints persisted issues from concurrent batches instead of malformed Codex prose", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const persisted = publicationResult();
+    persisted.created = Array.from({ length: 23 }, (_, index) => ({
+      findingId: `finding-${index + 1}`,
+      occurrenceId: `occurrence-${index + 1}`,
+      issueIdentifier: `SEC-${200 + index}`,
+      url: `https://linear.app/example/issue/SEC-${200 + index}`,
+    }));
+    persisted.counts.findings = persisted.created.length;
+    persisted.counts.created = persisted.created.length;
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      options.onProgress?.({
+        type: "started",
+        scanId: persisted.scanId,
+        total: persisted.created.length,
+      });
+      options.onProgress?.({
+        type: "codex_event",
+        event: {
+          type: "item.completed",
+          item: {
+            id: "agent-message-1",
+            type: "agent_message",
+            text: "Created zero issues: {invalid JSON; imaginary SEC-999999}",
+          },
+        },
+      });
+
+      const completionOrder = [
+        ...persisted.created.slice(0, 20).reverse(),
+        ...persisted.created.slice(20).reverse(),
+      ];
+      for (const [index, issue] of completionOrder.entries()) {
+        options.onProgress?.({
+          type: "issue_completed",
+          findingId: issue.findingId,
+          issueIdentifier: issue.issueIdentifier,
+          completed: index + 1,
+          total: persisted.created.length,
+        });
+      }
+      options.onProgress?.({
+        type: "completed",
+        created: persisted.created.length,
+        failed: 0,
+        total: persisted.created.length,
+      });
+      return persisted;
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+
+    expect(JSON.parse(stdout.text())).toEqual(persisted);
+    expect(stdout.text()).not.toContain("invalid JSON");
+    expect(stdout.text()).not.toContain("SEC-999999");
+    expect(stderr.text()).toContain("Codex: Created zero issues:");
+    expect(stderr.text()).toContain("[1/23] Created SEC-219\n");
+    expect(stderr.text()).toContain("[20/23] Created SEC-200\n");
+    expect(stderr.text()).toContain("[21/23] Created SEC-222\n");
+    expect(stderr.text()).toContain("[23/23] Created SEC-220\n");
+    expect(stderr.text()).toContain("Published 23/23 findings.\n");
+  });
+
+  test("preserves persisted successes and failures across concurrent batches", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const failures = [
+      { findingId: "finding-5", error: "The first batch issue failed." },
+      { findingId: "finding-21", error: "The second batch issue failed." },
+    ];
+    const persisted = publicationResult(failures);
+    const findings = Array.from({ length: 22 }, (_, index) => ({
+      findingId: `finding-${index + 1}`,
+      occurrenceId: `occurrence-${index + 1}`,
+      issueIdentifier: `SEC-${300 + index}`,
+      url: `https://linear.app/example/issue/SEC-${300 + index}`,
+    }));
+    persisted.created = findings.filter(
+      ({ findingId }) =>
+        !failures.some((failure) => failure.findingId === findingId),
+    );
+    persisted.counts.findings = findings.length;
+    persisted.counts.created = persisted.created.length;
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      options.onProgress?.({
+        type: "started",
+        scanId: persisted.scanId,
+        total: findings.length,
+      });
+      const completionOrder = [
+        ...findings.slice(0, 20).reverse(),
+        ...findings.slice(20).reverse(),
+      ];
+      for (const [index, finding] of completionOrder.entries()) {
+        const failure = failures.find(
+          ({ findingId }) => findingId === finding.findingId,
+        );
+        options.onProgress?.({
+          type: "issue_completed",
+          findingId: finding.findingId,
+          ...(failure === undefined
+            ? { issueIdentifier: finding.issueIdentifier }
+            : { error: failure.error }),
+          completed: index + 1,
+          total: findings.length,
+        });
+      }
+      options.onProgress?.({
+        type: "completed",
+        created: persisted.created.length,
+        failed: failures.length,
+        total: findings.length,
+      });
+      return persisted;
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+
+    expect(JSON.parse(stdout.text())).toEqual(persisted);
+    expect(stderr.text()).toContain(
+      "[16/22] Failed finding-5: The first batch issue failed.\n",
+    );
+    expect(stderr.text()).toContain("[21/22] Created SEC-321\n");
+    expect(stderr.text()).toContain(
+      "[22/22] Failed finding-21: The second batch issue failed.\n",
+    );
+    expect(stderr.text()).toContain("Published 20/22 findings (2 failed).\n");
+  });
+
   test("interactively selects a completed scan across all repositories", async () => {
     const firstDirectory = join(tmpdir(), "first-completed-scan");
     const selectedDirectory = join(tmpdir(), "selected-completed-scan");
@@ -433,6 +580,110 @@ describe("publish scan", () => {
     );
     expect(stderr.text()).not.toContain("\u001B");
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+  });
+
+  test("hides source-bearing handoff commands in plain and full-screen progress", async () => {
+    for (const interactive of [false, true]) {
+      const stdout = capture();
+      const stderr = capture(interactive);
+      const deps = dependencies();
+      deps.publishScan = async (_scanDirectory, options) => {
+        options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
+        options.onProgress?.({
+          type: "codex_event",
+          event: {
+            type: "item.completed",
+            item: {
+              id: "reasoning-1",
+              type: "reasoning",
+              text: "Saving the verified Linear issue.",
+            },
+          },
+        });
+        options.onProgress?.({
+          type: "codex_event",
+          event: {
+            type: "item.started",
+            item: {
+              id: "handoff-command",
+              type: "command_execution",
+              command:
+                "python -c 'write(\"PRIVATE_SOURCE_SNIPPET_MUST_NOT_BE_LOGGED\")'",
+            },
+          },
+        });
+        options.onProgress?.({
+          type: "codex_event",
+          event: {
+            type: "item.started",
+            item: {
+              id: "handoff-tool",
+              type: "mcp_tool_call",
+              server: "local-tools",
+              tool: "exec",
+              arguments: {
+                cmd: "append PRIVATE_ISSUE_DESCRIPTION_MUST_NOT_BE_LOGGED",
+              },
+            },
+          },
+        });
+        options.onProgress?.({
+          type: "codex_event",
+          event: {
+            type: "item.started",
+            item: {
+              id: "linear-create",
+              type: "mcp_tool_call",
+              server: "codex_apps",
+              tool: "linear.save_issue",
+              arguments: {
+                description: "PRIVATE_LINEAR_ARGUMENT_MUST_NOT_BE_LOGGED",
+              },
+            },
+          },
+        });
+        options.onProgress?.({
+          type: "issue_completed",
+          findingId: "finding-1",
+          issueIdentifier: "SEC-123",
+          completed: 1,
+          total: 1,
+        });
+        options.onProgress?.({
+          type: "completed",
+          created: 1,
+          failed: 0,
+          total: 1,
+        });
+        return publicationResult();
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+
+      const progress = stripVTControlCharacters(stderr.text());
+      expect(progress).toContain("Saving the verified Linear issue.");
+      expect(progress).toContain("Saving Linear publication results");
+      expect(progress).toContain("linear.save_issue");
+      expect(progress).toContain("Created SEC-123");
+      expect(progress).not.toContain("PRIVATE_SOURCE_SNIPPET");
+      expect(progress).not.toContain("PRIVATE_ISSUE_DESCRIPTION");
+      expect(progress).not.toContain("PRIVATE_LINEAR_ARGUMENT");
+      expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+      expect(stdout.text()).not.toContain("PRIVATE_");
+    }
   });
 
   test("restores the publication screen before reporting publisher failures", async () => {

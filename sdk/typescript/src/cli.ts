@@ -338,20 +338,39 @@ class PublicationProgressPresenter {
         event.event as Record<string, unknown>,
         this.#repository,
       )) {
+        const item = (event.event as Record<string, unknown>)["item"];
+        const tool =
+          typeof item === "object" && item !== null && !Array.isArray(item)
+            ? (item as Record<string, unknown>)["tool"]
+            : undefined;
+        const hidesShellCommand =
+          activity.kind === "command" ||
+          (activity.kind === "tool" &&
+            typeof tool === "string" &&
+            /^(?:exec|exec_command|shell_command|shell|apply_patch)$/u.test(
+              tool,
+            ));
+        const visibleActivity = hidesShellCommand
+          ? {
+              ...activity,
+              description: "Saving Linear publication results",
+              paths: [],
+            }
+          : activity;
         if (this.#dashboard !== null) {
-          this.#dashboard.record(activity);
+          this.#dashboard.record(visibleActivity);
           continue;
         }
-        const key = `${activity.id}\0${activity.description}`;
+        const key = `${visibleActivity.id}\0${visibleActivity.description}`;
         if (this.#seenActivities.has(key)) continue;
         this.#seenActivities.add(key);
         const label =
-          activity.kind === "reasoning"
+          visibleActivity.kind === "reasoning"
             ? "Codex"
-            : activity.kind === "message"
+            : visibleActivity.kind === "message"
               ? "Codex"
               : "Tool";
-        this.#write(`${label}: ${activity.description}`, true);
+        this.#write(`${label}: ${visibleActivity.description}`, true);
       }
       return;
     }
