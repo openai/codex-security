@@ -4091,6 +4091,7 @@ describe("CodexSecurity orchestration", () => {
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
+          approval_policy: "never",
           features: { goals: true },
           projects: {
             ...unrelatedProjects,
@@ -4131,6 +4132,7 @@ describe("CodexSecurity orchestration", () => {
                   await readFile(join(codexHome!, "config.toml"), "utf8"),
                 ),
               ).toMatchObject({
+                approval_policy: "never",
                 permissions: {
                   codex_security_scan: {
                     filesystem: {

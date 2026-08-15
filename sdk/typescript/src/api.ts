@@ -2870,6 +2870,7 @@ function sharedCredentialCodexConfig(
   credentialHome: string,
 ): JsonObject {
   const shared: JsonObject = {
+    approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
   for (const key of [
