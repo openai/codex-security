@@ -1250,12 +1250,30 @@ export async function main(
             "--status",
             "complete",
           ]);
-          const scans = saved["scans"];
-          if (!Array.isArray(scans)) {
+          const listedScans = saved["scans"];
+          if (!Array.isArray(listedScans)) {
             throw new CodexSecurityError(
               "Could not read completed Codex Security scans.",
             );
           }
+          const scans = (
+            await Promise.all(
+              listedScans.map(async (scan) => {
+                if (!isJsonObject(scan)) return undefined;
+                const directory = scan["scanDir"];
+                if (typeof directory !== "string" || directory.length === 0) {
+                  return undefined;
+                }
+                const metadata = await lstat(
+                  resolve(dependencies.currentDirectory(), directory),
+                ).catch(() => undefined);
+                return metadata?.isDirectory() === true &&
+                  !metadata.isSymbolicLink()
+                  ? scan
+                  : undefined;
+              }),
+            )
+          ).filter((scan): scan is JsonObject => scan !== undefined);
           const choices = scans.flatMap((scan) => {
             if (!isJsonObject(scan)) return [];
             const progress = scan["progress"];
@@ -1331,6 +1349,14 @@ export async function main(
         );
         controller.signal.throwIfAborted();
         if (result.failed.length > 0) exitCode = 2;
+        if ("warnings" in result && Array.isArray(result.warnings)) {
+          for (const warning of result.warnings) {
+            if (typeof warning !== "string") continue;
+            errorOutput.write(
+              `codex-security: ${diagnosticValue(safeErrorMessage(warning))}\n`,
+            );
+          }
+        }
         return { ...result };
       } catch (error) {
         const signal = controller.signal.reason;
