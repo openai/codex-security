@@ -45,6 +45,8 @@ async function writeSession(
   threadId: string,
   usage: Record<string, number>,
   parentThreadId?: string,
+  workingDirectory?: string,
+  timestamp?: string,
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
@@ -56,6 +58,8 @@ async function writeSession(
         type: "session_meta",
         payload: {
           id: threadId,
+          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+          ...(timestamp === undefined ? {} : { timestamp }),
           ...(parentThreadId === undefined
             ? {}
             : {
@@ -112,47 +116,54 @@ function progressMessage(
 }
 
 describe("scan cost", () => {
-  test("retains cached and alternate cache-write usage in workbench totals", async () => {
-    const { PLUGIN_ROOT } = await import("./plugin-root.js");
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const usage = {
-      input_tokens: 100,
-      cached_input_tokens: 40,
-      cache_write_tokens: 15,
-      output_tokens: 20,
-      reasoning_output_tokens: 5,
-      total_tokens: 120,
-    };
-    const probe = [
-      "import json, sys",
-      "sys.path.insert(0, sys.argv[1])",
-      "import workbench_scan_usage",
-      "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
-      "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
-    ].join("\n");
-    const result = spawnSync(
-      python!,
-      [
-        "-I",
-        "-B",
-        "-c",
-        probe,
-        join(PLUGIN_ROOT, "scripts"),
-        JSON.stringify(usage),
-      ],
-      { encoding: "utf8" },
-    );
+  test.each([
+    [{ cache_write_tokens: 15 }, 15],
+    [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
+    [{ cache_write_input_tokens: 0, cache_write_tokens: 80 }, 0],
+  ] as const)(
+    "keeps workbench cache-write normalization aligned with SDK usage",
+    async (cacheWrites, expectedCacheWrites) => {
+      const { PLUGIN_ROOT } = await import("./plugin-root.js");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const usage = {
+        input_tokens: 100,
+        cached_input_tokens: 40,
+        ...cacheWrites,
+        output_tokens: 20,
+        reasoning_output_tokens: 5,
+        total_tokens: 120,
+      };
+      const probe = [
+        "import json, sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_scan_usage",
+        "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
+        "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
+      ].join("\n");
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          probe,
+          join(PLUGIN_ROOT, "scripts"),
+          JSON.stringify(usage),
+        ],
+        { encoding: "utf8" },
+      );
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      inputTokens: 100,
-      cachedInputTokens: 40,
-      cacheWriteInputTokens: 15,
-      outputTokens: 20,
-      totalTokens: 120,
-    });
-  });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        inputTokens: 100,
+        cachedInputTokens: 40,
+        cacheWriteInputTokens: expectedCacheWrites,
+        outputTokens: 20,
+        totalTokens: 120,
+      });
+    },
+  );
 
   test("uses published GPT-5.6 model rates", () => {
     const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
@@ -241,6 +252,30 @@ describe("scan cost", () => {
         output_tokens: 10,
       })?.estimatedUsd,
     ).toBe(0.0051);
+  });
+
+  test("preserves legacy cache writes after SDK normalization adds zero", () => {
+    expect(
+      estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
+        cache_write_tokens: 200,
+        output_tokens: 10,
+      }),
+    ).toMatchObject({ cacheWriteInputTokens: 200, estimatedUsd: 0.0051 });
+  });
+
+  test("ignores impossible legacy cache writes while retaining canonical usage", () => {
+    expect(
+      estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
+        cache_write_tokens: 1_001,
+        output_tokens: 10,
+      }),
+    ).toMatchObject({ cacheWriteInputTokens: 0, estimatedUsd: 0.00485 });
   });
 
   test("does not double-charge reasoning tokens included in output", () => {
@@ -429,6 +464,96 @@ describe("live scan cost tracking", () => {
         outputTokens: 15,
         estimatedUsd: 0.006275,
       },
+    });
+  });
+
+  test("counts independent Deep workers inside the scan directory only", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "current");
+    await writeSession(
+      home,
+      "scan-thread",
+      { input_tokens: 1_000, output_tokens: 10 },
+      undefined,
+      scanDirectory,
+      "2026-07-26T12:00:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-worker",
+      { input_tokens: 250, output_tokens: 2 },
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "worker",
+        "output",
+      ),
+      "2026-07-26T12:01:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-reducer",
+      { input_tokens: 125, output_tokens: 1 },
+      undefined,
+      join(scanDirectory, "artifacts"),
+      "2026-07-26T12:02:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-worker-child",
+      { input_tokens: 50, output_tokens: 1 },
+      "deep-worker",
+    );
+    await writeSession(
+      home,
+      "unrelated-thread",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      `${scanDirectory}-other`,
+    );
+    await writeSession(
+      home,
+      "previous-scan",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(scanDirectory, "artifacts", "deep_discovery", "previous-worker"),
+      "2026-07-26T11:59:00Z",
+    );
+    await writeSession(
+      home,
+      "unknown-start",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "stale",
+        "output",
+      ),
+    );
+    await writeSession(
+      home,
+      "nested-scan",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(scanDirectory, "nested", "artifacts"),
+      "2026-07-26T12:03:00Z",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      scanDirectory,
+    });
+    tracker.start("scan-thread");
+
+    expect((await tracker.stop()).usage).toMatchObject({
+      input_tokens: 1_425,
+      output_tokens: 14,
     });
   });
 

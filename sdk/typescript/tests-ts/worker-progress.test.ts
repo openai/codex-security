@@ -64,7 +64,7 @@ describe("worker progress events", () => {
             "python3 /plugin/scripts/config_preflight.py --profile security_scan",
             JSON.stringify({
               profile: "security_scan",
-              status: status === "unknown" ? "incomplete" : "ready",
+              status: "ready",
               results: [
                 { capability: "delegated_workers", status },
                 {

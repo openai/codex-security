@@ -2,11 +2,13 @@ import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   symlink,
@@ -27,6 +29,7 @@ type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
 
 const temporaryDirectories: string[] = [];
+const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(async () => {
   await Promise.all(
@@ -41,7 +44,9 @@ async function fixture(): Promise<{
   input: string;
   output: string;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-multiscan-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-multiscan-")),
+  );
   temporaryDirectories.push(root);
   return {
     root,
@@ -259,6 +264,81 @@ describe("multiscan", () => {
     ]);
   });
 
+  test("surfaces optional post-scan warnings without failing completed scans", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "follow-up-warning");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfollow-up-warning,${source.path},${source.revision}\n`,
+    );
+    const progress: Parameters<
+      NonNullable<MultiscanOptions["onProgress"]>
+    >[0][] = [];
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          scanOptions.onWarning?.("Could not run post-scan instructions.");
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { onProgress: (event) => progress.push(event) },
+      ),
+    );
+
+    expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+    expect(progress).toContainEqual({
+      repository: "follow-up-warning",
+      attempt: 1,
+      status: "started",
+      warning: "Could not run post-scan instructions.",
+    });
+  });
+
+  test.each([false, true])(
+    "continues scanning when a progress observer fails %s",
+    async (asynchronous) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "observer-failure");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nobserver-failure,${source.path},${source.revision}\n`,
+      );
+      let attempts = 0;
+      const progress: string[] = [];
+
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            attempts += 1;
+            scanOptions.onWarning?.("Optional post-scan warning.");
+            return await completedScan(scanOptions.outputDir!);
+          }),
+          {
+            onProgress: (event) => {
+              progress.push(event.warning ?? event.status);
+              const error = new Error("Optional progress observer failed.");
+              if (asynchronous) return Promise.reject(error);
+              throw error;
+            },
+          },
+        ),
+      );
+
+      expect(summary).toMatchObject({ completed: 1, incomplete: 0, failed: 0 });
+      expect(attempts).toBe(1);
+      expect(progress).toEqual([
+        "started",
+        "Optional post-scan warning.",
+        "completed",
+      ]);
+      expect(await results(summary.resultsPath)).toMatchObject([
+        { id: "observer-failure", status: "completed", attempt: 1 },
+      ]);
+    },
+  );
+
   test.each(["partial", "unknown"] as const)(
     "retains sealed %s coverage without retries or multiplied costs",
     async (completeness) => {
@@ -343,7 +423,12 @@ describe("multiscan", () => {
       ]);
 
       const resumed = await runMultiscan(
-        options(paths, security, { maxAttempts: 3 }),
+        options(paths, security, {
+          maxAttempts: 3,
+          onProgress: () => {
+            throw new Error("Optional progress observer failed.");
+          },
+        }),
       );
       expect(resumed).toMatchObject({
         completed: 0,
@@ -1437,6 +1522,70 @@ describe("multiscan", () => {
     }
   });
 
+  test("removes mixed-case repository Git variables before cloning", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "isolated");
+    const trace = join(paths.root, "git-events.jsonl");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nisolated,${source.path},${source.revision}\n`,
+    );
+    const repositoryVariables = [
+      "Git_Dir",
+      "gIt_Work_Tree",
+      "Git_Index_File",
+      "gIt_Object_Directory",
+      "Git_Alternate_Object_Directories",
+    ];
+    const previous = new Map(
+      [...repositoryVariables, "GIT_TRACE2_EVENT", "GIT_TRACE2_ENV_VARS"].map(
+        (name) => [name, process.env[name]] as const,
+      ),
+    );
+
+    try {
+      for (const name of repositoryVariables) {
+        process.env[name] = join(paths.root, `missing-${name}`);
+      }
+      process.env["GIT_TRACE2_EVENT"] = trace;
+      process.env["GIT_TRACE2_ENV_VARS"] = repositoryVariables.join(",");
+
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) =>
+            completedScan(scanOptions.outputDir!),
+          ),
+        ),
+      );
+      expect(summary).toMatchObject({ completed: 1, failed: 0 });
+
+      const leakedVariables = (await readFile(trace, "utf8"))
+        .trim()
+        .split("\n")
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              event: string;
+              param?: string;
+              value?: string;
+            },
+        )
+        .filter(
+          (event) =>
+            event.event === "def_param" &&
+            repositoryVariables.includes(event.param ?? "") &&
+            event.value === join(paths.root, `missing-${event.param}`),
+        );
+      expect(leakedVariables).toEqual([]);
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   test("rejects output-directory symlinks before deleting external checkouts", async () => {
     for (const directory of ["", "checkouts", "artifacts"]) {
       const paths = await fixture();
@@ -1472,6 +1621,249 @@ describe("multiscan", () => {
     }
   });
 
+  test("rejects linked task artifact directories without touching external files", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "victim");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nvictim,${source.path},${source.revision}\n`,
+    );
+    const external = join(paths.root, "external");
+    await mkdir(external);
+    await writeFile(join(external, "preserved.txt"), "preserved\n");
+    await mkdir(join(paths.output, "artifacts"), { recursive: true });
+    await symlink(
+      external,
+      join(paths.output, "artifacts", "victim"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    let scans = 0;
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          scans += 1;
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { maxAttempts: 1 },
+      ),
+    );
+
+    expect(summary).toMatchObject({ total: 1, completed: 0, failed: 1 });
+    expect(scans).toBe(0);
+    expect((await results(summary.resultsPath))[0]?.["error"]).toContain(
+      "symbolic links",
+    );
+    expect(await readdir(external)).toEqual(["preserved.txt"]);
+    expect(await readFile(join(external, "preserved.txt"), "utf8")).toBe(
+      "preserved\n",
+    );
+  });
+
+  test("rejects linked task artifacts before accepting completed receipts", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "victim");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nvictim,${source.path},${source.revision}\n`,
+    );
+    const external = join(paths.root, "external");
+    await completedScan(join(external, "attempt-1"));
+    await mkdir(join(paths.output, "artifacts"), { recursive: true });
+    await symlink(
+      external,
+      join(paths.output, "artifacts", "victim"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await writeFile(
+      join(paths.output, "results.jsonl"),
+      `${JSON.stringify({
+        id: "victim",
+        repository: source.path,
+        revision: source.revision,
+        mode: "standard",
+        status: "completed",
+        attempt: 1,
+        outputDir: join(paths.output, "artifacts", "victim", "attempt-1"),
+      })}\n`,
+    );
+
+    let scans = 0;
+    await expect(
+      runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            scans += 1;
+            return await completedScan(scanOptions.outputDir!);
+          }),
+        ),
+      ),
+    ).rejects.toThrow("symbolic links");
+    expect(scans).toBe(0);
+    expect(await readdir(external)).toEqual(["attempt-1"]);
+  });
+
+  testPosix(
+    "rejects other-user-writable campaigns while preserving readable existing campaigns",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "sample");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nsample,${source.path},${source.revision}\n`,
+      );
+      await mkdir(paths.output, { mode: 0o755 });
+      let scans = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        scans += 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+
+      for (const mode of [0o770, 0o777]) {
+        await chmod(paths.output, mode);
+        await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+          "must not be group- or world-writable",
+        );
+        expect(scans).toBe(0);
+      }
+
+      await chmod(paths.output, 0o755);
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        total: 1,
+        completed: 1,
+        failed: 0,
+      });
+      expect(scans).toBe(1);
+    },
+  );
+
+  testPosix("rejects campaigns beneath an unsafe shared parent", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "sample");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
+    );
+    const parent = join(paths.root, "shared");
+    await mkdir(parent, { mode: 0o777 });
+    await chmod(parent, 0o777);
+    let scans = 0;
+
+    await expect(
+      runMultiscan(
+        options(
+          paths,
+          client(async (_repository, scanOptions = {}) => {
+            scans += 1;
+            return await completedScan(scanOptions.outputDir!);
+          }),
+          { outputDir: join(parent, "results") },
+        ),
+      ),
+    ).rejects.toThrow(
+      "must not be group- or world-writable without the sticky bit",
+    );
+    expect(scans).toBe(0);
+  });
+
+  test("preserves trusted user-selected campaign parent aliases", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "sample");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
+    );
+    const canonicalParent = join(paths.root, "campaigns");
+    const linkedParent = join(paths.root, "linked-campaigns");
+    await mkdir(canonicalParent);
+    await symlink(
+      canonicalParent,
+      linkedParent,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const output = join(linkedParent, "results");
+    let scans = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      scans += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+
+    const summary = await runMultiscan(
+      options(paths, security, { outputDir: output }),
+    );
+
+    expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
+    expect(summary.resultsPath).toBe(join(output, "results.jsonl"));
+    const [receipt] = await results(summary.resultsPath);
+    expect(receipt?.["outputDir"]).toBe(
+      join(canonicalParent, "results", "artifacts", "sample", "attempt-1"),
+    );
+    await writeFile(
+      summary.resultsPath,
+      `${JSON.stringify({
+        ...receipt,
+        outputDir: join(output, "artifacts", "sample", "attempt-1"),
+      })}\n`,
+    );
+    expect(
+      await runMultiscan(options(paths, security, { outputDir: output })),
+    ).toMatchObject({ completed: 1, skipped: 1 });
+    expect(scans).toBe(1);
+    expect(await readdir(join(canonicalParent, "results"))).toContain(
+      "results.jsonl",
+    );
+  });
+
+  test("keeps campaign operations on their validated canonical directory", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "sample");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nsample,${source.path},${source.revision}\n`,
+    );
+    const canonicalParent = join(paths.root, "campaigns");
+    const redirectedParent = join(paths.root, "redirected");
+    const linkedParent = join(paths.root, "linked-campaigns");
+    await mkdir(canonicalParent);
+    await mkdir(join(redirectedParent, "results"), { recursive: true });
+    await writeFile(
+      join(redirectedParent, "results", "preserved.txt"),
+      "preserved\n",
+    );
+    await symlink(
+      canonicalParent,
+      linkedParent,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const output = join(linkedParent, "results");
+
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repository, scanOptions = {}) => {
+          await rename(linkedParent, join(paths.root, "previous-alias"));
+          await symlink(
+            redirectedParent,
+            linkedParent,
+            process.platform === "win32" ? "junction" : "dir",
+          );
+          return await completedScan(scanOptions.outputDir!);
+        }),
+        { outputDir: output },
+      ),
+    );
+
+    expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
+    expect(summary.resultsPath).toBe(
+      join(canonicalParent, "results", "results.jsonl"),
+    );
+    expect(await readdir(join(redirectedParent, "results"))).toEqual([
+      "preserved.txt",
+    ]);
+  });
+
   test("rejects unsafe input without starting scans or exposing URL credentials", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "safe");
@@ -1480,6 +1872,25 @@ describe("multiscan", () => {
       {
         name: "task-id",
         row: `../escape,${source.path},${source.revision},.`,
+      },
+      ...[
+        "CON",
+        "con.txt",
+        "NUL",
+        "AUX.txt",
+        "PRN",
+        "COM1",
+        "com9.log",
+        "LPT1",
+        "lpt9.txt",
+        "report.",
+      ].map((id) => ({
+        name: `task-id-${id}`,
+        row: `${id},${source.path},${source.revision},.`,
+      })),
+      {
+        name: "windows-alias",
+        row: `report,${source.path},${source.revision},.\nreport.,${source.path},${source.revision},.`,
       },
       {
         name: "scope",

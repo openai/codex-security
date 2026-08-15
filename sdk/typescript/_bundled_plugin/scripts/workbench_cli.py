@@ -213,6 +213,11 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
 
+    complete_budget_exhausted_scan = subparsers.add_parser("complete-budget-exhausted-scan")
+    complete_budget_exhausted_scan.add_argument("--scan-id", required=True)
+    complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
+    complete_budget_exhausted_scan.add_argument("--message")
+
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
     cancel_scan.add_argument("--thread-id")

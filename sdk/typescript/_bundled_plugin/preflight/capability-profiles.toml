@@ -65,47 +65,14 @@ capability = "usable_worker_slots_6"
 severity = "warn"
 reason = "A six-thread cap provides room for an independent baseline and parallel investigators; it does not require six running workers."
 
-[[profiles.security_scan.requirements]]
-capability = "goal_tools"
-severity = "suggest"
-reason = "Goal tools help long scans preserve completion criteria across interruptions and compaction."
-
-[[profiles.security_scan.requirements]]
-capability = "goals_enabled"
-severity = "suggest"
-reason = "Enabling goals makes long scans easier to resume and audit."
-
 [profiles.deep_security_scan]
 description = "Capabilities for deep repository-wide Codex Security scans."
-
-[[profiles.deep_security_scan.requirements]]
-capability = "goal_tools"
-severity = "suggest"
-reason = "Goal tools help long deep scans preserve completion criteria across many rounds."
-
-[[profiles.deep_security_scan.requirements]]
-capability = "goals_enabled"
-severity = "suggest"
-reason = "Enabling goals makes long deep scans easier to resume and audit."
+requirements = []
 
 [profiles.security_diff_scan.remediation]
 summary = "Recommended Codex config for longer diff scans."
 
 [[profiles.security_diff_scan.remediation.patches]]
-path = "features.goals"
-value = true
-
-[profiles.security_scan.remediation]
-summary = "Recommended Codex config for repository-wide or scoped-path scans."
-
-[[profiles.security_scan.remediation.patches]]
-path = "features.goals"
-value = true
-
-[profiles.deep_security_scan.remediation]
-summary = "Recommended Codex setup for deep repository-wide scans."
-
-[[profiles.deep_security_scan.remediation.patches]]
 path = "features.goals"
 value = true
 

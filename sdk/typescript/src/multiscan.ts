@@ -22,6 +22,7 @@ import type { CodexSecurityConfig } from "./config.js";
 import type { ScanCost } from "./cost.js";
 import { safeErrorMessage } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
+import { requireSecureOutputAncestry } from "./runtime.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -106,11 +107,15 @@ export async function runMultiscan(
     dirname(resolve(options.inputPath)),
     options.mode,
   );
-  const output = resolve(options.outputDir);
-  await ensureOutputDirectory(output);
+  const requestedOutput = resolve(options.outputDir);
+  const output = await ensureOutputDirectory(requestedOutput);
+  await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   try {
-    return await runCampaign(options, tasks, output);
+    const result = await runCampaign(options, tasks, output);
+    return (await realpath(requestedOutput).catch(() => undefined)) === output
+      ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
+      : result;
   } finally {
     await unlock();
   }
@@ -131,11 +136,24 @@ async function runCampaign(
   let incomplete = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
+    if (receipt === undefined) {
+      pending.push(task);
+      continue;
+    }
+    const artifactRoot = await ensureOutputDirectory(
+      join(output, "artifacts", task.id),
+    );
+    const artifactOutput = join(artifactRoot, `attempt-${receipt.attempt}`);
+    const selectedArtifactOutput = join(
+      resolve(options.outputDir),
+      "artifacts",
+      task.id,
+      `attempt-${receipt.attempt}`,
+    );
     if (
-      receipt !== undefined &&
-      receipt.outputDir ===
-        join(output, "artifacts", task.id, `attempt-${receipt.attempt}`) &&
-      (await hasArtifacts(receipt.outputDir))
+      (receipt.outputDir === artifactOutput ||
+        receipt.outputDir === selectedArtifactOutput) &&
+      (await hasArtifacts(artifactOutput))
     ) {
       if (receipt.status === "completed") {
         completed += 1;
@@ -144,10 +162,13 @@ async function runCampaign(
       const coverage =
         receipt.status === "completed_with_incomplete_coverage"
           ? receipt.coverage ?? "unknown"
-          : await legacyIncompleteCoverage(receipt);
+          : await legacyIncompleteCoverage({
+              ...receipt,
+              outputDir: artifactOutput,
+            });
       if (coverage !== undefined) {
         incomplete += 1;
-        options.onProgress?.({
+        notifyProgress(options, {
           repository: task.id,
           status: "completed_with_incomplete_coverage",
           attempt: receipt.attempt,
@@ -193,13 +214,13 @@ async function runCampaign(
           `attempt-${attempt}`,
         );
         const progress = { repository: task.id, attempt };
-        options.onProgress?.({ ...progress, status: "started" });
+        notifyProgress(options, { ...progress, status: "started" });
         let failure: string | undefined;
         let warning: string | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         try {
-          await mkdir(dirname(scanDir), { recursive: true, mode: 0o700 });
+          await ensureOutputDirectory(dirname(scanDir));
           await rm(checkout, { recursive: true, force: true });
           await mkdir(checkout, { mode: 0o700 });
           await checkoutRevision(
@@ -233,6 +254,12 @@ async function runCampaign(
             ...(options.postScanPrompt === undefined
               ? {}
               : { postScanPrompt: options.postScanPrompt }),
+            onWarning: (warning) =>
+              notifyProgress(options, {
+                ...progress,
+                status: "started",
+                warning,
+              }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
@@ -270,7 +297,7 @@ async function runCampaign(
             ...(warning === undefined ? {} : { warning }),
           })}\n`,
         );
-        options.onProgress?.({
+        notifyProgress(options, {
           ...progress,
           status,
           ...(failure === undefined ? {} : { error: failure }),
@@ -310,7 +337,16 @@ async function runCampaign(
   };
 }
 
-async function ensureOutputDirectory(path: string): Promise<void> {
+function notifyProgress(
+  options: MultiscanOptions,
+  event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
+): void {
+  try {
+    void Promise.resolve(options.onProgress?.(event)).catch(() => {});
+  } catch {}
+}
+
+async function ensureOutputDirectory(path: string): Promise<string> {
   const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
     return undefined;
@@ -319,6 +355,27 @@ async function ensureOutputDirectory(path: string): Promise<void> {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
   await mkdir(path, { recursive: true, mode: 0o700 });
+  const canonical = await realpath(path);
+  const directory = await lstat(canonical);
+  if (
+    metadata !== undefined &&
+    (directory.dev !== metadata.dev || directory.ino !== metadata.ino)
+  ) {
+    throw new Error("Multiscan output directories changed during preparation.");
+  }
+  if (process.platform === "win32") return canonical;
+  if ((directory.mode & 0o022) !== 0) {
+    throw new Error(
+      "Multiscan output directories must not be group- or world-writable.",
+    );
+  }
+  const owner = process.geteuid?.();
+  if (owner !== undefined && directory.uid !== owner) {
+    throw new Error(
+      "Multiscan output directories must be owned by the current user.",
+    );
+  }
+  return canonical;
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
@@ -639,7 +696,11 @@ function parseInventory(
     const get = (name: string): string =>
       fields[headers.indexOf(name)]?.trim() ?? "";
     const id = get("id");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id)) {
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) ||
+      id.endsWith(".") ||
+      /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(id)
+    ) {
       throw new Error("Multiscan task IDs must be safe, unique path names.");
     }
     if (seen.has(id.toLowerCase()))
@@ -712,14 +773,15 @@ async function checkoutRevision(
   githubHost?: string,
 ): Promise<void> {
   const environment = { ...process.env };
-  for (const name of [
+  const repositoryVariables = new Set([
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  ]) {
-    delete environment[name];
+  ]);
+  for (const name of Object.keys(environment)) {
+    if (repositoryVariables.has(name.toUpperCase())) delete environment[name];
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";

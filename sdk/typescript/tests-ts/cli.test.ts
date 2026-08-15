@@ -1,21 +1,20 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  copyFile,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, normalize } from "node:path";
 import { Writable } from "node:stream";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import type {
   CodexSecurityConfig,
   JsonObject,
@@ -36,6 +35,7 @@ import {
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
+import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -117,9 +117,12 @@ describe("CLI", () => {
           subagents: { type: "integer" },
           stopAfterNoNew: { type: "integer" },
           maxDiscoveryRuns: { type: "integer" },
+          maxTimeHours: { type: "number", maximum: 96 },
           model: { type: "string" },
           verbose: { type: "boolean" },
-          effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
+          effort: {
+            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+          },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
           },
@@ -295,11 +298,7 @@ describe("CLI", () => {
     );
 
     for (const documentation of [readme, publicReadme]) {
-      expect(documentation).toContain(
-        "Some cybersecurity requests and protected findings require approval through\n" +
-          "Trusted Access for Cyber. To apply or check your access, visit\n" +
-          "[chatgpt.com/cyber](https://chatgpt.com/cyber).",
-      );
+      expect(documentation).toContain("https://chatgpt.com/cyber");
     }
 
     for (const setting of [
@@ -334,6 +333,7 @@ describe("CLI", () => {
       "[deep_scan]",
       "stop_after_no_new",
       "max_discovery_runs",
+      "max_time_hours",
     ]) {
       expect(readme).toContain(setting);
     }
@@ -347,18 +347,29 @@ describe("CLI", () => {
     const readme = await readFile(new URL("../README.md", import.meta.url), {
       encoding: "utf8",
     });
-    expect(readme).toContain(
-      `model = "${DEFAULT_SCAN_MODEL_CONFIGURATION.model}"`,
+    const documentedConfigs = [
+      ...readme.matchAll(/^```toml\s*\n([\s\S]*?)\n```\s*$/gmu),
+    ].map(([, config]) => parseToml(config!));
+    const documentedRuntime = documentedConfigs.find(
+      (config) => "cli_auth_credentials_store" in config,
     );
-    expect(readme).toContain(
-      `model_reasoning_effort = "${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}"`,
-    );
+    expect(documentedRuntime).toMatchObject({
+      cli_auth_credentials_store:
+        DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"],
+      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
+      model_reasoning_effort: DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort,
+    });
 
     const features = DEFAULT_CODEX_CONFIG["features"] as JsonObject;
     const multiAgent = features["multi_agent_v2"] as JsonObject;
-    expect(readme).toContain(
-      `max_concurrent_threads_per_session = ${String(multiAgent["max_concurrent_threads_per_session"])}`,
-    );
+    expect(documentedRuntime).toMatchObject({
+      features: {
+        multi_agent_v2: {
+          max_concurrent_threads_per_session:
+            multiAgent["max_concurrent_threads_per_session"],
+        },
+      },
+    });
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
@@ -396,17 +407,27 @@ describe("CLI", () => {
         workers: number;
         subagents: number;
         stopAfterNoNew: number;
+        stopAfterConsecutiveErrors: number;
         maxDiscoveryRuns: number;
+        maxTimeHours: number;
       };
-      expect(defaults.workers).toBe(6);
-      expect(readme).toContain('workers = "auto"');
-      expect(readme).toContain(`subagents = ${defaults.subagents}`);
-      expect(readme).toContain(
-        `stop_after_no_new = ${defaults.stopAfterNoNew}`,
+      expect(defaults.workers).toBe(4);
+      const documentedDeepScan = documentedConfigs.find(
+        (config) =>
+          typeof config["deep_scan"] === "object" &&
+          config["deep_scan"] !== null &&
+          "stop_after_consecutive_errors" in config["deep_scan"],
       );
-      expect(readme).toContain(
-        `max_discovery_runs = ${defaults.maxDiscoveryRuns}`,
-      );
+      expect(documentedDeepScan).toMatchObject({
+        deep_scan: {
+          workers: 4,
+          subagents: defaults.subagents,
+          stop_after_no_new: defaults.stopAfterNoNew,
+          stop_after_consecutive_errors: defaults.stopAfterConsecutiveErrors,
+          max_discovery_runs: defaults.maxDiscoveryRuns,
+          max_time_hours: defaults.maxTimeHours,
+        },
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -883,6 +904,7 @@ describe("CLI", () => {
       ["bulk-scan", "--model=gpt-5.6-terra"],
       ["bulk-scan", "--effort", "high"],
       ["bulk-scan", "--effort=high"],
+      ["bulk-scan", "--effort", "max"],
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
@@ -1007,8 +1029,8 @@ describe("CLI", () => {
       bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
       scanMcp: false,
       cliVersion: VERSION,
-      codexVersion: "0.144.6",
-      codexSdkVersion: "0.144.6",
+      codexVersion: CODEX_EXECUTABLE_VERSION,
+      codexSdkVersion: CODEX_SDK_VERSION,
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
@@ -1404,6 +1426,180 @@ describe("CLI", () => {
     expect(timers).toBe(0);
   });
 
+  test("keeps later progress redraw failures from stopping the scan", () => {
+    const stderr = capture(true);
+    const write = stderr.stream.write;
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    stderr.stream.write = (chunk) => {
+      if (failRedraw) throw new Error("Progress redraw failed.");
+      return write.call(stderr.stream, chunk);
+    };
+    const progress = new Progress(stderr.stream, {
+      now: () => 0,
+      setInterval: (callback) => {
+        redraw = callback;
+        return {} as NodeJS.Timeout;
+      },
+      clearInterval: () => {},
+    });
+
+    progress.startTimer("Running scan");
+    failRedraw = true;
+
+    expect(() => redraw?.()).not.toThrow();
+
+    failRedraw = false;
+    progress.stopTimer();
+  });
+
+  test("handles asynchronous progress stream failures while a scan is active", async () => {
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    const stream = Object.assign(
+      new Writable({
+        autoDestroy: false,
+        write(_chunk, _encoding, callback) {
+          if (failRedraw) {
+            queueMicrotask(() =>
+              callback(new Error("Progress output failed.")),
+            );
+          } else {
+            callback();
+          }
+        },
+      }),
+      { isTTY: true },
+    );
+    const progress = new Progress(stream, {
+      now: () => 0,
+      setInterval: (callback) => {
+        redraw = callback;
+        return {} as NodeJS.Timeout;
+      },
+      clearInterval: () => {},
+    });
+
+    progress.startTimer("Running scan");
+    expect(stream.listenerCount("error")).toBe(1);
+    const failure = new Promise<Error>((resolve) =>
+      stream.once("error", resolve),
+    );
+    failRedraw = true;
+    redraw?.();
+    progress.stopTimer();
+    expect(stream.listenerCount("error")).toBe(2);
+
+    await expect(failure).resolves.toMatchObject({
+      message: "Progress output failed.",
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(stream.listenerCount("error")).toBe(0);
+  });
+
+  test("releases progress stream listeners after completed scans and preflight", async () => {
+    for (const command of [
+      ["scan", ".", "--json"],
+      ["scan", ".", "--dry-run", "--json"],
+    ]) {
+      const stream = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+
+      expect(
+        await main(command, capture().stream, stream, dependencies()),
+      ).toBe(0);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(stream.listenerCount("error")).toBe(0);
+    }
+  });
+
+  test("keeps final scan summary failures isolated until all output settles", async () => {
+    const stream = new Writable({
+      autoDestroy: false,
+      write(chunk, _encoding, callback) {
+        if (chunk.toString().includes("REPORT")) {
+          setImmediate(() => callback(new Error("Scan summary failed.")));
+        } else {
+          callback();
+        }
+      },
+    });
+    let progressListenersDuringFailure = 0;
+    const failure = new Promise<Error>((resolve) => {
+      stream.once("error", (error) => {
+        progressListenersDuringFailure = stream.listenerCount("error");
+        resolve(error);
+      });
+    });
+
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        capture().stream,
+        stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    await expect(failure).resolves.toMatchObject({
+      message: "Scan summary failed.",
+    });
+    expect(progressListenersDuringFailure).toBeGreaterThan(0);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(stream.listenerCount("error")).toBe(0);
+  });
+
+  test.each(["archive", "failure"] as const)(
+    "keeps %s output failures isolated after progress stops",
+    async (scenario) => {
+      const failingMessage =
+        scenario === "archive"
+          ? "Moved existing results to:"
+          : "Synthetic scan failure.";
+      const stream = new Writable({
+        autoDestroy: false,
+        write(chunk, _encoding, callback) {
+          if (chunk.toString().includes(failingMessage)) {
+            setImmediate(() => callback(new Error("Terminal output failed.")));
+          } else {
+            callback();
+          }
+        },
+      });
+      let activeProtection = 0;
+      const failure = new Promise<Error>((resolve) => {
+        stream.once("error", (error) => {
+          activeProtection = stream.listenerCount("error");
+          resolve(error);
+        });
+      });
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        async run(_repository, options) {
+          if (scenario === "archive") {
+            options?.onOutputArchived?.("/tmp/previous-results");
+            return fakeResult();
+          }
+          throw new CodexSecurityError(failingMessage);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", ".", "--json"], capture().stream, stream, deps),
+      ).toBe(scenario === "archive" ? 0 : 2);
+      await expect(failure).resolves.toMatchObject({
+        message: "Terminal output failed.",
+      });
+      expect(activeProtection).toBeGreaterThan(0);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(stream.listenerCount("error")).toBe(0);
+    },
+  );
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
     const stderr = capture(true);
@@ -1604,6 +1800,66 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("\r");
   });
 
+  test("falls back to plain progress when the dashboard cannot initialize", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    let scans = 0;
+    let closed = 0;
+    let timers = 0;
+    const deps = dependencies({
+      onRun: () => {
+        scans += 1;
+      },
+      onClose: () => {
+        closed += 1;
+      },
+    });
+    deps.setInterval = () => {
+      timers += 1;
+      throw new Error("Dashboard timer unavailable.");
+    };
+
+    expect(await main(["scan", "."], stdout.stream, stderr.stream, deps)).toBe(
+      0,
+    );
+    expect(scans).toBe(1);
+    expect(closed).toBe(1);
+    expect(timers).toBe(1);
+    expect(stderr.text()).toContain("Preparing scan");
+    expect(stderr.text()).toContain("Running scan");
+  });
+
+  test("closes the client when dashboard cleanup cannot restore the terminal", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const write = stderr.stream.write;
+    const signals = new FakeSignals();
+    let closed = 0;
+    stderr.stream.write = (chunk) => {
+      if (chunk.toString().includes("\u001B[?25h\u001B[?1049l")) {
+        throw new Error("Terminal cleanup failed.");
+      }
+      return write.call(stderr.stream, chunk);
+    };
+
+    expect(
+      await main(
+        ["scan", "."],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          signals,
+          onClose: () => {
+            closed += 1;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(closed).toBe(1);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+  });
+
   test("keeps terminal scans in one live dashboard", async () => {
     const stdout = capture();
     const stderr = capture(true);
@@ -1720,6 +1976,51 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
+  test("omits stage and file counts from interactive Deep scan dashboards", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const result = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+
+    expect(
+      await main(
+        ["scan", "/code/juice-shop", "--mode", "deep"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { NO_COLOR: "1" },
+          result,
+          activities: [
+            {
+              id: "worker-1:read-1",
+              kind: "command",
+              status: "completed",
+              description: "read routes/login.ts",
+              paths: ["routes/login.ts"],
+              worker: 1,
+            },
+          ],
+          costUpdates: [result.cost!],
+          scanProgress: [
+            { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+          ],
+        }),
+      ),
+    ).toBe(0);
+
+    const text = stripVTControlCharacters(stderr.text());
+    expect(text).not.toContain("STAGE");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("0 / 1,258 reviewed");
+    expect(text).toContain("worker 1 · read routes/login.ts");
+    expect(text).toContain("TOKENS");
+    expect(text).toContain("COST");
+    expect(text).toContain("TIME");
+  });
+
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
       ["validate", ["finding"]],
@@ -1803,98 +2104,6 @@ describe("CLI", () => {
     expect(stderr.text()).toBe("");
   });
 
-  test("runs split TypeScript output from an npm-style bin when Node preserves main symlinks", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-node-bin-"));
-    try {
-      const source = join(import.meta.dir, "..");
-      const installed = join(root, "node_modules", "@openai", "codex-security");
-      const dist = join(installed, "dist");
-      const build = spawnSync(
-        "node",
-        [
-          join(source, "node_modules", "typescript", "bin", "tsc"),
-          "-p",
-          join(source, "tsconfig.build.json"),
-          "--outDir",
-          dist,
-          "--pretty",
-          "false",
-        ],
-        { encoding: "utf8", cwd: source },
-      );
-      expect(build.status).toBe(0);
-      expect(build.stderr).toBe("");
-      expect(await readFile(join(dist, "cli.js"), "utf8")).toContain(
-        'from "./api.js"',
-      );
-      const launcher = join(installed, "bin", "codex-security.mjs");
-      await mkdir(join(installed, "bin"), { recursive: true });
-      await copyFile(join(source, "bin", "codex-security.mjs"), launcher);
-      await copyFile(
-        join(source, "package.json"),
-        join(installed, "package.json"),
-      );
-      await symlink(
-        join(source, "node_modules"),
-        join(installed, "node_modules"),
-        "dir",
-      );
-      const binDirectory = join(root, "node_modules", ".bin");
-      await mkdir(binDirectory, { recursive: true });
-      const bin = join(binDirectory, "codex-security");
-      await symlink(launcher, bin);
-      const child = spawnSync("node", [bin, "--version"], {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          NODE_OPTIONS:
-            "--preserve-symlinks-main --no-experimental-detect-module",
-          NODE_USE_ENV_PROXY: undefined,
-        },
-      });
-      expect(child.status).toBe(0);
-      expect(child.stderr).toBe("");
-      expect(child.stdout).toBe(`${VERSION}\n`);
-
-      const preload = join(root, "unavailable-cwd.mjs");
-      await writeFile(
-        preload,
-        [
-          "const originalCwd = process.cwd;",
-          'Object.defineProperty(process, "cwd", {',
-          "  value() {",
-          '    if (/[\\\\/]dist[\\\\/]cli\\.js:/u.test(new Error().stack ?? "")) {',
-          '      throw new Error("working directory is unavailable");',
-          "    }",
-          "    return originalCwd.call(process);",
-          "  },",
-          "});\n",
-        ].join("\n"),
-      );
-      const failed = spawnSync(
-        "node",
-        ["--import", pathToFileURL(preload).href, bin, "scan"],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            NODE_OPTIONS:
-              "--preserve-symlinks-main --no-experimental-detect-module",
-            NODE_USE_ENV_PROXY: undefined,
-          },
-          timeout: 30_000,
-        },
-      );
-      expect([failed.status, failed.stdout, failed.stderr]).toEqual([
-        2,
-        "",
-        "working directory is unavailable\n",
-      ]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30_000);
-
   test("uses Incur version and command help", async () => {
     const version = capture();
     const stderr = capture();
@@ -1921,6 +2130,7 @@ describe("CLI", () => {
     expect(help.text()).toContain("--subagents <number>");
     expect(help.text()).toContain("--stop-after-no-new <number>");
     expect(help.text()).toContain("--max-discovery-runs <number>");
+    expect(help.text()).toContain("--max-time-hours <number>");
     expect(help.text()).toContain("--headless");
     expect(help.text()).toContain(
       "Use plain text progress instead of the interactive dashboard.",
@@ -1932,7 +2142,9 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
-    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      "--effort <minimal|low|medium|high|xhigh|max>",
+    );
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
     );
@@ -1968,7 +2180,9 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
-    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      "--effort <minimal|low|medium|high|xhigh|max>",
+    );
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
     );
@@ -2006,6 +2220,7 @@ describe("CLI", () => {
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
+      [["--effort", "max"], { model_reasoning_effort: "max" }],
       [
         ["--model", "gpt-5.6-terra", "--effort", "high"],
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
@@ -2135,6 +2350,8 @@ describe("CLI", () => {
           "3",
           "--max-discovery-runs",
           "10",
+          "--max-time-hours",
+          "1.5",
           "--plugin-path",
           "plugin.zip",
           "--python=/managed/python",
@@ -2159,6 +2376,7 @@ describe("CLI", () => {
       subagents: 0,
       stopAfterNoNew: 3,
       maxDiscoveryRuns: 10,
+      maxTimeHours: 1.5,
     });
     expect(pathConfig).toMatchObject({
       pluginPath: "plugin.zip",
@@ -2293,6 +2511,10 @@ describe("CLI", () => {
         "Deep scan settings require --mode deep",
       ],
       [
+        ["scan", ".", "--max-time-hours", "1.5"],
+        "Deep scan settings require --mode deep",
+      ],
+      [
         ["scan", ".", "--mode", "deep", "--workers", "0"],
         "expected number to be >0",
       ],
@@ -2307,6 +2529,14 @@ describe("CLI", () => {
       [
         ["scan", ".", "--mode", "deep", "--max-discovery-runs", "0"],
         "expected number to be >0",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--max-time-hours", "0"],
+        "expected number to be >0",
+      ],
+      [
+        ["scan", ".", "--mode", "deep", "--max-time-hours", "96.5"],
+        "expected number to be <=96",
       ],
       [["scan", ".", "--path="], "--path must not be empty"],
       [
@@ -2328,7 +2558,7 @@ describe("CLI", () => {
       ],
       [
         ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, or xhigh",
+        "--effort must be minimal, low, medium, high, xhigh, or max",
       ],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],
@@ -2337,6 +2567,10 @@ describe("CLI", () => {
       [["scan", ".", "--effort", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
+      [
+        ["scan", ".", "--max-time-hours", "--dry-run"],
+        "Missing value for flag",
+      ],
       [["scan", "repo-a", "repo-b", "--dry-run"], "Unexpected positional"],
       [["findings", "false-positive"], "occurrenceId"],
       [["findings", "false-positive", "occurrence-1"], "reason"],

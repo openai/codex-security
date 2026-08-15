@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurityError, type ScanOptions } from "../src/index.js";
 import {
@@ -22,7 +22,19 @@ import {
   dependencies as cliDependencies,
   fakePreflight,
   fakeResult,
-} from "./support/cli.js";
+} from "./cli-fixtures.js";
+
+let stateDirectory: string;
+
+beforeEach(async () => {
+  stateDirectory = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-cli-authentication-")),
+  );
+});
+
+afterEach(async () => {
+  await rm(stateDirectory, { recursive: true, force: true });
+});
 
 function dependencies(
   options: Parameters<typeof cliDependencies>[0] = {},
@@ -30,10 +42,7 @@ function dependencies(
   return cliDependencies({
     ...options,
     environment: {
-      CODEX_SECURITY_STATE_DIR: join(
-        tmpdir(),
-        `codex-security-cli-authentication-${process.pid}`,
-      ),
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
       ...options.environment,
     },
   });
@@ -53,6 +62,8 @@ describe("CLI authentication", () => {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
+      deps.prepareAuthenticationHome = async () =>
+        join(stateDirectory, "codex-home");
       let forwarded: readonly string[] | undefined;
       deps.createSecurity = () => {
         throw new Error("must not initialize Codex Security");
@@ -69,8 +80,6 @@ describe("CLI authentication", () => {
   });
 
   test("uses the same stable credential home for login, status, and logout", async () => {
-    const stateDirectory = join(tmpdir(), "codex-security-managed-auth-state");
-    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     const expectedHome = await realpath(
       await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: stateDirectory,

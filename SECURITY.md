@@ -70,14 +70,14 @@ incomplete coverage.
 ### How scans run
 
 Each scan uses the product's `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. The scan does not request interactive approval. Its
-profile allows reads of the local filesystem and writes to workspace roots and
-the selected scan state directory.
+`approvalPolicy: "never"`. The scan does not request interactive approval or
+grant filesystem escalations. Its profile allows reads of the local filesystem
+and writes to workspace roots and the selected scan state directory.
 
-Setting `approval_policy`, `sandbox_mode`, or permissions through `--codex` or
-SDK `codexOverrides` does not replace the scan's approval policy or make its
-filesystem profile more restrictive. Separately enforced host and network
-restrictions still apply.
+Setting `approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permissions
+through `--codex` or SDK `codexOverrides` does not replace the scan's approval
+policy or make its filesystem profile more restrictive. Separately enforced
+host and network restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment. The workbench
 removes `OPENAI_API_KEY` and `CODEX_API_KEY`, but it does not remove every

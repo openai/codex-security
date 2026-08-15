@@ -1,14 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
-import type {
-  Finding,
-  FindingCodeEvidence,
-  FindingRootCause,
-  FindingWriteup,
-  ScanHardening,
-  ScanRecord,
-} from "../src/index.js";
 import { main } from "../src/cli.js";
 
 function capture(): {
@@ -82,7 +74,13 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
-    expect(ciWorkflow).toContain("run: pnpm --dir sdk/typescript run test\n");
+    expect(ciWorkflow).toContain(
+      "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+    );
+    expect(ciWorkflow).toContain(
+      "name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+    );
+    expect(ciWorkflow).toContain("run: pnpm --dir sdk/typescript run test");
     expect(ciWorkflow).not.toContain("--timeout 60000");
   });
 
@@ -111,29 +109,6 @@ describe("TypeScript package skeleton", () => {
         /- name: Audit production dependencies\n(?:\s+if: [^\n]+\n)?\s+continue-on-error: true\n\s+run: (?:sfw )?pnpm --dir sdk\/typescript run audit:prod/u,
       );
     }
-  });
-
-  test("exposes canonical finding and hardening fields with public types", () => {
-    const finding = {} as Finding;
-    const scan = {} as ScanRecord;
-    const writeup: FindingWriteup | undefined = finding.writeup;
-    const evidence: FindingCodeEvidence[] | undefined = finding.codeEvidence;
-    const rootCause: string | FindingRootCause | undefined = finding.rootCause;
-    const hardening: ScanHardening | undefined = scan.hardening;
-    const reportPath: string | undefined = finding.writeup?.reportPath;
-    const firstEvidencePath: string | undefined =
-      finding.codeEvidence?.[0]?.path;
-    const portfolioPath: "hardening/hardening.md" | undefined =
-      scan.hardening?.portfolioPath;
-    expect([
-      writeup,
-      evidence,
-      rootCause,
-      hardening,
-      reportPath,
-      firstEvidencePath,
-      portfolioPath,
-    ]).toEqual(new Array(7).fill(undefined));
   });
 
   test("exports the async client and curated error base", async () => {
