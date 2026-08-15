@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
+import { hasOnlyRegularEntries, tarListingLines } from "./tar-listing.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
   packageSmokeTimeouts().processTimeoutMs;
@@ -91,7 +92,7 @@ function archiveFile(path) {
   return contents;
 }
 
-const entries = tar(["-tzf", archive], "utf8").split(/\r?\n/u).filter(Boolean);
+const entries = tarListingLines(tar(["-tzf", archive], "utf8"));
 const files = new Set(entries);
 if (files.size !== entries.length) {
   throw new Error("npm tarball contains duplicate paths.");
@@ -209,12 +210,12 @@ for (const file of files) {
 }
 
 const listing = tar(["-tvzf", archive], "utf8");
-if (/^[^d-]/mu.test(listing)) {
+const listingLines = tarListingLines(listing);
+if (!hasOnlyRegularEntries(listingLines)) {
   throw new Error(
     "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
   );
 }
-const listingLines = listing.split(/\r?\n/u).filter(Boolean);
 if (
   listingLines.length !== entries.length ||
   listingLines.some(
