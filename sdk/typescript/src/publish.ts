@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFile,
@@ -281,6 +281,7 @@ export async function publishScanInternal(
     result,
     environment,
   );
+  options.signal?.throwIfAborted();
   reportPublicationProgress(progressObserver, {
     type: "completed",
     created: result.counts.created,
@@ -682,16 +683,37 @@ async function runPublicationCodex(
   input: string,
   environment: NodeJS.ProcessEnv,
   onEvent?: (event: unknown) => void,
+  signal?: AbortSignal,
 ): Promise<PublicationCodexResult> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(command.command, [...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
     let stdout = "";
     let stderr = "";
     let partialLine = "";
+    let termination: Promise<void> | undefined;
+    let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+    let cancellationRequested = false;
+    const onAbort = (): void => {
+      if (cancellationRequested) return;
+      cancellationRequested = true;
+      termination = terminatePublicationProcess(child, signal);
+      forcedTermination = setTimeout(() => {
+        terminatePublicationProcessGroup(child, "SIGKILL");
+      }, 1_000);
+      forcedTermination.unref();
+    };
+    const cleanup = (): void => {
+      signal?.removeEventListener("abort", onAbort);
+      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted === true) onAbort();
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
@@ -714,6 +736,7 @@ async function runPublicationCodex(
     });
     child.stdin.on("error", () => undefined);
     child.once("error", (error) => {
+      cleanup();
       reject(
         new CodexSecurityError(
           "Could not start Codex for Linear publication.",
@@ -723,15 +746,78 @@ async function runPublicationCodex(
         ),
       );
     });
-    child.once("close", (code, signal) => {
-      resolve({
-        exitCode: signal === null ? code ?? 1 : 1,
-        stdout,
-        stderr,
+    child.once("close", (code, terminationSignal) => {
+      void (termination ?? Promise.resolve()).finally(() => {
+        if (cancellationRequested && process.platform !== "win32") {
+          terminatePublicationProcessGroup(child, "SIGKILL");
+        }
+        cleanup();
+        resolve({
+          exitCode: terminationSignal === null ? code ?? 1 : 1,
+          stdout,
+          stderr,
+        });
       });
     });
     child.stdin.end(input);
   });
+}
+
+function terminatePublicationProcess(
+  child: ChildProcessWithoutNullStreams,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (process.platform !== "win32") {
+    terminatePublicationProcessGroup(
+      child,
+      signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
+    );
+    return Promise.resolve();
+  }
+  if (child.pid === undefined) {
+    terminatePublicationProcessGroup(child, "SIGKILL");
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const command = join(
+      process.env["SystemRoot"] ?? "C:\\Windows",
+      "System32",
+      "taskkill.exe",
+    );
+    const taskkill = spawn(command, ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    taskkill.once("error", () => {
+      terminatePublicationProcessGroup(child, "SIGKILL");
+      resolve();
+    });
+    taskkill.once("close", (code) => {
+      if (code !== 0) terminatePublicationProcessGroup(child, "SIGKILL");
+      resolve();
+    });
+  });
+}
+
+function terminatePublicationProcessGroup(
+  child: ChildProcessWithoutNullStreams,
+  signal: NodeJS.Signals,
+): void {
+  if (child.pid === undefined) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child if its process group is unavailable.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The child may have already exited between cancellation and termination.
+  }
 }
 
 function reportCodexEvent(
