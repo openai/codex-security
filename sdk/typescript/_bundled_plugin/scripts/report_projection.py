@@ -427,9 +427,16 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     raw_root_cause = finding.get("rootCause")
     root_cause = raw_root_cause if isinstance(raw_root_cause, dict) else {}
     attack_path = finding.get("attackPath") if isinstance(finding.get("attackPath"), dict) else {}
+    dataflow_aliases = [
+        attack_path[key] for key in ("dataFlow", "dataflow", "data_flow") if key in attack_path
+    ]
     raw_dataflow = next(
-        (attack_path[key] for key in ("dataFlow", "dataflow", "data_flow") if key in attack_path),
-        None,
+        (
+            value
+            for value in dataflow_aliases
+            if (isinstance(value, str) and value.strip()) or (isinstance(value, dict) and value)
+        ),
+        dataflow_aliases[0] if dataflow_aliases else None,
     )
     dataflow = (
         {"summary": raw_dataflow}

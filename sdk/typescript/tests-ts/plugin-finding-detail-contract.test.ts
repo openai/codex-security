@@ -292,6 +292,22 @@ describe("bundled plugin finding detail contracts", () => {
     },
   );
 
+  test("projects the populated data-flow alias", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        dataFlow: {},
+        dataflow: {
+          summary:
+            "request -> populated lowercase dataflow -> filesystem write",
+        },
+      },
+    });
+
+    expect(report).toContain(
+      "request -\\> populated lowercase dataflow -\\> filesystem write",
+    );
+  });
+
   test("projects code evidence referenced by nested attack-path details", () => {
     const report = projectFindingDetails({
       attackPath: {
