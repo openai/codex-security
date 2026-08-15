@@ -35,6 +35,7 @@ export interface PublishScanOptions {
   teamId: string;
   projectId: string;
   dryRun?: boolean;
+  signal?: AbortSignal;
   onProgress?: (event: PublishScanProgress) => void;
 }
 
@@ -94,6 +95,7 @@ export interface PublishScanDependencies {
     input: string,
     environment: NodeJS.ProcessEnv,
     onEvent?: (event: unknown) => void,
+    signal?: AbortSignal,
   ) => Promise<PublicationCodexResult>;
   preparePublicationStore?: typeof preparePublicationStore;
   recordPublishedIssues?: typeof recordPublishedIssues;
@@ -115,6 +117,7 @@ export async function publishScanInternal(
   options: PublishScanOptions,
   dependencies: PublishScanDependencies = {},
 ): Promise<PublishScanResult> {
+  options.signal?.throwIfAborted();
   if (options.destination !== "linear") {
     throw new ConfigurationError("The publication destination must be linear.");
   }
@@ -131,6 +134,7 @@ export async function publishScanInternal(
     scanDirectory,
     options,
   );
+  options.signal?.throwIfAborted();
   const result: PublishScanResult = {
     scanId: prepared.scanId,
     uploadId: prepared.scanId,
@@ -153,6 +157,7 @@ export async function publishScanInternal(
     prepared,
     environment,
   );
+  options.signal?.throwIfAborted();
   const handoff = await createPublicationHandoff(prepared, environment);
   const progressObserver = options.onProgress;
   reportPublicationProgress(progressObserver, {
@@ -163,6 +168,7 @@ export async function publishScanInternal(
   const command = (dependencies.resolveCodex ?? resolveCodexCommand)(
     environment,
   );
+  options.signal?.throwIfAborted();
   const completedFindings = new Set<string>();
   const invocation = await (dependencies.runCodex ?? runPublicationCodex)(
     command,
@@ -197,6 +203,7 @@ export async function publishScanInternal(
             progressObserver,
           );
         },
+    options.signal,
   );
   const failureMessage =
     invocation.exitCode === 0
@@ -234,6 +241,24 @@ export async function publishScanInternal(
   result.failed = handoffResults.failed;
   result.counts.created = result.created.length;
   result.counts.failed = result.failed.length;
+  if (options.signal?.aborted) {
+    try {
+      await (dependencies.writeReceipt ?? writePublicationReceipt)(
+        result,
+        environment,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new CodexSecurityError(
+        `Linear publication was interrupted and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+        { cause: error },
+      );
+    }
+    throw new CodexSecurityError(
+      `Linear publication was interrupted. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+      { cause: options.signal.reason },
+    );
+  }
   await rm(handoff.directory, { recursive: true, force: true }).catch(
     () => undefined,
   );
