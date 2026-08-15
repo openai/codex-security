@@ -224,6 +224,30 @@ function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
 }
 
+function publicationScanAge(timestamp: string, now: number): string {
+  const completedAt = Date.parse(timestamp);
+  if (!Number.isFinite(completedAt)) return "run time unknown";
+
+  const elapsed = Math.max(0, now - completedAt);
+  const units = [
+    ["year", 365 * 24 * 60 * 60 * 1_000],
+    ["month", 30 * 24 * 60 * 60 * 1_000],
+    ["week", 7 * 24 * 60 * 60 * 1_000],
+    ["day", 24 * 60 * 60 * 1_000],
+    ["hour", 60 * 60 * 1_000],
+    ["minute", 60 * 1_000],
+    ["second", 1_000],
+  ] as const;
+
+  for (const [unit, duration] of units) {
+    const count = Math.floor(elapsed / duration);
+    if (count > 0) {
+      return `ran ${count} ${unit}${count === 1 ? "" : "s"} ago`;
+    }
+  }
+  return "ran just now";
+}
+
 function effortOption() {
   return z
     .enum(MODEL_REASONING_EFFORTS, {
@@ -1252,6 +1276,11 @@ export async function main(
               "Could not read completed Codex Security scans.",
             );
           }
+          const now = dependencies.now();
+          const emphasizeRepository =
+            errorOutput.isTTY === true &&
+            dependencies.environment["NO_COLOR"] === undefined &&
+            dependencies.environment["TERM"] !== "dumb";
           const choices = scans.flatMap((scan) => {
             if (!isJsonObject(scan)) return [];
             const progress = scan["progress"];
@@ -1270,12 +1299,15 @@ export async function main(
             }
             const targetSummary = scan["targetSummary"];
             const targetPath = scan["targetPath"];
-            const repository =
+            const repository = (
               typeof targetSummary === "string" && targetSummary.trim()
                 ? targetSummary.trim()
                 : typeof targetPath === "string" && targetPath.trim()
                   ? basename(targetPath)
-                  : "unknown repository";
+                  : "unknown repository"
+            )
+              .replace(/\s+/gu, " ")
+              .trim();
             const completedAt = scan["completedAt"];
             const startedAt = scan["startedAt"];
             const updatedAt = scan["updatedAt"];
@@ -1292,9 +1324,13 @@ export async function main(
               typeof findingCount === "number"
                 ? `${findingCount} finding${findingCount === 1 ? "" : "s"}`
                 : "unknown findings";
+            const name = emphasizeRepository
+              ? `\u001B[1m${repository}\u001B[22m`
+              : repository;
+            const shortScanId = `...${scanId.replace(/\s+/gu, " ").slice(-6)}`;
             return [
               {
-                label: `${repository} · ${scanId} · ${timestamp} · ${findings} · COMPLETE`,
+                label: `${name}  ·  ${findings}  ·  ${publicationScanAge(timestamp, now)}  ·  ${shortScanId}`,
                 value: directory,
               },
             ];

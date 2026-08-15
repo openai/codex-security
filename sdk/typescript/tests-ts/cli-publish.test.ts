@@ -100,7 +100,7 @@ describe("publish scan", () => {
         return {
           scans: [
             {
-              scanId: "first-scan",
+              scanId: "11111111-2222-3333-4444-555555abc123",
               scanDir: firstDirectory,
               targetPath: join(tmpdir(), "first-repository"),
               startedAt: "2026-08-15T01:00:00Z",
@@ -110,7 +110,7 @@ describe("publish scan", () => {
               progress: { status: "complete" },
             },
             {
-              scanId: "second-scan",
+              scanId: "66666666-7777-8888-9999-000000def456",
               scanDir: selectedDirectory,
               targetPath: join(tmpdir(), "second-repository"),
               startedAt: null,
@@ -133,6 +133,7 @@ describe("publish scan", () => {
         };
       },
     });
+    deps.now = () => Date.parse("2026-08-15T02:17:00Z");
     deps.publishPrompt = {
       isInteractive: () => true,
       select: async <Value extends string>(
@@ -160,18 +161,96 @@ describe("publish scan", () => {
     expect(workbenchArguments).toEqual(["list-scans", "--status", "complete"]);
     expect(question).toBe("Which completed scan would you like to publish?");
     expect(choices).toHaveLength(2);
-    expect(choices[0]!.label).toContain("first-repository");
-    expect(choices[0]!.label).toContain("first-scan");
-    expect(choices[0]!.label).toContain("2026-08-15T01:05:00Z");
+    expect(choices[0]!.label).toStartWith(
+      "\u001B[1mfirst-repository\u001B[22m",
+    );
+    expect(choices[0]!.label).toContain("...abc123");
+    expect(choices[0]!.label).toContain("ran 1 hour ago");
     expect(choices[0]!.label).toContain("1 finding");
-    expect(choices[1]!.label).toContain("second-repository");
-    expect(choices[1]!.label).toContain("second-scan");
-    expect(choices[1]!.label).toContain("2026-08-15T02:15:00Z");
+    expect(choices[1]!.label).toStartWith(
+      "\u001B[1msecond-repository\u001B[22m",
+    );
+    expect(choices[1]!.label).toContain("...def456");
+    expect(choices[1]!.label).toContain("ran 2 minutes ago");
     expect(choices[1]!.label).toContain("3 findings");
-    expect(choices[1]!.label).toContain("COMPLETE");
+    expect(choices[0]!.label).not.toContain("11111111-2222-3333");
+    expect(choices[1]!.label).not.toContain("2026-08-15T02:15:00Z");
+    expect(choices[1]!.label).not.toContain("COMPLETE");
+    expect(choices.every((choice) => !choice.label.includes("\n"))).toBe(true);
     expect(publishedDirectory).toBe(selectedDirectory);
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
     expect(stderr.text()).toBe("");
+  });
+
+  test("formats scan choices as compact single lines with relative ages", async () => {
+    const currentTime = Date.parse("2026-08-15T12:00:00Z");
+    const scenarios = [
+      { age: 0, expected: "ran just now" },
+      { age: 30_000, expected: "ran 30 seconds ago" },
+      { age: 60_000, expected: "ran 1 minute ago" },
+      { age: 2 * 60_000, expected: "ran 2 minutes ago" },
+      { age: 60 * 60_000, expected: "ran 1 hour ago" },
+      { age: 4 * 24 * 60 * 60_000, expected: "ran 4 days ago" },
+      { age: 8 * 24 * 60 * 60_000, expected: "ran 1 week ago" },
+      { age: 32 * 24 * 60 * 60_000, expected: "ran 1 month ago" },
+      { age: 366 * 24 * 60 * 60_000, expected: "ran 1 year ago" },
+      { age: -30_000, expected: "ran just now" },
+    ] as const;
+    let choices: readonly { label: string; value: string }[] = [];
+    const deps = dependencies({
+      environment: { NO_COLOR: "1" },
+      onWorkbench: () => ({
+        scans: [
+          ...scenarios.map(({ age }, index) => ({
+            scanId: `scan-${String(index).padStart(6, "0")}`,
+            scanDir: join(tmpdir(), `scan-${index}`),
+            targetSummary: "payments\n\t api",
+            completedAt: new Date(currentTime - age).toISOString(),
+            findingCount: 2,
+            progress: { status: "complete" },
+          })),
+          {
+            scanId: "scan-999999",
+            scanDir: join(tmpdir(), "scan-unknown"),
+            targetSummary: "payments api",
+            completedAt: "not-a-timestamp",
+            findingCount: 0,
+            progress: { status: "complete" },
+          },
+        ],
+      }),
+    });
+    deps.now = () => currentTime;
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async <Value extends string>(
+        _message: string,
+        options: readonly { label: string; value: Value }[],
+      ): Promise<Value> => {
+        choices = options;
+        return options[0]!.value;
+      },
+    };
+    deps.publishScan = async () => publicationResult();
+
+    expect(
+      await main(
+        ["publish", "scan", ...DESTINATION_OPTIONS],
+        capture().stream,
+        capture(true).stream,
+        deps,
+      ),
+    ).toBe(0);
+
+    for (const [index, scenario] of scenarios.entries()) {
+      expect(choices[index]!.label).toBe(
+        `payments api  ·  2 findings  ·  ${scenario.expected}  ·  ...${String(index).padStart(6, "0")}`,
+      );
+    }
+    expect(choices.at(-1)!.label).toBe(
+      "payments api  ·  0 findings  ·  run time unknown  ·  ...999999",
+    );
+    expect(choices.every((choice) => !choice.label.includes("\n"))).toBe(true);
   });
 
   test("requires an interactive terminal when no scan directory is supplied", async () => {

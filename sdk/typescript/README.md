@@ -551,7 +551,8 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
 ```
 
 To choose from all completed scans saved in your local scan history, omit the
-scan directory:
+scan directory. The selector highlights each repository and shows its finding
+count, relative run time, and abbreviated scan ID:
 
 ```bash
 npx @openai/codex-security publish scan \
