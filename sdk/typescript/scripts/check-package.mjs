@@ -172,6 +172,7 @@ const distFiles = new Set(
     "knowledge-base",
     "models",
     "multiscan",
+    "publication",
     "result",
     "runtime",
     "scan-activity",
