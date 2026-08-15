@@ -4067,10 +4067,13 @@ describe("CodexSecurity orchestration", () => {
                 "utf8",
               );
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
-              expect(codexConfig).toContain(
-                'model_reasoning_summary = "detailed"',
-              );
-              expect(codexConfig).toContain("show_raw_agent_reasoning = true");
+              expect(codexConfig).not.toContain("model_reasoning_summary");
+              expect(codexConfig).not.toContain("show_raw_agent_reasoning");
+              expect(options.config).toMatchObject({
+                model_reasoning_summary: "detailed",
+                show_raw_agent_reasoning: true,
+                windows: { sandbox: "unelevated" },
+              });
               if (process.platform !== "win32") {
                 expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
               }
@@ -4287,9 +4290,19 @@ describe("CodexSecurity orchestration", () => {
         ),
       ).toBe(true);
       expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
-      expect(
-        await readFile(join(codexHome, "config.toml"), "utf8"),
-      ).not.toContain("synthetic-transient-key");
+      const persistentConfigText = await readFile(
+        join(codexHome, "config.toml"),
+        "utf8",
+      );
+      expect(persistentConfigText).not.toContain("synthetic-transient-key");
+      const persistentConfig = parseToml(persistentConfigText);
+      expect(persistentConfig["model"]).toBeUndefined();
+      if (provider !== undefined) {
+        expect(persistentConfig).toMatchObject({
+          model_provider: provider,
+          model_providers: { [provider]: providerConfig },
+        });
+      }
     },
   );
 
@@ -4382,7 +4395,7 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("serializes parallel scans sharing a managed credential home", async () => {
+  test("runs parallel ChatGPT scans with isolated mutable configuration", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-codex-home");
@@ -4393,6 +4406,11 @@ describe("CodexSecurity orchestration", () => {
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     let activeScans = 0;
     let maximumActiveScans = 0;
+    const deepScanConfigPaths = new Set<string>();
+    let releaseScans!: () => void;
+    const concurrentScans = new Promise<void>((resolve) => {
+      releaseScans = resolve;
+    });
 
     const clients = await Promise.all(
       [0, 1].map(async (index) => {
@@ -4415,33 +4433,52 @@ describe("CodexSecurity orchestration", () => {
             repositoryRevision: async () => "deadbeef",
             createCodex: (options: CodexOptions) => {
               expect(options.env?.["CODEX_HOME"]).toBe(credentialHome);
+              const expectedModel =
+                index === 0 ? "gpt-5.6-sol" : "gpt-5.6-terra";
+              expect(options.config?.["model"]).toBe(expectedModel);
+              const deepScanConfigPath =
+                options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+              expect(typeof deepScanConfigPath).toBe("string");
+              deepScanConfigPaths.add(deepScanConfigPath!);
               return {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
+                    expect(
+                      existsSync(
+                        join(credentialHome, ".codex-security-scan.lock"),
+                      ),
+                    ).toBe(false);
                     activeScans += 1;
                     maximumActiveScans = Math.max(
                       maximumActiveScans,
                       activeScans,
                     );
+                    if (activeScans === 2) releaseScans();
                     try {
-                      const expectedModel =
-                        index === 0 ? "gpt-5.6-sol" : "gpt-5.6-terra";
+                      const credentialConfig = parseToml(
+                        await readFile(
+                          join(credentialHome, "config.toml"),
+                          "utf8",
+                        ),
+                      );
+                      expect(credentialConfig["model"]).toBeUndefined();
                       const before = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
+                        await readFile(deepScanConfigPath!, "utf8"),
                       );
-                      expect(before["model"]).toBe(expectedModel);
-                      await new Promise((resolve) => setTimeout(resolve, 40));
+                      expect(before["deep_scan"]).toMatchObject({
+                        workers: index + 2,
+                      });
+                      await Promise.race([
+                        concurrentScans,
+                        new Promise((resolve) => setTimeout(resolve, 5_000)),
+                      ]);
                       const after = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
+                        await readFile(deepScanConfigPath!, "utf8"),
                       );
-                      expect(after["model"]).toBe(expectedModel);
+                      expect(after["deep_scan"]).toMatchObject({
+                        workers: index + 2,
+                      });
                       throw new Error("parallel managed scan reached");
                     } finally {
                       activeScans -= 1;
@@ -4456,16 +4493,30 @@ describe("CodexSecurity orchestration", () => {
     );
 
     try {
-      await Promise.all(
-        clients.map(
-          async (client) =>
-            await expect(client.run(repository)).rejects.toThrow(
-              "parallel managed scan reached",
-            ),
+      const results = await Promise.allSettled(
+        clients.map((client, index) =>
+          client.run(repository, { mode: "deep", workers: index + 2 }),
         ),
       );
+      for (const result of results) {
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            message: "parallel managed scan reached",
+          }),
+        });
+      }
       expect(existsSync(credentialHome)).toBe(true);
-      expect(maximumActiveScans).toBe(1);
+      expect(maximumActiveScans).toBe(2);
+      expect(deepScanConfigPaths.size).toBe(2);
+      const pluginConfiguration = JSON.parse(
+        await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
+      ) as { mcpServers: Record<string, { env_vars: string[] }> };
+      expect(
+        pluginConfiguration.mcpServers["codex-security"]?.env_vars.includes(
+          "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+        ),
+      ).toBe(true);
     } finally {
       await Promise.all(clients.map(async (client) => await client.close()));
     }

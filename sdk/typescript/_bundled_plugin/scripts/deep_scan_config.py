@@ -35,6 +35,9 @@ def codex_home() -> Path:
 
 
 def config_path() -> Path:
+    configured = os.environ.get("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
     return codex_home() / "codex-security" / "config.toml"
 
 
