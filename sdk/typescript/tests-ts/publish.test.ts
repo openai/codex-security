@@ -1,8 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   publishScanInternal,
@@ -200,7 +207,121 @@ async function writeHandoff(
   );
 }
 
+async function processHasExited(pid: number): Promise<boolean> {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+      throw error;
+    }
+    if (process.platform === "linux") {
+      const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(
+        () => undefined,
+      );
+      if (state === undefined || /\) Z /u.test(state)) return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return false;
+}
+
 describe("connected Linear publication", () => {
+  test("rejects pre-aborted publication before preparing scans or touching local state", async () => {
+    const publication = preparedPublication();
+    const controller = new AbortController();
+    controller.abort(new Error("Publication was canceled before it started."));
+    let prepared = false;
+    let verified = false;
+    let resolved = false;
+    let started = false;
+    let persisted = false;
+    let receipt = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            prepare: async () => {
+              prepared = true;
+              return publication;
+            },
+            preparePublicationStore: async () => {
+              verified = true;
+            },
+            resolveCodex: () => {
+              resolved = true;
+              return { command: "must-not-run" };
+            },
+            runCodex: async () => {
+              started = true;
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = true;
+              return [...issues];
+            },
+            writeReceipt: async () => {
+              receipt = true;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("Publication was canceled before it started.");
+
+    expect(prepared).toBe(false);
+    expect(verified).toBe(false);
+    expect(resolved).toBe(false);
+    expect(started).toBe(false);
+    expect(persisted).toBe(false);
+    expect(receipt).toBe(false);
+  });
+
+  test("does not create publication state when cancellation interrupts preparation", async () => {
+    const publication = preparedPublication();
+    const controller = new AbortController();
+    let verified = false;
+    let resolved = false;
+    let started = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            prepare: async () => {
+              controller.abort(new Error("Publication preparation stopped."));
+              return publication;
+            },
+            preparePublicationStore: async () => {
+              verified = true;
+            },
+            resolveCodex: () => {
+              resolved = true;
+              return { command: "must-not-run" };
+            },
+            runCodex: async () => {
+              started = true;
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("Publication preparation stopped.");
+
+    expect(verified).toBe(false);
+    expect(resolved).toBe(false);
+    expect(started).toBe(false);
+  });
+
   test("reuses ambient Codex configuration and loads exact issue data from a private file", async () => {
     const publication = preparedPublication();
     const stateDirectory = await mkdtemp(
@@ -757,6 +878,214 @@ describe("connected Linear publication", () => {
     ]);
   });
 
+  test("recovers validated partial mappings after cancellation before preserving its private handoff", async () => {
+    const publication = preparedPublication(3);
+    const controller = new AbortController();
+    const updates: PublishScanProgress[] = [];
+    let handoffFile: string | undefined;
+    let publicationFile: string | undefined;
+    let childStopped = false;
+    let recorded: string[] = [];
+    let receipt: unknown;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          signal: controller.signal,
+          onProgress: (event) => updates.push(event),
+        },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (
+              _command,
+              _args,
+              input,
+              _environment,
+              onEvent,
+              signal,
+            ) => {
+              expect(signal).toBe(controller.signal);
+              ({ handoffFile, publicationFile } = publicationData(input));
+              await writeHandoff(input, [
+                handoffRecord(publication, publication.issues[0]!, {
+                  identifier: "SEC-WRITTEN",
+                }),
+                {
+                  ...handoffRecord(publication, publication.issues[2]!, {
+                    identifier: "SEC-UNVERIFIED",
+                  }),
+                  scanId: "another-scan",
+                },
+              ]);
+              const observed = issueEvent(publication.issues[1]!, {
+                identifier: "SEC-SALVAGED",
+              });
+              onEvent?.(JSON.parse(observed) as unknown);
+              controller.abort("SIGINT");
+              await Promise.resolve();
+              childStopped = true;
+              return {
+                exitCode: 130,
+                stdout: observed,
+                stderr: "Publication was interrupted.",
+              };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              expect(childStopped).toBe(true);
+              recorded = issues.map((issue) => issue.issueIdentifier);
+              return [...issues];
+            },
+            writeReceipt: async (result) => {
+              expect(childStopped).toBe(true);
+              receipt = result;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /Linear publication was interrupted\. The publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
+    );
+
+    expect(recorded).toEqual(["SEC-WRITTEN", "SEC-SALVAGED"]);
+    expect(receipt).toMatchObject({
+      scanId: publication.scanId,
+      created: [
+        { findingId: "finding-1", issueIdentifier: "SEC-WRITTEN" },
+        { findingId: "finding-2", issueIdentifier: "SEC-SALVAGED" },
+      ],
+      failed: [{ findingId: "finding-3" }],
+      counts: { findings: 3, created: 2, failed: 1 },
+    });
+    expect(JSON.stringify(receipt)).not.toContain("SEC-UNVERIFIED");
+    expect(updates.some((event) => event.type === "completed")).toBe(false);
+
+    const recovery = (await readFile(handoffFile!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(
+      recovery.map((record) => [
+        record["findingId"],
+        record["issueIdentifier"],
+      ]),
+    ).toEqual([
+      ["finding-1", "SEC-WRITTEN"],
+      ["finding-3", "SEC-UNVERIFIED"],
+      ["finding-2", "SEC-SALVAGED"],
+    ]);
+    expect(await readFile(publicationFile!, "utf8")).toContain("unsafe(input)");
+    if (process.platform !== "win32") {
+      expect((await stat(dirname(handoffFile!))).mode & 0o077).toBe(0);
+      expect((await stat(handoffFile!)).mode & 0o077).toBe(0);
+      expect((await stat(publicationFile!)).mode & 0o077).toBe(0);
+    }
+  });
+
+  test("retains every verified recovery mapping when cancellation and database failure overlap", async () => {
+    const publication = preparedPublication(2);
+    const controller = new AbortController();
+    let handoffFile: string | undefined;
+    let receipt = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [
+                handoffRecord(publication, publication.issues[0]!, {
+                  identifier: "SEC-WRITTEN",
+                }),
+              ]);
+              controller.abort("SIGTERM");
+              return {
+                exitCode: 143,
+                stdout: issueEvent(publication.issues[1]!, {
+                  identifier: "SEC-SALVAGED",
+                }),
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async () => {
+              throw new Error("The publication database is unavailable.");
+            },
+            writeReceipt: async () => {
+              receipt = true;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /database is unavailable.*publication handoff remains at.*avoid creating duplicate issues/u,
+    );
+
+    expect(receipt).toBe(false);
+    const recovery = (await readFile(handoffFile!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(
+      recovery.map((record) => [
+        record["findingId"],
+        record["issueIdentifier"],
+      ]),
+    ).toEqual([
+      ["finding-1", "SEC-WRITTEN"],
+      ["finding-2", "SEC-SALVAGED"],
+    ]);
+  });
+
+  test("retains cancellation recovery data when its partial receipt cannot be written", async () => {
+    const publication = preparedPublication();
+    const controller = new AbortController();
+    let handoffFile: string | undefined;
+    let persisted = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [
+                handoffRecord(publication, publication.issues[0]!, {
+                  identifier: "SEC-SAVED",
+                }),
+              ]);
+              controller.abort("SIGINT");
+              return { exitCode: 130, stdout: "", stderr: "" };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = true;
+              return [...issues];
+            },
+            writeReceipt: async () => {
+              throw new Error("The receipt disk is full.");
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /partial receipt could not be saved: The receipt disk is full.*publication handoff remains at.*avoid creating duplicate issues/u,
+    );
+
+    expect(persisted).toBe(true);
+    expect(await readFile(handoffFile!, "utf8")).toContain("SEC-SAVED");
+  });
+
   test("rejects mismatched scan IDs, finding occurrences, duplicate findings, and unknown findings", async () => {
     const scenarios: Array<{
       name: string;
@@ -977,6 +1306,198 @@ describe("connected Linear publication", () => {
       issues: publication.issues,
     });
   });
+
+  test("rejects an already-aborted publication before preparing or starting Codex", async () => {
+    const publication = preparedPublication();
+    const controller = new AbortController();
+    const reason = new Error("Publication was canceled before startup.");
+    controller.abort(reason);
+    let prepared = false;
+    let started = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            prepare: async () => {
+              prepared = true;
+              return publication;
+            },
+            runCodex: async () => {
+              started = true;
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
+          },
+        ),
+      ),
+    ).rejects.toBe(reason);
+    expect(prepared).toBe(false);
+    expect(started).toBe(false);
+  });
+
+  test("forwards cancellation and saves verified issues before reporting interruption", async () => {
+    const publication = preparedPublication(2);
+    const controller = new AbortController();
+    const reason = new Error("Publication was interrupted.");
+    let saved: PublicationCodexResult | undefined;
+    let savedIssueIdentifiers: string[] | undefined;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (
+              _command,
+              _args,
+              _input,
+              _environment,
+              _onEvent,
+              signal,
+            ) => {
+              expect(signal).toBe(controller.signal);
+              controller.abort(reason);
+              saved = {
+                exitCode: 1,
+                stdout: issueEvent(publication.issues[0]!),
+                stderr: "",
+              };
+              return saved;
+            },
+            writeReceipt: async (receipt) => {
+              savedIssueIdentifiers = receipt.created.map(
+                (issue) => issue.issueIdentifier,
+              );
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /Linear publication was interrupted\. The publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
+    );
+
+    expect(saved?.exitCode).toBe(1);
+    expect(savedIssueIdentifiers).toEqual(["SEC-1"]);
+  });
+
+  test.each([
+    ["a promptly exiting parent", false, "SIGTERM"],
+    ["a parent that ignores termination", true, "SIGTERM"],
+    ["a Ctrl-C-interrupted parent", false, "SIGINT"],
+  ] as const)(
+    "cancellation stops %s and its signal-resistant Codex descendants",
+    async (_description, ignoreTermination, terminationSignal) => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "codex-security-publication-cancel-"),
+      );
+      temporaryDirectories.push(directory);
+      const publication = preparedPublication(2);
+      const parentPath = join(directory, "parent.pid");
+      const descendantPath = join(directory, "descendant.pid");
+      const preload = join(directory, "codex-preload.cjs");
+      await writeFile(
+        preload,
+        [
+          'const fs = require("node:fs");',
+          'const { spawn } = require("node:child_process");',
+          'fs.readFileSync(0, "utf8");',
+          "fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));",
+          "const environment = { ...process.env };",
+          "delete environment.NODE_OPTIONS;",
+          "const descendant = [",
+          '  "const fs = require(\\"node:fs\\");",',
+          '  "process.on(\\"SIGTERM\\", () => {});",',
+          '  "process.on(\\"SIGINT\\", () => {});",',
+          '  "fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));",',
+          '  "setInterval(() => {}, 1000);",',
+          '].join("");',
+          'spawn(process.execPath, ["-e", descendant], { env: environment, stdio: "ignore" });',
+          "const waiter = new Int32Array(new SharedArrayBuffer(4));",
+          "for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) {",
+          "  if (attempts === 1000) process.exit(3);",
+          "  Atomics.wait(waiter, 0, 0, 10);",
+          "}",
+          'if (process.env.CODEX_PUBLICATION_IGNORE_TERMINATION === "1") {',
+          '  process.on("SIGTERM", () => {});',
+          "}",
+          "fs.writeSync(1, `${process.env.CODEX_PUBLICATION_EVENT}\\n`);",
+          "for (;;) Atomics.wait(waiter, 0, 0, 1000);",
+        ].join("\n"),
+        "utf8",
+      );
+      const controller = new AbortController();
+      const reason =
+        terminationSignal === "SIGINT"
+          ? "SIGINT"
+          : new Error("Publication was interrupted.");
+      const injected = dependencies(
+        publication,
+        {},
+        {
+          environment: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: join(directory, "state"),
+            NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+            CODEX_PUBLICATION_PARENT_PID: parentPath,
+            CODEX_PUBLICATION_DESCENDANT_PID: descendantPath,
+            CODEX_PUBLICATION_IGNORE_TERMINATION: ignoreTermination ? "1" : "0",
+            CODEX_PUBLICATION_EVENT: issueEvent(publication.issues[0]!),
+          },
+          resolveCodex: () => ({
+            command: execFileSync("node", ["-p", "process.execPath"], {
+              encoding: "utf8",
+            }).trim(),
+          }),
+        },
+      );
+      delete injected.runCodex;
+      delete injected.writeReceipt;
+
+      await expect(
+        publishScanInternal(
+          publication.scanDirectory,
+          {
+            ...OPTIONS,
+            signal: controller.signal,
+            onProgress: (event) => {
+              if (event.type === "issue_completed") controller.abort(reason);
+            },
+          },
+          injected,
+        ),
+      ).rejects.toThrow(
+        /Linear publication was interrupted\. The publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
+      );
+
+      const parent = Number(await readFile(parentPath, "utf8"));
+      const descendant = Number(await readFile(descendantPath, "utf8"));
+      expect(await processHasExited(parent)).toBe(true);
+      expect(await processHasExited(descendant)).toBe(true);
+      const receipt = join(
+        directory,
+        "state",
+        "publications",
+        "linear",
+        `${createHash("sha256").update(publication.scanId).digest("hex")}.json`,
+      );
+      const persisted = JSON.parse(await readFile(receipt, "utf8")) as {
+        created: Array<{ issueIdentifier: string }>;
+        counts: { findings: number; created: number; failed: number };
+      };
+      expect(persisted.created.map((issue) => issue.issueIdentifier)).toEqual([
+        "SEC-1",
+      ]);
+      expect(persisted.counts).toEqual({ findings: 2, created: 1, failed: 1 });
+    },
+    30_000,
+  );
 
   test("streams dotted Linear events, ordered progress, and a partial-publication receipt", async () => {
     const directory = await mkdtemp(
