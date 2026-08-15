@@ -14,7 +14,6 @@ const DESTINATION_OPTIONS = [
   "--project",
   "project-from-flags",
 ] as const;
-
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -24,6 +23,14 @@ afterEach(async () => {
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
+
+async function publicationDirectory(): Promise<string> {
+  const directory = await mkdtemp(
+    join(tmpdir(), "codex-security-cli-publication-"),
+  );
+  temporaryDirectories.push(directory);
+  return directory;
+}
 
 async function publicationScanDirectories(count: number): Promise<string[]> {
   const root = await mkdtemp(join(tmpdir(), "codex-security-publish-picker-"));
@@ -1404,6 +1411,91 @@ describe("publish scan", () => {
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
   });
 
+  test("omits deleted, replaced, and linked scan directories without changing valid scan order", async () => {
+    const directory = await publicationDirectory();
+    const firstDirectory = join(directory, "first-completed-scan");
+    const selectedDirectory = join(directory, "selected-completed-scan");
+    const deletedDirectory = join(directory, "deleted-scan");
+    const replacedDirectory = join(directory, "replaced-scan");
+    const linkedDirectory = join(directory, "linked-scan");
+    await Promise.all([
+      mkdir(firstDirectory),
+      mkdir(selectedDirectory),
+      mkdir(deletedDirectory),
+      mkdir(replacedDirectory),
+    ]);
+    await Promise.all([
+      rm(deletedDirectory, { recursive: true }),
+      rm(replacedDirectory, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(replacedDirectory, "This completed scan was replaced."),
+      symlink(firstDirectory, linkedDirectory, "junction"),
+    ]);
+
+    const saved = [
+      { id: "first-scan", directory: firstDirectory },
+      { id: "deleted-scan", directory: deletedDirectory },
+      { id: "replaced-scan", directory: replacedDirectory },
+      { id: "linked-scan", directory: linkedDirectory },
+      { id: "selected-scan", directory: "selected-completed-scan" },
+    ];
+    const stdout = capture();
+    const stderr = capture(true);
+    let offered: readonly { label: string; value: string }[] = [];
+    let publishedDirectory: string | undefined;
+    const deps = dependencies({
+      currentDirectory: directory,
+      onWorkbench: () => ({
+        scans: saved.map(({ id, directory: scanDirectory }) => ({
+          scanId: id,
+          scanDir: scanDirectory,
+          targetSummary: id,
+          completedAt: "2030-01-01T00:00:00Z",
+          findingCount: 1,
+          progress: { status: "complete" },
+        })),
+      }),
+    });
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async <Value extends string>(
+        _message: string,
+        choices: readonly { label: string; value: Value }[],
+      ): Promise<Value> => {
+        offered = choices;
+        return choices[1]!.value;
+      },
+    };
+    deps.publishScan = async (scanDirectory) => {
+      publishedDirectory = scanDirectory;
+      return publicationResult();
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(offered.map(({ value }) => value)).toEqual([
+      firstDirectory,
+      "selected-completed-scan",
+    ]);
+    expect(offered.map(({ label }) => label)).toEqual([
+      expect.stringContaining("first-scan"),
+      expect.stringContaining("selected-scan"),
+    ]);
+    expect(publishedDirectory).toBe(selectedDirectory);
+    expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+    expect(stripVTControlCharacters(stderr.text())).toContain(
+      "CODEX SECURITY  ·  PUBLISH  ·  selected-scan",
+    );
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
   test("requires an interactive terminal when no scan directory is supplied", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -1468,6 +1560,65 @@ describe("publish scan", () => {
     expect(
       await main(
         ["publish", "scan", ...DESTINATION_OPTIONS],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "No completed Codex Security scans are available to publish.",
+    );
+    expect(stdout.text()).toBe("");
+    expect(prompted).toBe(false);
+    expect(published).toBe(false);
+  });
+
+  test("does not offer completed history when every scan directory is unavailable", async () => {
+    const directory = await publicationDirectory();
+    const replacedDirectory = join(directory, "replaced-scan");
+    const validDirectory = join(directory, "unlisted-valid-scan");
+    const linkedDirectory = join(directory, "linked-scan");
+    await Promise.all([
+      mkdir(validDirectory),
+      writeFile(replacedDirectory, "This completed scan was replaced."),
+    ]);
+    await symlink(validDirectory, linkedDirectory, "junction");
+
+    const stdout = capture();
+    const stderr = capture(true);
+    let prompted = false;
+    let published = false;
+    const deps = dependencies({
+      onWorkbench: () => ({
+        scans: [
+          join(directory, "deleted-scan"),
+          replacedDirectory,
+          linkedDirectory,
+        ].map((scanDirectory, index) => ({
+          scanId: `unavailable-scan-${index}`,
+          scanDir: scanDirectory,
+          progress: { status: "complete" },
+        })),
+      }),
+    });
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async <Value extends string>(
+        _message: string,
+        choices: readonly { value: Value }[],
+      ): Promise<Value> => {
+        prompted = true;
+        return choices[0]!.value;
+      },
+    };
+    deps.publishScan = async () => {
+      published = true;
+      return publicationResult();
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", ...DESTINATION_OPTIONS, "--json"],
         stdout.stream,
         stderr.stream,
         deps,
@@ -1619,6 +1770,83 @@ describe("publish scan", () => {
       issues: [],
     });
     expect(stderr.text()).toBe("");
+  });
+
+  test("surfaces receipt warnings without changing published issues or JSON output", async () => {
+    const warning =
+      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.";
+    const result = { ...publicationResult(), warnings: [warning] };
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.publishScan = async () => result;
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
+  });
+
+  test("surfaces receipt warnings for default human-readable publication output", async () => {
+    const warning =
+      "Could not save the publication receipt: Disk is unavailable. Linear issues were already created; do not retry publication.";
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.publishScan = async () => ({
+      ...publicationResult(),
+      warnings: [warning],
+    });
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("SEC-123");
+    expect(stderr.text()).toBe(`codex-security: ${warning}\n`);
+  });
+
+  test("sanitizes receipt warnings while preserving partial publication results", async () => {
+    const warnings = [
+      "Receipt storage failed.\n\u001B[31mDo not retry publication.",
+      "Receipt storage failed: sk-proj-SYNTHETIC_RECEIPT_SECRET",
+    ];
+    const result = {
+      ...publicationResult([
+        { findingId: "finding-2", error: "Linear issue creation failed." },
+      ]),
+      warnings,
+    };
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.publishScan = async () => result;
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toBe(
+      "codex-security: Receipt storage failed.  [31mDo not retry publication.\n" +
+        "codex-security: [redacted]\n",
+    );
+    expect(stderr.text()).not.toContain("\u001B");
+    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
   });
 
   test("returns a nonzero exit code while preserving partial publication results", async () => {

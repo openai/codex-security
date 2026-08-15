@@ -9,7 +9,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import {
+  CodexSecurityError,
+  ConfigurationError,
+  safeErrorMessage,
+} from "./errors.js";
 import {
   prepareScanPublication,
   type LinearPublicationDestination,
@@ -77,6 +81,7 @@ export interface PublishScanResult {
   };
   dryRun?: boolean;
   issues?: PreparedPublicationIssue[];
+  warnings?: string[];
 }
 
 export interface PublicationCodexResult {
@@ -277,10 +282,18 @@ export async function publishScanInternal(
       });
     }
   }
-  await (dependencies.writeReceipt ?? writePublicationReceipt)(
-    result,
-    environment,
-  );
+  try {
+    await (dependencies.writeReceipt ?? writePublicationReceipt)(
+      result,
+      environment,
+    );
+  } catch (error) {
+    if (result.created.length === 0 || options.signal?.aborted) throw error;
+    result.warnings = [
+      ...(result.warnings ?? []),
+      `Could not save the publication receipt: ${safeErrorMessage(error)}. Linear issues were already created; do not retry publication.`,
+    ];
+  }
   options.signal?.throwIfAborted();
   reportPublicationProgress(progressObserver, {
     type: "completed",

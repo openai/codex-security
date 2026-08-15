@@ -1755,6 +1755,127 @@ describe("connected Linear publication", () => {
     expect(result.counts).toEqual({ findings: 0, created: 0, failed: 0 });
   });
 
+  test("returns persisted successes and partial failures when an optional receipt cannot be saved", async () => {
+    for (const partialFailure of [false, true]) {
+      const publication = preparedPublication(2);
+      const progress: PublishScanProgress[] = [];
+      let invocations = 0;
+      let persisted: string[] = [];
+      let handoffFile: string | undefined;
+
+      const result = await publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          onProgress: (event) => progress.push(event),
+        },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              invocations += 1;
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [
+                handoffRecord(publication, publication.issues[0]!, {
+                  identifier: "SEC-PERSISTED",
+                }),
+                handoffRecord(
+                  publication,
+                  publication.issues[1]!,
+                  partialFailure
+                    ? { error: "The destination rejected this finding." }
+                    : { identifier: "SEC-ALSO-PERSISTED" },
+                ),
+              ]);
+              return {
+                exitCode: 0,
+                stdout: "not trusted agent prose",
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = issues.map((issue) => issue.issueIdentifier);
+              return [...issues];
+            },
+            writeReceipt: async () => {
+              throw new Error(
+                "OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123",
+              );
+            },
+          },
+        ),
+      );
+
+      const expectedCreated = partialFailure
+        ? ["SEC-PERSISTED"]
+        : ["SEC-PERSISTED", "SEC-ALSO-PERSISTED"];
+      expect(invocations).toBe(1);
+      expect(persisted).toEqual(expectedCreated);
+      expect(result.created.map((issue) => issue.issueIdentifier)).toEqual(
+        expectedCreated,
+      );
+      expect(result.failed).toEqual(
+        partialFailure
+          ? [
+              {
+                findingId: "finding-2",
+                error: "The destination rejected this finding.",
+              },
+            ]
+          : [],
+      );
+      expect(result.counts).toEqual({
+        findings: 2,
+        created: expectedCreated.length,
+        failed: partialFailure ? 1 : 0,
+      });
+      expect(result.warnings).toEqual([
+        "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.",
+      ]);
+      expect(JSON.stringify(result)).not.toContain("SYNTHETIC_RECEIPT_SECRET");
+      expect(progress.at(-1)).toEqual({
+        type: "completed",
+        created: expectedCreated.length,
+        failed: partialFailure ? 1 : 0,
+        total: 2,
+      });
+      expect(
+        await stat(handoffFile!).then(
+          () => false,
+          (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  test("keeps receipt failures fatal when no Linear issues were created", async () => {
+    const publication = preparedPublication();
+    let persisted = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          { stdout: "" },
+          {
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = true;
+              return [...issues];
+            },
+            writeReceipt: async () => {
+              throw new Error("The receipt disk is unavailable.");
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("The receipt disk is unavailable.");
+
+    expect(persisted).toBe(false);
+  });
+
   test("preserves successful issues when another creation fails", async () => {
     const publication = preparedPublication(3);
     const result = await publishScanInternal(

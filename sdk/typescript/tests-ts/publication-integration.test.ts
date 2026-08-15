@@ -521,6 +521,85 @@ describe("database-backed Linear publication integration", () => {
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
   });
 
+  test("keeps SQLite-backed Linear issues successful when their optional receipt cannot be saved", async () => {
+    const completed = await fixture(2);
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const stdout = capture();
+    const stderr = capture();
+    const cli = dependencies({ environment: completed.environment });
+    let publicationAttempts = 0;
+
+    cli.publishScan = async (directory, options) =>
+      await publishScanInternal(directory, options, {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async (_command, _args, prompt) => {
+          publicationAttempts += 1;
+          const payload = await publicationPayload(prompt);
+          await appendFile(
+            payload.handoffFile,
+            `${payload.batches[0]!.map((finding, index) =>
+              JSON.stringify({
+                scanId: payload.scanId,
+                findingId: finding.findingId,
+                occurrenceId: finding.occurrenceId,
+                arguments: finding.arguments,
+                issueIdentifier: `SEC-${801 + index}`,
+              }),
+            ).join("\n")}\n`,
+          );
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+        writeReceipt: async () => {
+          throw new Error(
+            "Receipt storage unavailable: sk-proj-SYNTHETIC_RECEIPT_SECRET",
+          );
+        },
+      });
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--project",
+          OPTIONS.projectId,
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      ),
+    ).toBe(0);
+
+    const result = JSON.parse(stdout.text()) as PublishScanResult & {
+      warnings?: string[];
+    };
+    expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
+    expect(
+      result.created.map(({ issueIdentifier }) => issueIdentifier),
+    ).toEqual(["SEC-801", "SEC-802"]);
+    expect(result.warnings).toEqual([
+      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.",
+    ]);
+    expect(stderr.text()).toContain(result.warnings![0]!);
+    expect(stdout.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
+    expect(stderr.text()).not.toContain("SYNTHETIC_RECEIPT_SECRET");
+    expect(publicationAttempts).toBe(1);
+    expect(
+      storedPublications(completed).map(({ external_id }) => external_id),
+    ).toEqual(["SEC-801", "SEC-802"]);
+    expect(
+      await readFile(receiptPath(completed), "utf8").catch(() => null),
+    ).toBe(null);
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
   test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
     const completed = await fixture(3);
     const sealed = await artifactDigests(completed.scanDirectory);
