@@ -448,16 +448,13 @@ async function collectPublicationHandoff(
     }
     observed.add(issue.findingId);
 
-    const args = record["arguments"];
     if (
       record["scanId"] !== publication.scanId ||
-      record["occurrenceId"] !== issue.occurrenceId ||
-      !isRecord(args) ||
-      !hasExpectedPublicationArguments(args, publication, issue)
+      record["occurrenceId"] !== issue.occurrenceId
     ) {
       failed.set(
         issue.findingId,
-        "Codex wrote a Linear publication with an unexpected scan, finding, destination, or arguments.",
+        "Codex wrote a Linear publication with an unexpected scan or finding occurrence.",
       );
       continue;
     }
@@ -469,14 +466,7 @@ async function collectPublicationHandoff(
       if (
         identifiers.length !== 0 ||
         typeof record["error"] !== "string" ||
-        record["error"].trim().length === 0 ||
-        !hasExpectedHandoffKeys(record, [
-          "scanId",
-          "findingId",
-          "occurrenceId",
-          "arguments",
-          "error",
-        ])
+        record["error"].trim().length === 0
       ) {
         failed.set(
           issue.findingId,
@@ -495,15 +485,7 @@ async function collectPublicationHandoff(
       typeof identifier !== "string" ||
       identifier.trim().length === 0 ||
       (url !== undefined &&
-        (typeof url !== "string" || url.trim().length === 0)) ||
-      !hasExpectedHandoffKeys(record, [
-        "scanId",
-        "findingId",
-        "occurrenceId",
-        "arguments",
-        ...identifiers,
-        ...(url === undefined ? [] : ["url"]),
-      ])
+        (typeof url !== "string" || url.trim().length === 0))
     ) {
       failed.set(
         issue.findingId,
@@ -639,39 +621,6 @@ async function preserveVerifiedHandoff(
     encoding: "utf8",
     mode: 0o600,
   });
-}
-
-function hasExpectedPublicationArguments(
-  actual: Record<string, unknown>,
-  publication: PreparedScanPublication,
-  issue: PreparedPublicationIssue,
-): boolean {
-  const expected: Record<string, unknown> = {
-    team: publication.destination.teamId,
-    project: publication.destination.projectId,
-    title: issue.title,
-    description: issue.description,
-    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-  };
-  const keys = Object.keys(actual);
-  return (
-    keys.length === Object.keys(expected).length &&
-    keys.every(
-      (key) =>
-        Object.hasOwn(expected, key) && Object.is(actual[key], expected[key]),
-    )
-  );
-}
-
-function hasExpectedHandoffKeys(
-  record: Record<string, unknown>,
-  expected: readonly string[],
-): boolean {
-  const keys = Object.keys(record);
-  return (
-    keys.length === expected.length &&
-    keys.every((key) => expected.includes(key))
-  );
 }
 
 function codexFailureMessage(stderr: string, exitCode: number): string {

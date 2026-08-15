@@ -674,7 +674,7 @@ describe("connected Linear publication", () => {
     ]);
   });
 
-  test("rejects mismatched destinations, payloads, duplicate findings, and cross-scan handoffs", async () => {
+  test("rejects mismatched scan IDs, finding occurrences, duplicate findings, and unknown findings", async () => {
     const scenarios: Array<{
       name: string;
       mutate: (record: Record<string, unknown>) => Record<string, unknown>[];
@@ -686,34 +686,6 @@ describe("connected Linear publication", () => {
       {
         name: "another occurrence",
         mutate: (record) => [{ ...record, occurrenceId: "another-occurrence" }],
-      },
-      ...["team", "project", "title", "description", "priority"].map((key) => ({
-        name: `unexpected ${key}`,
-        mutate: (record: Record<string, unknown>) => [
-          {
-            ...record,
-            arguments: {
-              ...(record["arguments"] as Record<string, unknown>),
-              [key]: key === "priority" ? 4 : `unexpected-${key}`,
-            },
-          },
-        ],
-      })),
-      {
-        name: "an additional Linear argument",
-        mutate: (record) => [
-          {
-            ...record,
-            arguments: {
-              ...(record["arguments"] as Record<string, unknown>),
-              id: "existing-issue",
-            },
-          },
-        ],
-      },
-      {
-        name: "an additional handoff field",
-        mutate: (record) => [{ ...record, untrusted: true }],
       },
       {
         name: "duplicate finding records",
@@ -759,21 +731,49 @@ describe("connected Linear publication", () => {
     }
   });
 
+  test("matches durable publication handoffs by scan and finding IDs only", async () => {
+    const publication = preparedPublication(3);
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _args, input) => {
+            await writeHandoff(
+              input,
+              publication.issues.map((issue, index) => {
+                const record = handoffRecord(publication, issue);
+                if (index === 0) {
+                  record["arguments"] = { title: "Normalized issue title" };
+                } else if (index === 1) {
+                  delete record["arguments"];
+                } else {
+                  record["connectorRequestId"] = "request-example";
+                }
+                return record;
+              }),
+            );
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        },
+      ),
+    );
+
+    expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
+    expect(result.created.map((issue) => issue.findingId)).toEqual([
+      "finding-1",
+      "finding-2",
+      "finding-3",
+    ]);
+  });
+
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {
     const scenarios: Array<{
       name: string;
       events: (publication: PreparedScanPublication) => string[];
     }> = [
-      {
-        name: "unexpected destination",
-        events: (publication) => {
-          const event = JSON.parse(issueEvent(publication.issues[0]!)) as {
-            item: { arguments: Record<string, unknown> };
-          };
-          event.item.arguments["team"] = "unexpected-team";
-          return [JSON.stringify(event)];
-        },
-      },
       {
         name: "different created issue",
         events: (publication) => [
