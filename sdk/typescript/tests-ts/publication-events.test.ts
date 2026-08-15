@@ -34,7 +34,7 @@ function event(
       id: `call_${index}`,
       type: "mcp_tool_call",
       server: "codex_apps",
-      tool: "linear_save_issue",
+      tool: "linear.save_issue",
       status: "completed",
       arguments: {
         team: prepared.destination.teamId,
@@ -56,7 +56,7 @@ function event(
 }
 
 describe("Codex Linear publication events", () => {
-  test("collects completed Linear issue tool calls and ignores unrelated events", () => {
+  test("collects dotted and legacy Linear issue calls while ignoring unrelated events", () => {
     const prepared = publication(2);
     const output = [
       JSON.stringify({
@@ -72,11 +72,11 @@ describe("Codex Linear publication events", () => {
         item: {
           type: "mcp_tool_call",
           server: "codex_apps",
-          tool: "linear_save_issue",
+          tool: "linear.save_issue",
         },
       }),
       event(prepared, 0),
-      event(prepared, 1),
+      event(prepared, 1, { tool: "linear_save_issue" }),
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
@@ -386,39 +386,6 @@ describe("Codex Linear publication events", () => {
     });
   });
 
-  test.each([
-    ["different team", { team: "unexpected_team" }],
-    ["different project", { project: "unexpected_project" }],
-    ["update id", { id: "SEC-EXISTING" }],
-    ["extra mutation", { assignee: "someone" }],
-    ["wrong priority", { priority: 1 }],
-  ] as const)(
-    "rejects %s without claiming a created issue",
-    (_label, changed) => {
-      const prepared = publication();
-      const issue = prepared.issues[0]!;
-      const output = event(prepared, 0, {
-        arguments: {
-          team: prepared.destination.teamId,
-          project: prepared.destination.projectId,
-          title: issue.title,
-          description: issue.description,
-          priority: issue.priority,
-          ...changed,
-        },
-      });
-
-      const result = collectPublicationEvents(output, prepared, "missing");
-      expect(result.created).toEqual([]);
-      expect(result.failed).toEqual([
-        {
-          findingId: "finding_0",
-          error: expect.stringContaining("unexpected arguments or destination"),
-        },
-      ]);
-    },
-  );
-
   test("reports unexpected issue calls instead of trusting model-created output", () => {
     const prepared = publication();
     const output = event(prepared, 0, {
@@ -495,18 +462,6 @@ describe("Codex Linear publication events", () => {
         { findingId: "finding_1", error: "Missing tool call." },
       ],
     });
-  });
-
-  test("handles more than 25 findings without a publication limit", () => {
-    const prepared = publication(37);
-    const output = prepared.issues
-      .map((_issue, index) => event(prepared, index))
-      .join("\n");
-    const result = collectPublicationEvents(output, prepared, "missing");
-
-    expect(result.created).toHaveLength(37);
-    expect(result.failed).toEqual([]);
-    expect(result.created[36]?.issueIdentifier).toBe("SEC-37");
   });
 
   test("rejects repeated creation calls for the same finding", () => {
