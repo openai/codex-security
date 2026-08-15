@@ -104,6 +104,51 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("publishes directly to a Linear team when no project is selected", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = {
+      ...publicationResult(),
+      destination: { type: "linear" as const, teamId: "team-from-flags" },
+    };
+    let options: Record<string, unknown> | undefined;
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, selected) => {
+      options = { ...selected };
+      return result;
+    };
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          "--to",
+          "linear",
+          "--linear-team",
+          "team-from-flags",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(options).toMatchObject({
+      destination: "linear",
+      teamId: "team-from-flags",
+      dryRun: false,
+      signal: expect.any(AbortSignal),
+    });
+    expect(options).not.toHaveProperty("projectId");
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(JSON.parse(stdout.text()).destination).not.toHaveProperty(
+      "projectId",
+    );
+    expect(stderr.text()).toBe("");
+  });
+
   test("waits for interrupted publication recovery before honoring either terminal signal", async () => {
     for (const [signal, expectedCode, expectedMessage] of [
       ["SIGINT", 130, "Publication canceled by Ctrl-C."],
@@ -476,25 +521,13 @@ describe("publish scan", () => {
     expect(published).toBe(false);
   });
 
-  test("requires an explicit supported destination, team, and project", async () => {
+  test("requires an explicit supported destination and team with valid optional flags", async () => {
     const cases: ReadonlyArray<[readonly string[], string]> = [
       [["publish", "scan", "completed-scan"], "to"],
       [["publish", "scan", "completed-scan", "--to", "azure"], "linear"],
       [
         ["publish", "scan", "completed-scan", "--to", "linear"],
         "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required.",
-      ],
-      [
-        [
-          "publish",
-          "scan",
-          "completed-scan",
-          "--to",
-          "linear",
-          "--linear-team",
-          "team-id",
-        ],
-        "--project or CODEX_SECURITY_LINEAR_PROJECT is required.",
       ],
       [
         ["publish", "scan", "completed-scan", "--to"],
@@ -523,6 +556,20 @@ describe("publish scan", () => {
           "--project",
         ],
         "Missing value for flag: --project",
+      ],
+      [
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          "--to",
+          "linear",
+          "--linear-team",
+          "team-id",
+          "--project",
+          "   ",
+        ],
+        "--project must not be empty.",
       ],
     ];
 
