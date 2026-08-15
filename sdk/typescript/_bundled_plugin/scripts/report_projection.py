@@ -438,7 +438,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         if isinstance((value := attack_path.get(key)), (str, dict))
     ]
     dataflow: dict[str, Any] = {}
-    for key in ("summary", "source", "sink", "outcome", "transformations"):
+    for key in ("summary", "source", "sink", "outcome"):
         value = next(
             (
                 section[key]
@@ -453,6 +453,15 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         )
         if value is not None:
             dataflow[key] = value
+    transformations = list(
+        dict.fromkeys(
+            transformation
+            for section in dataflow_sections
+            for transformation in _strings(section.get("transformations"))
+        )
+    )
+    if transformations:
+        dataflow["transformations"] = transformations
     raw_reachability = attack_path.get("reachability")
     reachability = (
         {"summary": raw_reachability}

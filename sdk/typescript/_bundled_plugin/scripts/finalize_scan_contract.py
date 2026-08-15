@@ -1222,17 +1222,21 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         _validate_location(location, f"{context}.locations[{index}]")
 
     evidence_ids: set[str] = set()
-    code_evidence = finding.get("codeEvidence")
-    if code_evidence is not None:
+    for evidence_key in ("codeEvidence", "code_evidence"):
+        code_evidence = finding.get(evidence_key)
+        if code_evidence is None:
+            continue
         if not isinstance(code_evidence, list):
-            raise ContractError(f"{context}.codeEvidence: expected an array")
+            raise ContractError(f"{context}.{evidence_key}: expected an array")
+        catalog_ids: set[str] = set()
         for index, evidence in enumerate(code_evidence):
-            evidence_context = f"{context}.codeEvidence[{index}]"
+            evidence_context = f"{context}.{evidence_key}[{index}]"
             if not isinstance(evidence, dict):
                 raise ContractError(f"{evidence_context}: expected an object")
             evidence_id = _require_str(evidence, "id", evidence_context)
-            if evidence_id in evidence_ids:
+            if evidence_id in catalog_ids:
                 raise ContractError(f"{evidence_context}.id: duplicate code-evidence id")
+            catalog_ids.add(evidence_id)
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
 

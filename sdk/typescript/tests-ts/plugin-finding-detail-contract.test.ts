@@ -308,6 +308,22 @@ describe("bundled plugin finding detail contracts", () => {
     );
   });
 
+  test("merges transformations across data-flow aliases", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        dataFlow: { transformations: ["decode archive entry"] },
+        dataflow: {
+          summary: "request -> archive extraction -> filesystem write",
+          transformations: ["dispatch extraction", "decode archive entry"],
+        },
+      },
+    });
+
+    expect(report).toContain("- decode archive entry");
+    expect(report).toContain("- dispatch extraction");
+    expect(report.match(/- decode archive entry/gu)).toHaveLength(1);
+  });
+
   test("projects code evidence referenced by nested attack-path details", () => {
     const report = projectFindingDetails({
       attackPath: {
@@ -369,6 +385,28 @@ describe("bundled plugin finding detail contracts", () => {
     expect(new TextDecoder().decode(result.stdout)).toContain(
       "attackPath.dataflow.evidenceRefs: unknown code-evidence ids: missing-evidence",
     );
+  });
+
+  test("accepts nested references to the legacy code evidence catalog", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())['findings'][0]",
+      "finding.pop('codeEvidence', None)",
+      "finding['code_evidence'] = [{'id': 'legacy-source', 'code': 'entry_path = archive_entry.name'}]",
+      "finding['attackPath'] = {'dataflow': {'evidence_refs': ['legacy-source']}}",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "finalizer['_validate_finding'](finding, 'findings[0]')",
+      "print('accepted')",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(new TextDecoder().decode(result.stdout)).toContain("accepted");
   });
 
   test("keeps legacy sealed nested evidence references compatible", () => {
