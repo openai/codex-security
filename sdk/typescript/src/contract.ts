@@ -831,8 +831,8 @@ async function openCheckedScanFile(
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
-      opened.dev !== checked.metadata.dev ||
-      opened.ino !== checked.metadata.ino
+      opened.ino !== checked.metadata.ino ||
+      !(await sameCheckedFileDevice(file, checked, opened))
     ) {
       throw new ContractValidationError(
         `${context}: expected the checked regular file.`,
@@ -874,6 +874,29 @@ async function openCheckedScanFile(
       { cause: error },
     );
   }
+}
+
+export async function sameCheckedFileDevice(
+  file: FileHandle,
+  checked: CheckedScanFile,
+  opened: Stats,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (opened.dev === checked.metadata.dev) return true;
+  if (platform !== "win32") return false;
+
+  const [openedIdentity, checkedIdentity] = await Promise.all([
+    file.stat({ bigint: true }),
+    lstat(checked.path, { bigint: true }),
+  ]);
+  return (
+    openedIdentity.isFile() &&
+    checkedIdentity.isFile() &&
+    !checkedIdentity.isSymbolicLink() &&
+    openedIdentity.ino === checkedIdentity.ino &&
+    BigInt.asUintN(32, openedIdentity.dev) ===
+      BigInt.asUintN(32, checkedIdentity.dev)
+  );
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
