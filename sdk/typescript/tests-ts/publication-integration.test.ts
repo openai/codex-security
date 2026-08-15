@@ -68,7 +68,7 @@ interface StoredPublication {
   occurrence_id: string;
   destination_type: string;
   team_id: string;
-  project_id: string;
+  project_id: string | null;
   external_id: string;
   external_url: string;
 }
@@ -492,6 +492,137 @@ describe("database-backed Linear publication integration", () => {
         await readFile(join(completed.stateDirectory, "workbench.sqlite3"))
       ).includes(Buffer.from(key)),
     ).toBe(false);
+  });
+
+  test("publishes a sealed finding directly to a team without a project", async () => {
+    const completed = await fixture(1, true);
+    const key = "lin_api_SYNTHETIC_TEAM_ONLY_INTEGRATION";
+    const environment = {
+      ...completed.environment,
+      CODEX_SECURITY_LINEAR_API_KEY: key,
+    };
+    const stdout = capture();
+    const stderr = capture();
+    const requests: Array<{
+      query: string;
+      variables: Record<string, unknown>;
+    }> = [];
+    let sdkResult: PublishScanResult | undefined;
+    const cli = dependencies({ environment });
+    cli.publishScan = async (directory, options) => {
+      sdkResult = await publishScanInternal(directory, options, {
+        environment,
+        resolveCodex: () => {
+          throw new Error("direct API publication must not resolve Codex");
+        },
+        runCodex: async () => {
+          throw new Error("direct API publication must not invoke Codex");
+        },
+        linearFetch: (async (
+          resource: Parameters<typeof fetch>[0],
+          init?: Parameters<typeof fetch>[1],
+        ) => {
+          expect(String(resource)).toBe("https://api.linear.app/graphql");
+          expect(new Headers(init?.headers).get("authorization")).toBe(key);
+          const request = JSON.parse(String(init?.body)) as {
+            query: string;
+            variables: Record<string, unknown>;
+          };
+          requests.push(request);
+
+          if (request.query.includes("CodexSecurityLinearDestination")) {
+            expect(request.query).not.toContain("$projectId");
+            expect(request.query).not.toContain("project(");
+            expect(request.variables).toEqual({ teamId: OPTIONS.teamId });
+            return Response.json({
+              data: {
+                viewer: { id: "viewer-self" },
+                team: { id: OPTIONS.teamId },
+              },
+            });
+          }
+
+          const input = request.variables["input"] as Record<string, unknown>;
+          expect(input).not.toHaveProperty("projectId");
+          const description = input["description"] as string;
+          expect(input).toEqual({
+            teamId: OPTIONS.teamId,
+            title: "[Codex Security][HIGH] Synthetic finding 1",
+            description,
+            priority: 2,
+            assigneeId: "viewer-self",
+          });
+          expect(description).toContain(completed.findings[0]!.findingId);
+          expect(description).toContain("write(destination_1, user_input)");
+          return Response.json({
+            data: {
+              issueCreate: {
+                success: true,
+                issue: {
+                  identifier: "SEC-950",
+                  url: "https://linear.app/example/issue/SEC-950",
+                  title: input["title"],
+                  description,
+                  priority: input["priority"],
+                  team: { id: input["teamId"] },
+                  project: null,
+                  assignee: { id: input["assigneeId"] },
+                },
+              },
+            },
+          });
+        }) as typeof fetch,
+      });
+      return sdkResult;
+    };
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      ),
+    ).toBe(0);
+
+    expect(requests).toHaveLength(2);
+    expect(sdkResult?.destination).toMatchObject({
+      type: "linear",
+      teamId: OPTIONS.teamId,
+    });
+    expect(sdkResult?.destination).not.toHaveProperty("projectId");
+    expect(sdkResult?.counts).toEqual({
+      findings: 1,
+      created: 1,
+      failed: 0,
+    });
+    expect(JSON.parse(stdout.text())).toEqual(sdkResult);
+    expect(JSON.parse(await readFile(receiptPath(completed), "utf8"))).toEqual(
+      sdkResult,
+    );
+    expect(storedPublications(completed)).toEqual([
+      {
+        scan_id: SCAN_ID,
+        finding_id: completed.findings[0]!.findingId,
+        occurrence_id: completed.findings[0]!.occurrenceId,
+        destination_type: "linear",
+        team_id: OPTIONS.teamId,
+        project_id: null,
+        external_id: "SEC-950",
+        external_url: "https://linear.app/example/issue/SEC-950",
+      },
+    ]);
+    expect(stdout.text()).not.toContain(key);
+    expect(stderr.text()).not.toContain(key);
   });
 
   test("publishes 23 sealed findings through a durable handoff without Codex JSON", async () => {

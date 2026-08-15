@@ -29,6 +29,12 @@ function publication(): PreparedScanPublication {
   };
 }
 
+function teamOnlyPublication(): PreparedScanPublication {
+  const prepared = publication();
+  delete (prepared.destination as { projectId?: string }).projectId;
+  return prepared;
+}
+
 function destinationResponse(
   prepared: PreparedScanPublication,
   overrides: Record<string, unknown> = {},
@@ -37,10 +43,14 @@ function destinationResponse(
     data: {
       viewer: { id: "user-self" },
       team: { id: prepared.destination.teamId },
-      project: {
-        id: prepared.destination.projectId,
-        teams: { nodes: [{ id: prepared.destination.teamId }] },
-      },
+      ...(prepared.destination.projectId === undefined
+        ? {}
+        : {
+            project: {
+              id: prepared.destination.projectId,
+              teams: { nodes: [{ id: prepared.destination.teamId }] },
+            },
+          }),
       ...overrides,
     },
   });
@@ -63,7 +73,10 @@ function issueResponse(
           description: issue.description,
           priority: issue.priority ?? 0,
           team: { id: prepared.destination.teamId },
-          project: { id: prepared.destination.projectId },
+          project:
+            prepared.destination.projectId === undefined
+              ? null
+              : { id: prepared.destination.projectId },
           assignee: { id: assigneeId },
           ...overrides,
         },
@@ -147,6 +160,45 @@ describe("direct Linear API publication", () => {
       input: {
         teamId: prepared.destination.teamId,
         projectId: prepared.destination.projectId,
+        title: issue.title,
+        description: issue.description,
+        priority: 2,
+        assigneeId: "user-self",
+      },
+    });
+  });
+
+  test("publishes directly to a team without selecting a project", async () => {
+    const prepared = teamOnlyPublication();
+    const issue = prepared.issues[0]!;
+    const { fetchImpl, requests } = mockedFetch([
+      destinationResponse(prepared),
+      issueResponse(prepared, issue),
+    ]);
+
+    const client = await prepareLinearApiPublication(
+      prepared,
+      API_KEY,
+      undefined,
+      fetchImpl,
+    );
+    expect(client.assigneeId).toBe("user-self");
+    await expect(client.create(issue)).resolves.toEqual({
+      issueIdentifier: "SEC-123",
+      url: "https://linear.app/example/issue/SEC-123/synthetic-finding",
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.body.query).toContain("$teamId: String!");
+    expect(requests[0]!.body.query).not.toContain("$projectId");
+    expect(requests[0]!.body.query).not.toContain("project(");
+    expect(requests[0]!.body.variables).toEqual({
+      teamId: prepared.destination.teamId,
+    });
+    expect(requests[1]!.body.query).toContain("project { id }");
+    expect(requests[1]!.body.variables).toEqual({
+      input: {
+        teamId: prepared.destination.teamId,
         title: issue.title,
         description: issue.description,
         priority: 2,
@@ -246,6 +298,24 @@ describe("direct Linear API publication", () => {
   });
 
   test.each([
+    ["missing viewer", { viewer: null }],
+    ["different team", { team: { id: "other-team" } }],
+  ] as const)(
+    "rejects a team-only destination with %s before attempting any mutation",
+    async (_, data) => {
+      const prepared = teamOnlyPublication();
+      const { fetchImpl, requests } = mockedFetch([
+        destinationResponse(prepared, data),
+      ]);
+      await expect(
+        prepareLinearApiPublication(prepared, API_KEY, undefined, fetchImpl),
+      ).rejects.toThrow("could not verify the authenticated user and team");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.body.variables).not.toHaveProperty("projectId");
+    },
+  );
+
+  test.each([
     ["missing email", []],
     [
       "ambiguous email",
@@ -301,6 +371,7 @@ describe("direct Linear API publication", () => {
     ["different description", { description: "untrusted description" }],
     ["different priority", { priority: 1 }],
     ["different team", { team: { id: "other-team" } }],
+    ["missing project", { project: null }],
     ["different project", { project: { id: "other-project" } }],
     ["different assignee", { assignee: { id: "other-user" } }],
     ["non-HTTPS issue URL", { url: "http://linear.app/issue/SEC-123" }],
@@ -323,6 +394,27 @@ describe("direct Linear API publication", () => {
     const { fetchImpl } = mockedFetch([
       destinationResponse(prepared),
       issueResponse(prepared, issue, "user-self", overrides),
+    ]);
+    const client = await prepareLinearApiPublication(
+      prepared,
+      API_KEY,
+      undefined,
+      fetchImpl,
+    );
+    await expect(client.create(issue)).rejects.toThrow(
+      "unverified created issue; do not retry",
+    );
+  });
+
+  test.each([
+    ["an unexpected project", { id: "unexpected-project" }],
+    ["a missing project readback", undefined],
+  ] as const)("rejects a team-only issue with %s", async (_, project) => {
+    const prepared = teamOnlyPublication();
+    const issue = prepared.issues[0]!;
+    const { fetchImpl } = mockedFetch([
+      destinationResponse(prepared),
+      issueResponse(prepared, issue, "user-self", { project }),
     ]);
     const client = await prepareLinearApiPublication(
       prepared,

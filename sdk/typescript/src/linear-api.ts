@@ -12,6 +12,11 @@ const DESTINATION_QUERY = `query CodexSecurityLinearDestination($teamId: String!
   project(id: $projectId) { id teams { nodes { id } } }
 }`;
 
+const TEAM_DESTINATION_QUERY = `query CodexSecurityLinearDestination($teamId: String!) {
+  viewer { id }
+  team(id: $teamId) { id }
+}`;
+
 const ASSIGNEE_BY_EMAIL_QUERY = `query CodexSecurityLinearAssigneeByEmail($email: String!) {
   users(filter: { email: { eqIgnoreCase: $email } }, first: 2) { nodes { id email } }
 }`;
@@ -63,11 +68,12 @@ export async function prepareLinearApiPublication(
     throw new ConfigurationError("A valid Linear assignee is required.");
   }
 
+  const projectId = publication.destination.projectId;
   const destination = await linearRequest(
-    DESTINATION_QUERY,
+    projectId === undefined ? TEAM_DESTINATION_QUERY : DESTINATION_QUERY,
     {
       teamId: publication.destination.teamId,
-      projectId: publication.destination.projectId,
+      ...(projectId === undefined ? {} : { projectId }),
     },
     "destination verification",
     apiKey,
@@ -79,20 +85,26 @@ export async function prepareLinearApiPublication(
   const project = destination["project"];
   const projectTeams = isRecord(project) ? project["teams"] : undefined;
   const nodes = isRecord(projectTeams) ? projectTeams["nodes"] : undefined;
+  const projectIsValid =
+    projectId === undefined ||
+    (isRecord(project) &&
+      project["id"] === projectId &&
+      Array.isArray(nodes) &&
+      nodes.some(
+        (node) =>
+          isRecord(node) && node["id"] === publication.destination.teamId,
+      ));
   if (
     !isRecord(viewer) ||
     !validIdentifier(viewer["id"]) ||
     !isRecord(team) ||
     team["id"] !== publication.destination.teamId ||
-    !isRecord(project) ||
-    project["id"] !== publication.destination.projectId ||
-    !Array.isArray(nodes) ||
-    !nodes.some(
-      (node) => isRecord(node) && node["id"] === publication.destination.teamId,
-    )
+    !projectIsValid
   ) {
     throw new CodexSecurityError(
-      "Linear could not verify the authenticated user, team, and project.",
+      projectId === undefined
+        ? "Linear could not verify the authenticated user and team."
+        : "Linear could not verify the authenticated user, team, and project.",
     );
   }
 
@@ -113,7 +125,7 @@ export async function prepareLinearApiPublication(
         {
           input: {
             teamId: publication.destination.teamId,
-            projectId: publication.destination.projectId,
+            ...(projectId === undefined ? {} : { projectId }),
             title: issue.title,
             description: issue.description,
             assigneeId: resolvedAssignee,
@@ -147,8 +159,9 @@ export async function prepareLinearApiPublication(
           : created["priority"] !== issue.priority) ||
         !isRecord(createdTeam) ||
         createdTeam["id"] !== publication.destination.teamId ||
-        !isRecord(createdProject) ||
-        createdProject["id"] !== publication.destination.projectId ||
+        (projectId === undefined
+          ? createdProject !== null
+          : !isRecord(createdProject) || createdProject["id"] !== projectId) ||
         !isRecord(createdAssignee) ||
         createdAssignee["id"] !== resolvedAssignee
       ) {
