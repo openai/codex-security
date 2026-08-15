@@ -88,7 +88,7 @@ describe("scan publication preparation", () => {
     expect(issue.title).not.toContain(publication.scanId);
     expect(issue.title).not.toContain("example/repo");
     expect(issue.description).toContain("**Scan ID:** scan_example_001");
-    expect(issue.description).toContain("**Upload ID:** scan_example_001");
+    expect(issue.description).not.toContain("**Upload ID:**");
     expect(issue.description).toContain(issue.findingId);
     expect(issue.description).toContain(issue.occurrenceId);
     expect(issue.description).toContain("**Repository:** example/repo");
