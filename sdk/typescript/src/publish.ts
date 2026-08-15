@@ -16,6 +16,7 @@ import {
 } from "./errors.js";
 import {
   prepareLinearApiPublication,
+  type LinearClientFactory,
   type PreparedLinearApiPublication,
 } from "./linear-api.js";
 import {
@@ -98,7 +99,7 @@ export interface PublicationCodexResult {
 
 export interface PublishScanDependencies {
   environment?: NodeJS.ProcessEnv;
-  linearFetch?: typeof fetch;
+  linearClient?: LinearClientFactory;
   prepare?: typeof prepareScanPublication;
   resolveCodex?: (environment: NodeJS.ProcessEnv) => CodexCommand;
   runCodex?: (
@@ -187,7 +188,7 @@ export async function publishScanInternal(
           prepared,
           linearApiKey,
           options.assigneeId,
-          dependencies.linearFetch ?? fetch,
+          dependencies.linearClient,
           options.signal,
         );
   options.signal?.throwIfAborted();

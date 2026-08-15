@@ -1,45 +1,13 @@
+import { LinearClient, LinearError, type LinearSdk } from "@linear/sdk";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import type {
   PreparedPublicationIssue,
   PreparedScanPublication,
 } from "./publication.js";
 
-const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
-
-const DESTINATION_QUERY = `query CodexSecurityLinearDestination($teamId: String!, $projectId: String!) {
-  viewer { id }
-  team(id: $teamId) { id }
-  project(id: $projectId) { id teams { nodes { id } } }
-}`;
-
-const TEAM_DESTINATION_QUERY = `query CodexSecurityLinearDestination($teamId: String!) {
-  viewer { id }
-  team(id: $teamId) { id }
-}`;
-
-const ASSIGNEE_BY_EMAIL_QUERY = `query CodexSecurityLinearAssigneeByEmail($email: String!) {
-  users(filter: { email: { eqIgnoreCase: $email } }, first: 2) { nodes { id email } }
-}`;
-
-const ASSIGNEE_BY_ID_QUERY = `query CodexSecurityLinearAssigneeById($id: String!) {
-  user(id: $id) { id }
-}`;
-
-const CREATE_ISSUE_MUTATION = `mutation CodexSecurityLinearIssueCreate($input: IssueCreateInput!) {
-  issueCreate(input: $input) {
-    success
-    issue {
-      identifier
-      url
-      title
-      description
-      priority
-      team { id }
-      project { id }
-      assignee { id }
-    }
-  }
-}`;
+export type LinearClientFactory = (
+  options: ConstructorParameters<typeof LinearClient>[0],
+) => LinearSdk;
 
 export interface PreparedLinearApiPublication {
   assigneeId: string;
@@ -53,7 +21,7 @@ export async function prepareLinearApiPublication(
   publication: PreparedScanPublication,
   apiKey: string,
   assigneeId: string | undefined,
-  fetchImpl: typeof fetch = fetch,
+  createClient: LinearClientFactory = (options) => new LinearClient(options),
   signal?: AbortSignal,
 ): Promise<PreparedLinearApiPublication> {
   signal?.throwIfAborted();
@@ -68,50 +36,53 @@ export async function prepareLinearApiPublication(
     throw new ConfigurationError("A valid Linear assignee is required.");
   }
 
-  const projectId = publication.destination.projectId;
-  const destination = await linearRequest(
-    projectId === undefined ? TEAM_DESTINATION_QUERY : DESTINATION_QUERY,
-    {
-      teamId: publication.destination.teamId,
-      ...(projectId === undefined ? {} : { projectId }),
-    },
-    "destination verification",
+  const client = createClient({
     apiKey,
-    fetchImpl,
+    redirect: "error",
+    ...(signal === undefined ? {} : { signal }),
+  });
+  const projectId = publication.destination.projectId;
+  const viewer = await linearOperation(
+    "destination verification",
     signal,
+    () => client.viewer,
   );
-  const viewer = destination["viewer"];
-  const team = destination["team"];
-  const project = destination["project"];
-  const projectTeams = isRecord(project) ? project["teams"] : undefined;
-  const nodes = isRecord(projectTeams) ? projectTeams["nodes"] : undefined;
-  const projectIsValid =
-    projectId === undefined ||
-    (isRecord(project) &&
-      project["id"] === projectId &&
-      Array.isArray(nodes) &&
-      nodes.some(
-        (node) =>
-          isRecord(node) && node["id"] === publication.destination.teamId,
-      ));
+  const team = await linearOperation("destination verification", signal, () =>
+    client.team(publication.destination.teamId),
+  );
+
   if (
-    !isRecord(viewer) ||
-    !validIdentifier(viewer["id"]) ||
-    !isRecord(team) ||
-    team["id"] !== publication.destination.teamId ||
-    !projectIsValid
+    !validIdentifier(viewer?.id) ||
+    team?.id !== publication.destination.teamId
   ) {
-    throw new CodexSecurityError(
-      projectId === undefined
-        ? "Linear could not verify the authenticated user and team."
-        : "Linear could not verify the authenticated user, team, and project.",
+    throw destinationError(projectId);
+  }
+
+  if (projectId !== undefined) {
+    const project = await linearOperation(
+      "destination verification",
+      signal,
+      () => client.project(projectId),
     );
+    if (project?.id !== projectId) throw destinationError(projectId);
+    const projectTeams = await linearOperation(
+      "destination verification",
+      signal,
+      () => project.teams(),
+    );
+    if (
+      !projectTeams.nodes.some(
+        (projectTeam) => projectTeam.id === publication.destination.teamId,
+      )
+    ) {
+      throw destinationError(projectId);
+    }
   }
 
   const resolvedAssignee =
     assigneeId === undefined
-      ? viewer["id"]
-      : await resolveLinearAssignee(assigneeId, apiKey, fetchImpl, signal);
+      ? viewer.id
+      : await resolveLinearAssignee(client, assigneeId, signal);
   if (!validIdentifier(resolvedAssignee)) {
     throw new CodexSecurityError("Linear returned an invalid issue assignee.");
   }
@@ -119,105 +90,75 @@ export async function prepareLinearApiPublication(
   return {
     assigneeId: resolvedAssignee,
     create: async (issue) => {
-      signal?.throwIfAborted();
-      const data = await linearRequest(
-        CREATE_ISSUE_MUTATION,
-        {
-          input: {
-            teamId: publication.destination.teamId,
-            ...(projectId === undefined ? {} : { projectId }),
-            title: issue.title,
-            description: issue.description,
-            assigneeId: resolvedAssignee,
-            ...(issue.priority === undefined
-              ? {}
-              : { priority: issue.priority }),
-          },
-        },
-        "issue creation",
-        apiKey,
-        fetchImpl,
-        signal,
+      const mutation = await linearOperation("issue creation", signal, () =>
+        client.createIssue({
+          teamId: publication.destination.teamId,
+          ...(projectId === undefined ? {} : { projectId }),
+          title: issue.title,
+          description: issue.description,
+          assigneeId: resolvedAssignee,
+          ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+        }),
       );
-      const mutation = data["issueCreate"];
-      const created = isRecord(mutation) ? mutation["issue"] : undefined;
-      const createdTeam = isRecord(created) ? created["team"] : undefined;
-      const createdProject = isRecord(created) ? created["project"] : undefined;
-      const createdAssignee = isRecord(created)
-        ? created["assignee"]
-        : undefined;
+      if (mutation.success !== true || !validIdentifier(mutation.issueId)) {
+        throw unverifiedIssueError();
+      }
+      const created = await linearOperation(
+        "created issue verification",
+        signal,
+        () => mutation.issue!,
+      );
       if (
-        !isRecord(mutation) ||
-        mutation["success"] !== true ||
-        !isRecord(created) ||
-        !validIdentifier(created["identifier"]) ||
-        !validLinearUrl(created["url"]) ||
-        created["title"] !== issue.title ||
-        created["description"] !== issue.description ||
+        !validIdentifier(created?.identifier) ||
+        !validLinearUrl(created.url) ||
+        created.title !== issue.title ||
+        created.description !== issue.description ||
         (issue.priority === undefined
-          ? created["priority"] !== 0 && created["priority"] !== null
-          : created["priority"] !== issue.priority) ||
-        !isRecord(createdTeam) ||
-        createdTeam["id"] !== publication.destination.teamId ||
-        (projectId === undefined
-          ? createdProject !== null
-          : !isRecord(createdProject) || createdProject["id"] !== projectId) ||
-        !isRecord(createdAssignee) ||
-        createdAssignee["id"] !== resolvedAssignee
+          ? created.priority !== 0
+          : created.priority !== issue.priority) ||
+        created.teamId !== publication.destination.teamId ||
+        created.projectId !== projectId ||
+        created.assigneeId !== resolvedAssignee
       ) {
-        throw new CodexSecurityError(
-          "Linear returned an unverified created issue; do not retry without checking the destination.",
-        );
+        throw unverifiedIssueError();
       }
       return {
-        issueIdentifier: created["identifier"],
-        url: created["url"],
+        issueIdentifier: created.identifier,
+        url: created.url,
       };
     },
   };
 }
 
 async function resolveLinearAssignee(
+  client: LinearSdk,
   assigneeId: string,
-  apiKey: string,
-  fetchImpl: typeof fetch,
   signal?: AbortSignal,
 ): Promise<string> {
   if (assigneeId.includes("@")) {
-    const data = await linearRequest(
-      ASSIGNEE_BY_EMAIL_QUERY,
-      { email: assigneeId },
-      "assignee lookup",
-      apiKey,
-      fetchImpl,
-      signal,
+    const users = await linearOperation("assignee lookup", signal, () =>
+      client.users({
+        filter: { email: { eqIgnoreCase: assigneeId } },
+        first: 2,
+      }),
     );
-    const users = data["users"];
-    const nodes = isRecord(users) ? users["nodes"] : undefined;
-    const user = Array.isArray(nodes) && nodes.length === 1 ? nodes[0] : null;
+    const user = users.nodes.length === 1 ? users.nodes[0] : undefined;
     if (
-      !isRecord(user) ||
-      !validIdentifier(user["id"]) ||
-      typeof user["email"] !== "string" ||
-      user["email"].toLowerCase() !== assigneeId.toLowerCase()
+      user === undefined ||
+      !validIdentifier(user.id) ||
+      user.email.toLowerCase() !== assigneeId.toLowerCase()
     ) {
       throw new CodexSecurityError(
         "Linear could not resolve exactly one matching issue assignee.",
       );
     }
-    return user["id"];
+    return user.id;
   }
 
-  const data = await linearRequest(
-    ASSIGNEE_BY_ID_QUERY,
-    { id: assigneeId },
-    "assignee lookup",
-    apiKey,
-    fetchImpl,
-    signal,
+  const user = await linearOperation("assignee lookup", signal, () =>
+    client.user(assigneeId),
   );
-  const user = data["user"];
-  if (!isRecord(user) || user["id"] !== assigneeId) {
+  if (user?.id !== assigneeId) {
     throw new CodexSecurityError(
       "Linear could not resolve the requested issue assignee.",
     );
@@ -225,72 +166,61 @@ async function resolveLinearAssignee(
   return assigneeId;
 }
 
-async function linearRequest(
-  query: string,
-  variables: Record<string, unknown>,
+async function linearOperation<T>(
   operation: string,
-  apiKey: string,
-  fetchImpl: typeof fetch,
-  signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
+  signal: AbortSignal | undefined,
+  execute: () => PromiseLike<T>,
+): Promise<T> {
   signal?.throwIfAborted();
-  let response: Response;
   try {
-    response = await fetchImpl(LINEAR_GRAPHQL_ENDPOINT, {
-      method: "POST",
-      headers: {
-        Authorization: apiKey,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ query, variables }),
-      redirect: "error",
-      ...(signal === undefined ? {} : { signal }),
-    });
-  } catch {
+    return await execute();
+  } catch (error) {
     signal?.throwIfAborted();
-    throw new CodexSecurityError(`Linear ${operation} could not be completed.`);
+    const status = error instanceof LinearError ? error.status : undefined;
+    if (status === 401 || status === 403) {
+      throw new CodexSecurityError("Linear rejected the supplied API key.");
+    }
+    if (
+      status === 429 ||
+      (error instanceof LinearError &&
+        (error.type === "Ratelimited" ||
+          error.errors?.some(({ type }) => type === "Ratelimited") ||
+          (
+            error.raw as
+              | {
+                  response?: {
+                    errors?: Array<{ extensions?: { code?: string } }>;
+                  };
+                }
+              | undefined
+          )?.response?.errors?.some(
+            ({ extensions }) => extensions?.code === "RATELIMITED",
+          )))
+    ) {
+      throw new CodexSecurityError(
+        `Linear rate-limited ${operation}; do not retry until existing issues are checked.`,
+      );
+    }
+    throw new CodexSecurityError(
+      error instanceof LinearError
+        ? `Linear ${operation} was rejected.`
+        : `Linear ${operation} could not be completed.`,
+    );
   }
+}
 
-  if (response.status === 401 || response.status === 403) {
-    throw new CodexSecurityError("Linear rejected the supplied API key.");
-  }
-  if (response.status === 429) {
-    throw new CodexSecurityError(
-      `Linear rate-limited ${operation}; do not retry until existing issues are checked.`,
-    );
-  }
+function destinationError(projectId: string | undefined): CodexSecurityError {
+  return new CodexSecurityError(
+    projectId === undefined
+      ? "Linear could not verify the authenticated user and team."
+      : "Linear could not verify the authenticated user, team, and project.",
+  );
+}
 
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    signal?.throwIfAborted();
-    throw new CodexSecurityError(
-      `Linear ${operation} returned an unreadable response.`,
-    );
-  }
-  const errors = isRecord(payload) ? payload["errors"] : undefined;
-  if (
-    Array.isArray(errors) &&
-    errors.some((error) => {
-      const extensions = isRecord(error) ? error["extensions"] : undefined;
-      return isRecord(extensions) && extensions["code"] === "RATELIMITED";
-    })
-  ) {
-    throw new CodexSecurityError(
-      `Linear rate-limited ${operation}; do not retry until existing issues are checked.`,
-    );
-  }
-  if (!response.ok || (Array.isArray(errors) && errors.length !== 0)) {
-    throw new CodexSecurityError(`Linear ${operation} was rejected.`);
-  }
-  if (!isRecord(payload) || !isRecord(payload["data"])) {
-    throw new CodexSecurityError(
-      `Linear ${operation} returned an invalid response.`,
-    );
-  }
-  return payload["data"];
+function unverifiedIssueError(): CodexSecurityError {
+  return new CodexSecurityError(
+    "Linear returned an unverified created issue; do not retry without checking the destination.",
+  );
 }
 
 function validIdentifier(value: unknown): value is string {
@@ -318,8 +248,4 @@ function validLinearUrl(value: unknown): value is string {
     parsed.search.length === 0 &&
     parsed.hash.length === 0
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

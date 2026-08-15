@@ -31,6 +31,7 @@ import {
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { mockLinearClient } from "./support/linear-client.js";
 
 const SCAN_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
@@ -307,6 +308,7 @@ describe("database-backed Linear publication integration", () => {
       query: string;
       variables: Record<string, unknown>;
     }> = [];
+    const createdIssues = new Map<string, Record<string, unknown>>();
     let active = 0;
     let maximum = 0;
     let settled = 0;
@@ -330,7 +332,7 @@ describe("database-backed Linear publication integration", () => {
           runCodex: async () => {
             throw new Error("direct API publication must not invoke Codex");
           },
-          linearFetch: (async (
+          linearClient: mockLinearClient((async (
             resource: Parameters<typeof fetch>[0],
             init?: Parameters<typeof fetch>[1],
           ) => {
@@ -344,25 +346,40 @@ describe("database-backed Linear publication integration", () => {
             };
             requests.push(request);
 
-            if (request.query.includes("CodexSecurityLinearDestination")) {
-              expect(request.variables).toEqual({
-                teamId: OPTIONS.teamId,
-                projectId: OPTIONS.projectId,
+            const operation = request.query.match(
+              /\b(?:query|mutation)\s+(\w+)/u,
+            )?.[1];
+            if (operation === "viewer") {
+              return Response.json({ data: { viewer: { id: "viewer-self" } } });
+            }
+            if (operation === "team") {
+              expect(request.variables).toEqual({ id: OPTIONS.teamId });
+              return Response.json({ data: { team: { id: OPTIONS.teamId } } });
+            }
+            if (operation === "project") {
+              expect(request.variables).toEqual({ id: OPTIONS.projectId });
+              return Response.json({
+                data: { project: { id: OPTIONS.projectId } },
               });
+            }
+            if (operation === "project_teams") {
               return Response.json({
                 data: {
-                  viewer: { id: "viewer-self" },
-                  team: { id: OPTIONS.teamId },
                   project: {
-                    id: OPTIONS.projectId,
-                    teams: { nodes: [{ id: OPTIONS.teamId }] },
+                    teams: {
+                      nodes: [{ id: OPTIONS.teamId }],
+                      pageInfo: { hasNextPage: false, hasPreviousPage: false },
+                    },
                   },
                 },
               });
             }
-            if (request.query.includes("CodexSecurityLinearAssigneeByEmail")) {
+            if (operation === "users") {
               expect(request.variables).toEqual({
-                email: "owner@example.test",
+                filter: {
+                  email: { eqIgnoreCase: "owner@example.test" },
+                },
+                first: 2,
               });
               return Response.json({
                 data: {
@@ -370,6 +387,18 @@ describe("database-backed Linear publication integration", () => {
                     nodes: [
                       { id: "assigned-owner", email: "owner@example.test" },
                     ],
+                    pageInfo: { hasNextPage: false, hasPreviousPage: false },
+                  },
+                },
+              });
+            }
+            if (operation === "issue") {
+              return Response.json({
+                data: {
+                  issue: {
+                    ...createdIssues.get(String(request.variables["id"])),
+                    sharedAccess: { sharedWithUsers: [] },
+                    reactions: [],
                   },
                 },
               });
@@ -402,24 +431,27 @@ describe("database-backed Linear publication integration", () => {
             active -= 1;
             settled += 1;
             const identifier = `SEC-${900 + index}`;
+            const issue = {
+              id: `issue-${index + 1}`,
+              identifier,
+              url: `https://linear.app/example/issue/${identifier}`,
+              title: input["title"],
+              description,
+              priority: input["priority"],
+              team: { id: input["teamId"] },
+              project: { id: input["projectId"] },
+              assignee: { id: input["assigneeId"] },
+            };
+            createdIssues.set(issue.id, issue);
             return Response.json({
               data: {
                 issueCreate: {
                   success: true,
-                  issue: {
-                    identifier,
-                    url: `https://linear.app/example/issue/${identifier}`,
-                    title: input["title"],
-                    description,
-                    priority: input["priority"],
-                    team: { id: input["teamId"] },
-                    project: { id: input["projectId"] },
-                    assignee: { id: input["assigneeId"] },
-                  },
+                  issue: { id: issue.id },
                 },
               },
             });
-          }) as typeof fetch,
+          }) as typeof fetch),
         },
       );
       return sdkResult;
@@ -449,7 +481,7 @@ describe("database-backed Linear publication integration", () => {
       ),
     ).toBe(0);
 
-    expect(requests).toHaveLength(25);
+    expect(requests).toHaveLength(51);
     expect(maximum).toBe(20);
     expect(sdkResult?.counts).toEqual({
       findings: 23,
@@ -508,6 +540,7 @@ describe("database-backed Linear publication integration", () => {
       query: string;
       variables: Record<string, unknown>;
     }> = [];
+    let createdIssue: Record<string, unknown> | undefined;
     let sdkResult: PublishScanResult | undefined;
     const cli = dependencies({ environment });
     cli.publishScan = async (directory, options) => {
@@ -547,7 +580,7 @@ describe("database-backed Linear publication integration", () => {
         runCodex: async () => {
           throw new Error("direct API publication must not invoke Codex");
         },
-        linearFetch: (async (
+        linearClient: mockLinearClient((async (
           resource: Parameters<typeof fetch>[0],
           init?: Parameters<typeof fetch>[1],
         ) => {
@@ -559,14 +592,28 @@ describe("database-backed Linear publication integration", () => {
           };
           requests.push(request);
 
-          if (request.query.includes("CodexSecurityLinearDestination")) {
-            expect(request.query).not.toContain("$projectId");
-            expect(request.query).not.toContain("project(");
-            expect(request.variables).toEqual({ teamId: OPTIONS.teamId });
+          const operation = request.query.match(
+            /\b(?:query|mutation)\s+(\w+)/u,
+          )?.[1];
+          if (operation === "viewer") {
             return Response.json({
               data: {
                 viewer: { id: "viewer-self" },
-                team: { id: OPTIONS.teamId },
+              },
+            });
+          }
+          if (operation === "team") {
+            expect(request.variables).toEqual({ id: OPTIONS.teamId });
+            return Response.json({ data: { team: { id: OPTIONS.teamId } } });
+          }
+          if (operation === "issue") {
+            return Response.json({
+              data: {
+                issue: {
+                  ...createdIssue,
+                  sharedAccess: { sharedWithUsers: [] },
+                  reactions: [],
+                },
               },
             });
           }
@@ -583,24 +630,26 @@ describe("database-backed Linear publication integration", () => {
           });
           expect(description).toContain(completed.findings[0]!.findingId);
           expect(description).toContain("write(destination_1, user_input)");
+          createdIssue = {
+            id: "issue-950",
+            identifier: "SEC-950",
+            url: "https://linear.app/example/issue/SEC-950",
+            title: input["title"],
+            description,
+            priority: input["priority"],
+            team: { id: input["teamId"] },
+            project: null,
+            assignee: { id: input["assigneeId"] },
+          };
           return Response.json({
             data: {
               issueCreate: {
                 success: true,
-                issue: {
-                  identifier: "SEC-950",
-                  url: "https://linear.app/example/issue/SEC-950",
-                  title: input["title"],
-                  description,
-                  priority: input["priority"],
-                  team: { id: input["teamId"] },
-                  project: null,
-                  assignee: { id: input["assigneeId"] },
-                },
+                issue: { id: createdIssue["id"] },
               },
             },
           });
-        }) as typeof fetch,
+        }) as typeof fetch),
       });
       return sdkResult;
     };
@@ -623,7 +672,7 @@ describe("database-backed Linear publication integration", () => {
       ),
     ).toBe(0);
 
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(4);
     expect(sdkResult?.destination).toMatchObject({
       type: "linear",
       teamId: OPTIONS.teamId,

@@ -23,6 +23,7 @@ import type {
   PreparedPublicationIssue,
   PreparedScanPublication,
 } from "../src/publication.js";
+import { mockLinearClient } from "./support/linear-client.js";
 
 const OPTIONS: PublishScanOptions = {
   destination: "linear",
@@ -149,15 +150,16 @@ interface LinearApiRequest {
   signal: AbortSignal | null;
 }
 
-function linearApiFetch(
+function linearApiClient(
   publication: PreparedScanPublication,
   options: {
     onRequest?: (
       request: LinearApiRequest,
     ) => Response | undefined | Promise<Response | undefined>;
   } = {},
-): typeof fetch {
-  return (async (
+): NonNullable<PublishScanDependencies["linearClient"]> {
+  const createdIssues = new Map<string, Record<string, unknown>>();
+  return mockLinearClient((async (
     resource: Parameters<typeof fetch>[0],
     init?: Parameters<typeof fetch>[1],
   ) => {
@@ -176,31 +178,67 @@ function linearApiFetch(
     const custom = await options.onRequest?.(observed);
     if (custom !== undefined) return custom;
 
-    if (request.query.includes("CodexSecurityLinearDestination")) {
+    const operation = request.query.match(/\b(?:query|mutation)\s+(\w+)/u)?.[1];
+    if (operation === "viewer") {
+      return Response.json({ data: { viewer: { id: "viewer-self" } } });
+    }
+    if (operation === "team") {
+      return Response.json({
+        data: { team: { id: publication.destination.teamId } },
+      });
+    }
+    if (operation === "project") {
       return Response.json({
         data: {
-          viewer: { id: "viewer-self" },
-          team: { id: publication.destination.teamId },
           project: {
             id: publication.destination.projectId,
-            teams: { nodes: [{ id: publication.destination.teamId }] },
           },
         },
       });
     }
-    if (request.query.includes("CodexSecurityLinearAssigneeByEmail")) {
+    if (operation === "project_teams") {
+      return Response.json({
+        data: {
+          project: {
+            teams: {
+              nodes: [{ id: publication.destination.teamId }],
+              pageInfo: { hasNextPage: false, hasPreviousPage: false },
+            },
+          },
+        },
+      });
+    }
+    if (operation === "users") {
+      const filter = request.variables["filter"] as {
+        email?: { eqIgnoreCase?: string };
+      };
       return Response.json({
         data: {
           users: {
             nodes: [
-              { id: "assignee-from-email", email: request.variables["email"] },
+              {
+                id: "assignee-from-email",
+                email: filter.email?.eqIgnoreCase,
+              },
             ],
+            pageInfo: { hasNextPage: false, hasPreviousPage: false },
           },
         },
       });
     }
-    if (request.query.includes("CodexSecurityLinearAssigneeById")) {
+    if (operation === "user") {
       return Response.json({ data: { user: { id: request.variables["id"] } } });
+    }
+    if (operation === "issue") {
+      return Response.json({
+        data: {
+          issue: {
+            ...createdIssues.get(String(request.variables["id"])),
+            sharedAccess: { sharedWithUsers: [] },
+            reactions: [],
+          },
+        },
+      });
     }
 
     const input = request.variables["input"] as Record<string, unknown>;
@@ -209,24 +247,28 @@ function linearApiFetch(
     );
     expect(index).toBeGreaterThanOrEqual(0);
     const identifier = `SEC-${index + 1}`;
+    const issue = {
+      id: `issue-${index + 1}`,
+      identifier,
+      url: `https://linear.app/example/issue/${identifier}`,
+      title: input["title"],
+      description: input["description"],
+      priority: input["priority"] ?? 0,
+      team: { id: input["teamId"] },
+      project:
+        input["projectId"] === undefined ? null : { id: input["projectId"] },
+      assignee: { id: input["assigneeId"] },
+    };
+    createdIssues.set(issue.id, issue);
     return Response.json({
       data: {
         issueCreate: {
           success: true,
-          issue: {
-            identifier,
-            url: `https://linear.app/example/issue/${identifier}`,
-            title: input["title"],
-            description: input["description"],
-            priority: input["priority"] ?? 0,
-            team: { id: input["teamId"] },
-            project: { id: input["projectId"] },
-            assignee: { id: input["assigneeId"] },
-          },
+          issue: { id: issue.id },
         },
       },
     });
-  }) as typeof fetch;
+  }) as typeof fetch);
 }
 
 interface PublicationPromptData {
@@ -334,7 +376,7 @@ describe("direct Linear API publication", () => {
         publication,
         {},
         {
-          linearFetch: linearApiFetch(publication, {
+          linearClient: linearApiClient(publication, {
             onRequest: (request) => {
               requests.push(request);
               return undefined;
@@ -382,11 +424,13 @@ describe("direct Linear API publication", () => {
         injected,
       );
 
-      expect(requests.map(({ authorization }) => authorization)).toEqual([
-        scenario.expected,
-        scenario.expected,
-      ]);
-      expect(requests[1]!.variables["input"]).toMatchObject({
+      expect(requests.map(({ authorization }) => authorization)).toEqual(
+        Array.from({ length: 6 }, () => scenario.expected),
+      );
+      const mutation = requests.find(({ query }) =>
+        query.includes("mutation createIssue"),
+      );
+      expect(mutation?.variables["input"]).toMatchObject({
         teamId: OPTIONS.teamId,
         projectId: OPTIONS.projectId,
         assigneeId: "viewer-self",
@@ -432,7 +476,7 @@ describe("direct Linear API publication", () => {
           publication,
           {},
           {
-            linearFetch: linearApiFetch(publication, {
+            linearClient: linearApiClient(publication, {
               onRequest: (request) => {
                 requests.push(request);
                 return undefined;
@@ -442,11 +486,11 @@ describe("direct Linear API publication", () => {
         ),
       );
 
-      expect(requests).toHaveLength(3);
-      expect(requests[1]!.query).toContain(
-        scenario.requested.includes("@") ? "AssigneeByEmail" : "AssigneeById",
+      expect(requests).toHaveLength(7);
+      expect(requests[4]!.query).toContain(
+        scenario.requested.includes("@") ? "query users" : "query user(",
       );
-      expect(requests[2]!.variables["input"]).toMatchObject({
+      expect(requests[5]!.variables["input"]).toMatchObject({
         assigneeId: scenario.resolved,
       });
       expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
@@ -465,9 +509,10 @@ describe("direct Linear API publication", () => {
       publication,
       {},
       {
-        linearFetch: linearApiFetch(publication, {
+        linearClient: linearApiClient(publication, {
           onRequest: async (request) => {
-            if (!request.query.includes("IssueCreate")) return undefined;
+            if (!request.query.includes("mutation createIssue"))
+              return undefined;
             const input = request.variables["input"] as Record<string, unknown>;
             const index = publication.issues.findIndex(
               (issue) => issue.title === input["title"],
@@ -566,9 +611,9 @@ describe("direct Linear API publication", () => {
       publication,
       {},
       {
-        linearFetch: linearApiFetch(publication, {
+        linearClient: linearApiClient(publication, {
           onRequest: (request) => {
-            if (request.query.includes("IssueCreate")) attempts += 1;
+            if (request.query.includes("mutation createIssue")) attempts += 1;
             return undefined;
           },
         }),
@@ -616,9 +661,10 @@ describe("direct Linear API publication", () => {
       publication,
       {},
       {
-        linearFetch: linearApiFetch(publication, {
+        linearClient: linearApiClient(publication, {
           onRequest: async (request) => {
-            if (!request.query.includes("IssueCreate")) return undefined;
+            if (!request.query.includes("mutation createIssue"))
+              return undefined;
             started += 1;
             const input = request.variables["input"] as Record<string, unknown>;
             if (input["title"] === publication.issues[0]!.title) {
@@ -705,9 +751,9 @@ describe("direct Linear API publication", () => {
         publication,
         {},
         {
-          linearFetch: (() => {
+          linearClient: () => {
             throw new Error("dry runs must not access the Linear API");
-          }) as unknown as typeof fetch,
+          },
           preparePublicationStore: async () => {
             throw new Error("dry runs must not inspect publication storage");
           },

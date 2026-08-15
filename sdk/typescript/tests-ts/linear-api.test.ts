@@ -1,9 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { prepareLinearApiPublication } from "../src/linear-api.js";
 import type {
   PreparedPublicationIssue,
   PreparedScanPublication,
 } from "../src/publication.js";
+import { mockLinearClient } from "./support/linear-client.js";
 
 const API_KEY = "lin_api_synthetic_test_key";
 
@@ -95,27 +96,147 @@ interface RecordedRequest {
 }
 
 function mockedFetch(responses: Response[]): {
-  fetchImpl: typeof fetch;
+  fetchImpl: Parameters<typeof prepareLinearApiPublication>[3];
+  rawFetch: typeof fetch;
   requests: RecordedRequest[];
 } {
   const requests: RecordedRequest[] = [];
+  let destination: Record<string, unknown> | undefined;
+  let createdIssue: Record<string, unknown> | undefined;
   const fetchImpl = async (
     url: Parameters<typeof fetch>[0],
     options?: Parameters<typeof fetch>[1],
   ): Promise<Response> => {
-    requests.push({
+    const request = {
       url: url.toString(),
       options: options!,
       body: JSON.parse(options!.body as string) as RecordedRequest["body"],
-    });
+    };
+    requests.push(request);
+    const operation = request.body.query.match(
+      /\b(?:query|mutation)\s+(\w+)/u,
+    )?.[1];
+    if (operation === "team") {
+      return Response.json({ data: { team: destination?.["team"] } });
+    }
+    if (operation === "project") {
+      return Response.json({ data: { project: destination?.["project"] } });
+    }
+    if (operation === "project_teams") {
+      const project = destination?.["project"] as
+        | { teams?: { nodes?: unknown[] } }
+        | undefined;
+      return Response.json({
+        data: {
+          project: {
+            teams: {
+              nodes: project?.teams?.nodes ?? [],
+              pageInfo: { hasNextPage: false, hasPreviousPage: false },
+            },
+          },
+        },
+      });
+    }
+    if (operation === "issue") {
+      return Response.json({
+        data: {
+          issue: {
+            ...createdIssue,
+            sharedAccess: { sharedWithUsers: [] },
+            reactions: [],
+          },
+        },
+      });
+    }
+
     const response = responses.shift();
     if (response === undefined) throw new Error("Unexpected synthetic request");
+    let payload: Record<string, unknown>;
+    try {
+      payload = (await response.clone().json()) as Record<string, unknown>;
+    } catch {
+      return response;
+    }
+    if (Array.isArray(payload["errors"])) return response;
+    const data = payload["data"] as Record<string, unknown> | undefined;
+    if (operation === "viewer" && response.ok && data !== undefined) {
+      destination = data;
+      return Response.json({
+        data: { viewer: data["viewer"] ?? { id: undefined } },
+      });
+    }
+    if (operation === "users" && response.ok && data !== undefined) {
+      const users = data["users"] as { nodes?: unknown[] } | undefined;
+      return Response.json({
+        data: {
+          users: {
+            nodes: users?.nodes ?? [],
+            pageInfo: { hasNextPage: false, hasPreviousPage: false },
+          },
+        },
+      });
+    }
+    if (operation === "createIssue" && response.ok && data !== undefined) {
+      const mutation = data["issueCreate"] as
+        | { success?: boolean; issue?: Record<string, unknown> }
+        | undefined;
+      createdIssue = {
+        id: "issue-synthetic",
+        ...mutation?.issue,
+      };
+      return Response.json({
+        data: {
+          issueCreate: {
+            success: mutation?.success,
+            issue: { id: createdIssue["id"] },
+          },
+        },
+      });
+    }
     return response;
   };
-  return { fetchImpl: fetchImpl as unknown as typeof fetch, requests };
+  return {
+    fetchImpl: mockLinearClient(fetchImpl as unknown as typeof fetch),
+    rawFetch: fetchImpl as unknown as typeof fetch,
+    requests,
+  };
 }
 
 describe("direct Linear API publication", () => {
+  test("uses the official LinearClient for authenticated, abortable issue creation", async () => {
+    const prepared = publication();
+    const issue = prepared.issues[0]!;
+    const controller = new AbortController();
+    const { rawFetch, requests } = mockedFetch([
+      destinationResponse(prepared),
+      issueResponse(prepared, issue),
+    ]);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(rawFetch);
+    try {
+      const client = await prepareLinearApiPublication(
+        prepared,
+        API_KEY,
+        undefined,
+        undefined,
+        controller.signal,
+      );
+      await expect(client.create(issue)).resolves.toHaveProperty(
+        "issueIdentifier",
+        "SEC-123",
+      );
+      expect(requests).toHaveLength(6);
+      for (const request of requests) {
+        expect(new Headers(request.options.headers).get("authorization")).toBe(
+          API_KEY,
+        );
+        expect(request.options.redirect).toBe("error");
+        expect(request.options.signal).toBe(controller.signal);
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   test("authenticates safely, validates the destination, and assigns findings to the viewer", async () => {
     const prepared = publication();
     const issue = prepared.issues[0]!;
@@ -137,7 +258,7 @@ describe("direct Linear API publication", () => {
       issueIdentifier: "SEC-123",
       url: "https://linear.app/example/issue/SEC-123/synthetic-finding",
     });
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(6);
     for (const request of requests) {
       expect(request.url).toBe("https://api.linear.app/graphql");
       expect(request.options.method).toBe("POST");
@@ -146,17 +267,22 @@ describe("direct Linear API publication", () => {
       expect(request.options.headers).toEqual({
         Authorization: API_KEY,
         "Content-Type": "application/json",
-        Accept: "application/json",
       });
       expect(request.body.query).not.toContain(API_KEY);
     }
-    expect(requests[0]!.body.variables).toEqual({
-      teamId: prepared.destination.teamId,
-      projectId: prepared.destination.projectId,
-    });
-    expect(requests[1]!.body.query).toContain("$input: IssueCreateInput!");
-    expect(requests[1]!.body.query).not.toContain(issue.description);
+    expect(requests[0]!.body.variables).toEqual({});
     expect(requests[1]!.body.variables).toEqual({
+      id: prepared.destination.teamId,
+    });
+    expect(requests[2]!.body.variables).toEqual({
+      id: prepared.destination.projectId,
+    });
+    const mutation = requests.find(({ body }) =>
+      body.query.includes("mutation createIssue"),
+    );
+    expect(mutation?.body.query).toContain("$input: IssueCreateInput!");
+    expect(mutation?.body.query).not.toContain(issue.description);
+    expect(mutation?.body.variables).toEqual({
       input: {
         teamId: prepared.destination.teamId,
         projectId: prepared.destination.projectId,
@@ -188,15 +314,16 @@ describe("direct Linear API publication", () => {
       url: "https://linear.app/example/issue/SEC-123/synthetic-finding",
     });
 
-    expect(requests).toHaveLength(2);
-    expect(requests[0]!.body.query).toContain("$teamId: String!");
-    expect(requests[0]!.body.query).not.toContain("$projectId");
-    expect(requests[0]!.body.query).not.toContain("project(");
-    expect(requests[0]!.body.variables).toEqual({
-      teamId: prepared.destination.teamId,
-    });
-    expect(requests[1]!.body.query).toContain("project { id }");
+    expect(requests).toHaveLength(4);
+    expect(requests[0]!.body.query).toContain("query viewer");
+    expect(requests[1]!.body.query).toContain("query team");
     expect(requests[1]!.body.variables).toEqual({
+      id: prepared.destination.teamId,
+    });
+    const mutation = requests.find(({ body }) =>
+      body.query.includes("mutation createIssue"),
+    );
+    expect(mutation?.body.variables).toEqual({
       input: {
         teamId: prepared.destination.teamId,
         title: issue.title,
@@ -228,15 +355,21 @@ describe("direct Linear API publication", () => {
       fetchImpl,
     );
     expect(client.assigneeId).toBe("user-override");
-    expect(requests[1]!.body.query).toContain("eqIgnoreCase: $email");
-    expect(requests[1]!.body.variables).toEqual({
-      email: "PERSON@example.test",
+    const userLookup = requests.find(({ body }) =>
+      body.query.includes("query users"),
+    );
+    expect(userLookup?.body.variables).toEqual({
+      filter: { email: { eqIgnoreCase: "PERSON@example.test" } },
+      first: 2,
     });
     await expect(client.create(issue)).resolves.toHaveProperty(
       "issueIdentifier",
       "SEC-123",
     );
-    expect(requests[2]!.body.variables["input"]).toMatchObject({
+    const mutation = requests.find(({ body }) =>
+      body.query.includes("mutation createIssue"),
+    );
+    expect(mutation?.body.variables["input"]).toMatchObject({
       assigneeId: "user-override",
     });
   });
@@ -255,8 +388,10 @@ describe("direct Linear API publication", () => {
       "user-override",
       fetchImpl,
     );
-    expect(requests[1]!.body.query).toContain("user(id: $id)");
-    expect(requests[1]!.body.variables).toEqual({ id: "user-override" });
+    const userLookup = requests.find(({ body }) =>
+      body.query.includes("query user("),
+    );
+    expect(userLookup?.body.variables).toEqual({ id: "user-override" });
     await expect(client.create(issue)).resolves.toHaveProperty(
       "issueIdentifier",
       "SEC-123",
@@ -294,7 +429,9 @@ describe("direct Linear API publication", () => {
     ).rejects.toThrow(
       "could not verify the authenticated user, team, and project",
     );
-    expect(requests).toHaveLength(1);
+    expect(
+      requests.some(({ body }) => body.query.includes("mutation createIssue")),
+    ).toBe(false);
   });
 
   test.each([
@@ -310,8 +447,14 @@ describe("direct Linear API publication", () => {
       await expect(
         prepareLinearApiPublication(prepared, API_KEY, undefined, fetchImpl),
       ).rejects.toThrow("could not verify the authenticated user and team");
-      expect(requests).toHaveLength(1);
-      expect(requests[0]!.body.variables).not.toHaveProperty("projectId");
+      expect(
+        requests.some(({ body }) =>
+          body.query.includes("mutation createIssue"),
+        ),
+      ).toBe(false);
+      for (const request of requests) {
+        expect(request.body.variables).not.toHaveProperty("projectId");
+      }
     },
   );
 
@@ -343,7 +486,11 @@ describe("direct Linear API publication", () => {
       ).rejects.toThrow(
         "could not resolve exactly one matching issue assignee",
       );
-      expect(requests).toHaveLength(2);
+      expect(
+        requests.some(({ body }) =>
+          body.query.includes("mutation createIssue"),
+        ),
+      ).toBe(false);
     },
   );
 
@@ -361,7 +508,9 @@ describe("direct Linear API publication", () => {
         fetchImpl,
       ),
     ).rejects.toThrow("could not resolve the requested issue assignee");
-    expect(requests).toHaveLength(2);
+    expect(
+      requests.some(({ body }) => body.query.includes("mutation createIssue")),
+    ).toBe(false);
   });
 
   test.each([
@@ -406,15 +555,14 @@ describe("direct Linear API publication", () => {
     );
   });
 
-  test.each([
-    ["an unexpected project", { id: "unexpected-project" }],
-    ["a missing project readback", undefined],
-  ] as const)("rejects a team-only issue with %s", async (_, project) => {
+  test("rejects a team-only issue attached to an unexpected project", async () => {
     const prepared = teamOnlyPublication();
     const issue = prepared.issues[0]!;
     const { fetchImpl } = mockedFetch([
       destinationResponse(prepared),
-      issueResponse(prepared, issue, "user-self", { project }),
+      issueResponse(prepared, issue, "user-self", {
+        project: { id: "unexpected-project" },
+      }),
     ]);
     const client = await prepareLinearApiPublication(
       prepared,
@@ -490,7 +638,7 @@ describe("direct Linear API publication", () => {
     [
       "invalid JSON",
       new Response(`secret upstream body ${API_KEY}`),
-      "Linear destination verification returned an unreadable response.",
+      "Linear destination verification could not be completed.",
     ],
   ] as const)(
     "never discloses credentials or response details for %s",
@@ -527,7 +675,7 @@ describe("direct Linear API publication", () => {
         publication(),
         arbitrarySecret,
         undefined,
-        fetchImpl,
+        mockLinearClient(fetchImpl),
       );
       throw new Error("Expected synthetic failure");
     } catch (error) {
@@ -601,7 +749,7 @@ describe("direct Linear API publication", () => {
         publication(),
         API_KEY,
         undefined,
-        fetchImpl,
+        mockLinearClient(fetchImpl),
         controller.signal,
       ),
     ).rejects.toBe(reason);
