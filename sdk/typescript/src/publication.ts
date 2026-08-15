@@ -12,13 +12,13 @@ import { bundledPluginRoot } from "./runtime.js";
 export interface LinearPublicationDestination {
   type: "linear";
   teamId: string;
-  projectId: string;
+  projectId?: string;
 }
 
 export interface PrepareScanPublicationOptions {
   destination: "linear";
   teamId: string;
-  projectId: string;
+  projectId?: string;
   uploadedAt?: string;
 }
 
@@ -63,7 +63,9 @@ export async function prepareScanPublication(
     destination: {
       type: options.destination,
       teamId: options.teamId,
-      projectId: options.projectId,
+      ...(options.projectId === undefined
+        ? {}
+        : { projectId: options.projectId }),
     },
     issues: contract.findings.findings.map((finding) => {
       const priority = LINEAR_PRIORITIES[finding.severity.level];
