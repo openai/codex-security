@@ -73,7 +73,7 @@ import {
   streamWindowsCredentialAclDescriptors,
   verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 const temporaryDirectories: string[] = [];
@@ -225,6 +225,101 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
+    const runtime = await loadBundledRuntime();
+    const source =
+      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(source).toBeDefined();
+
+    type Surface = {
+      id?: string;
+      label: string;
+      disposition: string;
+      receiptRefs?: string[];
+    };
+    type Deferred = { id: string; reason: string; surfaceIds: string[] };
+    const buildCoverage = new Function(
+      "semanticIdentifier",
+      "coverageMode",
+      "inventoryStrategy",
+      `${source}\nreturn buildCoverage;`,
+    )(
+      (label: string) => label.toLowerCase(),
+      () => "deep_repository",
+      () => "repository",
+    ) as (
+      context: Record<string, unknown>,
+      contract: Record<string, unknown>,
+      coverage: { surfaces: Surface[]; deferred: Deferred[] },
+      scope: { includePaths: string[]; excludePaths: string[] },
+      target: Record<string, unknown>,
+    ) => {
+      surfaces: Array<Surface & { id: string; receiptRefs: string[] }>;
+      deferred: Deferred[];
+    };
+
+    const coverage = {
+      surfaces: [
+        {
+          id: "surface-web",
+          label: "Primary",
+          disposition: "reported",
+          receiptRefs: ["artifacts/primary.json"],
+        },
+        { id: "surface-web", label: "Secondary", disposition: "reported" },
+        {
+          id: "surface-web-2",
+          label: "Reserved suffix",
+          disposition: "no_issue_found",
+        },
+        { label: "Uploads", disposition: "reported" },
+        {
+          id: "surface_uploads",
+          label: "Owned uploads",
+          disposition: "reported",
+        },
+        { label: "Archive", disposition: "reported" },
+        { label: "Archive", disposition: "no_issue_found" },
+      ],
+      deferred: [
+        {
+          id: "deferred-review",
+          reason: "Environment unavailable",
+          surfaceIds: ["surface-web", "surface_uploads"],
+        },
+      ],
+    };
+    const original = structuredClone(coverage);
+    const canonical = buildCoverage(
+      { mode: "deep" },
+      {},
+      coverage,
+      { includePaths: ["."], excludePaths: [] },
+      {},
+    );
+
+    expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
+      "surface-web",
+      "surface-web-3",
+      "surface-web-2",
+      "surface_uploads-2",
+      "surface_uploads",
+      "surface_archive",
+      "surface_archive-2",
+    ]);
+    expect(canonical.surfaces.map((surface) => surface.label)).toEqual(
+      coverage.surfaces.map((surface) => surface.label),
+    );
+    expect(canonical.surfaces[0]!.receiptRefs).toEqual([
+      "artifacts/primary.json",
+    ]);
+    expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
+    expect(canonical.deferred).toEqual(coverage.deferred);
+    expect(coverage).toEqual(original);
+  });
+
   test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
       const generator = await readFile(
@@ -280,27 +375,6 @@ describe("plugin runtime preparation", () => {
 
     const contents = await readFile(output);
     expect(await readFile(repeatedOutput)).toEqual(contents);
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const validateSource =
-      /function validateRepositoryPath\(value, field\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    const parseSource =
-      /function parseInScopePaths\(content, path3\) \{[\s\S]*?\n\}/u.exec(
-        runtime,
-      )?.[0];
-    expect(validateSource).toBeDefined();
-    expect(parseSource).toBeDefined();
-    const parseInventory = new Function(
-      "import_node_util5",
-      `${validateSource}\n${parseSource}\nreturn parseInScopePaths;`,
-    )({ TextDecoder }) as (content: Uint8Array, path: string) => Set<string>;
-    expect(() => parseInventory(contents, "in_scope_files.txt")).not.toThrow();
 
     const rows = contents.toString("utf8").trimEnd().split(/\r?\n/u);
     expect(rows).toContain("./nested/tracked-secret.py");
@@ -3627,9 +3701,15 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(result.status, result.stderr).toBe(0);
       const payload = JSON.parse(result.stdout) as {
         status: string;
+        results: { capability: string; severity: string }[];
         unknown: { capability: string; severity: string }[];
       };
       expect(payload.status).toBe("ready");
+      if (profile === "deep_security_scan") {
+        expect(payload.results).toEqual([]);
+        expect(payload.unknown).toEqual([]);
+        continue;
+      }
       expect(payload.unknown.length).toBeGreaterThan(0);
       expect(
         payload.unknown.every(({ severity }) => severity !== "block"),

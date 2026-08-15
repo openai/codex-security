@@ -7,9 +7,17 @@ import {
   existsSync,
   lstatSync,
   realpathSync,
+  type Stats,
   writeSync,
 } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -26,7 +34,6 @@ import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ModelReasoningEffort } from "@openai/codex-sdk";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -153,7 +160,9 @@ const MODEL_REASONING_EFFORTS = [
   "medium",
   "high",
   "xhigh",
-] as const satisfies readonly ModelReasoningEffort[];
+  "max",
+] as const;
+type ScanReasoningEffort = (typeof MODEL_REASONING_EFFORTS)[number];
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const CODEX_OVERRIDE_DESCRIPTION =
@@ -214,7 +223,7 @@ function optionValue(flag: string) {
 function effortOption() {
   return z
     .enum(MODEL_REASONING_EFFORTS, {
-      error: "--effort must be minimal, low, medium, high, or xhigh.",
+      error: "--effort must be minimal, low, medium, high, xhigh, or max.",
     })
     .optional()
     .describe(
@@ -259,19 +268,69 @@ async function readPromptFiles(
   directory: string,
   scanPromptFile?: string,
   postScanPromptFile?: string,
+  repository = directory,
 ): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
   const [scanPrompt, postScanPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, scanPromptFile), "utf8"),
+      : readRegularInputFile(resolve(directory, scanPromptFile), repository),
     postScanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+      : readRegularInputFile(
+          resolve(directory, postScanPromptFile),
+          repository,
+        ),
   ]);
   return {
     ...(scanPrompt?.trim() ? { scanPrompt } : {}),
     ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
   };
+}
+
+async function readRegularInputFile(
+  path: string,
+  repository: string,
+  metadata?: Pick<Stats, "isFile" | "dev" | "ino">,
+): Promise<string> {
+  const selected = metadata ?? (await lstat(path));
+  if (!selected.isFile()) {
+    throw new CodexSecurityError("Input files must be regular files.");
+  }
+  const canonicalRepository = await realpath(repository);
+  const canonicalParent = await realpath(dirname(path));
+  if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
+    for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+      if (
+        !isOutsidePath(relative(canonicalRepository, await realpath(ancestor)))
+      ) {
+        throw new CodexSecurityError(
+          "Input files must not follow repository directory links outside the selected repository.",
+        );
+      }
+      if (dirname(ancestor) === ancestor) {
+        break;
+      }
+    }
+  }
+  const file = await open(
+    join(canonicalParent, basename(path)),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const opened = await file.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== selected.dev ||
+      opened.ino !== selected.ino
+    ) {
+      throw new CodexSecurityError("Input files must remain regular files.");
+    }
+    return await file.readFile({ encoding: "utf8" });
+  } finally {
+    await file.close();
+  }
 }
 
 interface ScanArguments extends DeepScanOptions {
@@ -288,7 +347,7 @@ interface ScanArguments extends DeepScanOptions {
   base?: string;
   mode: ScanMode;
   model?: string;
-  effort?: ModelReasoningEffort;
+  effort?: ScanReasoningEffort;
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
@@ -2348,7 +2407,7 @@ async function runSkill(
   skill: "validation" | "fix-finding",
   inputs: readonly string[],
   codexOverrides: readonly string[],
-  effort: ModelReasoningEffort | undefined,
+  effort: ScanReasoningEffort | undefined,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
@@ -2393,7 +2452,7 @@ async function runSkill(
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
       const path = resolve(directory, input);
-      const metadata = await stat(path).catch((error: unknown) => {
+      const metadata = await lstat(path).catch((error: unknown) => {
         if (
           typeof error === "object" &&
           error !== null &&
@@ -2416,7 +2475,11 @@ async function runSkill(
           );
         }
         try {
-          contentsOrLiteral = await readFile(path, "utf8");
+          contentsOrLiteral = await readRegularInputFile(
+            path,
+            directory,
+            metadata,
+          );
         } catch {
           throw new CodexSecurityError(
             "Could not read the finding or issue input.",
@@ -2802,12 +2865,14 @@ async function executeScan(
   let failed = false;
   let failure: unknown;
   try {
-    const repository = arguments_.repository ?? dependencies.currentDirectory();
+    const directory = dependencies.currentDirectory();
+    const repository = arguments_.repository ?? directory;
     const target = targetFromArguments(arguments_);
     const prompts = await readPromptFiles(
-      dependencies.currentDirectory(),
+      directory,
       arguments_.scanPromptFile,
       arguments_.postScanPromptFile,
+      resolve(directory, repository),
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
@@ -2907,6 +2972,7 @@ async function executeScan(
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
         repository,
+        mode: arguments_.mode,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
         ...(arguments_.maxCostUsd === undefined
           ? {}
@@ -3660,7 +3726,7 @@ function targetFromArguments(arguments_: ScanArguments): ScanTarget {
 export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
-  effort?: ModelReasoningEffort,
+  effort?: ScanReasoningEffort,
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;

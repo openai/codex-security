@@ -120,7 +120,9 @@ describe("CLI", () => {
           maxTimeHours: { type: "number", maximum: 96 },
           model: { type: "string" },
           verbose: { type: "boolean" },
-          effort: { enum: ["minimal", "low", "medium", "high", "xhigh"] },
+          effort: {
+            enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+          },
           provider: {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
           },
@@ -409,7 +411,7 @@ describe("CLI", () => {
         maxDiscoveryRuns: number;
         maxTimeHours: number;
       };
-      expect(defaults.workers).toBe(6);
+      expect(defaults.workers).toBe(4);
       const documentedDeepScan = documentedConfigs.find(
         (config) =>
           typeof config["deep_scan"] === "object" &&
@@ -418,7 +420,7 @@ describe("CLI", () => {
       );
       expect(documentedDeepScan).toMatchObject({
         deep_scan: {
-          workers: "auto",
+          workers: 4,
           subagents: defaults.subagents,
           stop_after_no_new: defaults.stopAfterNoNew,
           stop_after_consecutive_errors: defaults.stopAfterConsecutiveErrors,
@@ -902,6 +904,7 @@ describe("CLI", () => {
       ["bulk-scan", "--model=gpt-5.6-terra"],
       ["bulk-scan", "--effort", "high"],
       ["bulk-scan", "--effort=high"],
+      ["bulk-scan", "--effort", "max"],
       ["bulk-scan", "--codex", 'model_reasoning_effort="high"'],
       ["bulk-scan", '--codex=model_reasoning_effort="high"'],
       ["bulk-scan", "--model", "gpt-5.6-terra", "--effort", "high"],
@@ -1973,6 +1976,51 @@ describe("CLI", () => {
     expect(text).not.toContain("Estimated cost: $0.0248865 of $2.00 limit");
   });
 
+  test("omits stage and file counts from interactive Deep scan dashboards", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const result = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    });
+
+    expect(
+      await main(
+        ["scan", "/code/juice-shop", "--mode", "deep"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          environment: { NO_COLOR: "1" },
+          result,
+          activities: [
+            {
+              id: "worker-1:read-1",
+              kind: "command",
+              status: "completed",
+              description: "read routes/login.ts",
+              paths: ["routes/login.ts"],
+              worker: 1,
+            },
+          ],
+          costUpdates: [result.cost!],
+          scanProgress: [
+            { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+          ],
+        }),
+      ),
+    ).toBe(0);
+
+    const text = stripVTControlCharacters(stderr.text());
+    expect(text).not.toContain("STAGE");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("0 / 1,258 reviewed");
+    expect(text).toContain("worker 1 · read routes/login.ts");
+    expect(text).toContain("TOKENS");
+    expect(text).toContain("COST");
+    expect(text).toContain("TIME");
+  });
+
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
       ["validate", ["finding"]],
@@ -2094,7 +2142,9 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
-    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      "--effort <minimal|low|medium|high|xhigh|max>",
+    );
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
     );
@@ -2130,7 +2180,9 @@ describe("CLI", () => {
     expect(help.text()).toContain(
       `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
     );
-    expect(help.text()).toContain("--effort <minimal|low|medium|high|xhigh>");
+    expect(help.text()).toContain(
+      "--effort <minimal|low|medium|high|xhigh|max>",
+    );
     expect(help.text()).toContain(
       `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
     );
@@ -2168,6 +2220,7 @@ describe("CLI", () => {
       [["--model=gpt-5.6-sol"], { model: "gpt-5.6-sol" }],
       [["--effort", "minimal"], { model_reasoning_effort: "minimal" }],
       [["--effort=xhigh"], { model_reasoning_effort: "xhigh" }],
+      [["--effort", "max"], { model_reasoning_effort: "max" }],
       [
         ["--model", "gpt-5.6-terra", "--effort", "high"],
         { model: "gpt-5.6-terra", model_reasoning_effort: "high" },
@@ -2505,7 +2558,7 @@ describe("CLI", () => {
       ],
       [
         ["scan", ".", "--effort", "ultra"],
-        "--effort must be minimal, low, medium, high, or xhigh",
+        "--effort must be minimal, low, medium, high, xhigh, or max",
       ],
       [["scan", ".", "--mode", "bogus"], "Invalid option"],
       [["scan", ".", "--unknown"], "Unknown flag: --unknown"],

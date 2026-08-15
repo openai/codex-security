@@ -322,7 +322,7 @@ mode.
 
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
 the implied provider. Use `--model gpt-5.6-terra` to switch models and
-`--effort minimal|low|medium|high|xhigh` to set reasoning effort. Repeat
+`--effort minimal|low|medium|high|xhigh|max` to set reasoning effort. Repeat
 `--codex KEY=VALUE` for other Codex settings; existing
 `--codex 'model_reasoning_effort="high"'` overrides remain supported.
 
@@ -392,17 +392,17 @@ Deep scans read `$CODEX_HOME/codex-security/config.toml`, defaulting to
 
 ```toml
 [deep_scan]
-workers = "auto"
+workers = 4
 subagents = 3
-stop_after_no_new = 6
+stop_after_no_new = 4
 stop_after_consecutive_errors = 3
-max_discovery_runs = 60
+max_discovery_runs = 40
 max_time_hours = 96
 ```
 
-`workers = "auto"` uses half the available parallelism, with a minimum of one
-and a maximum of six discovery workers. Set `workers` to a positive integer to
-choose an explicit count. `subagents` must be a nonnegative integer;
+The default is four discovery workers; the legacy `workers = "auto"` setting
+also resolves to four. Set `workers` to a positive integer to choose an explicit
+count. `subagents` must be a nonnegative integer;
 `stop_after_no_new`, `stop_after_consecutive_errors`, and `max_discovery_runs`
 must be positive integers. `max_time_hours` must be a positive finite number no
 greater than 96; fractional hours are supported. Unknown `[deep_scan]` keys are

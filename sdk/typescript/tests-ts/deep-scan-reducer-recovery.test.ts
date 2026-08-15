@@ -173,14 +173,14 @@ test("classifies owned worker tool failures without exposing their contents", as
   expect(unrelatedDiagnostics).toEqual([]);
 });
 
-test("resumes only when the exact reducer result is missing", async () => {
+test("resumes only when the exact Standard worker or reducer result is missing", async () => {
   const runtime = await loadBundledRuntime();
-  const source = bundledFunction(runtime, "isMissingReducerResult");
+  const source = bundledFunction(runtime, "isMissingWorkerResult");
   const pathImport = /\(0, (import_node_path\d+)\.join\)/u.exec(source)?.[1];
   expect(pathImport).toBeDefined();
-  const isMissingReducerResult = new Function(
+  const isMissingWorkerResult = new Function(
     pathImport!,
-    `${source}\nreturn isMissingReducerResult;`,
+    `${source}\nreturn isMissingWorkerResult;`,
   )({ join }) as (error: Error, artifactDirectory: string) => boolean;
   const artifactDirectory = join(tmpdir(), "codex-security-reducer-artifacts");
   const missingResult = Object.assign(new Error("result missing"), {
@@ -192,12 +192,12 @@ test("resumes only when the exact reducer result is missing", async () => {
     { code: "artifact_tool_failed" },
   );
 
-  expect(isMissingReducerResult(missingResult, artifactDirectory)).toBe(true);
+  expect(isMissingWorkerResult(missingResult, artifactDirectory)).toBe(true);
+  expect(isMissingWorkerResult(diagnosedMissingResult, artifactDirectory)).toBe(
+    true,
+  );
   expect(
-    isMissingReducerResult(diagnosedMissingResult, artifactDirectory),
-  ).toBe(true);
-  expect(
-    isMissingReducerResult(
+    isMissingWorkerResult(
       Object.assign(new Error("different artifact missing"), {
         code: "ENOENT",
         path: join(artifactDirectory, "candidates.jsonl"),
@@ -206,7 +206,7 @@ test("resumes only when the exact reducer result is missing", async () => {
     ),
   ).toBe(false);
   expect(
-    isMissingReducerResult(
+    isMissingWorkerResult(
       Object.assign(new Error("result cannot be read"), {
         code: "EACCES",
         path: join(artifactDirectory, "result.json"),
@@ -214,6 +214,12 @@ test("resumes only when the exact reducer result is missing", async () => {
       artifactDirectory,
     ),
   ).toBe(false);
+
+  const standardContinuation = new Function(
+    `${bundledFunction(runtime, "standardScanCompletionContinuation")}\nreturn standardScanCompletionContinuation;`,
+  )() as (attempt: number) => string;
+  expect(standardContinuation(1)).toContain("record_codex_security_scan_draft");
+  expect(standardContinuation(1)).toMatch(/retry.*until it succeeds/iu);
 
   const continuation = new Function(
     `${bundledFunction(runtime, "reducerCompletionContinuation")}\nreturn reducerCompletionContinuation;`,

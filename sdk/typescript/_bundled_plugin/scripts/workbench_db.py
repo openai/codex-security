@@ -1175,7 +1175,11 @@ def complete_budget_exhausted_scan(
                 "discovery."
             )
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-        candidates = budget_exhausted_candidates(scan, scan_dir)
+        candidates = (
+            []
+            if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
+            else budget_exhausted_candidates(scan, scan_dir)
+        )
         warning = optional_text(args.message, maximum=2400)
         if warning is None:
             warning = (
@@ -1450,11 +1454,14 @@ def complete_scan_locked(
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
-    warning = scan_target_warning(scan)
-    if warning is not None:
-        target_warnings.append(warning)
-        if warning not in warnings:
-            warnings.append(warning)
+
+    def add_warning() -> None:
+        if (warning := scan_target_warning(scan)) is not None:
+            for items in (target_warnings, warnings):
+                if warning not in items:
+                    items.append(warning)
+
+    add_warning()
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
@@ -1492,12 +1499,7 @@ def complete_scan_locked(
             completion_binding=completion_binding,
             completion_warnings=warnings,
         )
-        warning = scan_target_warning(scan)
-        if warning is not None:
-            if warning not in target_warnings:
-                target_warnings.append(warning)
-            if warning not in warnings:
-                warnings.append(warning)
+        add_warning()
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
