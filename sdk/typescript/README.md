@@ -333,7 +333,8 @@ configuration. Each scan starts with a private runtime and these Codex
 defaults:
 
 ```toml
-approval_policy = "never"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
@@ -698,13 +699,14 @@ repository, Git installation, configured tools, and other scans under the
 same account are not separate security principals.
 
 Every scan uses the `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. Its profile allows reads of the local filesystem and
-writes to workspace roots and the selected scan state directory. Scans do not
-request interactive approval or grant filesystem escalations. Setting
-`approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permissions
-through `--codex` or SDK `codexOverrides` does not replace these controls or
-make the filesystem profile more restrictive. Independently enforced host and
-network restrictions still apply.
+automatically reviewed execution approvals. Its baseline profile allows reads
+of the local filesystem and writes to workspace roots and the selected scan
+state directory. Approval requests are reviewed without an interactive prompt;
+approved requests can grant additional permissions for a specific operation.
+Use `--codex 'approval_policy="never"'` to deny all requests instead. Other
+`approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permission overrides
+cannot replace the reviewer or baseline filesystem profile. Independently
+enforced host and network restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment, including
 unrelated API tokens and cloud credentials. Start a scan with only the

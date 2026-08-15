@@ -294,6 +294,40 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  test("preserves explicitly requested strict approvals in scan threads", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await Promise.all([mkdir(repository), mkdir(codexHome)]);
+    let threadOptions: Record<string, unknown> | undefined;
+    const client = new TestClient(
+      { codexOverrides: { approval_policy: "never" } },
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => null,
+        createCodex: () => ({
+          startThread: (options: Record<string, unknown>) => {
+            threadOptions = options;
+            return {
+              id: null,
+              async runStreamed() {
+                throw new Error("scan approval policy captured");
+              },
+            };
+          },
+        }),
+      },
+    );
+
+    await expect(
+      client.run(repository, { outputDir: join(root, "scan") }),
+    ).rejects.toThrow("scan approval policy captured");
+    expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+    await client.close();
+  });
+
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
       stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
@@ -1905,16 +1939,14 @@ describe("CodexSecurity orchestration", () => {
       "CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST",
     );
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
+      approvals_reviewer: "auto_review",
       default_permissions: "codex_security_scan",
       allow_login_shell: false,
     });
-    expect((codexOptions as CodexOptions | null)?.config).not.toHaveProperty(
-      "approvals_reviewer",
-    );
     expect(threadOptions as Record<string, unknown> | null).toEqual({
       workingDirectory: scanDir,
       skipGitRepoCheck: true,
-      approvalPolicy: "never",
+      approvalPolicy: "on-request",
     });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
