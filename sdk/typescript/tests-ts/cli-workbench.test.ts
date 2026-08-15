@@ -720,6 +720,7 @@ describe("CLI workbench", () => {
     let repository: string | undefined;
     let options: Record<string, unknown> | undefined;
     const savedConfig = {
+      approval_policy: "on-request",
       model: "gpt-original",
       model_reasoning_effort: "high",
       features: { goals: true },
@@ -818,6 +819,48 @@ describe("CLI workbench", () => {
       expect(runOptions?.["target"]).toEqual(expected);
     }
   });
+
+  test.each([
+    ["legacy", undefined, "never"],
+    ["strict", "never", "never"],
+    ["reviewed", "on-request", "on-request"],
+  ] as const)(
+    "preserves %s scan approval policy when rerunning saved scans",
+    async (_scenario, savedApprovalPolicy, expectedApprovalPolicy) => {
+      let config: CodexSecurityConfig | undefined;
+      const savedConfig = {
+        model: "gpt-original",
+        ...(savedApprovalPolicy === undefined
+          ? {}
+          : { approval_policy: savedApprovalPolicy }),
+      };
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original"],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onConfig: (value) => {
+              config = value;
+            },
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: savedConfig,
+              },
+            }),
+          }),
+        ),
+      ).toBe(0);
+      expect(config?.codexOverrides).toEqual({
+        ...savedConfig,
+        approval_policy: expectedApprovalPolicy,
+      });
+    },
+  );
 
   test("preserves workbench failures and does not initialize Codex", async () => {
     const stderr = capture();

@@ -112,6 +112,15 @@ export function scanModelProvider(config: Readonly<JsonObject>): unknown {
     : config["model_provider"];
 }
 
+export function scanApprovalPolicy(
+  config: Readonly<JsonObject>,
+): "never" | "on-request" {
+  return config["approval_policy"] === "never" ||
+    selectedScanProfile(config)?.["approval_policy"] === "never"
+    ? "never"
+    : "on-request";
+}
+
 function selectedScanProfile(
   config: Readonly<JsonObject>,
 ): Record<string, JsonValue> | undefined {

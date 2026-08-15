@@ -294,39 +294,64 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
-  test("preserves explicitly requested strict approvals in scan threads", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    await Promise.all([mkdir(repository), mkdir(codexHome)]);
-    let threadOptions: Record<string, unknown> | undefined;
-    const client = new TestClient(
-      { codexOverrides: { approval_policy: "never" } },
+  test.each([
+    ["root configuration", { approval_policy: "never" }],
+    [
+      "selected profile",
       {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        repositoryRevision: async () => null,
-        createCodex: () => ({
-          startThread: (options: Record<string, unknown>) => {
-            threadOptions = options;
-            return {
-              id: null,
-              async runStreamed() {
-                throw new Error("scan approval policy captured");
-              },
-            };
-          },
-        }),
+        approval_policy: "on-request",
+        profile: "strict",
+        profiles: {
+          strict: { approval_policy: "never", model: "profile-model" },
+        },
       },
-    );
+    ],
+  ] as const)(
+    "preserves strict approvals from %s in scan threads and saved recipes",
+    async (_source, codexOverrides) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      await Promise.all([mkdir(repository), mkdir(codexHome)]);
+      let threadOptions: Record<string, unknown> | undefined;
+      let recipe: Record<string, unknown> | undefined;
+      const client = new TestClient(
+        { codexOverrides },
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            if (args[0] === "register-cli-scan") {
+              recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+            }
+            return mockWorkbench(args);
+          },
+          createCodex: () => ({
+            startThread: (options: Record<string, unknown>) => {
+              threadOptions = options;
+              return {
+                id: null,
+                async runStreamed() {
+                  throw new Error("scan approval policy captured");
+                },
+              };
+            },
+          }),
+        },
+      );
 
-    await expect(
-      client.run(repository, { outputDir: join(root, "scan") }),
-    ).rejects.toThrow("scan approval policy captured");
-    expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
-    await client.close();
-  });
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("scan approval policy captured");
+      expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+      expect(recipe).toMatchObject({
+        config: { approval_policy: "never" },
+      });
+      await client.close();
+    },
+  );
 
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
@@ -2006,7 +2031,7 @@ describe("CodexSecurity orchestration", () => {
       mode: "standard",
       repositoryRevision: "deadbeef",
       pluginVersion: "0.1.0",
-      config: { model: "replay-model" },
+      config: { approval_policy: "on-request", model: "replay-model" },
     });
     expect(commands[1]).toEqual([
       "get-scan-feedback",

@@ -78,8 +78,10 @@ requests can grant additional permissions for a specific operation. Set
 
 Setting `approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permissions
 through `--codex` or SDK `codexOverrides` cannot replace the automatic reviewer
-or baseline filesystem profile. A strict `approval_policy="never"` override is
-preserved. Separately enforced host and network restrictions still apply.
+or baseline filesystem profile. A strict `approval_policy="never"` override,
+including one in the selected profile, is preserved. Saved scans retain their
+effective approval policy, and older scans remain deny-all when rerun.
+Separately enforced host and network restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment. The workbench
 removes `OPENAI_API_KEY` and `CODEX_API_KEY`, but it does not remove every
