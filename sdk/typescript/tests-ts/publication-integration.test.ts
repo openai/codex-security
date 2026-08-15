@@ -423,6 +423,7 @@ describe("database-backed Linear publication integration", () => {
       failed: 0,
       total: 23,
     });
+    expect(stderr.text()).toContain("Published 23/23 findings.");
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
     expect(
       await readFile(handoffFile).then(
@@ -507,6 +508,7 @@ describe("database-backed Linear publication integration", () => {
     expect(JSON.parse(await readFile(receiptPath(completed), "utf8"))).toEqual(
       result,
     );
+    expect(stderr.text()).toContain("Published 21/22 findings (1 failed).");
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
   });
 });
