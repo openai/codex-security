@@ -1272,9 +1272,18 @@ export async function preparePersistentScanRoot(
   stateDirectory: string,
   repositoryName: string,
 ): Promise<string> {
-  const root = join(stateDirectory, "scans", safePrefix(repositoryName));
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  return await realpath(root);
+  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  let root = await realpath(stateDirectory);
+  for (const directory of ["scans", safePrefix(repositoryName)]) {
+    root = join(root, directory);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    if (!(await lstat(root)).isDirectory()) {
+      throw new OutputDirectoryError(
+        `Persistent scan output must use real directories: ${root}`,
+      );
+    }
+  }
+  return root;
 }
 
 export async function runWorkbench(
@@ -1934,20 +1943,7 @@ export async function createMarketplace(
   const root = await realpath(pluginRoot);
   const marketplace = join(codexHome, "sdk-marketplace");
   const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
-  const projectionContract = join(
-    root,
-    ".internal",
-    "external-promotion",
-    "external-projection-contract.json",
-  );
-  if (
-    root === (await bundledPluginRoot()) &&
-    (await isRegularFile(projectionContract))
-  ) {
-    await copyExternalPayload(root, pluginDestination);
-  } else {
-    await copyPluginTree(root, pluginDestination, signal);
-  }
+  await copyPluginTree(root, pluginDestination, signal);
   throwIfSignalAborted(signal);
   const manifest = {
     name: MARKETPLACE_NAME,
@@ -1982,7 +1978,12 @@ export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
-  if (configured) return { command: resolve(configured) };
+  if (
+    configured &&
+    (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(configured))
+  ) {
+    return { command: resolve(configured) };
+  }
 
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
@@ -2166,7 +2167,7 @@ export async function resolvePluginPython(
       options.signal,
     );
   }
-  const inherited = environment["PYTHON"]?.trim();
+  const inherited = environmentValue(environment, "PYTHON");
   if (inherited) {
     return await requirePython(
       inherited,
@@ -2384,56 +2385,6 @@ async function readExactly(
     offset += bytesRead;
   }
   return buffer;
-}
-
-async function copyExternalPayload(
-  source: string,
-  destination: string,
-): Promise<void> {
-  const contractPath = join(
-    source,
-    ".internal",
-    "external-promotion",
-    "external-projection-contract.json",
-  );
-  let contract: unknown;
-  try {
-    contract = JSON.parse(await readFile(contractPath, "utf8"));
-  } catch (error) {
-    throw new PluginBootstrapError(
-      `Invalid plugin projection contract: ${contractPath}`,
-      {
-        cause: error,
-      },
-    );
-  }
-  const shippedExact = isRecord(contract)
-    ? contract["shippedExact"]
-    : undefined;
-  if (
-    !Array.isArray(shippedExact) ||
-    !shippedExact.every((value) => typeof value === "string")
-  ) {
-    throw new PluginBootstrapError(
-      "Plugin projection contract must contain shippedExact paths.",
-    );
-  }
-  const paths = [".codex-plugin/plugin.json", ...shippedExact].filter(
-    (value) => !value.startsWith("sdk/"),
-  );
-  for (const path of paths) {
-    const normalized = safeArchivePath(path);
-    const sourcePath = join(source, ...normalized.split("/"));
-    const destinationPath = join(destination, ...normalized.split("/"));
-    const metadata = await lstat(sourcePath).catch(() => null);
-    if (metadata === null || !metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new PluginBootstrapError(
-        `Bundled plugin file is missing or unsafe: ${sourcePath}`,
-      );
-    }
-    await mkdir(dirname(destinationPath), { recursive: true, mode: 0o700 });
-    await copyFile(sourcePath, destinationPath, constants.COPYFILE_EXCL);
-  }
 }
 
 function safeArchivePath(value: string): string {

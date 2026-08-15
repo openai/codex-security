@@ -116,47 +116,54 @@ function progressMessage(
 }
 
 describe("scan cost", () => {
-  test("retains cached and alternate cache-write usage in workbench totals", async () => {
-    const { PLUGIN_ROOT } = await import("./plugin-root.js");
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const usage = {
-      input_tokens: 100,
-      cached_input_tokens: 40,
-      cache_write_tokens: 15,
-      output_tokens: 20,
-      reasoning_output_tokens: 5,
-      total_tokens: 120,
-    };
-    const probe = [
-      "import json, sys",
-      "sys.path.insert(0, sys.argv[1])",
-      "import workbench_scan_usage",
-      "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
-      "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
-    ].join("\n");
-    const result = spawnSync(
-      python!,
-      [
-        "-I",
-        "-B",
-        "-c",
-        probe,
-        join(PLUGIN_ROOT, "scripts"),
-        JSON.stringify(usage),
-      ],
-      { encoding: "utf8" },
-    );
+  test.each([
+    [{ cache_write_tokens: 15 }, 15],
+    [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
+    [{ cache_write_input_tokens: 0, cache_write_tokens: 80 }, 0],
+  ] as const)(
+    "keeps workbench cache-write normalization aligned with SDK usage",
+    async (cacheWrites, expectedCacheWrites) => {
+      const { PLUGIN_ROOT } = await import("./plugin-root.js");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const usage = {
+        input_tokens: 100,
+        cached_input_tokens: 40,
+        ...cacheWrites,
+        output_tokens: 20,
+        reasoning_output_tokens: 5,
+        total_tokens: 120,
+      };
+      const probe = [
+        "import json, sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_scan_usage",
+        "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
+        "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
+      ].join("\n");
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          probe,
+          join(PLUGIN_ROOT, "scripts"),
+          JSON.stringify(usage),
+        ],
+        { encoding: "utf8" },
+      );
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      inputTokens: 100,
-      cachedInputTokens: 40,
-      cacheWriteInputTokens: 15,
-      outputTokens: 20,
-      totalTokens: 120,
-    });
-  });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        inputTokens: 100,
+        cachedInputTokens: 40,
+        cacheWriteInputTokens: expectedCacheWrites,
+        outputTokens: 20,
+        totalTokens: 120,
+      });
+    },
+  );
 
   test("uses published GPT-5.6 model rates", () => {
     const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
@@ -245,6 +252,30 @@ describe("scan cost", () => {
         output_tokens: 10,
       })?.estimatedUsd,
     ).toBe(0.0051);
+  });
+
+  test("preserves legacy cache writes after SDK normalization adds zero", () => {
+    expect(
+      estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
+        cache_write_tokens: 200,
+        output_tokens: 10,
+      }),
+    ).toMatchObject({ cacheWriteInputTokens: 200, estimatedUsd: 0.0051 });
+  });
+
+  test("ignores impossible legacy cache writes while retaining canonical usage", () => {
+    expect(
+      estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
+        cache_write_tokens: 1_001,
+        output_tokens: 10,
+      }),
+    ).toMatchObject({ cacheWriteInputTokens: 0, estimatedUsd: 0.00485 });
   });
 
   test("does not double-charge reasoning tokens included in output", () => {

@@ -13,7 +13,6 @@ from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
 from workbench_validation import optional_text, require_uuid, user_text
 
-MAX_PREFLIGHT_ISSUES_JSON_BYTES = 64 * 1024
 MAX_PREFLIGHT_ISSUES = 32
 
 
@@ -33,10 +32,6 @@ def _preflight_issue_text(value: Any, maximum: int, label: str) -> str:
 def preflight_issues_json(value: str | None) -> str | None:
     if value is None:
         return None
-    if len(value.encode("utf-8")) > MAX_PREFLIGHT_ISSUES_JSON_BYTES:
-        raise SystemExit(
-            f"Preflight issues must be no larger than {MAX_PREFLIGHT_ISSUES_JSON_BYTES} bytes."
-        )
     try:
         payload = json.loads(value)
     except json.JSONDecodeError as exc:

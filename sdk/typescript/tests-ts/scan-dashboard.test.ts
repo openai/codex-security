@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { ScanDashboard } from "../src/scan-dashboard.js";
@@ -39,6 +40,162 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("restores terminal state when dashboard initialization fails", () => {
+    const input = new DashboardTestInput();
+    const output: string[] = [];
+    let timerCleared = false;
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          output.push(chunk);
+          if (chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard rendering failed.");
+          }
+          return true;
+        },
+      },
+      {
+        repository: "/synthetic/repository",
+        input,
+        clock: {
+          ...fakeClock(),
+          clearInterval: () => {
+            timerCleared = true;
+          },
+        },
+      },
+    );
+
+    expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
+    expect(timerCleared).toBe(true);
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount("data")).toBe(0);
+    expect(output.join("")).toContain("\u001B[?25h\u001B[?1049l");
+    dashboard.stop();
+  });
+
+  test("restores the screen when raw mode setup and cleanup both fail", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    input.setRawMode = (enabled) => {
+      throw new Error(
+        enabled
+          ? "Raw mode initialization failed."
+          : "Raw mode cleanup failed.",
+      );
+    };
+    const dashboard = new ScanDashboard(stderr.stream, {
+      repository: "/synthetic/repository",
+      input,
+      clock: fakeClock(),
+    });
+
+    expect(() => dashboard.start()).toThrow("Raw mode initialization failed.");
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+    expect(input.listenerCount("data")).toBe(0);
+  });
+
+  test("disables alternate scrolling when dashboard rollback fails", () => {
+    const input = new DashboardTestInput();
+    const output: string[] = [];
+    input.setRawMode = (enabled) => {
+      if (!enabled) throw new Error("Raw mode cleanup failed.");
+      input.isRaw = enabled;
+      return input;
+    };
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          output.push(chunk);
+          if (chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard rendering failed.");
+          }
+          return true;
+        },
+      },
+      { repository: "/synthetic/repository", input, clock: fakeClock() },
+    );
+
+    expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
+    expect(output.join("")).toContain("\u001B[?1007h");
+    expect(output.join("")).toContain("\u001B[?1007l\u001B[?25h\u001B[?1049l");
+  });
+
+  test("keeps later dashboard redraw failures from stopping the scan", () => {
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          if (failRedraw && chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard redraw failed.");
+          }
+          return true;
+        },
+      },
+      {
+        repository: "/synthetic/repository",
+        clock: {
+          ...fakeClock(),
+          setInterval: (callback) => {
+            redraw = callback;
+            return {} as NodeJS.Timeout;
+          },
+        },
+      },
+    );
+
+    dashboard.start();
+    failRedraw = true;
+
+    expect(() => redraw?.()).not.toThrow();
+    expect(() => dashboard.setStage("reviewing files")).not.toThrow();
+
+    failRedraw = false;
+    dashboard.stop();
+  });
+
+  test("handles asynchronous dashboard stream failures while a scan is active", async () => {
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    const stream = new Writable({
+      autoDestroy: false,
+      write(_chunk, _encoding, callback) {
+        if (failRedraw) {
+          queueMicrotask(() => callback(new Error("Dashboard output failed.")));
+        } else {
+          callback();
+        }
+      },
+    });
+    const dashboard = new ScanDashboard(stream, {
+      repository: "/synthetic/repository",
+      clock: {
+        ...fakeClock(),
+        setInterval: (callback) => {
+          redraw = callback;
+          return {} as NodeJS.Timeout;
+        },
+      },
+    });
+
+    dashboard.start();
+    expect(stream.listenerCount("error")).toBe(1);
+    const failure = new Promise<Error>((resolve) =>
+      stream.once("error", resolve),
+    );
+    failRedraw = true;
+    redraw?.();
+    dashboard.stop();
+    expect(stream.listenerCount("error")).toBe(2);
+
+    await expect(failure).resolves.toMatchObject({
+      message: "Dashboard output failed.",
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(stream.listenerCount("error")).toBe(0);
+  });
+
   test("redraws real scan activity and metrics in place", () => {
     const stderr = capture(true);
     const timers: NodeJS.Timeout[] = [];
@@ -86,6 +243,8 @@ describe("live scan dashboard", () => {
     expect(text).not.toContain("ACTIVITY");
     expect(text).not.toContain("events · live");
     expect(text).not.toContain("WORKERS");
+    expect(text).toContain("STAGE");
+    expect(text).toContain("FILES");
     expect(text).toContain(
       '[09:41:19] ◐ nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
     );
@@ -103,6 +262,56 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).toContain("\u001B[?25l");
     expect(stderr.text()).toContain("\u001B[?25h");
     expect(timers).toEqual([]);
+  });
+
+  test("hides stage and file counts during Deep scans without wasting screen rows", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 80, rows: 12 },
+      {
+        repository: "/code/juice-shop",
+        mode: "deep",
+        clock: fakeClock(),
+      },
+    );
+
+    dashboard.start();
+    dashboard.setStage("inspecting repository files");
+    dashboard.setFiles({
+      phase: "preflight",
+      filesCompleted: 0,
+      filesTotal: 1_258,
+    });
+    for (let index = 1; index <= 6; index += 1) {
+      dashboard.record({
+        id: `worker-1:read-${index}`,
+        kind: "command",
+        status: "completed",
+        description: `Reviewed source file ${index}`,
+        paths: [],
+        worker: 1,
+      });
+    }
+    dashboard.setCost(
+      fakeResult([], "complete", {
+        input_tokens: 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      }).cost!,
+    );
+
+    const frame = lastFrame(stderr);
+    dashboard.stop();
+
+    expect(frame).not.toContain("STAGE");
+    expect(frame).not.toContain("FILES");
+    expect(frame).not.toContain("inspecting repository files");
+    expect(frame).not.toContain("0 / 1,258 reviewed");
+    expect(frame).toContain("worker 1 · Reviewed source file 1");
+    expect(frame).toContain("worker 1 · Reviewed source file 6");
+    expect(frame).toContain("TOKENS");
+    expect(frame).toContain("COST");
+    expect(frame).toContain("TIME");
   });
 
   test("updates the same activity when a command completes", () => {

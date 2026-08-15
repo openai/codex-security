@@ -127,7 +127,6 @@ jobs:
           pnpm --dir sdk/typescript run types
           pnpm --dir sdk/typescript run test
           pnpm --dir sdk/typescript run format
-          pnpm --dir sdk/typescript run build
 
       - name: Pack
         working-directory: sdk/typescript

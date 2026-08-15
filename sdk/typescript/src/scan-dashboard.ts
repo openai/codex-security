@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { ScanModelConfiguration } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { ScanMode } from "./targets.js";
 import type { ScanProgress } from "./worker-progress.js";
 
 const HIDE_CURSOR = "\u001B[?25l";
@@ -18,7 +19,9 @@ const MAX_HISTORY_ENTRIES = 2_000;
 const FIXED_SCREEN_ROWS = 8;
 
 interface DashboardStream {
-  write(chunk: string): unknown;
+  write(chunk: string, callback?: (error?: Error | null) => void): unknown;
+  on?(event: "error", listener: (error: Error) => void): unknown;
+  off?(event: "error", listener: (error: Error) => void): unknown;
   readonly columns?: number;
   readonly rows?: number;
 }
@@ -41,6 +44,7 @@ interface DashboardInput {
 
 interface ScanDashboardOptions {
   repository: string;
+  mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
   clock: DashboardClock;
@@ -101,6 +105,8 @@ export class ScanDashboard {
   #scrollOffset = 0;
   #inputWasRaw = false;
   #noteCount = 0;
+  #observingStreamErrors = false;
+  readonly #onStreamError = (): void => {};
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
       typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
@@ -145,17 +151,36 @@ export class ScanDashboard {
 
   public start(): void {
     if (this.#timer !== null) return;
-    this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
     const input = this.#options.input;
     if (input?.isTTY === true) {
       this.#inputWasRaw = input.isRaw === true;
-      input.setRawMode?.(true);
-      input.resume?.();
-      input.on("data", this.#onInput);
-      this.#stream.write(ENABLE_ALTERNATE_SCROLL);
     }
-    this.#render();
-    this.#timer = this.#options.clock.setInterval(() => this.#render(), 1_000);
+    this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
+    try {
+      if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
+        this.#stream.on("error", this.#onStreamError);
+        this.#observingStreamErrors = true;
+      }
+      this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
+      if (input?.isTTY === true) {
+        input.setRawMode?.(true);
+        input.resume?.();
+        input.on("data", this.#onInput);
+        this.#stream.write(ENABLE_ALTERNATE_SCROLL);
+      }
+      this.#render();
+    } catch (error) {
+      try {
+        this.stop();
+      } catch {
+        try {
+          this.#stream.write(
+            `${DISABLE_ALTERNATE_SCROLL}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
+          );
+        } catch {}
+      }
+      throw error;
+    }
   }
 
   public stop(): void {
@@ -163,14 +188,32 @@ export class ScanDashboard {
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
     const input = this.#options.input;
-    if (input?.isTTY === true) {
-      input.off("data", this.#onInput);
-      input.setRawMode?.(this.#inputWasRaw);
-      input.pause?.();
+    try {
+      if (input?.isTTY === true) {
+        input.off("data", this.#onInput);
+        input.setRawMode?.(this.#inputWasRaw);
+        input.pause?.();
+      }
+      this.#stream.write(
+        `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
+      );
+    } finally {
+      if (this.#observingStreamErrors) {
+        try {
+          this.#stream.write("", () => {
+            queueMicrotask(() => {
+              if (this.#timer === null && this.#observingStreamErrors) {
+                this.#stream.off?.("error", this.#onStreamError);
+                this.#observingStreamErrors = false;
+              }
+            });
+          });
+        } catch {
+          this.#stream.off?.("error", this.#onStreamError);
+          this.#observingStreamErrors = false;
+        }
+      }
     }
-    this.#stream.write(
-      `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
-    );
   }
 
   public setStage(stage: string): void {
@@ -243,7 +286,10 @@ export class ScanDashboard {
   }
 
   #refresh(): void {
-    if (this.#timer !== null) this.#render();
+    if (this.#timer === null) return;
+    try {
+      this.#render();
+    } catch {}
   }
 
   #render(): void {
@@ -298,8 +344,9 @@ export class ScanDashboard {
       divider,
       ...activity,
       divider,
-      `  STAGE    ${this.#stage}`,
-      `  FILES    ${files}`,
+      ...(this.#options.mode === "deep"
+        ? []
+        : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
       `  TOKENS   ${tokens}`,
       `  COST     ${cost}`,
       `  TIME     ${time}  ·  ${scrollStatus}`,
@@ -346,7 +393,12 @@ export class ScanDashboard {
   }
 
   #activityRows(): number {
-    return Math.max(1, (this.#stream.rows ?? 24) - FIXED_SCREEN_ROWS);
+    return Math.max(
+      1,
+      (this.#stream.rows ?? 24) -
+        FIXED_SCREEN_ROWS +
+        (this.#options.mode === "deep" ? 2 : 0),
+    );
   }
 
   #activityLines(width: number): DashboardActivityLine[] {

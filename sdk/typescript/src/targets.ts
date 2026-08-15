@@ -17,6 +17,17 @@ const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
   "GIT_COMMON_DIR",
   "GIT_REPLACE_REF_BASE",
 ]);
+const GIT_REPOSITORY_ENVIRONMENT = new Set([
+  ...UNSUPPORTED_GIT_ENVIRONMENT,
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_GRAFT_FILE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_NAMESPACE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+]);
 
 export type ScanMode = "standard" | "deep";
 export type DiffTargetKind = "refs" | "working_tree";
@@ -289,13 +300,7 @@ export async function validateCommittedDiffCheckout(
 
   const status = await gitOutput(
     repository,
-    [
-      "-c",
-      "core.fsmonitor=false",
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-    ],
+    ["status", "--porcelain=v1", "--untracked-files=all"],
     signal,
   );
   if (status.length !== 0) {
@@ -395,7 +400,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
-    isolatedGitEnvironment(),
+    isolatedGitEnvironment(args[0] === "rev-parse"),
     await outermostGitMarkerRoot(repository, signal),
   );
   if (command === null)
@@ -403,7 +408,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-C", repository, ...args],
+    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
     {
       encoding: "utf8",
       signal,
@@ -433,13 +438,21 @@ async function outermostGitMarkerRoot(
   }
 }
 
-function isolatedGitEnvironment(): NodeJS.ProcessEnv {
+function isolatedGitEnvironment(
+  preserveGitConfiguration: boolean,
+): NodeJS.ProcessEnv {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
-    if (name.toUpperCase().startsWith("GIT_")) {
+    const normalized = name.toUpperCase();
+    if (
+      GIT_REPOSITORY_ENVIRONMENT.has(normalized) ||
+      normalized === "GIT_ALLOW_PROTOCOL" ||
+      (!preserveGitConfiguration && normalized.startsWith("GIT_"))
+    ) {
       delete environment[name];
     }
   }
+  environment["GIT_ALLOW_PROTOCOL"] = "";
   return environment;
 }
 

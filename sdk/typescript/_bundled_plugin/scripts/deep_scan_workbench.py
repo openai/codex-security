@@ -17,6 +17,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from filesystem_identity import serialize_filesystem_identity
+from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
 from workbench_target import (
     directory_content_digest,
@@ -358,31 +359,25 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         """,
         (run["scan_id"],),
     )
-    successful_reducer = connection.execute(
-        """
-        SELECT 1 FROM deep_scan_workers
-        WHERE scan_id = ? AND kind = 'dedup' AND status = 'succeeded'
-        LIMIT 1
-        """,
-        (run["scan_id"],),
-    ).fetchone()
     canonical_artifacts = None
-    if run["canonical_inventory_path"] is None:
-        if successful_reducer is not None:
-            canonical_artifacts = canonical_discovery_artifacts(scan)
-        elif (
-            run["status"] == "succeeded"
-            and run["terminal_reason"] == "capped"
+    if (
+        run["canonical_inventory_path"] is None
+        and run["status"] == "succeeded"
+        and run["manifest_path"] is not None
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+        and (Path(scan["scan_dir"]) / "artifacts" / "02_discovery" / "in_scope_files.txt").exists()
+    ):
+        canonical_artifacts = canonical_discovery_artifacts(scan)
+        if (
+            run["terminal_reason"] == "capped"
             and run["completion_sequence"] == 0
             and deep_scan_deadline_reached(run)
+            and Path(canonical_artifacts["candidateLedgerPath"]).stat().st_size != 0
         ):
-            candidate_artifacts = canonical_discovery_artifacts(scan)
-            if Path(candidate_artifacts["candidateLedgerPath"]).stat().st_size != 0:
-                raise SystemExit(
-                    "A capped Deep Scan without completed discoveries requires an empty "
-                    "candidate ledger."
-                )
-            canonical_artifacts = candidate_artifacts
+            raise SystemExit(
+                "A capped Deep Scan without completed discoveries requires an empty "
+                "candidate ledger."
+            )
     return {
         "scanId": run["scan_id"],
         "targetPath": scan["target_path"],
@@ -1549,7 +1544,6 @@ def commit_deep_scan_dedup_locked(
                 "Canonical candidate ledger path",
             )
         else:
-            canonical_discovery_artifacts(scan)
             candidate_ledger_path = None
             canonical_candidate_ledger_path = None
         result_manifest_path = deep_scan_path(
@@ -1657,6 +1651,65 @@ def finish_deep_scan_locked(
                 scan, args.manifest_path, "Deep Scan coordinator manifest path", kind="file"
             )
         )
+        standard_scan_manifest = manifest_path == str(Path(scan["scan_dir"]) / "scan-manifest.json")
+
+        failure_capped = False
+        if (
+            standard_scan_manifest
+            and args.terminal_reason == "capped"
+            and (run["status"] == "running" or omitted_worker_ids)
+        ):
+            for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
+                deep_scan_path(
+                    scan,
+                    str(Path(scan["scan_dir"]) / artifact_name),
+                    f"Canonical parent {artifact_name}",
+                    kind="file",
+                )
+            coverage = _read_scan_local_json(
+                Path(scan["scan_dir"]), "coverage.json", "Canonical parent coverage.json"
+            )
+            deferred = coverage.get("deferred")
+            failure_capped = (
+                coverage.get("completeness") == "partial"
+                and isinstance(deferred, list)
+                and any(
+                    isinstance(item, dict)
+                    and isinstance(item.get("reason"), str)
+                    and item["reason"].startswith("Deep Scan stopped before completion: ")
+                    for item in deferred
+                )
+                and connection.execute(
+                    """
+                    SELECT 1 FROM deep_scan_workers
+                    WHERE scan_id = ? AND kind = 'dedup' AND status = 'succeeded'
+                    LIMIT 1
+                    """,
+                    (scan_id,),
+                ).fetchone()
+                is not None
+            )
+            if failure_capped and run["status"] == "running":
+                require_running_deep_scan(connection, scan_id)
+                connection.execute(
+                    """
+                    UPDATE deep_scan_workers
+                    SET merge_state = 'buffered', updated_at = ?
+                    WHERE scan_id = ? AND kind = 'discovery' AND status = 'succeeded'
+                        AND merge_state = 'merging'
+                        AND id IN (
+                            SELECT inputs.discovery_worker_id
+                            FROM deep_scan_dedup_inputs AS inputs
+                            JOIN deep_scan_workers AS reducers
+                                ON reducers.id = inputs.dedup_worker_id
+                                AND reducers.scan_id = inputs.scan_id
+                            WHERE inputs.scan_id = ?
+                                AND reducers.kind = 'dedup'
+                                AND reducers.status IN ('failed', 'canceled')
+                        )
+                    """,
+                    (now(), scan_id, scan_id),
+                )
         buffered_worker_ids = [
             row["id"]
             for row in connection.execute(
@@ -1671,7 +1724,7 @@ def finish_deep_scan_locked(
         ]
         omissions_match = (
             set(omitted_worker_ids) == set(buffered_worker_ids)
-            if args.terminal_reason == "saturated"
+            if args.terminal_reason == "saturated" or failure_capped
             else not omitted_worker_ids and not buffered_worker_ids
         )
         if run["status"] == "succeeded":
@@ -1703,16 +1756,27 @@ def finish_deep_scan_locked(
             args.terminal_reason == "capped"
             and run["discovery_runs_dispatched"] < run["max_discovery_runs"]
             and not deep_scan_deadline_reached(run)
+            and not failure_capped
         ):
             raise SystemExit(
                 "Deep Scan cannot finish capped before reaching its configured maximum."
             )
-        try:
-            canonical_artifacts = canonical_discovery_artifacts(scan)
-        except SystemExit as exc:
-            raise SystemExit(
-                f"Deep Scan cannot finish without canonical discovery artifacts: {exc}"
-            ) from exc
+        canonical_artifacts = None
+        if standard_scan_manifest:
+            for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
+                deep_scan_path(
+                    scan,
+                    str(Path(scan["scan_dir"]) / artifact_name),
+                    f"Canonical parent {artifact_name}",
+                    kind="file",
+                )
+        else:
+            try:
+                canonical_artifacts = canonical_discovery_artifacts(scan)
+            except SystemExit as exc:
+                raise SystemExit(
+                    f"Deep Scan cannot finish without canonical discovery artifacts: {exc}"
+                ) from exc
         successful_reducer = connection.execute(
             """
             SELECT 1 FROM deep_scan_workers
@@ -1725,7 +1789,11 @@ def finish_deep_scan_locked(
             args.terminal_reason == "capped"
             and deep_scan_deadline_reached(run)
             and run["completion_sequence"] == 0
-            and Path(canonical_artifacts["candidateLedgerPath"]).stat().st_size == 0
+            and (
+                standard_scan_manifest
+                or canonical_artifacts is not None
+                and Path(canonical_artifacts["candidateLedgerPath"]).stat().st_size == 0
+            )
         )
         if successful_reducer is None and not zero_discovery_deadline:
             raise SystemExit("Deep Scan cannot finish without a successful dedup worker.")
@@ -1760,7 +1828,7 @@ def finish_deep_scan_locked(
             """,
             (scan_id,),
         ).fetchone()
-        if failed_worker is not None:
+        if failed_worker is not None and not failure_capped:
             raise SystemExit("Deep Scan cannot finish after a worker has failed.")
         active_worker = connection.execute(
             """
@@ -1782,15 +1850,15 @@ def finish_deep_scan_locked(
         ).fetchone()
         if merging_worker is not None:
             raise SystemExit("Deep Scan cannot finish while discovery output is merging.")
-        if args.terminal_reason == "capped" and omitted_worker_ids:
+        if args.terminal_reason == "capped" and omitted_worker_ids and not failure_capped:
             raise SystemExit("Deep Scan capped completion cannot declare omitted buffered workers.")
-        if args.terminal_reason == "capped" and buffered_worker_ids:
+        if args.terminal_reason == "capped" and buffered_worker_ids and not failure_capped:
             raise SystemExit(
                 "Deep Scan cannot finish capped while discovery output remains buffered."
             )
-        if args.terminal_reason == "saturated" and not omissions_match:
+        if (args.terminal_reason == "saturated" or failure_capped) and not omissions_match:
             raise SystemExit(
-                "Deep Scan saturated completion must exactly identify all buffered discovery "
+                f"Deep Scan {args.terminal_reason} completion must exactly identify all buffered discovery "
                 "workers with --omitted-worker-id."
             )
         if args.staged_manifest_path:

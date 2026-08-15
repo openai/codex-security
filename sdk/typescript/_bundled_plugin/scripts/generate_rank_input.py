@@ -646,8 +646,19 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
     if mode == "local-patch":
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
+        untracked = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         combined = dict(staged)
         combined.update(unstaged)
+        combined.update(
+            (repo / relative, "A")
+            for relative in untracked.stdout.split("\0")
+            if relative
+        )
         return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
@@ -693,10 +704,17 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
             if is_binary:
                 continue
+        elif path.is_symlink():
+            preview = ""
         elif path.is_file():
-            preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary:
-                continue
+            try:
+                path.resolve(strict=True).relative_to(repo)
+            except (OSError, ValueError):
+                preview = ""
+            else:
+                preview, is_binary = preview_for(path, args.preview_bytes)
+                if is_binary:
+                    continue
         else:
             preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})

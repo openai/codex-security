@@ -1,5 +1,12 @@
-import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -50,10 +57,262 @@ async function temporaryDirectory(): Promise<string> {
   return path;
 }
 
+function runPreflight(
+  config: string,
+  profile: string,
+  options: readonly string[] = [],
+): { status: number | null; payload: Record<string, unknown> } {
+  const interpreter =
+    Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(interpreter).not.toBeNull();
+  const result = spawnSync(
+    interpreter!,
+    [
+      "-I",
+      "-B",
+      join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+      "--profile",
+      profile,
+      "--config",
+      config,
+      ...options,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.error).toBeUndefined();
+  return {
+    status: result.status,
+    payload: JSON.parse(result.stdout) as Record<string, unknown>,
+  };
+}
+
 describe("CodexSecurity preflight configuration", () => {
+  test("ignores unrelated runtime settings for profiles without parent-runtime requirements", async () => {
+    const root = await temporaryDirectory();
+    const config = join(root, "empty.toml");
+    await writeFile(config, "");
+    const settings = [
+      {
+        args: [
+          "--effective-config",
+          "features.multi_agent_v2.enabled=true",
+          "--effective-config",
+          "agents.max_threads=8",
+        ],
+        context: { owner: "native", version: "v2", agent_max_threads: 8 },
+        error: "agents.max_threads cannot be set",
+      },
+      {
+        args: ["--effective-config", "multiagent_config.max_concurrency=8"],
+        context: { owner: "unknown", version: "unknown" },
+        error: "does not prove bridge ownership",
+      },
+    ];
+
+    for (const { args, context, error } of settings) {
+      for (const profile of ["deep_security_scan", "security_diff_scan"]) {
+        const result = runPreflight(config, profile, args);
+        expect(result.status).toBe(0);
+        expect(result.payload).toMatchObject({
+          multi_agent_context: context,
+          profile,
+          status: "ready",
+        });
+      }
+
+      const required = runPreflight(config, "security_scan", args);
+      expect(required.status).toBe(2);
+      expect(required.payload["error"]).toContain(error);
+    }
+  });
+
+  test("keeps custom profile requirements and explicit runtime ownership strict", async () => {
+    const root = await temporaryDirectory();
+    const config = join(root, "empty.toml");
+    const registry = join(root, "registry.toml");
+    await writeFile(config, "");
+    await writeFile(
+      registry,
+      [
+        "version = 1",
+        "[capabilities.available]",
+        'kind = "runtime"',
+        'check = "available"',
+        "[capabilities.mode]",
+        'kind = "multi_agent_mode"',
+        'owner = "native"',
+        'version = "v2"',
+        "[capabilities.bridge]",
+        'kind = "config"',
+        'path = "multiagent_config.max_concurrency"',
+        'op = ">="',
+        "value = 1",
+        ...[
+          ["root_bridge", "multiagent_config"],
+          ["root_agents", "agents"],
+          ["root_features", "features"],
+          ["v2_feature", "features.multi_agent_v2"],
+        ].flatMap(([capability, path]) => [
+          `[capabilities.${capability}]`,
+          'kind = "config"',
+          `path = "${path}"`,
+          'op = "=="',
+          "value = {}",
+        ]),
+        ...[
+          ["similar_v20", "features.multi_agent_v20"],
+          ["similar_preview", "features.multi_agent_v2_preview"],
+        ].flatMap(([capability, path]) => [
+          `[capabilities.${capability}]`,
+          'kind = "config"',
+          `path = "${path}"`,
+          'op = "=="',
+          "value = true",
+        ]),
+        ...[
+          "available",
+          "mode",
+          "bridge",
+          "root_bridge",
+          "root_agents",
+          "root_features",
+          "v2_feature",
+          "similar_v20",
+          "similar_preview",
+        ].flatMap((profile) => [
+          `[profiles.${profile}]`,
+          `description = "${profile} capability"`,
+          `[[profiles.${profile}.requirements]]`,
+          `capability = "${profile}"`,
+          'severity = "block"',
+          'reason = "Required capability"',
+        ]),
+        "[profiles.root_patch]",
+        'description = "Root runtime remediation"',
+        "[[profiles.root_patch.requirements]]",
+        'capability = "available"',
+        'severity = "block"',
+        'reason = "Required capability"',
+        "[profiles.root_patch.remediation]",
+        "[[profiles.root_patch.remediation.patches]]",
+        'path = "multiagent_config"',
+        "value = {}",
+      ].join("\n"),
+    );
+    const conflictingNative = [
+      "--registry",
+      registry,
+      "--runtime-check",
+      "available=true",
+      "--effective-config",
+      "features.multi_agent_v2.enabled=true",
+      "--effective-config",
+      "agents.max_threads=8",
+    ];
+
+    expect(runPreflight(config, "available", conflictingNative)).toMatchObject({
+      status: 0,
+      payload: { status: "ready" },
+    });
+    for (const profile of ["mode", "root_agents", "root_features"]) {
+      expect(runPreflight(config, profile, conflictingNative)).toMatchObject({
+        status: 2,
+        payload: { error: expect.stringContaining("agents.max_threads") },
+      });
+    }
+    for (const profile of [
+      "bridge",
+      "root_bridge",
+      "root_patch",
+      "v2_feature",
+    ]) {
+      expect(
+        runPreflight(config, profile, [
+          "--registry",
+          registry,
+          "--runtime-check",
+          "available=true",
+          "--effective-config",
+          "multiagent_config.max_concurrency=8",
+        ]),
+      ).toMatchObject({
+        status: 2,
+        payload: { error: expect.stringContaining("bridge ownership") },
+      });
+    }
+    for (const [profile, feature] of [
+      ["similar_v20", "features.multi_agent_v20"],
+      ["similar_preview", "features.multi_agent_v2_preview"],
+    ] as const) {
+      expect(
+        runPreflight(config, profile, [
+          "--registry",
+          registry,
+          "--effective-config",
+          `${feature}=true`,
+          "--effective-config",
+          "multiagent_config.max_concurrency=8",
+        ]),
+      ).toMatchObject({ status: 0, payload: { status: "ready" } });
+    }
+
+    for (const [version, additional] of [
+      ["v2", []],
+      ["v1", ["--effective-config", "features.multi_agent_v2.enabled=true"]],
+    ] as const) {
+      const conflictingNativeRuntime = runPreflight(
+        config,
+        "deep_security_scan",
+        [
+          "--multi-agent-runtime-owner",
+          "native",
+          "--multi-agent-runtime-version",
+          version,
+          "--multi-agent-runtime-provenance",
+          "tool-surface",
+          "--effective-config",
+          "agents.max_threads=8",
+          ...additional,
+        ],
+      );
+      expect(conflictingNativeRuntime.status).toBe(2);
+      expect(conflictingNativeRuntime.payload["error"]).toContain(
+        "agents.max_threads",
+      );
+    }
+
+    const forged = runPreflight(config, "deep_security_scan", [
+      "--multi-agent-runtime-owner",
+      "codex-bridge",
+      "--multi-agent-runtime-provenance",
+      "tool-surface",
+    ]);
+    expect(forged.status).toBe(2);
+    expect(forged.payload["error"]).toContain("verified-bridge");
+
+    const conflictingBridge = runPreflight(config, "deep_security_scan", [
+      "--multi-agent-runtime-owner",
+      "codex-bridge",
+      "--multi-agent-runtime-version",
+      "v2",
+      "--multi-agent-runtime-provenance",
+      "verified-bridge",
+      "--multi-agent-session-cap",
+      "9",
+      "--effective-config",
+      "multiagent_config.max_concurrency=8",
+    ]);
+    expect(conflictingBridge.status).toBe(2);
+    expect(conflictingBridge.payload["error"]).toContain(
+      "conflicting bridge concurrency facts",
+    );
+  });
+
   test("uses a root-read filesystem profile with writable workspace and workbench state", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",
@@ -67,6 +326,7 @@ describe("CodexSecurity preflight configuration", () => {
     };
 
     expect(scanRuntimeCodexConfig(original, stateDirectory)).toEqual({
+      approval_policy: "never",
       allow_login_shell: false,
       default_permissions: "codex_security_scan",
       permissions: {
@@ -81,6 +341,8 @@ describe("CodexSecurity preflight configuration", () => {
       },
     });
     expect(original).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",
@@ -103,6 +365,67 @@ describe("CodexSecurity preflight configuration", () => {
           },
         },
       },
+    });
+  });
+
+  test("removes execution and permission overrides from every configured profile", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+    const original = {
+      profile: "selected",
+      profiles: {
+        selected: {
+          model: "profile-model",
+          approval_policy: "on-request",
+          approvals_reviewer: "auto_review",
+          default_permissions: "unsafe",
+          permissions: { unsafe: { filesystem: { ":root": "write" } } },
+          sandbox_mode: "danger-full-access",
+        },
+        other: {
+          model_reasoning_effort: "high",
+          approval_policy: "untrusted",
+          approvals_reviewer: "guardian_subagent",
+          default_permissions: "other-unsafe",
+          permissions: { "other-unsafe": { filesystem: { ":root": "write" } } },
+          sandbox_mode: "workspace-write",
+        },
+      },
+    };
+
+    const hardened = scanRuntimeCodexConfig(original, stateDirectory);
+    expect(hardened).toMatchObject({
+      approval_policy: "never",
+      default_permissions: "codex_security_scan",
+      profile: "selected",
+    });
+    expect(hardened["profiles"]).toEqual({
+      selected: { model: "profile-model" },
+      other: { model_reasoning_effort: "high" },
+    });
+    expect(original.profiles.selected).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
+      default_permissions: "unsafe",
+      permissions: { unsafe: { filesystem: { ":root": "write" } } },
+      sandbox_mode: "danger-full-access",
+    });
+  });
+
+  test("preserves configured Responses metadata without persisting scan attribution", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    const config = scanRuntimeCodexConfig(
+      {
+        responses_api_metadata: {
+          request_trace: "preserve-configured-metadata",
+        },
+      },
+      stateDirectory,
+      credentialHome,
+    );
+
+    expect(config["responses_api_metadata"]).toEqual({
+      request_trace: "preserve-configured-metadata",
     });
   });
 

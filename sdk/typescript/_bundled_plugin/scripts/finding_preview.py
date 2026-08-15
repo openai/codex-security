@@ -111,8 +111,14 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     ):
         key = next((alias for alias in aliases if alias in value), None)
         if key is not None:
+            section = value[key]
+            if key == "attackPath" and isinstance(section, dict):
+                section = dict(section)
+                for assessment in ("impact", "likelihood"):
+                    if isinstance(section.get(assessment), str):
+                        section[assessment] = {"level": section[assessment]}
             prepared[key] = bounded_finding_section(
-                value[key],
+                section,
                 maximum_bytes,
                 priority_keys,
                 reserved_fields,
@@ -140,6 +146,8 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
         "severity",
         "status",
         "taxonomy",
+        "preventiveControls",
+        "remediationTests",
     ):
         if key in value:
             prepared[key] = (
@@ -148,8 +156,64 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 else value[key]
             )
 
-    budget = [FINDING_DETAILS_PREVIEW_BYTES]
-    bounded = bounded_json_value(prepared, budget)
+    guidance = {
+        key: prepared[key]
+        for key in ("remediationTests", "preventiveControls")
+        if key in prepared and isinstance(prepared[key], list)
+    }
+    diagnostics = (
+        "rootCause",
+        "root_cause",
+        "validation",
+        "attackPath",
+        "codeEvidence",
+        "code_evidence",
+    )
+    core_keys = (
+        "writeup",
+        *diagnostics,
+        "confidence",
+        "detectedAt",
+        "identity",
+        "provenance",
+        "ruleId",
+        "severity",
+        "status",
+        "taxonomy",
+        "evidence",
+        "evidenceExcerpt",
+    )
+    core = {key: prepared[key] for key in core_keys if key in prepared}
+    extras = {
+        key: item
+        for key, item in prepared.items()
+        if key not in core and key not in guidance
+    }
+    complete_guidance = {key: items[:1] for key, items in guidance.items()}
+    minimum_guidance = {
+        key: [items[0][:1]] if items and isinstance(items[0], str) else []
+        for key, items in guidance.items()
+    }
+    projected_core = {}
+    for selected_guidance in (complete_guidance, minimum_guidance):
+        reserved = (
+            len(json.dumps(selected_guidance, separators=(",", ":")).encode("utf-8")) - 1
+            if selected_guidance
+            else 0
+        )
+        if reserved >= FINDING_DETAILS_PREVIEW_BYTES:
+            continue
+        projected_core = bounded_json_value(
+            core,
+            [FINDING_DETAILS_PREVIEW_BYTES - reserved],
+        )
+        if all(key in projected_core for key in core):
+            break
+    ordered_guidance = dict(sorted(guidance.items(), key=lambda entry: bool(entry[1])))
+    bounded = bounded_json_value(
+        {**projected_core, **ordered_guidance, **extras},
+        [FINDING_DETAILS_PREVIEW_BYTES],
+    )
     return bounded if isinstance(bounded, dict) else {}
 
 
@@ -215,11 +279,20 @@ def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
         if not consume_json_budget(budget, 2):
             return []
         result = []
-        for item in value[:20]:
+        for item in value:
+            remaining = budget[0]
             separator = 0 if not result else 1
             if not consume_json_budget(budget, separator):
                 break
-            result.append(bounded_json_value(item, budget, depth=depth + 1))
+            bounded_item = bounded_json_value(item, budget, depth=depth + 1)
+            size = len(json.dumps(bounded_item, separators=(",", ":")).encode("utf-8"))
+            if separator + size > remaining or (
+                isinstance(item, str) and item and bounded_item == ""
+            ):
+                budget[0] = remaining
+                break
+            budget[0] = remaining - separator - size
+            result.append(bounded_item)
         return result
     if isinstance(value, dict):
         if not consume_json_budget(budget, 2):
@@ -228,13 +301,56 @@ def bounded_json_value(value: Any, budget: list[int], *, depth: int = 0) -> Any:
         for key, item in list(value.items())[:20]:
             if budget[0] <= 0 or not isinstance(key, str):
                 break
+            remaining = budget[0]
             separator = 0 if not result else 1
             if not consume_json_budget(budget, separator):
+                budget[0] = remaining
                 break
             bounded_key, key_size = bounded_json_text(key, min(budget[0], 512))
             if not consume_json_budget(budget, key_size + 1):
+                budget[0] = remaining
                 break
-            result[bounded_key] = bounded_json_value(item, budget, depth=depth + 1)
+            item_budget = budget
+            if depth == 0 and key == "remediationTests":
+                controls = value.get("preventiveControls")
+                if (
+                    isinstance(item, list)
+                    and item
+                    and isinstance(item[0], str)
+                    and item[0]
+                    and isinstance(controls, list)
+                    and controls
+                    and isinstance(controls[0], str)
+                    and controls[0]
+                ):
+                    minimum_tests = len(
+                        json.dumps([item[0][0]], separators=(",", ":")).encode("utf-8")
+                    )
+                    for control in (controls[0], controls[0][0]):
+                        reserved = (
+                            len(
+                                json.dumps(
+                                    {"preventiveControls": [control]},
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            )
+                            - 1
+                        )
+                        if budget[0] >= minimum_tests + reserved:
+                            item_budget = [budget[0] - reserved]
+                            break
+            bounded_item = bounded_json_value(item, item_budget, depth=depth + 1)
+            size = (
+                separator
+                + key_size
+                + 1
+                + len(json.dumps(bounded_item, separators=(",", ":")).encode("utf-8"))
+            )
+            if size > remaining or (isinstance(item, str) and item and bounded_item == ""):
+                budget[0] = remaining
+                break
+            budget[0] = remaining - size
+            result[bounded_key] = bounded_item
         return result
     consume_json_budget(budget, 4)
     return None

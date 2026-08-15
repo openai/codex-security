@@ -10,7 +10,7 @@ import {
   dependencies,
   fakeResult,
   SYNTHETIC_CREDENTIALS,
-} from "./support/cli.js";
+} from "./cli-fixtures.js";
 
 describe("CLI workbench", () => {
   test("lists and summarizes open findings for the current repository", async () => {
@@ -249,13 +249,17 @@ describe("CLI workbench", () => {
     );
     try {
       const sessions = join(state, "codex-home", "sessions", "2026", "08");
+      const scanDirectory = join(state, "scans", "scan-1");
       await mkdir(sessions, { recursive: true });
       await writeFile(
         join(sessions, "rollout-thread-1.jsonl"),
         [
           {
             type: "session_meta",
-            payload: { id: "thread-1" },
+            payload: {
+              id: "thread-1",
+              timestamp: "2026-08-11T12:00:00.000Z",
+            },
           },
           {
             type: "response_item",
@@ -266,6 +270,47 @@ describe("CLI workbench", () => {
               arguments: JSON.stringify({
                 cmd: "OPENAI_API_KEY=sk-proj-SYNTHETIC_KEY_123 pytest",
               }),
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
+      await writeFile(
+        join(sessions, "rollout-worker.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "worker",
+              timestamp: "2026-08-11T12:01:00.000Z",
+              cwd: join(scanDirectory, "artifacts"),
+            },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "agent_message", message: "independent worker" },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      );
+      await writeFile(
+        join(sessions, "rollout-after-completion.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "after-completion",
+              timestamp: "2026-08-11T12:03:00.000Z",
+              cwd: join(scanDirectory, "artifacts"),
+            },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "agent_message",
+              message: "PRIVATE LATER SESSION",
             },
           },
         ]
@@ -286,6 +331,12 @@ describe("CLI workbench", () => {
             scan: {
               scanId: "scan-1",
               continuationThreadId: "thread-1",
+              mode: "deep",
+              progress: {
+                status: "complete",
+                updatedAt: "2026-08-11T12:02:00.000Z",
+              },
+              scanDir: scanDirectory,
             },
           };
         },
@@ -303,6 +354,8 @@ describe("CLI workbench", () => {
       ).toBe(0);
       expect(calls).toEqual([["get-scan", "--scan-id", "scan-1"]]);
       expect(stdout.text()).toContain("SYNTHETIC_KEY");
+      expect(stdout.text()).toContain("independent worker");
+      expect(stdout.text()).not.toContain("PRIVATE LATER SESSION");
 
       calls.length = 0;
       const latest = capture();

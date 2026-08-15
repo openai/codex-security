@@ -97,7 +97,7 @@ from workbench_schema import (
 from workbench_schema import (
     sql_statements as sql_statements,
 )
-from workbench_source_excerpt import finding_source_excerpt
+from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
     clean_worktree_content_digest,
     copy_directory_excluding,
@@ -1175,7 +1175,11 @@ def complete_budget_exhausted_scan(
                 "discovery."
             )
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-        candidates = budget_exhausted_candidates(scan, scan_dir)
+        candidates = (
+            []
+            if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
+            else budget_exhausted_candidates(scan, scan_dir)
+        )
         warning = optional_text(args.message, maximum=2400)
         if warning is None:
             warning = (
@@ -1439,6 +1443,8 @@ def complete_scan_locked(
         verify_manifest_binding(scan, manifest)
         manifest_digest = published_manifest_digest(scan_dir, manifest)
         pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
+        if cost_json is not None and scan["recipe_json"] is not None:
+            scan_usage.reconcile_completed_scan_cost(connection, scan, cost_json)
         return scan_context(connection, scan["id"])
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
@@ -1450,11 +1456,14 @@ def complete_scan_locked(
     deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
     warnings = json.loads(scan["completion_warnings_json"])
     target_warnings: list[str] = []
-    warning = scan_target_warning(scan)
-    if warning is not None:
-        target_warnings.append(warning)
-        if warning not in warnings:
-            warnings.append(warning)
+
+    def add_warning() -> None:
+        if (warning := scan_target_warning(scan)) is not None:
+            for items in (target_warnings, warnings):
+                if warning not in items:
+                    items.append(warning)
+
+    add_warning()
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     completion_binding = workbench_completion_binding(scan, completion_timestamp)
@@ -1492,12 +1501,7 @@ def complete_scan_locked(
             completion_binding=completion_binding,
             completion_warnings=warnings,
         )
-        warning = scan_target_warning(scan)
-        if warning is not None:
-            if warning not in target_warnings:
-                target_warnings.append(warning)
-            if warning not in warnings:
-                warnings.append(warning)
+        add_warning()
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
@@ -2905,10 +2909,15 @@ def scan_context(
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
+    workspace = workspace_state(connection, scan["workspace_id"], result_scan_id=scan["id"])
     context = {
         "otherRunningDeepScans": deep_scan.other_running_deep_scans(connection, scan["id"]),
-        "scan": scan_result(connection, scan, occurrence_id=occurrence_id),
-        "workspace": workspace_state(connection, scan["workspace_id"], result_scan_id=scan["id"]),
+        "scan": (
+            workspace["results"]
+            if occurrence_id is None
+            else scan_result(connection, scan, occurrence_id=occurrence_id)
+        ),
+        "workspace": workspace,
     }
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
@@ -3460,20 +3469,6 @@ def patch_artifact_preview(
         "fileCount": file_count or min(old_headers, new_headers),
         "previewTruncated": preview_truncated,
     }
-
-
-def safe_source_path(target: Path, relative_path: str) -> Path | None:
-    if "\\" in relative_path:
-        return None
-    parsed = PurePosixPath(relative_path)
-    if parsed.is_absolute() or ".." in parsed.parts:
-        return None
-    try:
-        path = (target / parsed.as_posix()).resolve()
-        path.relative_to(target)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    return path
 
 
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:

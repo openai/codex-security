@@ -13,13 +13,13 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
+DEFAULT_WORKERS = 4
 DEFAULT_SUBAGENTS = 3
-DEFAULT_STOP_AFTER_NO_NEW = 6
+DEFAULT_STOP_AFTER_NO_NEW = 4
 DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = 3
-DEFAULT_MAX_DISCOVERY_RUNS = 60
+DEFAULT_MAX_DISCOVERY_RUNS = 40
 DEFAULT_MAX_TIME_HOURS = 96
 MAX_TIME_HOURS = 96
-MAX_AUTOMATIC_WORKERS = 6
 CONFIG_KEYS = {
     "workers",
     "subagents",
@@ -35,6 +35,9 @@ def codex_home() -> Path:
 
 
 def config_path() -> Path:
+    configured = os.environ.get("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
     return codex_home() / "codex-security" / "config.toml"
 
 
@@ -63,9 +66,9 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | floa
             )
         configured = deep_scan
 
-    workers: object = configured.get("workers", "auto")
+    workers: object = configured.get("workers", DEFAULT_WORKERS)
     if workers == "auto":
-        resolved_workers = min(max(available_parallelism // 2, 1), MAX_AUTOMATIC_WORKERS)
+        resolved_workers = DEFAULT_WORKERS
     else:
         resolved_workers = require_integer(workers, "deep_scan.workers", minimum=1)
     stop_after_no_new = require_integer(

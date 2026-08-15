@@ -7,9 +7,17 @@ import {
   existsSync,
   lstatSync,
   realpathSync,
+  type Stats,
   writeSync,
 } from "node:fs";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -26,7 +34,6 @@ import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ModelReasoningEffort } from "@openai/codex-sdk";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -128,6 +135,8 @@ const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
+  on?(event: "error", listener: (error: Error) => void): unknown;
+  off?(event: "error", listener: (error: Error) => void): unknown;
   readonly isTTY?: boolean;
   readonly fd?: number;
   readonly columns?: number;
@@ -152,7 +161,9 @@ const MODEL_REASONING_EFFORTS = [
   "medium",
   "high",
   "xhigh",
-] as const satisfies readonly ModelReasoningEffort[];
+  "max",
+] as const;
+type ScanReasoningEffort = (typeof MODEL_REASONING_EFFORTS)[number];
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const CODEX_OVERRIDE_DESCRIPTION =
@@ -213,7 +224,7 @@ function optionValue(flag: string) {
 function effortOption() {
   return z
     .enum(MODEL_REASONING_EFFORTS, {
-      error: "--effort must be minimal, low, medium, high, or xhigh.",
+      error: "--effort must be minimal, low, medium, high, xhigh, or max.",
     })
     .optional()
     .describe(
@@ -258,19 +269,69 @@ async function readPromptFiles(
   directory: string,
   scanPromptFile?: string,
   postScanPromptFile?: string,
+  repository = directory,
 ): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
   const [scanPrompt, postScanPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, scanPromptFile), "utf8"),
+      : readRegularInputFile(resolve(directory, scanPromptFile), repository),
     postScanPromptFile === undefined
       ? undefined
-      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+      : readRegularInputFile(
+          resolve(directory, postScanPromptFile),
+          repository,
+        ),
   ]);
   return {
     ...(scanPrompt?.trim() ? { scanPrompt } : {}),
     ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
   };
+}
+
+async function readRegularInputFile(
+  path: string,
+  repository: string,
+  metadata?: Pick<Stats, "isFile" | "dev" | "ino">,
+): Promise<string> {
+  const selected = metadata ?? (await lstat(path));
+  if (!selected.isFile()) {
+    throw new CodexSecurityError("Input files must be regular files.");
+  }
+  const canonicalRepository = await realpath(repository);
+  const canonicalParent = await realpath(dirname(path));
+  if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
+    for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
+      if (
+        !isOutsidePath(relative(canonicalRepository, await realpath(ancestor)))
+      ) {
+        throw new CodexSecurityError(
+          "Input files must not follow repository directory links outside the selected repository.",
+        );
+      }
+      if (dirname(ancestor) === ancestor) {
+        break;
+      }
+    }
+  }
+  const file = await open(
+    join(canonicalParent, basename(path)),
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const opened = await file.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== selected.dev ||
+      opened.ino !== selected.ino
+    ) {
+      throw new CodexSecurityError("Input files must remain regular files.");
+    }
+    return await file.readFile({ encoding: "utf8" });
+  } finally {
+    await file.close();
+  }
 }
 
 interface ScanArguments extends DeepScanOptions {
@@ -287,7 +348,7 @@ interface ScanArguments extends DeepScanOptions {
   base?: string;
   mode: ScanMode;
   model?: string;
-  effort?: ModelReasoningEffort;
+  effort?: ScanReasoningEffort;
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
@@ -367,7 +428,7 @@ interface CliDependencies {
   bulkScan?: BulkScanDiscoveryDependencies;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
-  checkForUpdate(): Promise<UpdateNotice | undefined>;
+  checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -375,7 +436,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     createSecurityInternal(config, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
-  checkForUpdate: () => checkForUpdate({ environment: process.env }),
+  checkForUpdate: (signal) =>
+    checkForUpdate({ environment: process.env, signal }),
   hasStoredChatGPTSignIn: async () => {
     const environment = Object.fromEntries(
       Object.entries(process.env).filter(
@@ -705,6 +767,7 @@ export async function main(
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
+  const updateController = new AbortController();
   const pendingUpdate =
     errorOutput.isTTY === true &&
     argv.length > 0 &&
@@ -721,7 +784,9 @@ export async function main(
       ].includes(argument),
     ) &&
     updateNoticeEnabled(dependencies.environment)
-      ? dependencies.checkForUpdate().catch(() => undefined)
+      ? dependencies
+          .checkForUpdate(updateController.signal)
+          .catch(() => undefined)
       : undefined;
   let exitCode = 0;
   let frameworkExit: number | undefined;
@@ -1005,6 +1070,9 @@ export async function main(
             const scan = value["scan"] as {
               scanId: string;
               continuationThreadId?: string;
+              mode?: string;
+              progress?: { status?: string; updatedAt?: string };
+              scanDir?: string;
             };
             const threadId = scan.continuationThreadId;
             if (!threadId) {
@@ -1016,6 +1084,15 @@ export async function main(
               scanId: scan.scanId,
               threadId,
               codexHome: codexSecurityCredentialHome(dependencies.environment),
+              scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
+              completedAt:
+                scan.progress?.status === "running"
+                  ? null
+                  : scan.progress?.status === "complete" ||
+                      scan.progress?.status === "failed" ||
+                      scan.progress?.status === "canceled"
+                    ? scan.progress.updatedAt ?? ""
+                    : "",
             })) as unknown as JsonObject;
           },
         );
@@ -1514,6 +1591,13 @@ export async function main(
           .positive()
           .default(1)
           .describe("Maximum scan attempts per repository."),
+        maxCost: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+          ),
         pluginPath: z
           .string()
           .min(1)
@@ -1594,6 +1678,9 @@ export async function main(
             workers: options.workers,
             mode: options.mode,
             maxAttempts: options.maxAttempts,
+            ...(options.maxCost === undefined
+              ? {}
+              : { maxCostUsd: options.maxCost }),
             knowledgeBasePaths: options.knowledgeBase,
             ...prompts,
             config: {
@@ -1935,25 +2022,30 @@ export async function main(
       },
     });
 
-  await cli.serve(
-    argv.flatMap((argument) =>
-      argument.startsWith("--format=")
-        ? ["--format", argument.slice("--format=".length)]
-        : [argument],
-    ),
-    {
-      stdout: (value) => {
-        frameworkOutput += value;
+  let notice: UpdateNotice | undefined;
+  try {
+    await cli.serve(
+      argv.flatMap((argument) =>
+        argument.startsWith("--format=")
+          ? ["--format", argument.slice("--format=".length)]
+          : [argument],
+      ),
+      {
+        stdout: (value) => {
+          frameworkOutput += value;
+        },
+        exit: (code) => {
+          frameworkExit = code;
+        },
       },
-      exit: (code) => {
-        frameworkExit = code;
-      },
-    },
-  );
-  if (pendingUpdate !== undefined) {
-    const notice = await pendingUpdate;
-    if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
+    );
+    if (pendingUpdate !== undefined) {
+      notice = await Promise.race([pendingUpdate, undefined]);
+    }
+  } finally {
+    updateController.abort();
   }
+  if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
@@ -2387,7 +2479,7 @@ async function runSkill(
   skill: "validation" | "fix-finding",
   inputs: readonly string[],
   codexOverrides: readonly string[],
-  effort: ModelReasoningEffort | undefined,
+  effort: ScanReasoningEffort | undefined,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
@@ -2432,7 +2524,7 @@ async function runSkill(
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
       const path = resolve(directory, input);
-      const metadata = await stat(path).catch((error: unknown) => {
+      const metadata = await lstat(path).catch((error: unknown) => {
         if (
           typeof error === "object" &&
           error !== null &&
@@ -2455,7 +2547,11 @@ async function runSkill(
           );
         }
         try {
-          contentsOrLiteral = await readFile(path, "utf8");
+          contentsOrLiteral = await readRegularInputFile(
+            path,
+            directory,
+            metadata,
+          );
         } catch {
           throw new CodexSecurityError(
             "Could not read the finding or issue input.",
@@ -2709,6 +2805,39 @@ async function runScan(
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
+  const observeTerminalErrors =
+    typeof errorOutput.on === "function" &&
+    typeof errorOutput.off === "function";
+  const ignoreTerminalError = (): void => {};
+  if (observeTerminalErrors) {
+    errorOutput.on?.("error", ignoreTerminalError);
+  }
+  try {
+    return await executeScan(
+      arguments_,
+      errorOutput,
+      dependencies,
+      interactive,
+    );
+  } finally {
+    if (observeTerminalErrors) {
+      try {
+        errorOutput.write("", () => {
+          queueMicrotask(() => errorOutput.off?.("error", ignoreTerminalError));
+        });
+      } catch {
+        errorOutput.off?.("error", ignoreTerminalError);
+      }
+    }
+  }
+}
+
+async function executeScan(
+  arguments_: ScanArguments,
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+  interactive = true,
+): Promise<ScanOutcome> {
   let scanDir: string | null = null;
   let requestedSignal: SignalName | null = null;
   let firstSignalAt = 0;
@@ -2753,6 +2882,14 @@ async function runScan(
     });
   };
   const preparationAbortController = new AbortController();
+  const stopPresentation = (): void => {
+    try {
+      dashboard?.stop();
+    } catch {}
+    try {
+      progress?.stopTimer();
+    } catch {}
+  };
   const signalListener = (signal: SignalName) => () => {
     if (requestedSignal !== null) {
       // Launchers and terminals can deliver the same initial signal twice.
@@ -2764,8 +2901,7 @@ async function runScan(
         return;
       }
       requestedSignal = signal;
-      dashboard?.stop();
-      progress?.stopTimer();
+      stopPresentation();
       if (progress?.interactive === true) {
         try {
           dependencies.writeSynchronously(errorOutput, SHOW_CURSOR);
@@ -2801,12 +2937,14 @@ async function runScan(
   let failed = false;
   let failure: unknown;
   try {
-    const repository = arguments_.repository ?? dependencies.currentDirectory();
+    const directory = dependencies.currentDirectory();
+    const repository = arguments_.repository ?? directory;
     const target = targetFromArguments(arguments_);
     const prompts = await readPromptFiles(
-      dependencies.currentDirectory(),
+      directory,
       arguments_.scanPromptFile,
       arguments_.postScanPromptFile,
+      resolve(directory, repository),
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
@@ -2906,6 +3044,7 @@ async function runScan(
     if (progress.interactive && !arguments_.dryRun && !verbose) {
       dashboard = new ScanDashboard(errorOutput, {
         repository,
+        mode: arguments_.mode,
         model: scanModelConfiguration(await mergedCodexConfig(config)),
         ...(arguments_.maxCostUsd === undefined
           ? {}
@@ -2952,7 +3091,13 @@ async function runScan(
         arguments_.dryRun ? "Validating scan inputs" : "Preparing scan",
       );
     } else {
-      dashboard.start();
+      try {
+        dashboard.start();
+      } catch {
+        dashboard = null;
+        progress = new Progress(errorOutput, dependencies, false);
+        progress.startTimer("Preparing scan");
+      }
     }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
@@ -3206,8 +3351,7 @@ async function runScan(
     failed = true;
     failure = error;
   } finally {
-    dashboard?.stop();
-    progress?.stopTimer();
+    stopPresentation();
     if (security !== null) {
       diagnostic("runtime.cleanup.started");
       await security.close().then(
@@ -3285,6 +3429,7 @@ async function runScan(
           : undefined,
       verified: effectivePreflight.authentication.verified,
     });
+    progress?.stopTimer();
     return { exitCode: 0, data: { dryRun: true, ...effectivePreflight } };
   }
   if (result === null) {
@@ -3333,6 +3478,7 @@ async function runScan(
     errorOutput.write(
       "codex-security: Scan target changed during execution; results do not represent the current checkout.\n",
     );
+    progress?.stopTimer();
     return { exitCode: 2, data: scanData };
   }
   if (incomplete) {
@@ -3341,8 +3487,10 @@ async function runScan(
         ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
         : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
     );
+    progress?.stopTimer();
     return { exitCode: 2, data: scanData };
   }
+  progress?.stopTimer();
   return { exitCode: blockingCount > 0 ? 1 : 0, data: scanData };
 }
 
@@ -3650,7 +3798,7 @@ function targetFromArguments(arguments_: ScanArguments): ScanTarget {
 export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
-  effort?: ModelReasoningEffort,
+  effort?: ScanReasoningEffort,
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
@@ -3769,6 +3917,10 @@ export class Progress {
   #timerMessage: string | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
+  #observingStreamErrors = false;
+  #streamErrorsActive = false;
+  #streamErrorGeneration = 0;
+  readonly #onStreamError = (): void => {};
 
   public constructor(
     stream: Writable = process.stderr,
@@ -3796,10 +3948,12 @@ export class Progress {
   }
 
   public stage(message: string): void {
+    this.#observeStreamErrors();
     this.#stream.write(`${this.#line(message)}\n`);
   }
 
   public startTimer(message: string): void {
+    this.#observeStreamErrors();
     if (!this.interactive) {
       this.stage(message);
       return;
@@ -3807,26 +3961,51 @@ export class Progress {
     this.#stream.write(HIDE_CURSOR);
     this.#cursorHidden = true;
     this.#renderTimer(message);
-    this.#timer = this.#dependencies.setInterval(
-      () => this.#renderTimer(message),
-      PROGRESS_REFRESH_MILLISECONDS,
-    );
+    this.#timer = this.#dependencies.setInterval(() => {
+      try {
+        this.#renderTimer(message);
+      } catch {}
+    }, PROGRESS_REFRESH_MILLISECONDS);
     this.#timerMessage = message;
   }
 
   public stopTimer(): void {
-    if (this.#timer !== null) {
-      this.#dependencies.clearInterval(this.#timer);
-      this.#timer = null;
-    }
-    this.#timerMessage = null;
-    if (this.#timerLineActive) {
-      this.#stream.write("\n");
-      this.#timerLineActive = false;
-    }
-    if (this.#cursorHidden) {
-      this.#stream.write(SHOW_CURSOR);
-      this.#cursorHidden = false;
+    try {
+      if (this.#timer !== null) {
+        this.#dependencies.clearInterval(this.#timer);
+        this.#timer = null;
+      }
+      this.#timerMessage = null;
+      if (this.#timerLineActive) {
+        this.#stream.write("\n");
+        this.#timerLineActive = false;
+      }
+      if (this.#cursorHidden) {
+        this.#stream.write(SHOW_CURSOR);
+        this.#cursorHidden = false;
+      }
+    } finally {
+      if (this.#observingStreamErrors) {
+        this.#streamErrorsActive = false;
+        const generation = this.#streamErrorGeneration;
+        try {
+          this.#stream.write("", () => {
+            queueMicrotask(() => {
+              if (
+                generation === this.#streamErrorGeneration &&
+                !this.#streamErrorsActive &&
+                this.#observingStreamErrors
+              ) {
+                this.#stream.off?.("error", this.#onStreamError);
+                this.#observingStreamErrors = false;
+              }
+            });
+          });
+        } catch {
+          this.#stream.off?.("error", this.#onStreamError);
+          this.#observingStreamErrors = false;
+        }
+      }
     }
   }
 
@@ -3849,6 +4028,15 @@ export class Progress {
     const minutes = Math.floor(elapsedSeconds / 60);
     const seconds = elapsedSeconds % 60;
     return `[${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}] ${message}`;
+  }
+
+  #observeStreamErrors(): void {
+    this.#streamErrorsActive = true;
+    this.#streamErrorGeneration += 1;
+    if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
+      this.#stream.on("error", this.#onStreamError);
+      this.#observingStreamErrors = true;
+    }
   }
 
   #renderTimer(message: string): void {
