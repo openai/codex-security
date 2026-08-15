@@ -545,6 +545,71 @@ describe("connected Linear publication", () => {
     expect(receiptScanId).toBe("scan-example");
   });
 
+  test("publishes directly to a Linear team without project lookups or arguments", async () => {
+    const publication: PreparedScanPublication = {
+      ...preparedPublication(),
+      destination: { type: "linear", teamId: OPTIONS.teamId },
+    };
+    let input: string | undefined;
+    let issueArguments: Record<string, unknown> | undefined;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      { destination: "linear", teamId: OPTIONS.teamId },
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _arguments, prompt) => {
+            input = prompt;
+            const stored = JSON.parse(
+              await readFile(publicationData(prompt).publicationFile, "utf8"),
+            ) as {
+              batches: Array<Array<{ arguments: Record<string, unknown> }>>;
+            };
+            issueArguments = stored.batches[0]?.[0]?.arguments;
+            const event = JSON.parse(issueEvent(publication.issues[0]!)) as {
+              item: { arguments: Record<string, unknown> };
+            };
+            delete event.item.arguments["project"];
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify(event),
+              stderr: "",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(input).toContain("linear_get_team with the supplied team");
+    expect(input).not.toContain("linear_get_project");
+    expect(input).not.toContain("resolved project");
+    expect(input).toContain("Create issues only in the exact supplied team.");
+    const encoded = input!
+      .split("BEGIN UNTRUSTED PUBLICATION DATA\n")[1]!
+      .split("\nEND UNTRUSTED PUBLICATION DATA")[0]!;
+    const data = JSON.parse(encoded) as {
+      destination: Record<string, unknown>;
+    };
+    expect(data.destination).toEqual({
+      type: "linear",
+      teamId: "team-example",
+    });
+    expect(issueArguments).toEqual({
+      team: "team-example",
+      title: publication.issues[0]!.title,
+      description: publication.issues[0]!.description,
+      priority: 2,
+    });
+    expect(issueArguments).not.toHaveProperty("project");
+    expect(result.destination).toEqual({
+      type: "linear",
+      teamId: "team-example",
+    });
+    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+  });
+
   test("preserves complete finding descriptions without exposing them to model transcription", async () => {
     const publication = preparedPublication(2);
     publication.issues[0]!.description = [

@@ -670,6 +670,19 @@ MIGRATIONS = (
         ON finding_publications(finding_id, id);
         """,
     ),
+    (
+        30,
+        "preserve team-only finding publication associations",
+        """
+        CREATE UNIQUE INDEX finding_publications_team_only_occurrence
+        ON finding_publications(occurrence_id, destination_type, team_id, external_id)
+        WHERE project_id IS NULL;
+
+        CREATE UNIQUE INDEX finding_publications_team_only_external_issue
+        ON finding_publications(destination_type, team_id, external_id)
+        WHERE project_id IS NULL;
+        """,
+    ),
 )
 
 

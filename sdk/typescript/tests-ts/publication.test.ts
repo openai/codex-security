@@ -108,6 +108,25 @@ describe("scan publication preparation", () => {
     expect(issue.description).not.toContain("/blob/deadbeef/");
   });
 
+  test("prepares sealed findings for a Linear team without a project", async () => {
+    const scanDirectory = await copyExample();
+    const publication = await prepareScanPublication(scanDirectory, {
+      destination: "linear",
+      teamId: "team_example",
+      uploadedAt: "2026-06-01T10:30:00Z",
+    });
+
+    expect(publication.destination).toEqual({
+      type: "linear",
+      teamId: "team_example",
+    });
+    expect(publication.destination).not.toHaveProperty("projectId");
+    expect(publication.issues[0]).toMatchObject({
+      findingId: "csf_852f90d6e1177502ff113d4a",
+      occurrenceId: "occ_e79cb19591e696572a1c22be",
+    });
+  });
+
   test("includes every canonical source snippet, location role, and root-cause code", async () => {
     const scanDirectory = await copyExample();
     const findingsPath = join(scanDirectory, "findings.json");
