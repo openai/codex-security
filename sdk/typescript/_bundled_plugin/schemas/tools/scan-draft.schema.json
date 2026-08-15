@@ -182,19 +182,26 @@
       "additionalProperties": true
     },
     "findingAssessment": {
-      "type": "object",
-      "properties": {
-        "level": {
+      "anyOf": [
+        {
           "$ref": "#/$defs/text"
         },
-        "rationale": {
-          "$ref": "#/$defs/text"
-        },
-        "why": {
-          "$ref": "#/$defs/text"
+        {
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/text"
+            },
+            "rationale": {
+              "$ref": "#/$defs/text"
+            },
+            "why": {
+              "$ref": "#/$defs/text"
+            }
+          },
+          "additionalProperties": true
         }
-      },
-      "additionalProperties": true
+      ]
     },
     "textOrSummary": {
       "anyOf": [

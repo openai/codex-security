@@ -46,6 +46,16 @@ const scanDraftInput = {
   },
 };
 
+const stringAssessmentInput = {
+  ...scanDraftInput,
+  findings: [
+    {
+      ...scanDraftFinding,
+      attackPath: { impact: "high", likelihood: "medium" },
+    },
+  ],
+};
+
 async function readJson(path: string): Promise<JsonObject> {
   return JSON.parse(await readFile(path, "utf8")) as JsonObject;
 }
@@ -127,6 +137,10 @@ describe("bundled plugin finding detail contracts", () => {
     expect(validate(scanDraftInput), JSON.stringify(validate.errors)).toBe(
       true,
     );
+    expect(
+      validate(stringAssessmentInput),
+      JSON.stringify(validate.errors),
+    ).toBe(true);
     for (const { section, detail } of invalidFindingDetails) {
       expect(
         validate({
@@ -155,6 +169,10 @@ describe("bundled plugin finding detail contracts", () => {
       expect(validate(scanDraftInput), JSON.stringify(validate.errors)).toBe(
         true,
       );
+      expect(
+        validate(stringAssessmentInput),
+        JSON.stringify(validate.errors),
+      ).toBe(true);
       for (const { section, detail } of invalidFindingDetails) {
         expect(
           validate({
