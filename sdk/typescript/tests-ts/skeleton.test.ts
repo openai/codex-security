@@ -1,6 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
-import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
+import {
+  type AttackPathDataflow,
+  type AttackPathReachability,
+  CodexSecurity,
+  CodexSecurityError,
+  VERSION,
+} from "../src/index.js";
 import { main } from "../src/cli.js";
 
 function capture(): {
@@ -20,6 +26,22 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("exports typed attack-path aliases", () => {
+    const dataflow: AttackPathDataflow = {
+      transformations: ["decode archive entry"],
+    };
+    const reachability: AttackPathReachability = {
+      attacker: "authenticated uploader",
+      entrypoint: "archive upload endpoint",
+      preconditions: ["archive extraction is enabled"],
+    };
+    const transformations: string[] | undefined = dataflow.transformations;
+    const attacker: string | undefined = reachability.attacker;
+
+    expect(transformations).toEqual(["decode archive entry"]);
+    expect(attacker).toBe("authenticated uploader");
+  });
+
   test("advertises the tested Node.js 22, 24, and 26 release lines", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),

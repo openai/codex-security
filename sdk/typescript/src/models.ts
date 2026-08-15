@@ -352,9 +352,15 @@ export type FindingValidation = NonNullable<Finding["validation"]>;
 
 export type FindingAttackPath = NonNullable<Finding["attackPath"]>;
 
-export type AttackPathDataflow = ContractObject;
+export type AttackPathDataflow = Extract<
+  NonNullable<FindingAttackPath["dataFlow"]>,
+  object
+>;
 
-export type AttackPathReachability = ContractObject;
+export type AttackPathReachability = Extract<
+  NonNullable<FindingAttackPath["reachability"]>,
+  object
+>;
 
 export type FindingProvenance = Finding["provenance"];
 
