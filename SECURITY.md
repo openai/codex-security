@@ -102,6 +102,15 @@ A security issue must cross a boundary the product actually provides:
 - Protect official packages, bundled runtimes, dependencies, build artifacts,
   and release credentials from unauthorized changes.
 
+### Finding comparison
+
+Scans can start a separate model session to compare historical findings. This
+session uses a `read-only` sandbox, never approves execution requests, and
+disables network access and web search. Shell, application, plugin, and
+multi-agent features and inherited MCP servers are disabled; the scan's
+main-session approval policy remains unchanged. Comparison fails closed when an
+inherited MCP server cannot be disabled safely.
+
 ## In-scope reports
 
 Report reproducible issues in an official release, such as:

@@ -1,6 +1,15 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -253,6 +262,218 @@ describe("semantic scan comparison", () => {
     expect(calls.prompt).toContain("every earlier occurrence in one group");
     expect(calls.prompt).toContain("untrusted data");
     expect(calls.prompt).toContain(JSON.stringify(input));
+  });
+
+  test("disables inherited MCP servers in the real comparison session", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-comparison-")),
+    );
+    temporaryDirectories.push(root);
+    const codexHome = join(root, "codex-home");
+    const markerDirectory = join(root, "mcp-started");
+    const projectConfig = join(root, ".codex");
+    const mcpServer = join(root, "synthetic-mcp.mjs");
+    await Promise.all(
+      [codexHome, markerDirectory, projectConfig].map((path) => mkdir(path)),
+    );
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const homeServers = ["synthetic", "contains space", "café", "__proto__"];
+    const projectServer = "project_local";
+    const servers = [...homeServers, projectServer];
+    const startedServers = ["synthetic", "__proto__", projectServer];
+    const serverConfiguration = (name: string) =>
+      [
+        `[mcp_servers.${JSON.stringify(name)}]`,
+        `command = ${JSON.stringify(node)}`,
+        `args = [${JSON.stringify(mcpServer)}, ${JSON.stringify(join(markerDirectory, name))}]`,
+      ].join("\n");
+    await writeFile(
+      mcpServer,
+      [
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync(process.argv[2], "started");',
+        "process.stdin.resume();",
+      ].join("\n"),
+    );
+    const requests: Record<string, unknown>[] = [];
+    const response = { matches: [], uncertain: [] };
+    const service = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (request.method !== "POST") {
+          return new Response(null, { status: 404 });
+        }
+        requests.push((await request.json()) as Record<string, unknown>);
+        const events = [
+          { type: "response.created", response: { id: "synthetic-response" } },
+          {
+            type: "response.output_item.done",
+            item: {
+              type: "message",
+              role: "assistant",
+              id: "synthetic-message",
+              content: [
+                { type: "output_text", text: JSON.stringify(response) },
+              ],
+            },
+          },
+          {
+            type: "response.completed",
+            response: {
+              id: "synthetic-response",
+              usage: {
+                input_tokens: 0,
+                input_tokens_details: null,
+                output_tokens: 0,
+                output_tokens_details: null,
+                total_tokens: 0,
+              },
+            },
+          },
+        ];
+        return new Response(
+          events
+            .map(
+              (event) =>
+                `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+            )
+            .join(""),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    await writeFile(
+      join(codexHome, "config.toml"),
+      [
+        `openai_base_url = ${JSON.stringify(`${service.url}v1`)}`,
+        `[projects.${JSON.stringify(root)}]`,
+        'trust_level = "trusted"',
+        ...homeServers.map(serverConfiguration),
+      ].join("\n"),
+    );
+    await writeFile(
+      join(projectConfig, "config.toml"),
+      serverConfiguration(projectServer),
+    );
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      OPENAI_API_KEY: "synthetic-comparison-key",
+    };
+    delete environment["CODEX_API_KEY"];
+    try {
+      const unrestricted = Bun.spawnSync(
+        [
+          node!,
+          join(
+            import.meta.dir,
+            "..",
+            "node_modules",
+            "@openai",
+            "codex",
+            "bin",
+            "codex.js",
+          ),
+          "--cd",
+          root,
+          "--config",
+          "features.apps=false",
+          "--config",
+          "features.plugins=false",
+          "--config",
+          "features.shell_tool=false",
+          "--config",
+          "features.unified_exec=false",
+          "debug",
+          "prompt-input",
+          "synthetic comparison",
+        ],
+        { env: environment, stdout: "ignore", stderr: "pipe" },
+      );
+      expect(
+        unrestricted.exitCode,
+        new TextDecoder().decode(unrestricted.stderr),
+      ).toBe(0);
+      for (const server of startedServers) {
+        expect(
+          await readFile(join(markerDirectory, server), "utf8"),
+          `${server}: ${new TextDecoder().decode(unrestricted.stderr)}`,
+        ).toBe("started");
+      }
+      await Promise.all(
+        startedServers.map((server) => rm(join(markerDirectory, server))),
+      );
+
+      expect(
+        await matchScanFindings(
+          { before: [], after: [] },
+          { environment, model: "gpt-5.6-sol", workingDirectory: root },
+        ),
+      ).toEqual(response);
+      expect(requests).toHaveLength(1);
+      expect(JSON.stringify(requests[0]?.["tools"] ?? [])).not.toContain(
+        "synthetic",
+      );
+      for (const server of servers) {
+        await expect(
+          readFile(join(markerDirectory, server)),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
+      service.stop(true);
+    }
+  });
+
+  test("fails closed when configured MCP servers cannot be inspected", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-comparison-")),
+    );
+    temporaryDirectories.push(root);
+    const preload = join(root, "codex.mjs");
+    await writeFile(
+      preload,
+      [
+        'import { basename } from "node:path";',
+        "const args = [basename(process.argv[1]), ...process.argv.slice(2)];",
+        'if (args.join(" ") !== "mcp list --json") process.exit(2);',
+        "if (process.cwd() !== process.env.SYNTHETIC_WORKING_DIRECTORY) process.exit(3);",
+        'process.stdout.write(process.env.SYNTHETIC_MCP_LIST ?? "", () => {',
+        '  process.exit(Number(process.env.SYNTHETIC_MCP_EXIT ?? "0"));',
+        "});",
+      ].join("\n"),
+    );
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+
+    for (const result of [
+      { stdout: "[]", exitCode: 1 },
+      { stdout: "not-json", exitCode: 0 },
+      { stdout: "{}", exitCode: 0 },
+      { stdout: "[{}]", exitCode: 0 },
+      { stdout: '[{"name":1}]', exitCode: 0 },
+      { stdout: '[{"name":"unsafe.name"}]', exitCode: 0 },
+      { stdout: '[{"name":"unsafe=name"}]', exitCode: 0 },
+    ]) {
+      await expect(
+        matchScanFindings(
+          { before: [], after: [] },
+          {
+            environment: {
+              ...process.env,
+              CODEX_CLI_PATH: node!,
+              OPENAI_API_KEY: "synthetic-comparison-key",
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+              SYNTHETIC_MCP_LIST: result.stdout,
+              SYNTHETIC_MCP_EXIT: String(result.exitCode),
+              SYNTHETIC_WORKING_DIRECTORY: root,
+            },
+            workingDirectory: root,
+          },
+        ),
+      ).rejects.toThrow("Could not inspect configured comparison MCP servers.");
+    }
   });
 
   test("matches open and dismissed findings from the same target", async () => {
