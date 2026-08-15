@@ -15,6 +15,18 @@ const invalidFindingDetails: Array<{
 }> = [
   { section: "attackPath", detail: { steps: "upload, then extract" } },
   { section: "attackPath", detail: { preconditions: "upload access" } },
+  {
+    section: "attackPath",
+    detail: { reachability: { attacker: {} } },
+  },
+  {
+    section: "attackPath",
+    detail: { reachability: { entrypoint: [] } },
+  },
+  {
+    section: "attackPath",
+    detail: { reachability: { preconditions: "upload access" } },
+  },
   { section: "validation", detail: { assertions: "sink reached" } },
   { section: "validation", detail: { counterEvidence: "none" } },
   { section: "validation", detail: { evidence: { kind: "trace" } } },
@@ -51,7 +63,17 @@ const stringAssessmentInput = {
   findings: [
     {
       ...scanDraftFinding,
-      attackPath: { impact: "high", likelihood: "medium" },
+      attackPath: {
+        impact: "high",
+        likelihood: "medium",
+        reachability: {
+          summary: "A repository contributor can trigger archive extraction.",
+          attacker: "repository contributor",
+          entrypoint: "archive extraction",
+          outcome: "a file is written outside the extraction root",
+          preconditions: ["The service processes the uploaded archive."],
+        },
+      },
     },
   ],
 };
@@ -196,6 +218,15 @@ describe("bundled plugin finding detail contracts", () => {
     ]);
     const validate = new Ajv2020({ strict: false }).compile(schema);
     expect(validate(example), JSON.stringify(validate.errors)).toBe(true);
+
+    const compatibleDocument = structuredClone(example) as {
+      findings: Array<JsonObject>;
+    };
+    compatibleDocument.findings[0]!["attackPath"] =
+      stringAssessmentInput.findings[0]!.attackPath;
+    expect(validate(compatibleDocument), JSON.stringify(validate.errors)).toBe(
+      true,
+    );
 
     for (const { section, detail } of invalidFindingDetails) {
       const document = structuredClone(example) as {

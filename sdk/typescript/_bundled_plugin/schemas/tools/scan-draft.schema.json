@@ -234,6 +234,46 @@
         }
       ]
     },
+    "findingReachability": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/text"
+            },
+            "attacker": {
+              "$ref": "#/$defs/text"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/text"
+            },
+            "source": {
+              "$ref": "#/$defs/text"
+            },
+            "sink": {
+              "$ref": "#/$defs/text"
+            },
+            "outcome": {
+              "$ref": "#/$defs/text"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidenceRefs": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidence_refs": {
+              "$ref": "#/$defs/textList"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
     "findingValidation": {
       "type": "object",
       "properties": {
@@ -355,7 +395,7 @@
           "$ref": "#/$defs/textList"
         },
         "reachability": {
-          "$ref": "#/$defs/textOrSummary"
+          "$ref": "#/$defs/findingReachability"
         },
         "steps": {
           "$ref": "#/$defs/textList"

@@ -532,9 +532,15 @@
                 "minLength": 1,
                 "properties": {
                   "summary": { "type": "string", "minLength": 1 },
+                  "attacker": { "type": "string", "minLength": 1 },
+                  "entrypoint": { "type": "string", "minLength": 1 },
                   "source": { "type": "string", "minLength": 1 },
                   "sink": { "type": "string", "minLength": 1 },
                   "outcome": { "type": "string", "minLength": 1 },
+                  "preconditions": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
                   "evidenceRefs": {
                     "type": "array",
                     "items": { "type": "string", "minLength": 1 }

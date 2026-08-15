@@ -217,9 +217,12 @@ export interface FindingsDocument {
         | string
         | {
             summary?: string;
+            attacker?: string;
+            entrypoint?: string;
             source?: string;
             sink?: string;
             outcome?: string;
+            preconditions?: string[];
             evidenceRefs?: string[];
             evidence_refs?: string[];
             [k: string]: unknown;
