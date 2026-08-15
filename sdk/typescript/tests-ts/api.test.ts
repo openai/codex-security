@@ -45,6 +45,7 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import type { DesktopSessionOptions } from "../src/desktop-session.js";
 import {
   resolveCodexCommand,
   runWorkbench,
@@ -4253,6 +4254,81 @@ describe("CodexSecurity orchestration", () => {
     }
 
     expect(runtimeHomes).toEqual([credentialHome, credentialHome]);
+  });
+
+  test.each([
+    ["resumes its visible task", false],
+    ["falls back when task creation fails", true],
+  ])("a desktop scan %s", async (_description, fails) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-codex-home");
+    const codexHome = join(root, "private-codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all(
+      [repository, ambientHome, codexHome, scanDir].map((path) =>
+        mkdir(path, { mode: 0o700 }),
+      ),
+    );
+    let codexOptions: CodexOptions | undefined;
+    let selectedThreadId: string | null | undefined;
+    const warnings: string[] = [];
+    const thread = (id: string | null) => {
+      selectedThreadId = id;
+      return {
+        id,
+        async runStreamed() {
+          throw new Error("scan reached");
+        },
+      };
+    };
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolveCodexCommand: () => ({ command: "/synthetic/codex" }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        prepareDesktopSession: async (options: DesktopSessionOptions) => {
+          expect(options.environment).toMatchObject({
+            CODEX_HOME: codexHome,
+            CODEX_SQLITE_HOME: ambientHome,
+          });
+          expect(options.title).toBe("Security scan: repository");
+          if (fails) throw new Error("synthetic app-server failure");
+          return "visible-thread";
+        },
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          return {
+            startThread: () => thread(null),
+            resumeThread: thread,
+          };
+        },
+      },
+    );
+
+    await expect(
+      client.run(repository, {
+        onWarning: (warning) => warnings.push(warning),
+      }),
+    ).rejects.toThrow("scan reached");
+    expect(selectedThreadId).toBe(fails ? null : "visible-thread");
+    expect(codexOptions?.env?.["CODEX_SQLITE_HOME"]).toBe(
+      fails ? undefined : ambientHome,
+    );
+    expect(warnings).toEqual(
+      fails
+        ? ["Could not show scan in Codex: synthetic app-server failure"]
+        : [],
+    );
+    await client.close();
   });
 
   test.each([

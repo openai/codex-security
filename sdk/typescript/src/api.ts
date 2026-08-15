@@ -37,6 +37,7 @@ import {
   writeCodexConfig,
 } from "./config.js";
 import { estimateScanCost, ScanCostTracker, type ScanCost } from "./cost.js";
+import { prepareDesktopSession } from "./desktop-session.js";
 import {
   loadContract,
   requireScanFile,
@@ -132,12 +133,15 @@ interface ScanEvent {
   readonly [key: string]: unknown;
 }
 
+interface CodexThreadOptions {
+  workingDirectory: string;
+  skipGitRepoCheck: boolean;
+  approvalPolicy: "never";
+}
+
 interface CodexClientLike {
-  startThread(options: {
-    workingDirectory: string;
-    skipGitRepoCheck: boolean;
-    approvalPolicy: "never";
-  }): CodexThreadLike;
+  startThread(options: CodexThreadOptions): CodexThreadLike;
+  resumeThread(id: string, options: CodexThreadOptions): CodexThreadLike;
 }
 
 interface PreparedRuntime {
@@ -285,6 +289,7 @@ interface CodexSecurityRuntimeOptions {
 interface ClientDependencies {
   createCodex(options: CodexOptions): CodexClientLike;
   environment: ProcessEnvironment;
+  prepareDesktopSession?: typeof prepareDesktopSession;
   prepareRuntime?: (
     config: Readonly<CodexSecurityConfig>,
     signal?: AbortSignal,
@@ -300,6 +305,7 @@ interface ClientDependencies {
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
   createCodex: (options) => new Codex(options),
   environment: process.env,
+  prepareDesktopSession,
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
@@ -1039,7 +1045,7 @@ export class CodexSecurity {
         undefined
           ? undefined
           : this.#codexCommand().command;
-      const codex = this.#dependencies.createCodex({
+      const codexOptions: CodexOptions = {
         ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
         ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
@@ -1054,12 +1060,53 @@ export class CodexSecurity {
             codex_security_surface: this.#surface,
           },
         },
-      });
-      const thread = codex.startThread({
+      };
+      let desktopThreadId: string | undefined;
+      if (this.#dependencies.prepareDesktopSession !== undefined) {
+        const sqliteHome =
+          typeof effectiveConfig["sqlite_home"] === "string"
+            ? effectiveConfig["sqlite_home"]
+            : environmentValue(
+                this.#dependencies.environment,
+                "CODEX_SQLITE_HOME",
+              ) ??
+              environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+              join(homedir(), ".codex");
+        try {
+          requireOutputOutsideRepository(protectedRoot, sqliteHome, "runtime");
+          const desktopEnvironment = {
+            ...codexOptions.env!,
+            CODEX_SQLITE_HOME: sqliteHome,
+          };
+          desktopThreadId = await this.#dependencies.prepareDesktopSession({
+            command: this.#codexCommand(),
+            environment: desktopEnvironment,
+            config: codexOptions.config!,
+            workingDirectory: scanDir,
+            title: `Security scan: ${basename(repo)}`,
+            signal,
+          });
+          codexOptions.env = desktopEnvironment;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not show scan in Codex: ${safeErrorMessage(error)}`,
+          );
+        }
+      }
+      const codex = this.#dependencies.createCodex(codexOptions);
+      const threadOptions: CodexThreadOptions = {
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy: "never",
-      });
+      };
+      const thread =
+        desktopThreadId !== undefined
+          ? codex.resumeThread(desktopThreadId, threadOptions)
+          : codex.startThread(threadOptions);
       const serializedPaths =
         normalized.kind === "paths"
           ? JSON.stringify(normalized.paths)

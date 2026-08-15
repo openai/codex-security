@@ -162,6 +162,9 @@ when the dedicated home does not already contain stored credentials. Logging
 out prevents later scans from automatically reimporting that ambient sign-in
 until you explicitly log in again.
 
+Scan sessions also appear in the Codex app. Session files and credentials stay
+in the private Codex Security home while the app uses its normal task history.
+
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
 interactive scan asks which credential to use. JSON output, dry runs, CI, and
