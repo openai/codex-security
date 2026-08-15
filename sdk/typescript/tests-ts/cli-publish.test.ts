@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
@@ -79,6 +80,7 @@ describe("publish scan", () => {
         teamId: "team-from-flags",
         projectId: "project-from-flags",
         dryRun: false,
+        onProgress: expect.any(Function),
       },
     });
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
@@ -179,7 +181,384 @@ describe("publish scan", () => {
     expect(choices.every((choice) => !choice.label.includes("\n"))).toBe(true);
     expect(publishedDirectory).toBe(selectedDirectory);
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+    expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
+    expect(stripVTControlCharacters(stderr.text())).toContain(
+      "CODEX SECURITY  ·  PUBLISH  ·  second-repository",
+    );
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+    expect(stderr.text()).not.toContain("66666666-7777-8888-9999");
+  });
+
+  test("shows actual Codex reasoning and Linear activity in a full-screen publication dashboard", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      options.onProgress?.({ type: "started", scanId: "scan-123", total: 2 });
+      options.onProgress?.({
+        type: "codex_event",
+        event: {
+          type: "item.completed",
+          item: {
+            id: "reasoning-1",
+            type: "reasoning",
+            text: "Checking the connected Linear project.",
+          },
+        },
+      });
+      options.onProgress?.({
+        type: "codex_event",
+        event: {
+          type: "item.started",
+          item: {
+            id: "linear-team",
+            type: "mcp_tool_call",
+            server: "codex_apps",
+            tool: "linear_get_team",
+            arguments: { query: "team-from-flags" },
+          },
+        },
+      });
+      options.onProgress?.({
+        type: "issue_completed",
+        findingId: "finding-1",
+        issueIdentifier: "SEC-123",
+        completed: 1,
+        total: 2,
+      });
+      options.onProgress?.({
+        type: "completed",
+        created: 1,
+        failed: 1,
+        total: 2,
+      });
+      return publicationResult();
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+
+    const text = stripVTControlCharacters(stderr.text());
+    expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
+    expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  completed-scan");
+    expect(text).toContain("Checking the connected Linear project.");
+    expect(text).toContain("linear_get_team");
+    expect(text).toContain("Created SEC-123");
+    expect(text).toContain("FINDINGS  1 / 2 processed");
+    expect(text).toContain("Published 1/2 findings (1 failed).");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("TOKENS");
+    expect(text).not.toContain("COST");
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+    expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+    expect(stdout.text()).not.toContain("\u001B");
+  });
+
+  test("removes repository-controlled terminal escapes while retaining intentional choice emphasis", async () => {
+    for (const color of [true, false]) {
+      let choice = "";
+      const deps = dependencies({
+        environment: color ? {} : { NO_COLOR: "1" },
+        onWorkbench: () => ({
+          scans: [
+            {
+              scanId: "prefix-\u001B[31m\u0007def456",
+              scanDir: join(tmpdir(), "completed-scan"),
+              targetSummary: "payments\u001B[2J-api\u0007\nservice\u0008",
+              completedAt: "2026-08-15T01:00:00Z",
+              findingCount: 1,
+              progress: { status: "complete" },
+            },
+          ],
+        }),
+      });
+      deps.now = () => Date.parse("2026-08-15T01:01:00Z");
+      deps.publishPrompt = {
+        isInteractive: () => true,
+        select: async <Value extends string>(
+          _message: string,
+          options: readonly { label: string; value: Value }[],
+        ): Promise<Value> => {
+          choice = options[0]!.label;
+          return options[0]!.value;
+        },
+      };
+      deps.publishScan = async () => publicationResult();
+
+      expect(
+        await main(
+          ["publish", "scan", ...DESTINATION_OPTIONS],
+          capture().stream,
+          capture(true).stream,
+          deps,
+        ),
+      ).toBe(0);
+
+      expect(stripVTControlCharacters(choice)).toContain(
+        "payments-api service  ·  1 finding  ·  ran 1 minute ago  ·  ...def456",
+      );
+      expect(choice).not.toContain("\u001B[2J");
+      expect(choice).not.toContain("\u001B[31m");
+      expect(choice).not.toContain("\u0007");
+      expect(choice).not.toContain("\u0008");
+      if (color) {
+        expect(choice).toStartWith("\u001B[1mpayments-api service\u001B[22m");
+      } else {
+        expect(choice).not.toContain("\u001B");
+      }
+    }
+  });
+
+  test("streams sanitized Codex progress to noninteractive stderr without terminal controls", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
+      const reasoning = {
+        type: "item.completed",
+        item: {
+          id: "reasoning-1",
+          type: "reasoning",
+          text: "Preparing the Linear issue.\u001B[31m",
+        },
+      };
+      options.onProgress?.({ type: "codex_event", event: reasoning });
+      options.onProgress?.({ type: "codex_event", event: reasoning });
+      options.onProgress?.({
+        type: "codex_event",
+        event: {
+          type: "item.started",
+          item: {
+            id: "linear-create",
+            type: "mcp_tool_call",
+            server: "codex_apps",
+            tool: "linear_save_issue",
+            arguments: {
+              description: "PRIVATE_SOURCE_SNIPPET_MUST_NOT_BE_LOGGED",
+            },
+          },
+        },
+      });
+      options.onProgress?.({
+        type: "issue_completed",
+        findingId: "finding-1",
+        issueIdentifier: "SEC-123",
+        completed: 1,
+        total: 1,
+      });
+      options.onProgress?.({
+        type: "completed",
+        created: 1,
+        failed: 0,
+        total: 1,
+      });
+      return publicationResult();
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+
+    expect(stderr.text()).toContain("Publishing 1 finding to Linear.\n");
+    expect(stderr.text()).toContain("Codex: Preparing the Linear issue.");
+    expect(stderr.text()).toContain("Tool: linear_save_issue\n");
+    expect(stderr.text()).toContain("[1/1] Created SEC-123\n");
+    expect(stderr.text()).toContain("Published 1/1 finding.\n");
+    expect(stderr.text().match(/Preparing the Linear issue/gu)).toHaveLength(1);
+    expect(stderr.text()).not.toContain(
+      "PRIVATE_SOURCE_SNIPPET_MUST_NOT_BE_LOGGED",
+    );
+    expect(stderr.text()).not.toContain("\u001B");
+    expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+  });
+
+  test("restores the publication screen before reporting publisher failures", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
+      throw new Error("Linear publication stopped unexpectedly.");
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+
+    const restored = stderr.text().lastIndexOf("\u001B[?25h\u001B[?1049l");
+    const error = stderr
+      .text()
+      .lastIndexOf("Linear publication stopped unexpectedly.");
+    expect(restored).toBeGreaterThan(-1);
+    expect(error).toBeGreaterThan(restored);
+    expect(stdout.text()).toBe("");
+  });
+
+  test("uses plain progress in CI and dumb terminals even when stderr is a TTY", async () => {
+    for (const environment of [{ CI: "1" }, { TERM: "dumb" }]) {
+      const stdout = capture();
+      const stderr = capture(true);
+      const deps = dependencies({ environment });
+      deps.publishScan = async (_scanDirectory, options) => {
+        options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
+        options.onProgress?.({
+          type: "completed",
+          created: 1,
+          failed: 0,
+          total: 1,
+        });
+        return publicationResult();
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+
+      expect(stderr.text()).toContain("Publishing 1 finding to Linear.");
+      expect(stderr.text()).toContain("Published 1/1 finding.");
+      expect(stderr.text()).not.toContain("\u001B");
+      expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+    }
+  });
+
+  test("restores the full-screen terminal and unregisters listeners on interruption", async () => {
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      const stdout = capture();
+      const stderr = capture(true);
+      const listeners = new Map<string, () => void>();
+      const removed: string[] = [];
+      const exited: string[] = [];
+      const deps = dependencies();
+      deps.addSignalListener = (name, listener) => {
+        listeners.set(name, listener);
+      };
+      deps.removeSignalListener = (name, listener) => {
+        if (listeners.get(name) === listener) listeners.delete(name);
+        removed.push(name);
+      };
+      deps.forceExit = (name) => {
+        exited.push(name);
+      };
+      deps.publishScan = async (_scanDirectory, options) => {
+        options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
+        listeners.get(signal)!();
+        return publicationResult();
+      };
+
+      expect(
+        await main(
+          ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+
+      expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+      expect(removed).toEqual(["SIGINT", "SIGTERM"]);
+      expect(listeners.size).toBe(0);
+      expect(exited).toEqual([signal]);
+    }
+  });
+
+  test("falls back to plain progress if the full-screen dashboard cannot start", async () => {
+    const stdout = capture();
+    const output: string[] = [];
+    let failed = false;
+    const stderr = {
+      isTTY: true,
+      write(chunk: string | Uint8Array): boolean {
+        const value = chunk.toString();
+        if (!failed && value.includes("\u001B[?1049h")) {
+          failed = true;
+          throw new Error("The terminal cannot enter full-screen mode.");
+        }
+        output.push(value);
+        return true;
+      },
+    };
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
+      options.onProgress?.({
+        type: "completed",
+        created: 1,
+        failed: 0,
+        total: 1,
+      });
+      return publicationResult();
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr,
+        deps,
+      ),
+    ).toBe(0);
+
+    expect(failed).toBe(true);
+    expect(output.join("")).toContain("Publishing 1 finding to Linear.");
+    expect(output.join("")).toContain("Published 1/1 finding.");
+    expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+  });
+
+  test("keeps dry runs quiet even when stderr is interactive", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      expect(options.onProgress).toBeUndefined();
+      return { ...publicationResult(), dryRun: true, issues: [] };
+    };
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--dry-run",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+
     expect(stderr.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({ dryRun: true });
   });
 
   test("formats scan choices as compact single lines with relative ages", async () => {

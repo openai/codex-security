@@ -40,6 +40,45 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("renders publication progress without scan-only inventory and cost fields", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 100, rows: 18 },
+      {
+        repository: "/synthetic/payments-api",
+        presentation: "publication",
+        color: false,
+        clock: fakeClock(),
+      },
+    );
+
+    dashboard.setStage("Connecting to Linear");
+    dashboard.start();
+    let text = stripVTControlCharacters(stderr.text());
+    expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  payments-api");
+    expect(text).toContain("Waiting for publication activity");
+    expect(text).toContain("FINDINGS  waiting for findings");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("TOKENS");
+    expect(text).not.toContain("COST");
+
+    dashboard.setPublicationProgress(2, 5);
+    dashboard.setStage("Publishing findings · 2/5");
+    dashboard.record({
+      id: "publication-reasoning",
+      kind: "reasoning",
+      status: "completed",
+      description: "Preparing the next Linear issue.",
+      paths: [],
+    });
+    text = stripVTControlCharacters(stderr.text());
+    expect(text).toContain("FINDINGS  2 / 5 processed");
+    expect(text).toContain("Publishing findings · 2/5");
+    expect(text).toContain("Preparing the next Linear issue.");
+    dashboard.stop();
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
   test("restores terminal state when dashboard initialization fails", () => {
     const input = new DashboardTestInput();
     const output: string[] = [];
