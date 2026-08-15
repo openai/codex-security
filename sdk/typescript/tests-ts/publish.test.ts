@@ -298,7 +298,10 @@ describe("connected Linear publication", () => {
       priority: 2,
     });
     expect(data.issues[0]?.arguments).not.toHaveProperty("project");
-    expect(result.destination).toEqual(data.destination);
+    expect(result.destination).toEqual({
+      type: "linear",
+      teamId: "team-example",
+    });
     expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
   });
 
