@@ -251,88 +251,12 @@ describe("connected Linear publication", () => {
     });
   });
 
-  test("reports Codex activity and verified issue creation before publication completes", async () => {
-    const publication = preparedPublication(2);
-    const updates: PublishScanProgress[] = [];
-    const reasoning = {
-      type: "item.completed",
-      item: {
-        type: "reasoning",
-        text: "Checking the connected Linear project.",
-      },
-    };
-    const success = JSON.parse(issueEvent(publication.issues[0]!)) as unknown;
-    const failure = JSON.parse(
-      issueEvent(publication.issues[1]!, {
-        status: "failed",
-        error: "The destination rejected this finding.",
-      }),
-    ) as unknown;
-
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      { ...OPTIONS, onProgress: (event) => updates.push(event) },
-      dependencies(
-        publication,
-        {},
-        {
-          runCodex: async (_codex, _args, _input, _environment, onEvent) => {
-            expect(updates).toEqual([
-              { type: "started", scanId: "scan-example", total: 2 },
-            ]);
-
-            onEvent!(reasoning);
-            expect(updates.at(-1)).toEqual({
-              type: "codex_event",
-              event: reasoning,
-            });
-
-            onEvent!(success);
-            expect(updates.at(-1)).toEqual({
-              type: "issue_completed",
-              findingId: "finding-1",
-              issueIdentifier: "SEC-1",
-              completed: 1,
-              total: 2,
-            });
-
-            onEvent!(failure);
-            expect(updates.at(-1)).toEqual({
-              type: "issue_completed",
-              findingId: "finding-2",
-              error: "The destination rejected this finding.",
-              completed: 2,
-              total: 2,
-            });
-
-            return {
-              exitCode: 0,
-              stdout: [reasoning, success, failure]
-                .map((event) => JSON.stringify(event))
-                .join("\n"),
-              stderr: "",
-            };
-          },
-        },
-      ),
-    );
-
-    expect(result.counts).toEqual({ findings: 2, created: 1, failed: 1 });
-    expect(updates).toHaveLength(7);
-    expect(updates.at(-1)).toEqual({
-      type: "completed",
-      created: 1,
-      failed: 1,
-      total: 2,
-    });
-  });
-
-  test("streams real dotted Linear tool events and persists verified partial publication", async () => {
+  test("streams dotted Linear events, ordered progress, and a partial-publication receipt", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "codex-security-publication-stream-"),
     );
     temporaryDirectories.push(directory);
-    const publication = preparedPublication(2);
+    const publication = preparedPublication(3);
     const preload = join(directory, "codex-preload.cjs");
     await writeFile(
       preload,
@@ -347,7 +271,8 @@ describe("connected Linear publication", () => {
         "fs.writeSync(1, first.slice(0, boundary));",
         "fs.writeSync(1, `${first.slice(boundary)}\\r\\n`);",
         "fs.writeSync(1, `${JSON.stringify(lines[1])}\\n`);",
-        "fs.writeSync(1, JSON.stringify(lines[2]));",
+        "fs.writeSync(1, `${JSON.stringify(lines[2])}\\n`);",
+        "fs.writeSync(1, JSON.stringify(lines[3]));",
         "process.exit(0);",
       ].join("\n"),
       "utf8",
@@ -356,25 +281,29 @@ describe("connected Linear publication", () => {
       type: "item.completed",
       item: { type: "reasoning", text: "Creating the requested issue." },
     };
-    const issue = JSON.parse(issueEvent(publication.issues[0]!)) as {
-      item: {
-        tool: string;
-        result: {
-          content: unknown[];
-          structured_content: { id: string; url: string };
+    const issues = publication.issues.slice(0, 2).map((finding, index) => {
+      const issue = JSON.parse(issueEvent(finding)) as {
+        item: {
+          tool: string;
+          result: {
+            content: unknown[];
+            structured_content: { id: string; url: string };
+          };
         };
       };
-    };
-    issue.item.tool = "linear.save_issue";
-    issue.item.result = {
-      content: [],
-      structured_content: {
-        id: "SEC-901",
-        url: "https://linear.app/example/issue/SEC-901",
-      },
-    };
+      const identifier = `SEC-${index + 901}`;
+      issue.item.tool = "linear.save_issue";
+      issue.item.result = {
+        content: [],
+        structured_content: {
+          id: identifier,
+          url: `https://linear.app/example/issue/${identifier}`,
+        },
+      };
+      return issue;
+    });
     const failure = JSON.parse(
-      issueEvent(publication.issues[1]!, {
+      issueEvent(publication.issues[2]!, {
         status: "failed",
         error: "The connected Linear project rejected this finding.",
       }),
@@ -391,7 +320,7 @@ describe("connected Linear publication", () => {
           NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
           CODEX_PUBLICATION_TEST_EVENTS: JSON.stringify([
             reasoning,
-            issue,
+            ...issues,
             failure,
           ]),
         },
@@ -418,109 +347,52 @@ describe("connected Linear publication", () => {
         issueIdentifier: "SEC-901",
         url: "https://linear.app/example/issue/SEC-901",
       },
+      {
+        findingId: "finding-2",
+        occurrenceId: "occurrence-2",
+        issueIdentifier: "SEC-902",
+        url: "https://linear.app/example/issue/SEC-902",
+      },
     ]);
     expect(result.failed).toEqual([
       {
-        findingId: "finding-2",
+        findingId: "finding-3",
         error: "The connected Linear project rejected this finding.",
       },
     ]);
-    expect(result.counts).toEqual({ findings: 2, created: 1, failed: 1 });
+    expect(result.counts).toEqual({ findings: 3, created: 2, failed: 1 });
     expect(updates).toEqual([
-      { type: "started", scanId: "scan-example", total: 2 },
+      { type: "started", scanId: "scan-example", total: 3 },
       { type: "codex_event", event: reasoning },
-      { type: "codex_event", event: issue },
+      { type: "codex_event", event: issues[0] },
       {
         type: "issue_completed",
         findingId: "finding-1",
         issueIdentifier: "SEC-901",
         completed: 1,
-        total: 2,
+        total: 3,
+      },
+      { type: "codex_event", event: issues[1] },
+      {
+        type: "issue_completed",
+        findingId: "finding-2",
+        issueIdentifier: "SEC-902",
+        completed: 2,
+        total: 3,
       },
       { type: "codex_event", event: failure },
       {
         type: "issue_completed",
-        findingId: "finding-2",
+        findingId: "finding-3",
         error: "The connected Linear project rejected this finding.",
-        completed: 2,
-        total: 2,
+        completed: 3,
+        total: 3,
       },
-      { type: "completed", created: 1, failed: 1, total: 2 },
+      { type: "completed", created: 2, failed: 1, total: 3 },
     ]);
     const receipt = join(
       directory,
       "state",
-      "publications",
-      "linear",
-      `${createHash("sha256").update(publication.scanId).digest("hex")}.json`,
-    );
-    expect(JSON.parse(await readFile(receipt, "utf8"))).toEqual(result);
-  });
-
-  test("records every successful dotted Linear creation in its progress and receipt", async () => {
-    const stateDirectory = await mkdtemp(
-      join(tmpdir(), "codex-security-publication-created-"),
-    );
-    temporaryDirectories.push(stateDirectory);
-    const publication = preparedPublication(2);
-    const events = publication.issues.map((issue, index) => {
-      const event = JSON.parse(issueEvent(issue)) as {
-        item: {
-          tool: string;
-          result: {
-            content: unknown[];
-            structured_content: { id: string; url: string };
-          };
-        };
-      };
-      const identifier = `SEC-${index + 901}`;
-      event.item.tool = "linear.save_issue";
-      event.item.result = {
-        content: [],
-        structured_content: {
-          id: identifier,
-          url: `https://linear.app/example/issue/${identifier}`,
-        },
-      };
-      return event;
-    });
-    const updates: PublishScanProgress[] = [];
-    const injected = dependencies(
-      publication,
-      {},
-      {
-        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
-        runCodex: async (_codex, _args, _input, _environment, onEvent) => {
-          for (const event of events) onEvent?.(event);
-          return {
-            exitCode: 0,
-            stdout: events.map((event) => JSON.stringify(event)).join("\n"),
-            stderr: "",
-          };
-        },
-      },
-    );
-    delete injected.writeReceipt;
-
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      { ...OPTIONS, onProgress: (event) => updates.push(event) },
-      injected,
-    );
-
-    expect(result.created.map((issue) => issue.issueIdentifier)).toEqual([
-      "SEC-901",
-      "SEC-902",
-    ]);
-    expect(result.failed).toEqual([]);
-    expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
-    expect(
-      updates
-        .filter((event) => event.type === "issue_completed")
-        .map((event) => event.issueIdentifier),
-    ).toEqual(["SEC-901", "SEC-902"]);
-    const receipt = join(
-      stateDirectory,
       "publications",
       "linear",
       `${createHash("sha256").update(publication.scanId).digest("hex")}.json`,
