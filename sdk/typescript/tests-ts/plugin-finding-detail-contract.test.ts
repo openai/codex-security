@@ -409,18 +409,48 @@ describe("bundled plugin finding detail contracts", () => {
     expect(new TextDecoder().decode(result.stdout)).toContain("accepted");
   });
 
-  test("keeps legacy sealed nested evidence references compatible", () => {
+  test("rejects duplicate IDs across code evidence catalogs", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())['findings'][0]",
+      "finding['codeEvidence'] = [{'id': 'shared-source', 'code': 'canonical_source()'}]",
+      "finding['code_evidence'] = [{'id': 'shared-source', 'code': 'conflicting_legacy_source()'}]",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "try:",
+      "    finalizer['_validate_finding'](finding, 'findings[0]')",
+      "except finalizer['ContractError'] as error:",
+      "    print(error)",
+      "else:",
+      "    print('accepted')",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(new TextDecoder().decode(result.stdout)).toContain(
+      "code_evidence[0].id: duplicate code-evidence id",
+    );
+  });
+
+  test("keeps legacy sealed evidence references compatible", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const script = [
       "import json, pathlib, runpy, sys",
       "plugin = pathlib.Path(sys.argv[1])",
       "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
-      "findings['findings'][0]['attackPath'] = {'dataFlow': {'evidenceRefs': ['legacy-missing-evidence']}}",
+      "findings['findings'][0]['codeEvidence'] = [{'id': 'shared-source', 'code': 'canonical_source()'}]",
+      "findings['findings'][0]['code_evidence'] = [{'id': 'shared-source', 'code': 'legacy_source()'}]",
+      "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence']}",
+      "findings['findings'][0]['attackPath'] = {'evidence_refs': ['legacy-attack-evidence'], 'dataFlow': {'evidenceRefs': ['legacy-missing-evidence']}}",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
       "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
-      "print(json.dumps({'original': findings['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'compatible': compatible['findings'][0]['attackPath']['dataFlow']['evidenceRefs']}))",
+      "print(json.dumps({'originalNested': findings['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'compatibleNested': compatible['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'originalAttack': findings['findings'][0]['attackPath']['evidence_refs'], 'compatibleAttack': compatible['findings'][0]['attackPath']['evidence_refs'], 'originalValidation': findings['findings'][0]['validation']['evidence_refs'], 'compatibleValidation': compatible['findings'][0]['validation']['evidence_refs'], 'originalLegacyCatalog': findings['findings'][0]['code_evidence'], 'compatibleLegacyCatalog': compatible['findings'][0]['code_evidence']}))",
     ].join("\n");
     const result = Bun.spawnSync(
       [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
@@ -428,8 +458,14 @@ describe("bundled plugin finding detail contracts", () => {
     );
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
-      compatible: [],
-      original: ["legacy-missing-evidence"],
+      compatibleAttack: [],
+      compatibleLegacyCatalog: [],
+      compatibleNested: [],
+      compatibleValidation: [],
+      originalAttack: ["legacy-attack-evidence"],
+      originalLegacyCatalog: [{ code: "legacy_source()", id: "shared-source" }],
+      originalNested: ["legacy-missing-evidence"],
+      originalValidation: ["legacy-validation-evidence"],
     });
   });
 });

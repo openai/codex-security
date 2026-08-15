@@ -1228,15 +1228,13 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
             continue
         if not isinstance(code_evidence, list):
             raise ContractError(f"{context}.{evidence_key}: expected an array")
-        catalog_ids: set[str] = set()
         for index, evidence in enumerate(code_evidence):
             evidence_context = f"{context}.{evidence_key}[{index}]"
             if not isinstance(evidence, dict):
                 raise ContractError(f"{evidence_context}: expected an object")
             evidence_id = _require_str(evidence, "id", evidence_context)
-            if evidence_id in catalog_ids:
+            if evidence_id in evidence_ids:
                 raise ContractError(f"{evidence_context}.id: duplicate code-evidence id")
-            catalog_ids.add(evidence_id)
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
 
@@ -1484,6 +1482,19 @@ def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     _validate_schema_node(payload, schema, schema_path.stem)
 
 
+def _filter_unknown_legacy_evidence_refs(
+    section: dict[str, Any], evidence_ids: set[str]
+) -> None:
+    for refs_field in ("evidenceRefs", "evidence_refs"):
+        refs = section.get(refs_field)
+        if isinstance(refs, list):
+            section[refs_field] = [
+                ref
+                for ref in refs
+                if not (isinstance(ref, str) and ref and ref not in evidence_ids)
+            ]
+
+
 def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str, Any]:
     compatible = copy.deepcopy(findings)
     finding_items = compatible.get("findings")
@@ -1492,15 +1503,33 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
     for finding in finding_items:
         if not isinstance(finding, dict):
             continue
-        evidence_ids = {
+        canonical_evidence_ids = {
             evidence["id"]
             for evidence in finding.get("codeEvidence", [])
             if isinstance(evidence, dict)
             and isinstance(evidence.get("id"), str)
             and evidence["id"]
         }
+        legacy_evidence = finding.get("code_evidence")
+        if isinstance(legacy_evidence, list):
+            finding["code_evidence"] = [
+                evidence
+                for evidence in legacy_evidence
+                if not (
+                    isinstance(evidence, dict)
+                    and isinstance(evidence.get("id"), str)
+                    and evidence["id"] in canonical_evidence_ids
+                )
+            ]
+        evidence_ids = canonical_evidence_ids | {
+            evidence["id"]
+            for evidence in finding.get("code_evidence", [])
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("id"), str)
+            and evidence["id"]
+        }
         for section_name, list_fields in (
-            ("rootCause", ("evidenceRefs",)),
+            ("rootCause", ("evidenceRefs", "evidence_refs")),
             (
                 "validation",
                 (
@@ -1532,6 +1561,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             for field in list_fields:
                 if isinstance(section.get(field), str):
                     section[field] = [section[field]]
+            _filter_unknown_legacy_evidence_refs(section, evidence_ids)
         attack_path = finding.get("attackPath")
         if not isinstance(attack_path, dict):
             continue
@@ -1542,18 +1572,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             for list_field in ("evidenceRefs", "evidence_refs", "transformations"):
                 if isinstance(detail.get(list_field), str):
                     detail[list_field] = [detail[list_field]]
-            for refs_field in ("evidenceRefs", "evidence_refs"):
-                refs = detail.get(refs_field)
-                if isinstance(refs, list):
-                    detail[refs_field] = [
-                        ref
-                        for ref in refs
-                        if not (
-                            isinstance(ref, str)
-                            and ref
-                            and ref not in evidence_ids
-                        )
-                    ]
+            _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
             if field == "reachability" and isinstance(detail.get("preconditions"), str):
                 detail["preconditions"] = [detail["preconditions"]]
     return compatible
