@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 
 const DESTINATION_OPTIONS = [
   "--to",
@@ -79,10 +79,74 @@ describe("publish scan", () => {
         teamId: "team-from-flags",
         projectId: "project-from-flags",
         dryRun: false,
+        signal: expect.any(AbortSignal),
       },
     });
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
     expect(stderr.text()).toBe("");
+  });
+
+  test("waits for interrupted publication recovery before honoring either terminal signal", async () => {
+    for (const [signal, expectedCode, expectedMessage] of [
+      ["SIGINT", 130, "Publication canceled by Ctrl-C."],
+      ["SIGTERM", 143, "Publication terminated by SIGTERM."],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture();
+      const signals = new FakeSignals();
+      const events: string[] = [];
+      let enteredPublication!: () => void;
+      const publicationStarted = new Promise<void>((resolve) => {
+        enteredPublication = resolve;
+      });
+      let finishRecovery!: () => void;
+      const recoveryFinished = new Promise<void>((resolve) => {
+        finishRecovery = resolve;
+      });
+      const deps = dependencies({ signals });
+      deps.forceExit = (forced) => events.push(`forced ${forced}`);
+      deps.publishScan = async (_scanDirectory, options) => {
+        expect(options.signal).toBeInstanceOf(AbortSignal);
+        options.signal?.addEventListener("abort", () => {
+          events.push(`aborted ${String(options.signal?.reason)}`);
+        });
+        signals.emit(signal);
+        expect(events).toEqual([`aborted ${signal}`]);
+        enteredPublication();
+        await recoveryFinished;
+        events.push("recovered created issues");
+        throw new Error(
+          "The publication handoff remains at /tmp/synthetic-handoff; recover it before retrying to avoid creating duplicate issues.",
+        );
+      };
+
+      let finished = false;
+      const publishing = main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ).then((status) => {
+        finished = true;
+        return status;
+      });
+      await publicationStarted;
+      expect(finished).toBe(false);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(1);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(1);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe("");
+      finishRecovery();
+
+      expect(await publishing).toBe(expectedCode);
+
+      expect(events).toEqual([`aborted ${signal}`, "recovered created issues"]);
+      expect(stderr.text()).toContain(expectedMessage);
+      expect(stderr.text()).toContain("recover it before retrying");
+      expect(stdout.text()).toBe("");
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    }
   });
 
   test("interactively selects a completed scan across all repositories", async () => {
@@ -360,7 +424,8 @@ describe("publish scan", () => {
     const stdout = capture();
     const stderr = capture();
     let dryRun: boolean | undefined;
-    const deps = dependencies();
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
     deps.publishScan = async (_scanDirectory, options) => {
       dryRun = options.dryRun;
       return { ...publicationResult(), dryRun: true, issues: [] };
@@ -389,6 +454,7 @@ describe("publish scan", () => {
       issues: [],
     });
     expect(stderr.text()).toBe("");
+    expect(signals.listeners.size).toBe(0);
   });
 
   test("returns a nonzero exit code while preserving partial publication results", async () => {

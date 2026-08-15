@@ -1209,6 +1209,10 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, options }) {
+      const controller = new AbortController();
+      const onInterrupt = (): void => controller.abort("SIGINT");
+      const onTerminate = (): void => controller.abort("SIGTERM");
+      let observingSignals = false;
       try {
         const teamId =
           options.linearTeam?.trim() ||
@@ -1310,6 +1314,11 @@ export async function main(
           );
         }
 
+        if (!options.dryRun) {
+          dependencies.addSignalListener("SIGINT", onInterrupt);
+          dependencies.addSignalListener("SIGTERM", onTerminate);
+          observingSignals = true;
+        }
         const result = await (dependencies.publishScan ?? publishScan)(
           resolve(dependencies.currentDirectory(), scanDir),
           {
@@ -1317,14 +1326,35 @@ export async function main(
             teamId,
             projectId,
             dryRun: options.dryRun,
+            ...(options.dryRun ? {} : { signal: controller.signal }),
           },
         );
+        controller.signal.throwIfAborted();
         if (result.failed.length > 0) exitCode = 2;
         return { ...result };
       } catch (error) {
-        errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-        exitCode = 2;
+        const signal = controller.signal.reason;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          const reason =
+            signal === "SIGINT"
+              ? "Publication canceled by Ctrl-C."
+              : "Publication terminated by SIGTERM.";
+          const recovery =
+            error === signal
+              ? ""
+              : ` ${diagnosticValue(safeErrorMessage(error))}`;
+          errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+          exitCode = signal === "SIGINT" ? 130 : 143;
+        } else {
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          exitCode = 2;
+        }
         return undefined;
+      } finally {
+        if (observingSignals) {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
       }
     },
   });

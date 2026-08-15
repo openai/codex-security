@@ -28,7 +28,7 @@ import {
   type PublishScanResult,
 } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const SCAN_ID = "11111111-1111-4111-8111-111111111111";
@@ -516,6 +516,119 @@ describe("database-backed Linear publication integration", () => {
     expect(JSON.parse(await readFile(receiptPath(completed), "utf8"))).toEqual(
       result,
     );
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
+  test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
+    const completed = await fixture(3);
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const stdout = capture();
+    const stderr = capture();
+    const signals = new FakeSignals();
+    const cli = dependencies({ environment: completed.environment, signals });
+    let handoffFile = "";
+
+    cli.publishScan = async (directory, options) =>
+      await publishScanInternal(directory, options, {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async (
+          _command,
+          _args,
+          prompt,
+          _environment,
+          _onEvent,
+          signal,
+        ) => {
+          const payload = await publicationPayload(prompt);
+          const recorded = payload.batches[0]![0]!;
+          const salvaged = payload.batches[0]![1]!;
+          handoffFile = payload.handoffFile;
+          await appendFile(
+            handoffFile,
+            `${JSON.stringify({
+              scanId: payload.scanId,
+              findingId: recorded.findingId,
+              occurrenceId: recorded.occurrenceId,
+              arguments: recorded.arguments,
+              issueIdentifier: "SEC-701",
+              url: "https://linear.app/example/issue/SEC-701",
+            })}\n`,
+          );
+
+          signals.emit("SIGINT");
+          expect(signal?.aborted).toBe(true);
+          expect(signal?.reason).toBe("SIGINT");
+
+          return {
+            exitCode: 1,
+            stdout: JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "tool-salvaged-publication",
+                type: "mcp_tool_call",
+                server: "codex_apps",
+                tool: "linear.save_issue",
+                arguments: salvaged.arguments,
+                status: "completed",
+                result: {
+                  content: [],
+                  structured_content: {
+                    identifier: "SEC-702",
+                    url: "https://linear.app/example/issue/SEC-702",
+                  },
+                },
+              },
+            }),
+            stderr: "Publication interrupted.",
+          };
+        },
+      });
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--project",
+          OPTIONS.projectId,
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      ),
+    ).toBe(130);
+
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Publication canceled by Ctrl-C.");
+    expect(stderr.text()).toContain(handoffFile);
+    expect(stderr.text()).toContain("avoid creating duplicate issues");
+    expect(
+      storedPublications(completed).map(({ external_id }) => external_id),
+    ).toEqual(["SEC-701", "SEC-702"]);
+
+    const receipt = JSON.parse(
+      await readFile(receiptPath(completed), "utf8"),
+    ) as PublishScanResult;
+    expect(receipt.counts).toEqual({ findings: 3, created: 2, failed: 1 });
+    expect(
+      receipt.created.map(({ issueIdentifier }) => issueIdentifier),
+    ).toEqual(["SEC-701", "SEC-702"]);
+    expect(
+      (await readFile(handoffFile, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { issueIdentifier: string })
+        .map(({ issueIdentifier }) => issueIdentifier),
+    ).toEqual(["SEC-701", "SEC-702"]);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
   });
 });
