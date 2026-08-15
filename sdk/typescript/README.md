@@ -551,8 +551,7 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
 ```
 
 To choose from all completed scans saved in your local scan history, omit the
-scan directory. The selector highlights each repository and shows its finding
-count, relative run time, and abbreviated scan ID:
+scan directory:
 
 ```bash
 npx @openai/codex-security publish scan \
@@ -564,9 +563,6 @@ npx @openai/codex-security publish scan \
 Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and
 `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue titles
 without creating them, or `--json` to return structured publication results.
-Interactive publication shows a full-screen activity view with live Codex
-output and issue-creation progress. Other terminals receive plain progress on
-stderr, so `--json` output remains machine-readable.
 
 Publishing starts Codex with your existing Codex configuration and connected
 Linear app. Sign in to Codex and connect Linear before publishing. The command
@@ -598,13 +594,6 @@ const publication = await publishScan("/path/to/completed-scan", {
   destination: "linear",
   teamId: "TEAM_ID",
   projectId: "PROJECT_ID",
-  onProgress: (progress) => {
-    if (progress.type === "issue_completed") {
-      console.error(
-        `Processed ${progress.completed} of ${progress.total} findings.`,
-      );
-    }
-  },
 });
 
 console.log(publication.scanId);

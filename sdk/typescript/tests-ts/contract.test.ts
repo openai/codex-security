@@ -1,22 +1,18 @@
 import { createHash } from "node:crypto";
-import type { Stats } from "node:fs";
 import {
   chmod,
   cp,
-  lstat,
   mkdir,
   mkdtemp,
   readFile,
   rm,
   symlink,
-  type FileHandle,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { ContractValidationError, loadContract } from "../src/index.js";
-import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -105,60 +101,6 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
-  test("compares exact Windows volume serials without rounding file identity", async () => {
-    const scanDir = await copyExample();
-    const path = join(scanDir, "scan-manifest.json");
-    const metadata = await lstat(path);
-    const identity = await lstat(path, { bigint: true });
-    const volume = BigInt.asUintN(32, identity.dev);
-    const highDevice = (1n << 60n) | volume;
-    expect(highDevice).toBeGreaterThan(BigInt(Number.MAX_SAFE_INTEGER));
-
-    let device = highDevice;
-    let inode = identity.ino;
-    let regular = true;
-    let inspected = 0;
-    const file = {
-      stat: async () => {
-        inspected += 1;
-        return {
-          dev: device,
-          ino: inode,
-          isFile: () => regular,
-        };
-      },
-    } as unknown as FileHandle;
-    const checked = { path, metadata, parents: [] };
-    const opened = { dev: Number(highDevice) } as Stats;
-
-    await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
-    ).resolves.toBe(true);
-
-    device = highDevice ^ 1n;
-    await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
-    ).resolves.toBe(false);
-
-    device = highDevice;
-    inode = identity.ino + 1n;
-    await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
-    ).resolves.toBe(false);
-
-    inode = identity.ino;
-    regular = false;
-    await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
-    ).resolves.toBe(false);
-
-    const windowsInspections = inspected;
-    await expect(
-      sameCheckedFileDevice(file, checked, opened, "linux"),
-    ).resolves.toBe(false);
-    expect(inspected).toBe(windowsInspections);
-  });
-
   test("loads the unchanged plugin example with typed canonical names", async () => {
     const scanDir = await copyExample();
     const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
