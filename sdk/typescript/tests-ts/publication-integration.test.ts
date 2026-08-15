@@ -58,7 +58,8 @@ interface PublicationPrompt {
   scanId: string;
   destination: { type: "linear"; teamId: string; projectId: string };
   handoffFile: string;
-  batches: PromptFinding[][];
+  publicationFile: string;
+  batches: Array<Array<Omit<PromptFinding, "arguments">>>;
 }
 
 interface StoredPublication {
@@ -216,11 +217,19 @@ async function fixture(count: number): Promise<PublicationFixture> {
   };
 }
 
-function publicationPrompt(value: string): PublicationPrompt {
+async function publicationPayload(
+  value: string,
+): Promise<
+  Omit<PublicationPrompt, "batches"> & { batches: PromptFinding[][] }
+> {
   const json = value
     .split("BEGIN UNTRUSTED PUBLICATION DATA\n")[1]!
     .split("\nEND UNTRUSTED PUBLICATION DATA")[0]!;
-  return JSON.parse(json) as PublicationPrompt;
+  const prompt = JSON.parse(json) as PublicationPrompt;
+  const publication = JSON.parse(
+    await readFile(prompt.publicationFile, "utf8"),
+  ) as { batches: PromptFinding[][] };
+  return { ...prompt, batches: publication.batches };
 }
 
 async function artifactDigests(
@@ -293,7 +302,7 @@ describe("database-backed Linear publication integration", () => {
           environment: completed.environment,
           resolveCodex: () => ({ command: "synthetic-codex" }),
           runCodex: async (_command, args, prompt, _environment, onEvent) => {
-            const payload = publicationPrompt(prompt);
+            const payload = await publicationPayload(prompt);
             handoffFile = payload.handoffFile;
             expect(args[args.indexOf("--sandbox") + 1]).toBe("workspace-write");
             expect(args[args.indexOf("--cd") + 1]).toBe(dirname(handoffFile));
@@ -444,7 +453,7 @@ describe("database-backed Linear publication integration", () => {
         environment: completed.environment,
         resolveCodex: () => ({ command: "synthetic-codex" }),
         runCodex: async (_command, _args, prompt) => {
-          const payload = publicationPrompt(prompt);
+          const payload = await publicationPayload(prompt);
           expect(payload.batches.map((batch) => batch.length)).toEqual([20, 2]);
           for (const [batchIndex, batch] of payload.batches.entries()) {
             const records = batch.map((finding, index) => ({
