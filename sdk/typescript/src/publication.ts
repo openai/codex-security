@@ -89,7 +89,6 @@ function renderFindingDescription(
     "## Codex Security finding",
     "",
     `**Scan ID:** ${scan.id}`,
-    `**Upload ID:** ${scan.id}`,
     `**Finding ID:** ${finding.findingId}`,
     `**Occurrence ID:** ${finding.occurrenceId}`,
     `**Fingerprint:** ${finding.fingerprints.primary}`,

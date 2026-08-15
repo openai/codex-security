@@ -39,7 +39,8 @@ export function collectPublicationEvents(
       !isRecord(item) ||
       item["type"] !== "mcp_tool_call" ||
       item["server"] !== "codex_apps" ||
-      item["tool"] !== "linear_save_issue"
+      (item["tool"] !== "linear.save_issue" &&
+        item["tool"] !== "linear_save_issue")
     ) {
       continue;
     }
@@ -171,7 +172,8 @@ function savedIssue(
       isRecord(data) ? data["issue"] : undefined,
     ]) {
       if (!isRecord(value)) continue;
-      const identifier = value["identifier"] ?? value["issueIdentifier"];
+      const identifier =
+        value["identifier"] ?? value["issueIdentifier"] ?? value["id"];
       if (typeof identifier !== "string" || identifier.trim().length === 0) {
         continue;
       }

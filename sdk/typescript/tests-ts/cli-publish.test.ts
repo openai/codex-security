@@ -87,6 +87,57 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("reports every created Linear issue with a successful exit code", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const result = publicationResult();
+    result.created.push({
+      findingId: "finding-2",
+      occurrenceId: "occurrence-2",
+      issueIdentifier: "SEC-124",
+      url: "https://linear.app/example/issue/SEC-124",
+    });
+    result.counts.findings = result.created.length;
+    result.counts.created = result.created.length;
+    const deps = dependencies();
+    deps.publishScan = async (_scanDirectory, options) => {
+      options.onProgress?.({
+        type: "started",
+        scanId: result.scanId,
+        total: result.created.length,
+      });
+      for (const [index, issue] of result.created.entries()) {
+        options.onProgress?.({
+          type: "issue_completed",
+          findingId: issue.findingId,
+          issueIdentifier: issue.issueIdentifier,
+          completed: index + 1,
+          total: result.created.length,
+        });
+      }
+      options.onProgress?.({
+        type: "completed",
+        created: result.created.length,
+        failed: 0,
+        total: result.created.length,
+      });
+      return result;
+    };
+
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toContain("[1/2] Created SEC-123\n");
+    expect(stderr.text()).toContain("[2/2] Created SEC-124\n");
+    expect(stderr.text()).toContain("Published 2/2 findings.\n");
+  });
+
   test("interactively selects a completed scan across all repositories", async () => {
     const firstDirectory = join(tmpdir(), "first-completed-scan");
     const selectedDirectory = join(tmpdir(), "selected-completed-scan");
