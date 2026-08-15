@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -344,7 +346,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan.");`,
     ],
     { cwd: consumer },
   );
@@ -398,6 +400,48 @@ try {
 
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
+  assert.match(help, /\bpublish\b/u);
+
+  const publicationScan = join(consumer, "publication-scan");
+  await cp(
+    join(installedRoot, "_bundled_plugin", "examples", "completed-scan"),
+    publicationScan,
+    { recursive: true },
+  );
+  if (process.platform !== "win32") await chmod(publicationScan, 0o700);
+  const publication = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "publish",
+        "scan",
+        publicationScan,
+        "--to",
+        "linear",
+        "--linear-team",
+        "team-example",
+        "--project",
+        "project-example",
+        "--dry-run",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(publication.scanId, "scan_example_001");
+  assert.equal(publication.uploadId, publication.scanId);
+  assert.equal(publication.dryRun, true);
+  assert.equal(publication.counts.findings, 1);
+  assert.equal(publication.counts.created, 0);
+  assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
 
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 

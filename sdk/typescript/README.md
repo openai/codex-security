@@ -234,6 +234,8 @@ npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The r
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID --project PROJECT_ID
+npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID --project PROJECT_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
@@ -535,6 +537,64 @@ and scans stopped at their configured cost limit do not start another turn.
 `4`. `--max-attempts` sets how many times each pending repository can run per
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
+
+### Publish completed scans to Linear
+
+Publish every finding from a completed standard, deep, or scoped scan to one
+Linear team and project:
+
+```bash
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID \
+  --project PROJECT_ID
+```
+
+To choose from all completed scans saved in your local scan history, omit the
+scan directory:
+
+```bash
+npx @openai/codex-security publish scan \
+  --to linear \
+  --linear-team TEAM_ID \
+  --project PROJECT_ID
+```
+
+Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and
+`CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue titles
+without creating them, or `--json` to return structured publication results.
+
+Publishing starts Codex with your existing Codex configuration and connected
+Linear app. Sign in to Codex and connect Linear before publishing. The command
+does not require a Linear API token and does not use the isolated Codex home
+created for security scans.
+
+Each finding creates a separate new issue titled
+`[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
+repository, scanned scope, source locations and code snippets, severity,
+confidence, vulnerability classification, summary, and remediation guidance.
+Verified immutable Git revisions include source links. Running publication
+again creates another set of issues for the same scan; existing issues are not
+matched, updated, or reused.
+
+Issue descriptions contain source code and vulnerability details. Select a
+Linear destination authorized to receive that information. Publication receipts
+are stored separately from the sealed scan artifacts.
+
+You can also publish a scan from TypeScript:
+
+```ts
+import { publishScan } from "@openai/codex-security";
+
+const publication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  projectId: "PROJECT_ID",
+});
+
+console.log(publication.scanId);
+console.log(publication.created.length);
+```
 
 ### Scan history and reruns
 
