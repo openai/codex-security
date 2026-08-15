@@ -173,6 +173,8 @@ const distFiles = new Set(
     "models",
     "multiscan",
     "publication",
+    "publication-events",
+    "publish",
     "result",
     "runtime",
     "scan-activity",
