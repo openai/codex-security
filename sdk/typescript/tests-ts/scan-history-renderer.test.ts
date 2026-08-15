@@ -181,7 +181,7 @@ describe("scan history renderer", () => {
         mode: "standard",
         progress: { status: "complete" },
         findingCount: 8,
-        startedAt: "2026-07-24T12:00:00Z",
+        startedAt: "2026-07-23T12:00:00Z",
       },
       {
         scanId: "22222222-2222-4222-8222-222222222222",
@@ -189,7 +189,7 @@ describe("scan history renderer", () => {
         mode: "deep",
         progress: { status: "complete" },
         findingCount: 2,
-        startedAt: "2026-07-23T12:00:00Z",
+        startedAt: "2026-07-24T12:00:00Z",
       },
     ];
 
@@ -205,8 +205,38 @@ describe("scan history renderer", () => {
       expect(output).toContain("payment-service");
       expect(output).toContain(scans[0]!.scanId);
       expect(output).toContain(scans[1]!.scanId);
+      expect(output).toContain("latest: 8 findings");
+      expect(output).toContain("scans show 11111111");
       if (columns >= 96) expect(output).toContain("REPOSITORY");
     }
+  });
+
+  test("keeps finding links repository-scoped from checkout subdirectories", () => {
+    const scan = {
+      scanId: "11111111-1111-4111-8111-111111111111",
+      targetPath: "/demo/repository",
+      mode: "standard",
+      progress: { status: "complete" },
+      findingCount: 2,
+      startedAt: "2026-07-23T12:00:00Z",
+    };
+
+    const current = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", {
+        currentDirectory: "/demo/repository/src",
+        repository: "/demo/repository/src",
+      }),
+    );
+    expect(current).toContain("codex-security findings list");
+    expect(current).not.toContain("codex-security findings list --scan");
+
+    const other = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", {
+        currentDirectory: "/demo/another-repository",
+        repository: "/demo/repository",
+      }),
+    );
+    expect(other).toContain("codex-security findings list --scan 11111111");
   });
 
   test("shows bounded findings, saved configuration, and failure reasons", () => {
@@ -315,5 +345,149 @@ describe("scan history renderer", () => {
     ]) {
       expect(output).toContain(expected);
     }
+  });
+
+  test("renders saved findings with identifiers and pagination", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+          findings: [
+            {
+              occurrenceId: "saved-occurrence",
+              severity: { level: "high" },
+              title: "Missing authorization",
+              locations: [{ path: "routes/login.ts", startLine: 34 }],
+              triage: { status: "open" },
+            },
+          ],
+          offset: 20,
+          nextOffset: 21,
+          total: 25,
+        },
+        "findings",
+      ),
+    );
+
+    for (const expected of [
+      "SAVED FINDINGS",
+      "21-21 of 25",
+      "routes/login.ts:34",
+      "ID saved-occurrence",
+      "--offset 21",
+      "findings show OCCURRENCE_ID",
+    ]) {
+      expect(output).toContain(expected);
+    }
+  });
+
+  test("renders stored finding details and authoritative triage", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          occurrenceId: "saved-occurrence",
+          scanId: "31107fbe-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          severity: { level: "high" },
+          title: "Missing authorization",
+          summary: "Customer records are accessible without a session.",
+          locations: [{ path: "routes/login.ts", startLine: 34 }],
+          remediation: "Require an authenticated session.",
+          status: "closed",
+          triage: { status: "open" },
+        },
+        "finding",
+      ),
+    );
+
+    for (const expected of [
+      "FINDING DETAILS",
+      "juice-shop",
+      "OPEN",
+      "Customer records are accessible without a session.",
+      "Require an authenticated session.",
+      "findings false-positive saved-occurrence",
+    ]) {
+      expect(output).toContain(expected);
+    }
+    expect(output).not.toContain("CLOSED");
+  });
+
+  test("renders repeated finding history without a semantic match", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          occurrenceId: "saved-occurrence",
+          scanId: "latest-scan",
+          targetPath: "/demo/repository",
+          severity: { level: "high" },
+          title: "Missing authorization",
+          locations: [{ path: "routes/login.ts", startLine: 34 }],
+          knownSince: "2026-01-01T00:00:00Z",
+          knownScanIds: ["earlier-scan", "latest-scan"],
+          occurrenceCount: 2,
+          triage: { status: "open" },
+        },
+        "finding",
+      ),
+    );
+
+    expect(output).toContain("Known since");
+    expect(output).toContain("2 scans");
+    expect(output).not.toContain("LINKED FINDINGS");
+  });
+
+  test.each([
+    [["latest-scan"], "1 scan"],
+    [undefined, "2 occurrences"],
+  ] as const)(
+    "reports the distinct scan count for repeated finding occurrences",
+    (knownScanIds, expected) => {
+      const output = stripVTControlCharacters(
+        renderScanHistory(
+          {
+            occurrenceId: "saved-occurrence",
+            scanId: "latest-scan",
+            targetPath: "/demo/repository",
+            severity: { level: "high" },
+            title: "Missing authorization",
+            locations: [{ path: "routes/login.ts", startLine: 34 }],
+            ...(knownScanIds ? { knownScanIds: [...knownScanIds] } : {}),
+            occurrenceCount: 2,
+            triage: { status: "open" },
+          },
+          "finding",
+        ),
+      );
+
+      expect(output).toContain(expected);
+      expect(output).not.toContain("2 scans");
+    },
+  );
+
+  test.each([
+    ["already_fixed", "FIXED", "Fixed"],
+    ["false_positive", "FALSE POSITIVE", "False Positive"],
+    ["wont_fix", "IGNORED", "Ignored"],
+  ])("uses clear finding-status labels for %s", (reason, status, label) => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          occurrenceId: "saved-occurrence",
+          scanId: "saved-scan",
+          targetPath: "/demo/repository",
+          severity: { level: "high" },
+          title: "Missing authorization",
+          locations: [{ path: "routes/login.ts", startLine: 34 }],
+          triage: { closeReason: reason, status: "closed" },
+        },
+        "finding",
+      ),
+    );
+
+    expect(output).toContain(status);
+    expect(output).toContain(`Reason: ${label}`);
+    expect(output).not.toContain(reason);
+    expect(output).not.toContain("CLOSED");
   });
 });

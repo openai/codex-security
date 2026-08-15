@@ -40,7 +40,6 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   createSecurityInternal,
-  listRepositoryFindings,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -209,6 +208,12 @@ const VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
   "--scan-root",
+  "--scan",
+  "--query",
+  "--severity",
+  "--status",
+  "--offset",
+  "--limit",
   "--reason",
 ]);
 const PROVIDER_OPTION = z
@@ -859,6 +864,7 @@ export async function main(
         dependencies.environment["NO_COLOR"] === undefined &&
         dependencies.environment["TERM"] !== "dumb",
       now: dependencies.now(),
+      currentDirectory: dependencies.currentDirectory(),
       repository: settings.repository,
       scanRoot: settings.scanRoot,
       showLinkedFindings: settings.showLinkedFindings,
@@ -866,86 +872,248 @@ export async function main(
     return result;
   };
   const findingFeedback = Cli.create("findings", {
-    description: "Review and manage saved Codex Security findings.",
-  }).command("false-positive", {
-    description: "Mark a finding as a false positive for future scans.",
-    destructive: true,
-    mcp: false,
-    args: z.object({
-      occurrenceId: z
-        .string()
-        .trim()
-        .min(1)
-        .max(256)
-        .describe("Finding occurrence identifier."),
-    }),
-    options: z.object({
-      reason: z
-        .string()
-        .trim()
-        .min(1, "--reason must not be empty.")
-        .max(2_400, "--reason must not exceed 2400 characters.")
-        .describe("Explanation for why the finding is a false positive."),
-    }),
-    output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args, options }) {
-      return await history([
-        "set-finding-triage",
-        "--occurrence-id",
-        args.occurrenceId,
-        "--status",
-        "closed",
-        "--close-reason",
-        "false_positive",
-        "--note",
-        options.reason,
-      ]);
-    },
-  });
-  findingFeedback.command("list", {
-    description: "List open findings for a repository across its scans.",
-    mcp: false,
-    args: z.object({
-      repository: z
-        .string()
-        .optional()
-        .describe("Repository to inspect (default: current directory)."),
-    }),
-    output: z.record(z.string(), z.unknown()).optional(),
-    async run({ args, format }) {
-      const repository = resolve(
-        dependencies.currentDirectory(),
-        args.repository ?? ".",
-      );
-      return presentHistory(
-        await history(
-          ["list-repositories"],
-          async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
-              (entry) => entry["targetPath"] === repository,
-            );
-            const findings =
-              target === undefined
-                ? []
-                : await listRepositoryFindings(
-                    dependencies.runWorkbench,
-                    target["targetId"] as string,
-                  );
-            return { repository, findings: findings ?? [] };
-          },
-        ),
-        "findings",
-        format,
-        { repository },
-      );
-    },
-  });
-  const scanHistory = Cli.create("scans", {
-    description:
-      "List, inspect, rerun, match, and compare saved Codex Security scans.",
+    description: "Browse, inspect, and manage security findings across scans.",
   })
     .command("list", {
-      description: "List saved scans for a repository or scan root.",
+      description:
+        "List repository vulnerabilities or findings from one previous scan.",
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe("Repository to inspect (default: current directory)."),
+      }),
+      options: z
+        .object({
+          scan: optionValue("--scan")
+            .optional()
+            .describe("List every finding from a saved scan ID or prefix."),
+          allRepositories: z
+            .boolean()
+            .default(false)
+            .describe("Include findings from every saved repository."),
+          query: optionValue("--query")
+            .optional()
+            .describe("Search finding titles, summaries, or source paths."),
+          severity: z
+            .enum(DISPLAY_SEVERITIES)
+            .optional()
+            .describe("Include only findings with this severity."),
+          status: z
+            .enum(["open", "closed"])
+            .optional()
+            .describe("Include only findings with this triage status."),
+          offset: z
+            .number()
+            .int()
+            .nonnegative()
+            .default(0)
+            .describe("Skip this many findings when requesting another page."),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(20)
+            .default(20)
+            .describe("Maximum findings per page (1-20; default: 20)."),
+        })
+        .refine((options) => !(options.scan && options.allRepositories), {
+          message: "--scan cannot be combined with --all-repositories.",
+        }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, format, options }) {
+        if (
+          args.repository !== undefined &&
+          (options.scan !== undefined || options.allRepositories)
+        ) {
+          const conflictingOption =
+            options.scan === undefined ? "--all-repositories" : "--scan";
+          errorOutput.write(
+            `codex-security: ${conflictingOption} cannot be combined with a repository argument.\n`,
+          );
+          exitCode = 2;
+          return undefined;
+        }
+        const repository = options.allRepositories
+          ? undefined
+          : resolve(
+              dependencies.currentDirectory(),
+              args.repository ?? dependencies.currentDirectory(),
+            );
+        if (
+          repository !== undefined &&
+          format === "toon" &&
+          output.isTTY === true &&
+          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument)) &&
+          options.scan === undefined &&
+          !options.allRepositories &&
+          options.query === undefined &&
+          options.severity === undefined &&
+          options.status === undefined &&
+          !argv.some((argument) => /^--(?:offset|limit)(?:=|$)/u.test(argument))
+        ) {
+          const scopedArguments = [
+            "list-global-findings",
+            "--repository",
+            repository,
+            "--status",
+            "open",
+          ];
+          return presentHistory(
+            await history(
+              scopedArguments,
+              async (first): Promise<JsonObject> => {
+                const findings: JsonObject[] = [];
+                let page = first;
+                while (Array.isArray(page["findings"])) {
+                  findings.push(...(page["findings"] as JsonObject[]));
+                  if (typeof page["nextOffset"] !== "number") break;
+                  page = await dependencies.runWorkbench([
+                    ...scopedArguments,
+                    "--offset",
+                    String(page["nextOffset"]),
+                  ]);
+                }
+                return { repository, findings };
+              },
+            ),
+            "findings",
+            format,
+            { repository },
+          );
+        }
+        const filters = [
+          ...(options.query === undefined ? [] : ["--query", options.query]),
+          ...(options.severity === undefined
+            ? []
+            : ["--severity", options.severity]),
+          ...(options.status === undefined
+            ? options.scan === undefined
+              ? ["--status", "open"]
+              : []
+            : ["--status", options.status]),
+          "--offset",
+          String(options.offset),
+          "--limit",
+          String(options.limit),
+        ];
+        if (options.scan !== undefined) {
+          return presentHistory(
+            await history(
+              ["list-findings", "--scan-id", options.scan, ...filters],
+              ({ findingsPage }) => findingsPage as JsonObject,
+            ),
+            "findings",
+            format,
+          );
+        }
+
+        return presentHistory(
+          await history([
+            "list-global-findings",
+            ...(repository === undefined ? [] : ["--repository", repository]),
+            ...filters,
+          ]),
+          "findings",
+          format,
+          { repository },
+        );
+      },
+    })
+    .command("show", {
+      description:
+        "Show finding details, its occurrence ID, and its scan history.",
+      mcp: false,
+      args: z.object({
+        occurrenceId: z
+          .string()
+          .trim()
+          .min(1)
+          .max(256)
+          .describe("Finding occurrence ID from findings list."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, format }) {
+        return presentHistory(
+          await history(
+            ["get-finding", "--occurrence-id", args.occurrenceId],
+            ({ scan }) => {
+              const result = scan as JsonObject;
+              const scanDir = result["scanDir"];
+              const scanId = result["scanId"];
+              const targetPath = result["targetPath"];
+              const currentTargetPath = result["currentTargetPath"];
+              const finding = (result["findings"] as JsonObject[]).find(
+                (entry) => entry["occurrenceId"] === args.occurrenceId,
+              );
+              if (
+                finding === undefined ||
+                typeof scanId !== "string" ||
+                typeof targetPath !== "string"
+              ) {
+                throw new CodexSecurityError(
+                  "The selected finding was not returned by the workbench.",
+                );
+              }
+              return {
+                ...finding,
+                ...(typeof scanDir === "string" ? { scanDir } : {}),
+                scanId,
+                targetPath,
+                ...(typeof currentTargetPath === "string"
+                  ? { currentTargetPath }
+                  : {}),
+              };
+            },
+          ),
+          "finding",
+          format,
+          { showLinkedFindings: true },
+        );
+      },
+    })
+    .command("false-positive", {
+      description: "Mark a finding as a false positive for future scans.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        occurrenceId: z
+          .string()
+          .trim()
+          .min(1)
+          .max(256)
+          .describe("Finding occurrence ID from findings list."),
+      }),
+      options: z.object({
+        reason: z
+          .string()
+          .trim()
+          .min(1, "--reason must not be empty.")
+          .max(2_400, "--reason must not exceed 2400 characters.")
+          .describe("Explanation for why the finding is a false positive."),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        return await history([
+          "set-finding-triage",
+          "--occurrence-id",
+          args.occurrenceId,
+          "--status",
+          "closed",
+          "--close-reason",
+          "false_positive",
+          "--note",
+          options.reason,
+        ]);
+      },
+    });
+  const scanHistory = Cli.create("scans", {
+    description:
+      "Browse previous scans, inspect findings, and compare changes over time.",
+  })
+    .command("list", {
+      description: "List previous scans for a repository or scan root.",
       mcp: false,
       args: z.object({
         repository: z
@@ -987,24 +1155,52 @@ export async function main(
       },
     })
     .command("show", {
-      description: "Show the results and saved configuration for a scan.",
+      description:
+        "Show findings and configuration for a saved or latest scan.",
       mcp: false,
       args: z.object({
         scanId: z
           .string()
           .min(1)
-          .describe("Saved scan identifier or unique prefix."),
+          .optional()
+          .describe(
+            "Saved scan ID or prefix (default: latest completed scan).",
+          ),
       }),
       options: z.object({
         showLinkedFindings: z
           .boolean()
           .default(false)
-          .describe("Show findings linked across previous scans."),
+          .describe(
+            "Show saved links; run scans compare or scans match --all first.",
+          ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
+        let scanId = args.scanId;
+        if (scanId === undefined || scanId === "latest") {
+          const repository = dependencies.currentDirectory();
+          const latest = await history(
+            ["list-scans", "--repository", repository],
+            ({ scans }) => {
+              const scan = (scans as JsonObject[]).find(
+                (entry) =>
+                  (entry["progress"] as JsonObject | undefined)?.["status"] ===
+                  "complete",
+              );
+              if (typeof scan?.["scanId"] !== "string") {
+                throw new CodexSecurityError(
+                  `No completed scans found for ${repository}. Run 'codex-security scan .' first.`,
+                );
+              }
+              return { scanId: scan["scanId"] };
+            },
+          );
+          if (latest === undefined) return undefined;
+          scanId = latest["scanId"] as string;
+        }
         return presentHistory(
-          await history(["get-scan", "--scan-id", args.scanId], (value) => {
+          await history(["get-scan", "--scan-id", scanId], (value) => {
             const { scan, recipe, parentScanId } = value;
             return {
               ...(scan as JsonObject),
@@ -1110,7 +1306,7 @@ export async function main(
       },
     })
     .command("match", {
-      description: "Match findings by root cause across saved scans.",
+      description: "Use Codex to create and save cross-scan finding links.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -1129,7 +1325,9 @@ export async function main(
         all: z
           .boolean()
           .default(false)
-          .describe("Match all completed scans of the current repository."),
+          .describe(
+            "Use Codex to link all completed scans of this repository.",
+          ),
         force: z
           .boolean()
           .default(false)
@@ -1158,7 +1356,8 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings and coverage between scans.",
+      description:
+        "Show new, persisting, reopened, resolved, or unknown findings; matching uses Codex.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -1175,7 +1374,8 @@ export async function main(
       },
     });
   const cli = Cli.create("codex-security", {
-    description: "Run, validate, patch, and export Codex Security findings.",
+    description:
+      "Run security scans, review previous findings, validate, patch, and export.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -2008,7 +2208,7 @@ function defaultScansList(argv: readonly string[]): readonly string[] {
   });
   if (
     commandIndex < 0 ||
-    argv[commandIndex] !== "scans" ||
+    !["scans", "findings"].includes(argv[commandIndex]!) ||
     argv.includes("--help") ||
     argv.includes("-h")
   ) {

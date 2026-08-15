@@ -2698,6 +2698,16 @@ describe("CodexSecurity orchestration", () => {
     expect(
       repositoryQueries.every((args) => args.includes("target_sha256_example")),
     ).toBe(true);
+    expect(
+      repositoryQueries
+        .slice(0, 2)
+        .every((args) => args.includes("--include-resolved")),
+    ).toBe(true);
+    expect(
+      repositoryQueries
+        .slice(2)
+        .every((args) => !args.includes("--include-resolved")),
+    ).toBe(true);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
       "--scan-id",
