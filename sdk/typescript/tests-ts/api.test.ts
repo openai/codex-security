@@ -5187,6 +5187,7 @@ describe("CodexSecurity orchestration", () => {
       `Scan target: Git diff from ${revision} to ${revision}.`,
     );
     expect(prompt).toContain("$codex-security:security-diff-scan");
+    expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("complete_codex_security_scan");
     expect(prompt).not.toContain("do not finalize or seal them");
     expect(prompt).toContain(
@@ -5199,6 +5200,7 @@ describe("CodexSecurity orchestration", () => {
       "prompt captured",
     );
     expect(prompt).toContain("$codex-security:deep-security-scan");
+    expect(prompt).not.toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("complete_codex_security_scan");
     expect(prompt).not.toContain("do not finalize or seal them");
     expect(prompt).toContain(
