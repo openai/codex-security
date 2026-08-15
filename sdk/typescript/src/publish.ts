@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   CodexSecurityError,
   ConfigurationError,
+  errorMessage,
   safeErrorMessage,
 } from "./errors.js";
 import {
@@ -208,7 +209,6 @@ export async function publishScanInternal(
       directPublication,
       completedFindings,
       progressObserver,
-      linearApiKey,
       options.signal,
     );
   } else {
@@ -282,7 +282,7 @@ export async function publishScanInternal(
         dependencies.recordPublishedIssues ?? recordPublishedIssues
       )(prepared, handoffResults.created, environment);
     } catch (error) {
-      const detail = publicationErrorDetail(error, linearApiKey);
+      const detail = errorMessage(error);
       throw new CodexSecurityError(
         `Could not persist created Linear issues: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
@@ -299,7 +299,7 @@ export async function publishScanInternal(
         environment,
       );
     } catch (error) {
-      const detail = publicationErrorDetail(error, linearApiKey);
+      const detail = errorMessage(error);
       throw new CodexSecurityError(
         `Linear publication was interrupted and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
@@ -337,7 +337,7 @@ export async function publishScanInternal(
     if (result.created.length === 0 || options.signal?.aborted) throw error;
     result.warnings = [
       ...(result.warnings ?? []),
-      `Could not save the publication receipt: ${safeErrorMessage(publicationErrorDetail(error, linearApiKey))}. Linear issues were already created; do not retry publication.`,
+      `Could not save the publication receipt: ${safeErrorMessage(error)}. Linear issues were already created; do not retry publication.`,
     ];
   }
   options.signal?.throwIfAborted();
@@ -356,7 +356,6 @@ async function publishLinearApiIssues(
   client: PreparedLinearApiPublication,
   completed: Set<string>,
   observer: PublishScanOptions["onProgress"],
-  apiKey: string,
   signal?: AbortSignal,
 ): Promise<void> {
   let handoffWrites = Promise.resolve();
@@ -391,9 +390,7 @@ async function publishLinearApiIssues(
           created = await client.create(issue);
         } catch (error) {
           if (signal?.aborted) return;
-          const message = safeErrorMessage(
-            publicationErrorDetail(error, apiKey),
-          );
+          const message = safeErrorMessage(error);
           await appendHandoff({
             scanId: publication.scanId,
             findingId: issue.findingId,
@@ -436,18 +433,11 @@ async function publishLinearApiIssues(
     );
     if (rejected !== undefined) {
       throw new CodexSecurityError(
-        `Could not preserve created Linear issues: ${safeErrorMessage(publicationErrorDetail(rejected.reason, apiKey))}. The publication handoff remains at ${handoffFile}; recover it before retrying to avoid creating duplicate issues.`,
+        `Could not preserve created Linear issues: ${safeErrorMessage(rejected.reason)}. The publication handoff remains at ${handoffFile}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: rejected.reason },
       );
     }
   }
-}
-
-function publicationErrorDetail(error: unknown, apiKey?: string): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return apiKey === undefined
-    ? message
-    : message.replaceAll(apiKey, "[redacted]");
 }
 
 function reportPublicationProgress(

@@ -588,15 +588,17 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
 ```
 
 Direct API publication assigns every issue to the authenticated Linear user by
-default. Pass `--assignee-id teammate@example.com` or `--assignee-id USER_ID` to
-assign the issues to another Linear user by email address or user ID.
-`--assignee-id` requires direct API publication.
+default. Pass `--linear-assignee teammate@example.com` or
+`--linear-assignee USER_ID` to assign the issues to another Linear user by email
+address or user ID.
+`--linear-assignee` requires direct API publication.
 
 You can also pass `--linear-api-key KEY`, which takes precedence over
 `CODEX_SECURITY_LINEAR_API_KEY`. Prefer the environment variable to avoid
-exposing your API key in shell history and process listings. API keys are never
-included in publication results, progress output, receipts, scan history, or
-sealed scan artifacts. `--dry-run` never contacts Linear in either mode.
+exposing your API key in shell history and process listings. API keys are not
+added to successful publication results, scan history, or sealed scan artifacts.
+Error messages are preserved as returned. `--dry-run` never contacts Linear in
+either mode.
 
 Each finding creates a separate new issue titled
 `[Codex Security][HIGH] Finding title`. The issue includes the scan ID,

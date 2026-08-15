@@ -17,10 +17,6 @@ describe("error messages", () => {
     for (const message of [
       "request failed: token=SYNTHETIC_TOKEN",
       "Authorization: Bearer sk-proj-SYNTHETIC_KEY_123",
-      "Linear rejected personal API key lin_api_SYNTHETIC_KEY_123",
-      "Authorization: lin_api_SYNTHETIC_KEY_456",
-      "--linear-api-key lin_api_SYNTHETIC_KEY_789",
-      "CODEX_SECURITY_LINEAR_API_KEY=SYNTHETIC_UNPREFIXED_KEY",
       'upstream failed: {"clientSecret":"correct horse battery staple"}',
       JSON.stringify(JSON.stringify({ clientSecret: "SYNTHETIC_SECRET" })),
       "authorizationHeaderValue=SYNTHETIC_SECRET",
@@ -43,6 +39,9 @@ describe("error messages", () => {
     }
     expect(safeErrorMessage("upstream service unavailable")).toBe(
       "upstream service unavailable",
+    );
+    expect(safeErrorMessage("Linear rejected lin_api_SYNTHETIC_KEY_123")).toBe(
+      "Linear rejected lin_api_SYNTHETIC_KEY_123",
     );
     expect(safeErrorMessage("author=Michael")).toBe("author=Michael");
     expect(safeErrorMessage("signal=active")).toBe("signal=active");

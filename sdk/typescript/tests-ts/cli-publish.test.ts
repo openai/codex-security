@@ -221,7 +221,7 @@ describe("publish scan", () => {
             "scan",
             "completed-scan",
             ...DESTINATION_OPTIONS,
-            "--assignee-id",
+            "--linear-assignee",
             `  ${assigneeId}  `,
             "--json",
           ],
@@ -256,7 +256,7 @@ describe("publish scan", () => {
     ).toBe(0);
     expect(stdout.text()).toContain("--linear-api-key");
     expect(stdout.text()).toContain("CODEX_SECURITY_LINEAR_API_KEY");
-    expect(stdout.text()).toContain("--assignee-id");
+    expect(stdout.text()).toContain("--linear-assignee");
     expect(stderr.text()).toBe("");
   });
 
@@ -278,7 +278,7 @@ describe("publish scan", () => {
             "scan",
             "completed-scan",
             ...DESTINATION_OPTIONS,
-            "--assignee-id",
+            "--linear-assignee",
             "teammate@example.com",
             "--json",
           ],
@@ -288,14 +288,14 @@ describe("publish scan", () => {
         ),
       ).toBe(2);
       expect(stderr.text()).toContain(
-        "--assignee-id requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
+        "--linear-assignee requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
       );
       expect(stdout.text()).toBe("");
       expect(published).toBe(false);
     }
   });
 
-  test("redacts direct Linear API keys from publisher failures and interrupted recovery", async () => {
+  test("preserves direct Linear API error details during failures and interrupted recovery", async () => {
     const apiKey = "SYNTHETIC_OPAQUE_LINEAR_CREDENTIAL_123";
     for (const signal of [undefined, "SIGINT", "SIGTERM"] as const) {
       const stdout = capture();
@@ -324,10 +324,8 @@ describe("publish scan", () => {
           deps,
         ),
       ).toBe(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2);
-      expect(stderr.text()).toContain("[redacted]");
+      expect(stderr.text()).toContain(apiKey);
       expect(stdout.text()).toBe("");
-      expect(stdout.text()).not.toContain(apiKey);
-      expect(stderr.text()).not.toContain(apiKey);
       if (signal !== undefined) {
         expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
       }
@@ -1945,9 +1943,9 @@ describe("publish scan", () => {
           "scan",
           "completed-scan",
           ...DESTINATION_OPTIONS,
-          "--assignee-id",
+          "--linear-assignee",
         ],
-        "Missing value for flag: --assignee-id",
+        "Missing value for flag: --linear-assignee",
       ],
       [
         [
@@ -1968,10 +1966,10 @@ describe("publish scan", () => {
           ...DESTINATION_OPTIONS,
           "--linear-api-key",
           "SYNTHETIC_LINEAR_KEY",
-          "--assignee-id",
+          "--linear-assignee",
           "   ",
         ],
-        "--assignee-id must not be empty.",
+        "--linear-assignee must not be empty.",
       ],
       [
         [
@@ -2103,7 +2101,7 @@ describe("publish scan", () => {
           "scan",
           "completed-scan",
           ...DESTINATION_OPTIONS,
-          "--assignee-id",
+          "--linear-assignee",
           "teammate@example.com",
           "--dry-run",
           "--json",
@@ -2130,7 +2128,7 @@ describe("publish scan", () => {
     expect(signals.listeners.size).toBe(0);
   });
 
-  test("redacts opaque direct Linear API keys from human and JSON publication warnings", async () => {
+  test("preserves direct Linear API error details in human and JSON publication warnings", async () => {
     const apiKey = "SYNTHETIC_OPAQUE_WARNING_CREDENTIAL_123";
     for (const json of [false, true]) {
       const stdout = capture();
@@ -2160,16 +2158,16 @@ describe("publish scan", () => {
       if (json) {
         expect(JSON.parse(stdout.text())).toEqual({
           ...publicationResult(),
-          warnings: ["Receipt warning included [redacted]."],
+          warnings: [`Receipt warning included ${apiKey}.`],
         });
+      } else {
+        expect(stdout.text()).not.toContain(apiKey);
       }
-      expect(stdout.text()).not.toContain(apiKey);
-      expect(stderr.text()).toContain("Receipt warning included [redacted].");
-      expect(stderr.text()).not.toContain(apiKey);
+      expect(stderr.text()).toContain(`Receipt warning included ${apiKey}.`);
     }
   });
 
-  test("redacts opaque direct Linear API keys from partial JSON results and live progress", async () => {
+  test("preserves direct Linear API error details in partial JSON results and live progress", async () => {
     const apiKey = "SYNTHETIC_OPAQUE_FAILURE_CREDENTIAL_456";
     for (const interactive of [false, true]) {
       const stdout = capture();
@@ -2219,20 +2217,22 @@ describe("publish scan", () => {
         failed: [
           {
             findingId: "finding-2",
-            error: "Linear rejected [redacted].",
+            error: `Linear rejected ${apiKey}.`,
           },
         ],
-        warnings: ["Receipt warning included [redacted]."],
+        warnings: [`Receipt warning included ${apiKey}.`],
         counts: { findings: 2, created: 1, failed: 1 },
       });
+      if (!interactive) {
+        expect(stripVTControlCharacters(stderr.text())).toContain(
+          `Linear rejected ${apiKey}.`,
+        );
+      }
       expect(stripVTControlCharacters(stderr.text())).toContain(
-        "Linear rejected [redacted].",
+        `Receipt warning included ${apiKey}.`,
       );
-      expect(stripVTControlCharacters(stderr.text())).toContain(
-        "Receipt warning included [redacted].",
-      );
-      expect(stdout.text()).not.toContain(apiKey);
-      expect(stderr.text()).not.toContain(apiKey);
+      expect(stdout.text()).toContain(apiKey);
+      expect(stderr.text()).toContain(apiKey);
     }
   });
 

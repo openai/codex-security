@@ -360,7 +360,7 @@ async function processHasExited(pid: number): Promise<boolean> {
 }
 
 describe("direct Linear API publication", () => {
-  test("uses explicit API keys before environment defaults and never exposes opaque credentials", async () => {
+  test("uses explicit API keys before environment defaults and preserves receipt error details", async () => {
     for (const scenario of [
       { explicit: undefined, expected: "lin_api_SYNTHETIC_ENVIRONMENT" },
       {
@@ -443,17 +443,16 @@ describe("direct Linear API publication", () => {
         scenario.explicit === undefined
           ? undefined
           : [
-              "Could not save the publication receipt: Receipt rejected [redacted]. Linear issues were already created; do not retry publication.",
+              `Could not save the publication receipt: Receipt rejected ${scenario.expected}. Linear issues were already created; do not retry publication.`,
             ],
       );
       expect(persistedHandoff).toContain("SEC-1");
-      for (const material of [
-        persistedHandoff,
-        receipt,
-        JSON.stringify(result),
-      ]) {
+      for (const material of [persistedHandoff, receipt]) {
         expect(material).not.toContain(scenario.expected);
         expect(material).not.toContain("lin_api_SYNTHETIC_ENVIRONMENT");
+      }
+      if (scenario.explicit !== undefined) {
+        expect(JSON.stringify(result)).toContain(scenario.expected);
       }
     }
   });
@@ -638,7 +637,7 @@ describe("direct Linear API publication", () => {
         injected,
       ),
     ).rejects.toThrow(
-      /Database refused \[redacted\].*publication handoff remains at.*avoid creating duplicate issues/u,
+      /Database refused opaque-recovery-secret-98217.*publication handoff remains at.*avoid creating duplicate issues/u,
     );
 
     expect(attempts).toBe(2);

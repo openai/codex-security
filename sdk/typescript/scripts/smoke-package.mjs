@@ -468,7 +468,7 @@ try {
       "project-example",
       "--linear-api-key",
       "lin_api_SYNTHETIC_INSTALLED_OVERRIDE",
-      "--assignee-id",
+      "--linear-assignee",
       "security@example.test",
       "--dry-run",
       "--json",

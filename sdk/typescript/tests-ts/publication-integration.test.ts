@@ -471,7 +471,7 @@ describe("database-backed Linear publication integration", () => {
           OPTIONS.projectId,
           "--linear-api-key",
           key,
-          "--assignee-id",
+          "--linear-assignee",
           "owner@example.test",
           "--json",
         ],
