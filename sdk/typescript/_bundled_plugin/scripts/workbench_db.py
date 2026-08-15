@@ -2421,14 +2421,20 @@ def linear_publication_input(
         raise SystemExit("Linear publication input must identify the exact completed scan.")
     if (
         not isinstance(destination, dict)
-        or set(destination) != {"type", "teamId", "projectId"}
+        or not {"type", "teamId"}.issubset(destination)
+        or not set(destination).issubset({"type", "teamId", "projectId"})
         or destination.get("type") != "linear"
         or not isinstance(destination.get("teamId"), str)
         or not destination["teamId"].strip()
-        or not isinstance(destination.get("projectId"), str)
-        or not destination["projectId"].strip()
+        or (
+            "projectId" in destination
+            and (
+                not isinstance(destination["projectId"], str)
+                or not destination["projectId"].strip()
+            )
+        )
     ):
-        raise SystemExit("Linear publication input must identify the exact team and project.")
+        raise SystemExit("Linear publication input must identify the exact team and optional project.")
     if not isinstance(findings, list):
         raise SystemExit("Linear publication input must include the planned scan findings.")
 
@@ -2568,13 +2574,13 @@ def record_linear_publications(
                 """
                 SELECT occurrence_id, external_url
                 FROM finding_publications
-                WHERE destination_type = ? AND team_id = ? AND project_id = ?
+                WHERE destination_type = ? AND team_id = ? AND project_id IS ?
                     AND external_id = ?
                 """,
                 (
                     destination["type"],
                     destination["teamId"],
-                    destination["projectId"],
+                    destination.get("projectId"),
                     publication["issueIdentifier"],
                 ),
             ).fetchone()
@@ -2595,9 +2601,7 @@ def record_linear_publications(
                     scan_id, finding_id, occurrence_id, destination_type,
                     team_id, project_id, external_id, external_url, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (
-                    occurrence_id, destination_type, team_id, project_id, external_id
-                ) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     scan["id"],
@@ -2605,7 +2609,7 @@ def record_linear_publications(
                     publication["occurrenceId"],
                     destination["type"],
                     destination["teamId"],
-                    destination["projectId"],
+                    destination.get("projectId"),
                     publication["issueIdentifier"],
                     publication.get("url"),
                     timestamp,
@@ -2622,14 +2626,14 @@ def record_linear_publications(
                 SELECT finding_id, occurrence_id, external_id, external_url
                 FROM finding_publications
                 WHERE scan_id = ? AND occurrence_id = ? AND destination_type = ?
-                    AND team_id = ? AND project_id = ? AND external_id = ?
+                    AND team_id = ? AND project_id IS ? AND external_id = ?
                 """,
                 (
                     scan["id"],
                     publication["occurrenceId"],
                     destination["type"],
                     destination["teamId"],
-                    destination["projectId"],
+                    destination.get("projectId"),
                     publication["issueIdentifier"],
                 ),
             ).fetchone()

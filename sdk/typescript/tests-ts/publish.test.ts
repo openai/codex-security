@@ -183,7 +183,9 @@ function handoffRecord(
       : { error: options.error }),
     arguments: {
       team: publication.destination.teamId,
-      project: publication.destination.projectId,
+      ...(publication.destination.projectId === undefined
+        ? {}
+        : { project: publication.destination.projectId }),
       title: issue.title,
       description: issue.description,
       ...(issue.priority === undefined ? {} : { priority: issue.priority }),
@@ -322,6 +324,96 @@ describe("connected Linear publication", () => {
     expect(started).toBe(false);
   });
 
+  test("publishes team-only findings with project-free handoffs and recovered mappings", async () => {
+    const publication: PreparedScanPublication = {
+      ...preparedPublication(2),
+      destination: { type: "linear", teamId: OPTIONS.teamId },
+    };
+    let prompt: string | undefined;
+    let receiptDestination: unknown;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      { destination: "linear", teamId: OPTIONS.teamId },
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _arguments, input) => {
+            prompt = input;
+            const data = publicationData(input);
+            const stored = JSON.parse(
+              await readFile(data.publicationFile, "utf8"),
+            ) as {
+              destination: Record<string, unknown>;
+              batches: Array<Array<{ arguments: Record<string, unknown> }>>;
+            };
+            expect(stored.destination).toEqual({
+              type: "linear",
+              teamId: "team-example",
+            });
+            expect(stored.destination).not.toHaveProperty("projectId");
+            for (const issue of stored.batches.flat()) {
+              expect(issue.arguments).not.toHaveProperty("project");
+            }
+
+            await writeHandoff(input, [
+              handoffRecord(publication, publication.issues[0]!, {
+                identifier: "TEAM-1",
+              }),
+            ]);
+            const event = JSON.parse(
+              issueEvent(publication.issues[1]!, { identifier: "TEAM-2" }),
+            ) as { item: { arguments: Record<string, unknown> } };
+            delete event.item.arguments["project"];
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify(event),
+              stderr: "",
+            };
+          },
+          recordPublishedIssues: async (prepared, issues) => {
+            expect(prepared.destination).toEqual({
+              type: "linear",
+              teamId: "team-example",
+            });
+            const recovered = (
+              await readFile(publicationData(prompt!).handoffFile, "utf8")
+            )
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line) as Record<string, unknown>);
+            expect(
+              recovered.map((record) => record["issueIdentifier"]),
+            ).toEqual(["TEAM-1", "TEAM-2"]);
+            for (const record of recovered) {
+              expect(record["arguments"]).not.toHaveProperty("project");
+            }
+            return [...issues];
+          },
+          writeReceipt: async (receipt) => {
+            receiptDestination = receipt.destination;
+          },
+        },
+      ),
+    );
+
+    expect(prompt).toContain("linear_get_team with the supplied team");
+    expect(prompt).not.toContain("linear_get_project");
+    expect(prompt).not.toContain("resolved project");
+    expect(prompt).toContain("Create issues only in the exact supplied team.");
+    expect(result.destination).toEqual({
+      type: "linear",
+      teamId: "team-example",
+    });
+    expect(receiptDestination).toEqual(result.destination);
+    expect(result.created.map((issue) => issue.issueIdentifier)).toEqual([
+      "TEAM-1",
+      "TEAM-2",
+    ]);
+    expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
+  });
+
   test("reuses ambient Codex configuration and loads exact issue data from a private file", async () => {
     const publication = preparedPublication();
     const stateDirectory = await mkdtemp(
@@ -451,6 +543,71 @@ describe("connected Linear publication", () => {
       counts: { findings: 1, created: 1, failed: 0 },
     });
     expect(receiptScanId).toBe("scan-example");
+  });
+
+  test("publishes directly to a Linear team without project lookups or arguments", async () => {
+    const publication: PreparedScanPublication = {
+      ...preparedPublication(),
+      destination: { type: "linear", teamId: OPTIONS.teamId },
+    };
+    let input: string | undefined;
+    let issueArguments: Record<string, unknown> | undefined;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      { destination: "linear", teamId: OPTIONS.teamId },
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _arguments, prompt) => {
+            input = prompt;
+            const stored = JSON.parse(
+              await readFile(publicationData(prompt).publicationFile, "utf8"),
+            ) as {
+              batches: Array<Array<{ arguments: Record<string, unknown> }>>;
+            };
+            issueArguments = stored.batches[0]?.[0]?.arguments;
+            const event = JSON.parse(issueEvent(publication.issues[0]!)) as {
+              item: { arguments: Record<string, unknown> };
+            };
+            delete event.item.arguments["project"];
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify(event),
+              stderr: "",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(input).toContain("linear_get_team with the supplied team");
+    expect(input).not.toContain("linear_get_project");
+    expect(input).not.toContain("resolved project");
+    expect(input).toContain("Create issues only in the exact supplied team.");
+    const encoded = input!
+      .split("BEGIN UNTRUSTED PUBLICATION DATA\n")[1]!
+      .split("\nEND UNTRUSTED PUBLICATION DATA")[0]!;
+    const data = JSON.parse(encoded) as {
+      destination: Record<string, unknown>;
+    };
+    expect(data.destination).toEqual({
+      type: "linear",
+      teamId: "team-example",
+    });
+    expect(issueArguments).toEqual({
+      team: "team-example",
+      title: publication.issues[0]!.title,
+      description: publication.issues[0]!.description,
+      priority: 2,
+    });
+    expect(issueArguments).not.toHaveProperty("project");
+    expect(result.destination).toEqual({
+      type: "linear",
+      teamId: "team-example",
+    });
+    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
   });
 
   test("preserves complete finding descriptions without exposing them to model transcription", async () => {
@@ -1998,7 +2155,7 @@ describe("connected Linear publication", () => {
     expect(JSON.parse(await readFile(receipt, "utf8"))).toEqual(result);
   });
 
-  test("requires an exact destination, team, and project before reading a scan", async () => {
+  test("requires an exact team and rejects a blank supplied project before reading a scan", async () => {
     const publication = preparedPublication();
     for (const options of [
       { ...OPTIONS, destination: "azure" } as unknown as PublishScanOptions,

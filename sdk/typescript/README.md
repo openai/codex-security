@@ -234,8 +234,8 @@ npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The r
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
-npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID --project PROJECT_ID
-npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID --project PROJECT_ID
+npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID
+npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
@@ -541,14 +541,16 @@ same command to resume.
 ### Publish completed scans to Linear
 
 Publish every finding from a completed standard, deep, or scoped scan to one
-Linear team and project:
+Linear team:
 
 ```bash
 npx @openai/codex-security publish scan /path/to/completed-scan \
   --to linear \
-  --linear-team TEAM_ID \
-  --project PROJECT_ID
+  --linear-team TEAM_ID
 ```
+
+Add `--project PROJECT_ID` to place the issues in a Linear project. Without a
+project, issues are created directly in the selected team.
 
 To choose from all completed scans saved in your local scan history, omit the
 scan directory. The selector highlights each repository and shows its finding
@@ -557,13 +559,13 @@ count, relative run time, and abbreviated scan ID:
 ```bash
 npx @openai/codex-security publish scan \
   --to linear \
-  --linear-team TEAM_ID \
-  --project PROJECT_ID
+  --linear-team TEAM_ID
 ```
 
-Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and
-`CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue titles
-without creating them, or `--json` to return structured publication results.
+Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and the
+optional `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue
+titles without creating them, or `--json` to return structured publication
+results.
 Interactive publication shows a full-screen activity view with live Codex
 output and issue-creation progress. Other terminals receive plain progress on
 stderr, so `--json` output remains machine-readable.
@@ -597,7 +599,6 @@ import { publishScan } from "@openai/codex-security";
 const publication = await publishScan("/path/to/completed-scan", {
   destination: "linear",
   teamId: "TEAM_ID",
-  projectId: "PROJECT_ID",
   onProgress: (progress) => {
     if (progress.type === "issue_completed") {
       console.error(
@@ -610,6 +611,9 @@ const publication = await publishScan("/path/to/completed-scan", {
 console.log(publication.scanId);
 console.log(publication.created.length);
 ```
+
+Add `projectId: "PROJECT_ID"` to the options to publish into a specific Linear
+project instead of directly to the team.
 
 ### Scan history and reruns
 
