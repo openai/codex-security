@@ -145,6 +145,247 @@ describe("Codex Linear publication events", () => {
     });
   });
 
+  test("accepts Linear issues that expose their human-readable issue key as id", () => {
+    const prepared = publication(3);
+    const output = [
+      event(prepared, 0, {
+        result: {
+          content: [],
+          structured_content: {
+            id: "EXAMPLE-123",
+            url: "https://linear.app/example/issue/EXAMPLE-123",
+          },
+        },
+      }),
+      event(prepared, 1, {
+        result: {
+          content: [],
+          structured_content: { issue: { id: "EXAMPLE-124" } },
+        },
+      }),
+      event(prepared, 2, {
+        result: {
+          structured_content: null,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ data: { issue: { id: "EXAMPLE-125" } } }),
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      created: [
+        {
+          findingId: "finding_0",
+          occurrenceId: "occurrence_0",
+          issueIdentifier: "EXAMPLE-123",
+          url: "https://linear.app/example/issue/EXAMPLE-123",
+        },
+        {
+          findingId: "finding_1",
+          occurrenceId: "occurrence_1",
+          issueIdentifier: "EXAMPLE-124",
+        },
+        {
+          findingId: "finding_2",
+          occurrenceId: "occurrence_2",
+          issueIdentifier: "EXAMPLE-125",
+        },
+      ],
+      failed: [],
+    });
+  });
+
+  test("recognizes the actual dotted connected-app tool event and Linear id-only response", () => {
+    const prepared = publication(2);
+    const output = [
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "preflight-user",
+          type: "mcp_tool_call",
+          server: "codex_apps",
+          tool: "linear.get_user",
+          arguments: { query: "me" },
+          result: {
+            content: [{ type: "text", text: "Connected Linear user." }],
+            structured_content: { id: "user_synthetic" },
+          },
+          status: "completed",
+        },
+      }),
+      event(prepared, 0, {
+        id: "actual-hosted-creation-0",
+        tool: "linear.save_issue",
+        result: {
+          content: [
+            { type: "text", text: JSON.stringify({ id: "EXAMPLE-123" }) },
+          ],
+          structured_content: {
+            id: "EXAMPLE-123",
+            url: "https://linear.app/example/issue/EXAMPLE-123",
+          },
+        },
+      }),
+      event(prepared, 1, {
+        id: "actual-hosted-creation-1",
+        tool: "linear.save_issue",
+        result: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                id: "EXAMPLE-124",
+                url: "https://linear.app/example/issue/EXAMPLE-124",
+              }),
+            },
+          ],
+          structured_content: null,
+        },
+      }),
+    ].join("\n");
+
+    expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      created: [
+        {
+          findingId: "finding_0",
+          occurrenceId: "occurrence_0",
+          issueIdentifier: "EXAMPLE-123",
+          url: "https://linear.app/example/issue/EXAMPLE-123",
+        },
+        {
+          findingId: "finding_1",
+          occurrenceId: "occurrence_1",
+          issueIdentifier: "EXAMPLE-124",
+          url: "https://linear.app/example/issue/EXAMPLE-124",
+        },
+      ],
+      failed: [],
+    });
+  });
+
+  test.each([
+    ["unrelated dotted mutation", "linear.update_issue"],
+    ["suffix spoof", "linear.save_issue.unverified"],
+    ["prefix spoof", "other.linear.save_issue"],
+    ["nested function name", "mcp__codex_apps__linear_save_issue"],
+  ] as const)("does not trust %s", (_label, tool) => {
+    const prepared = publication();
+    expect(
+      collectPublicationEvents(
+        event(prepared, 0, { tool }),
+        prepared,
+        "not verified",
+      ),
+    ).toEqual({
+      created: [],
+      failed: [{ findingId: "finding_0", error: "not verified" }],
+    });
+  });
+
+  test("does not trust the dotted Linear mutation from another MCP server", () => {
+    const prepared = publication();
+    expect(
+      collectPublicationEvents(
+        event(prepared, 0, {
+          tool: "linear.save_issue",
+          server: "untrusted_apps",
+        }),
+        prepared,
+        "not verified",
+      ),
+    ).toEqual({
+      created: [],
+      failed: [{ findingId: "finding_0", error: "not verified" }],
+    });
+  });
+
+  test.each([
+    ["different team", { team: "team_unexpected" }],
+    ["different project", { project: "project_unexpected" }],
+    ["different title", { title: "Unexpected finding title" }],
+    ["different description", { description: "Unexpected finding details" }],
+    ["different priority", { priority: 1 }],
+    ["missing priority", { priority: undefined }],
+    ["existing issue id", { id: "EXAMPLE-999" }],
+    ["additional argument", { assignee: "synthetic_user" }],
+  ] as const)(
+    "rejects an actual dotted Linear tool event with %s",
+    (_label, changed) => {
+      const prepared = publication();
+      const issue = prepared.issues[0]!;
+      const output = event(prepared, 0, {
+        tool: "linear.save_issue",
+        arguments: {
+          team: prepared.destination.teamId,
+          project: prepared.destination.projectId,
+          title: issue.title,
+          description: issue.description,
+          priority: issue.priority,
+          ...changed,
+        },
+        result: {
+          content: [],
+          structured_content: { id: "EXAMPLE-123" },
+        },
+      });
+
+      const result = collectPublicationEvents(output, prepared, "not verified");
+      expect(result.created).toEqual([]);
+      expect(result.failed).toHaveLength(1);
+      expect(result.failed[0]?.findingId).toBe("finding_0");
+    },
+  );
+
+  test("does not trust issue ids reported by an agent message or a code-mode wrapper", () => {
+    const prepared = publication();
+    const issue = prepared.issues[0]!;
+    const output = [
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "message",
+          type: "agent_message",
+          text: JSON.stringify({
+            id: "EXAMPLE-FABRICATED",
+            title: issue.title,
+          }),
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "exec",
+          call_id: "unverified-wrapper",
+          input:
+            "await tools.mcp__codex_apps__linear_save_issue(unverifiedArguments)",
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "unverified-wrapper",
+          output: [
+            {
+              type: "input_text",
+              text: JSON.stringify({ id: "EXAMPLE-FABRICATED" }),
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    expect(collectPublicationEvents(output, prepared, "not verified")).toEqual({
+      created: [],
+      failed: [{ findingId: "finding_0", error: "not verified" }],
+    });
+  });
+
   test.each([
     ["different team", { team: "unexpected_team" }],
     ["different project", { project: "unexpected_project" }],

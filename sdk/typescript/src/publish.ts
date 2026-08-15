@@ -227,7 +227,8 @@ function reportCompletedIssue(
     !isRecord(item) ||
     item["type"] !== "mcp_tool_call" ||
     item["server"] !== "codex_apps" ||
-    item["tool"] !== "linear_save_issue"
+    (item["tool"] !== "linear.save_issue" &&
+      item["tool"] !== "linear_save_issue")
   ) {
     return;
   }
