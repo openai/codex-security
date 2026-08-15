@@ -47,21 +47,10 @@ export function collectPublicationEvents(
 
     const args = item["arguments"];
     const issue = isRecord(args)
-      ? publication.issues.find(
-          (candidate) =>
-            candidate.title === args["title"] &&
-            candidate.description === args["description"],
-        )
+      ? matchPublicationIssue(publication, args)
       : undefined;
     if (issue === undefined) {
       unexpected.push("Codex attempted to create an unexpected Linear issue.");
-      continue;
-    }
-    if (!isRecord(args) || !hasExpectedArguments(args, publication, issue)) {
-      failed.set(
-        issue.findingId,
-        "Codex attempted to create a Linear issue with unexpected arguments or destination.",
-      );
       continue;
     }
     if (failed.has(issue.findingId) || created.has(issue.findingId)) {
@@ -121,26 +110,34 @@ export function collectPublicationEvents(
   };
 }
 
-function hasExpectedArguments(
-  actual: Record<string, unknown>,
+export function matchPublicationIssue(
   publication: PreparedScanPublication,
+  arguments_: Record<string, unknown>,
+): PreparedPublicationIssue | undefined {
+  const description = arguments_["description"];
+  if (typeof description !== "string") {
+    return undefined;
+  }
+
+  const matches = publication.issues.filter((issue) =>
+    descriptionIdentifiesIssue(description, issue),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function descriptionIdentifiesIssue(
+  description: string,
   issue: PreparedPublicationIssue,
 ): boolean {
-  const expected: Record<string, unknown> = {
-    team: publication.destination.teamId,
-    project: publication.destination.projectId,
-    title: issue.title,
-    description: issue.description,
-    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-  };
-  const keys = Object.keys(actual);
   return (
-    keys.length === Object.keys(expected).length &&
-    keys.every(
-      (key) =>
-        Object.hasOwn(expected, key) && Object.is(actual[key], expected[key]),
-    )
+    containsIdentifier(description, issue.findingId) &&
+    containsIdentifier(description, issue.occurrenceId)
   );
+}
+
+function containsIdentifier(value: string, identifier: string): boolean {
+  const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`, "u").test(value);
 }
 
 function savedIssue(

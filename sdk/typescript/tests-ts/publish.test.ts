@@ -48,7 +48,16 @@ function preparedPublication(
       findingId: `finding-${index + 1}`,
       occurrenceId: `occurrence-${index + 1}`,
       title: `[Codex Security][HIGH] Synthetic finding ${index + 1}`,
-      description: `Finding ${index + 1}\n\n\`\`\`ts\nunsafe(input)\n\`\`\``,
+      description: [
+        `**Finding ID:** finding-${index + 1}`,
+        `**Occurrence ID:** occurrence-${index + 1}`,
+        "",
+        `Finding ${index + 1}`,
+        "",
+        "```ts",
+        "unsafe(input)",
+        "```",
+      ].join("\n"),
       priority: 2,
     })),
   };
@@ -1035,7 +1044,7 @@ describe("connected Linear publication", () => {
     expect(JSON.parse(await readFile(receipt, "utf8"))).toEqual(result);
   });
 
-  test("never reports an issue for unverified destinations or repeated tool events", async () => {
+  test("never reports an issue for unknown finding IDs or repeated tool events", async () => {
     const publication = preparedPublication();
     const updates: PublishScanProgress[] = [];
     const unexpected = JSON.parse(issueEvent(publication.issues[0]!)) as Record<
@@ -1044,7 +1053,7 @@ describe("connected Linear publication", () => {
     >;
     const item = unexpected["item"] as Record<string, unknown>;
     const args = item["arguments"] as Record<string, unknown>;
-    args["team"] = "another-team";
+    args["description"] = "**Finding ID:** unknown\n**Occurrence ID:** unknown";
     const valid = JSON.parse(issueEvent(publication.issues[0]!)) as unknown;
 
     await publishScanInternal(

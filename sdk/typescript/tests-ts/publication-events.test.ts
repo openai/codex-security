@@ -16,7 +16,11 @@ function publication(count = 1): PreparedScanPublication {
       findingId: `finding_${index}`,
       occurrenceId: `occurrence_${index}`,
       title: `[Codex Security][HIGH] Finding ${index}`,
-      description: `Description ${index}`,
+      description: [
+        `**Finding ID:** finding_${index}`,
+        `**Occurrence ID:** occurrence_${index}`,
+        `Description ${index}`,
+      ].join("\n"),
       priority: 2,
     })),
   };
@@ -143,6 +147,58 @@ describe("Codex Linear publication events", () => {
       ],
       failed: [],
     });
+  });
+
+  test("recognizes all created issues when Codex rewrites the final descriptions", () => {
+    const prepared = publication(8);
+    const output = prepared.issues
+      .map((issue, index) =>
+        event(prepared, index, {
+          arguments: {
+            title: index < 6 ? issue.title : "A rewritten issue title",
+            description:
+              index < 6
+                ? issue.description
+                : `Finding ${issue.findingId}; occurrence ${issue.occurrenceId}`,
+            priority: index < 6 ? issue.priority : 4,
+          },
+        }),
+      )
+      .join("\n");
+
+    const result = collectPublicationEvents(output, prepared, "missing");
+    expect(result.created).toHaveLength(8);
+    expect(result.created.map((issue) => issue.issueIdentifier)).toEqual([
+      "SEC-1",
+      "SEC-2",
+      "SEC-3",
+      "SEC-4",
+      "SEC-5",
+      "SEC-6",
+      "SEC-7",
+      "SEC-8",
+    ]);
+    expect(result.failed).toEqual([]);
+  });
+
+  test("rejects missing, mismatched, or ambiguous finding occurrence IDs", () => {
+    const prepared = publication(2);
+    const first = prepared.issues[0]!;
+    const second = prepared.issues[1]!;
+    for (const description of [
+      first.findingId,
+      first.occurrenceId,
+      `${first.findingId} ${second.occurrenceId}`,
+      `${first.findingId} ${first.occurrenceId} ${second.findingId} ${second.occurrenceId}`,
+    ]) {
+      const result = collectPublicationEvents(
+        event(prepared, 0, { arguments: { description } }),
+        prepared,
+        "missing",
+      );
+      expect(result.created).toEqual([]);
+      expect(result.failed).toHaveLength(2);
+    }
   });
 
   test("accepts Linear issues that expose their human-readable issue key as id", () => {
@@ -307,13 +363,12 @@ describe("Codex Linear publication events", () => {
     ["different team", { team: "team_unexpected" }],
     ["different project", { project: "project_unexpected" }],
     ["different title", { title: "Unexpected finding title" }],
-    ["different description", { description: "Unexpected finding details" }],
     ["different priority", { priority: 1 }],
     ["missing priority", { priority: undefined }],
     ["existing issue id", { id: "EXAMPLE-999" }],
     ["additional argument", { assignee: "synthetic_user" }],
   ] as const)(
-    "rejects an actual dotted Linear tool event with %s",
+    "matches an actual dotted Linear tool event by finding IDs despite %s",
     (_label, changed) => {
       const prepared = publication();
       const issue = prepared.issues[0]!;
@@ -334,9 +389,9 @@ describe("Codex Linear publication events", () => {
       });
 
       const result = collectPublicationEvents(output, prepared, "not verified");
-      expect(result.created).toEqual([]);
-      expect(result.failed).toHaveLength(1);
-      expect(result.failed[0]?.findingId).toBe("finding_0");
+      expect(result.created).toHaveLength(1);
+      expect(result.created[0]?.findingId).toBe("finding_0");
+      expect(result.failed).toEqual([]);
     },
   );
 
