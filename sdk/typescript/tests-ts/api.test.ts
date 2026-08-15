@@ -4048,6 +4048,9 @@ describe("CodexSecurity orchestration", () => {
           shell_environment_policy: {
             set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
           },
+          responses_api_metadata: {
+            request_trace: "preserve-configured-metadata",
+          },
         },
       },
       {
@@ -4100,6 +4103,19 @@ describe("CodexSecurity orchestration", () => {
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
                 windows: { sandbox: "unelevated" },
+                mcp_servers: {
+                  private: {
+                    command: "echo",
+                    env: { PRIVATE_TOKEN: "RUNTIME_MCP_SECRET" },
+                  },
+                },
+                shell_environment_policy: {
+                  set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
+                },
+                responses_api_metadata: {
+                  request_trace: "preserve-configured-metadata",
+                  codex_security_surface: "sdk",
+                },
               });
               if (process.platform !== "win32") {
                 expect((await stat(configPath!)).mode & 0o777).toBe(0o600);
@@ -4548,6 +4564,73 @@ describe("CodexSecurity orchestration", () => {
       ).toBe(true);
     } finally {
       await Promise.all(clients.map(async (client) => await client.close()));
+    }
+  });
+
+  test("keeps legacy custom-plugin Deep Scan settings under the credential lock", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-codex-home");
+    const stateDirectory = join(root, "state");
+    const credentialHome = join(stateDirectory, "codex-home");
+    const legacyPlugin = join(root, "legacy-plugin");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(join(ambientHome, "auth.json"), "{}\n");
+    await cp(PLUGIN_ROOT, legacyPlugin, { recursive: true });
+    const mcpPath = join(legacyPlugin, ".mcp.json");
+    const mcpConfiguration = JSON.parse(await readFile(mcpPath, "utf8")) as {
+      mcpServers: Record<string, { env_vars: string[] }>;
+    };
+    const server = mcpConfiguration.mcpServers["codex-security"]!;
+    server.env_vars = server.env_vars.filter(
+      (name) => name !== "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    );
+    await writeFile(mcpPath, `${JSON.stringify(mcpConfiguration, null, 2)}\n`);
+
+    const client = new TestClient(
+      { pluginPath: legacyPlugin },
+      {
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options: CodexOptions) => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              expect(
+                options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
+              ).toBeUndefined();
+              expect(
+                existsSync(join(credentialHome, ".codex-security-scan.lock")),
+              ).toBe(true);
+              expect(
+                parseToml(
+                  await readFile(
+                    join(credentialHome, "codex-security", "config.toml"),
+                    "utf8",
+                  ),
+                )["deep_scan"],
+              ).toMatchObject({ workers: 7 });
+              throw new Error("legacy custom plugin scan reached");
+            },
+          }),
+        }),
+      },
+    );
+
+    try {
+      await expect(
+        client.run(repository, { mode: "deep", workers: 7 }),
+      ).rejects.toThrow("legacy custom plugin scan reached");
+    } finally {
+      await client.close();
     }
   });
 

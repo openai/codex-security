@@ -152,6 +152,9 @@ interface PreparedRuntime {
   effectiveConfig?: JsonObject;
 }
 
+const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
+  "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
+
 export interface DeepScanOptions {
   workers?: number;
   subagents?: number;
@@ -533,15 +536,16 @@ export class CodexSecurity {
       }
       const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
-      const sessionConfig = scanSessionCodexConfig(
-        effectiveConfig,
-        preflightConfig,
-      );
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(runtime.configPath, preflightConfig);
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      const sessionConfig = scanRuntimeCodexConfig(
+        effectiveConfig,
+        stateDirectory,
+        runtimeHome,
+      );
       const deepScanConfigPath =
         mode === "deep"
           ? runtime.deepScanConfigPath ??
@@ -579,8 +583,10 @@ export class CodexSecurity {
           ? "stored_credentials"
           : null;
       }
-      await releaseCredentialHome?.();
-      releaseCredentialHome = null;
+      if (mode !== "deep" || runtime.deepScanConfigPath !== undefined) {
+        await releaseCredentialHome?.();
+        releaseCredentialHome = null;
+      }
       if (externalProvider === null && apiKey !== null) {
         this.#runtimeCredentialSource = "api_key";
       }
@@ -991,10 +997,10 @@ export class CodexSecurity {
         ...(runtime.configPath === undefined
           ? {}
           : { CODEX_SECURITY_CONFIG_PATH: runtime.configPath }),
-        ...(deepScanConfigPath === undefined
+        ...(mode !== "deep" || runtime.deepScanConfigPath === undefined
           ? {}
           : {
-              CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepScanConfigPath,
+              [DEEP_SCAN_CONFIG_PATH_ENVIRONMENT]: runtime.deepScanConfigPath,
             }),
         ...(targetPathsFile === null
           ? {}
@@ -1019,6 +1025,11 @@ export class CodexSecurity {
       };
       const sdkCodexConfig = { ...sessionConfig };
       delete sdkCodexConfig["projects"];
+      const configuredResponsesMetadata = isRecord(
+        sdkCodexConfig["responses_api_metadata"],
+      )
+        ? sdkCodexConfig["responses_api_metadata"]
+        : {};
       const codexPathOverride =
         environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
         undefined
@@ -1035,6 +1046,7 @@ export class CodexSecurity {
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
           responses_api_metadata: {
+            ...configuredResponsesMetadata,
             codex_security_surface: this.#surface,
           },
         },
@@ -1723,6 +1735,11 @@ export class CodexSecurity {
         signal,
       },
     );
+    runtime.deepScanConfigPath =
+      runtime.bootstrapWorkspace !== undefined &&
+      (await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot))
+        ? join(runtime.bootstrapWorkspace, "deep-scan-config.toml")
+        : undefined;
     runtime.effectiveConfig = mergedConfig;
   }
 
@@ -1842,16 +1859,17 @@ export class CodexSecurity {
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
-      const deepScanConfigPath = join(
-        bootstrapWorkspace,
-        "deep-scan-config.toml",
-      );
       throwIfAborted(signal);
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
         codexCommand: this.#codexCommand(),
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
+      const deepScanConfigPath = (await pluginSupportsIsolatedDeepScanConfig(
+        plugin.pluginRoot,
+      ))
+        ? join(bootstrapWorkspace, "deep-scan-config.toml")
+        : undefined;
       const credentialsAvailable =
         isExternalModelProvider(modelProvider) ||
         modelProvider === "amazon-bedrock"
@@ -2992,57 +3010,27 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   return result;
 }
 
-function scanSessionCodexConfig(
-  config: JsonObject,
-  preflightConfig: JsonObject,
-): JsonObject {
-  const result = structuredClone(preflightConfig);
-  copySessionCodexSettings(config, result);
-  const sourceProfiles = config["profiles"];
-  if (isRecord(sourceProfiles)) {
-    const sessionProfiles = isRecord(result["profiles"])
-      ? result["profiles"]
-      : {};
-    for (const [name, sourceProfile] of Object.entries(sourceProfiles)) {
-      if (!/^[A-Za-z0-9_-]+$/u.test(name) || !isRecord(sourceProfile)) {
-        continue;
-      }
-      const profile = isRecord(sessionProfiles[name])
-        ? sessionProfiles[name]
-        : {};
-      copySessionCodexSettings(sourceProfile, profile);
-      if (Object.keys(profile).length > 0) sessionProfiles[name] = profile;
-    }
-    if (Object.keys(sessionProfiles).length > 0) {
-      result["profiles"] = sessionProfiles;
-    }
+async function pluginSupportsIsolatedDeepScanConfig(
+  pluginRoot: string,
+): Promise<boolean> {
+  let configuration: unknown;
+  try {
+    configuration = JSON.parse(
+      await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
+    );
+  } catch {
+    return false;
   }
-  return result;
-}
-
-function copySessionCodexSettings(
-  source: JsonObject,
-  target: JsonObject,
-): void {
-  const reasoningSummary = source["model_reasoning_summary"];
-  if (
-    typeof reasoningSummary === "string" &&
-    reasoningSummary.length > 0 &&
-    !/[\u0000-\u001f\u007f]/u.test(reasoningSummary)
-  ) {
-    target["model_reasoning_summary"] = reasoningSummary;
-  }
-  const showRawReasoning = source["show_raw_agent_reasoning"];
-  if (typeof showRawReasoning === "boolean") {
-    target["show_raw_agent_reasoning"] = showRawReasoning;
-  }
-  const windows = source["windows"];
-  if (
-    isRecord(windows) &&
-    (windows["sandbox"] === "elevated" || windows["sandbox"] === "unelevated")
-  ) {
-    target["windows"] = { sandbox: windows["sandbox"] };
-  }
+  if (!isRecord(configuration)) return false;
+  const servers = configuration["mcpServers"];
+  if (!isRecord(servers)) return false;
+  const server = servers["codex-security"];
+  if (!isRecord(server)) return false;
+  const environment = server["env_vars"];
+  return (
+    Array.isArray(environment) &&
+    environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
+  );
 }
 
 function requireOutputOutsideRepository(

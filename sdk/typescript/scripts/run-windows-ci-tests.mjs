@@ -10,7 +10,7 @@ const tests = (await readdir(testsDirectory))
 const slowApiTestNames = [
   "keeps a private preflight snapshot isolated from persistent credentials",
   "reuses keyring-compatible credentials across separate scan clients",
-  "serializes parallel scans sharing a managed credential home",
+  "runs parallel ChatGPT scans with isolated mutable configuration",
   "reuses the managed runtime when scan authentication changes",
   "does not reimport ambient credentials after an explicit logout",
 ];
