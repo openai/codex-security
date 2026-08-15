@@ -157,6 +157,10 @@ describe("connected Linear publication", () => {
     expect(command).toBe("synthetic-codex");
     expect(args).toEqual([
       "exec",
+      "--model",
+      "gpt-5.6-luna",
+      "-c",
+      'model_reasoning_effort="low"',
       "--ephemeral",
       "--json",
       "--sandbox",
