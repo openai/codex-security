@@ -80,6 +80,7 @@ describe("publish scan", () => {
         teamId: "team-from-flags",
         projectId: "project-from-flags",
         dryRun: false,
+        signal: expect.any(AbortSignal),
         onProgress: expect.any(Function),
       },
     });
@@ -358,6 +359,10 @@ describe("publish scan", () => {
     const stdout = capture();
     const stderr = capture(true);
     const deps = dependencies();
+    let observedSignals = false;
+    deps.addSignalListener = () => {
+      observedSignals = true;
+    };
     deps.publishScan = async (_scanDirectory, options) => {
       expect(options.onProgress).toBeUndefined();
       return { ...publicationResult(), dryRun: true, issues: [] };
@@ -380,6 +385,7 @@ describe("publish scan", () => {
     expect(stdout.text()).toContain("dryRun: true");
     expect(stdout.text()).not.toContain("Linear publication complete");
     expect(stderr.text()).toBe("");
+    expect(observedSignals).toBe(false);
   });
 
   test("reports every created Linear issue with a successful exit code", async () => {
@@ -1076,43 +1082,111 @@ describe("publish scan", () => {
     }
   });
 
-  test("restores the full-screen terminal and unregisters listeners on interruption", async () => {
-    for (const signal of ["SIGINT", "SIGTERM"] as const) {
-      const stdout = capture();
-      const stderr = capture(true);
-      const listeners = new Map<string, () => void>();
-      const removed: string[] = [];
-      const exited: string[] = [];
-      const deps = dependencies();
-      deps.addSignalListener = (name, listener) => {
-        listeners.set(name, listener);
-      };
-      deps.removeSignalListener = (name, listener) => {
-        if (listeners.get(name) === listener) listeners.delete(name);
-        removed.push(name);
-      };
-      deps.forceExit = (name) => {
-        exited.push(name);
-      };
-      deps.publishScan = async (_scanDirectory, options) => {
-        options.onProgress?.({ type: "started", scanId: "scan-123", total: 1 });
-        listeners.get(signal)!();
-        return publicationResult();
-      };
+  test("restores the terminal before cancellation and waits for publication recovery", async () => {
+    for (const interactive of [true, false]) {
+      for (const [signal, expectedCode, expectedMessage] of [
+        ["SIGINT", 130, "Publication canceled by Ctrl-C."],
+        ["SIGTERM", 143, "Publication terminated by SIGTERM."],
+      ] as const) {
+        const stdout = capture();
+        const captured = capture(interactive);
+        const events: string[] = [];
+        const stderr = {
+          isTTY: interactive,
+          write(value: string | Uint8Array): boolean {
+            if (value.toString().includes("\u001B[?25h\u001B[?1049l")) {
+              events.push("restored terminal");
+            }
+            return captured.stream.write(value);
+          },
+        };
+        const listeners = new Map<string, () => void>();
+        const removed: string[] = [];
+        let enteredPublication!: () => void;
+        const publicationStarted = new Promise<void>((resolve) => {
+          enteredPublication = resolve;
+        });
+        let finishRecovery!: () => void;
+        const recoveryFinished = new Promise<void>((resolve) => {
+          finishRecovery = resolve;
+        });
+        const deps = dependencies();
+        deps.addSignalListener = (name, listener) => {
+          listeners.set(name, listener);
+        };
+        deps.removeSignalListener = (name, listener) => {
+          if (listeners.get(name) === listener) listeners.delete(name);
+          removed.push(name);
+        };
+        deps.forceExit = (name) => events.push(`forced ${name}`);
+        deps.publishScan = async (_scanDirectory, options) => {
+          expect(options.signal).toBeInstanceOf(AbortSignal);
+          options.signal?.addEventListener("abort", () => {
+            events.push(`aborted ${String(options.signal?.reason)}`);
+          });
+          options.onProgress?.({
+            type: "started",
+            scanId: "scan-123",
+            total: 1,
+          });
+          listeners.get(signal)!();
+          enteredPublication();
+          await recoveryFinished;
+          events.push("recovered created issues");
+          throw new Error(
+            "The publication handoff remains at /tmp/synthetic-handoff; recover it before retrying to avoid creating duplicate issues.",
+          );
+        };
 
-      expect(
-        await main(
-          ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS],
+        let finished = false;
+        const publishing = main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            ...(signal === "SIGINT" ? ["--json"] : []),
+          ],
           stdout.stream,
-          stderr.stream,
+          stderr,
           deps,
-        ),
-      ).toBe(0);
+        ).then((status) => {
+          finished = true;
+          return status;
+        });
+        await publicationStarted;
+        expect(finished).toBe(false);
+        expect(listeners.size).toBe(2);
+        expect(events).toEqual(
+          interactive
+            ? ["restored terminal", `aborted ${signal}`]
+            : [`aborted ${signal}`],
+        );
+        expect(captured.text()).not.toContain(expectedMessage);
+        expect(stdout.text()).toBe("");
+        finishRecovery();
 
-      expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
-      expect(removed).toEqual(["SIGINT", "SIGTERM"]);
-      expect(listeners.size).toBe(0);
-      expect(exited).toEqual([signal]);
+        expect(await publishing).toBe(expectedCode);
+        expect(events).toEqual(
+          interactive
+            ? [
+                "restored terminal",
+                `aborted ${signal}`,
+                "recovered created issues",
+              ]
+            : [`aborted ${signal}`, "recovered created issues"],
+        );
+        expect(captured.text()).toContain(expectedMessage);
+        expect(captured.text()).toContain("recover it before retrying");
+        expect(stdout.text()).toBe("");
+        expect(removed).toEqual(["SIGINT", "SIGTERM"]);
+        expect(listeners.size).toBe(0);
+        if (interactive) {
+          expect(captured.text()).toContain("\u001B[?25h\u001B[?1049l");
+        } else {
+          expect(captured.text()).not.toContain("\u001B");
+        }
+      }
     }
   });
 

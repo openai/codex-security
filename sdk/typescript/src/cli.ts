@@ -353,9 +353,6 @@ class PublicationProgressPresenter {
   readonly #repository: string;
   readonly #seenActivities = new Set<string>();
   #dashboard: ScanDashboard | null = null;
-  #observingSignals = false;
-  readonly #onInterrupt = (): void => this.#handleSignal("SIGINT");
-  readonly #onTerminate = (): void => this.#handleSignal("SIGTERM");
 
   public constructor(
     stream: Writable,
@@ -387,9 +384,6 @@ class PublicationProgressPresenter {
     try {
       dashboard.start();
       this.#dashboard = dashboard;
-      this.#dependencies.addSignalListener("SIGINT", this.#onInterrupt);
-      this.#dependencies.addSignalListener("SIGTERM", this.#onTerminate);
-      this.#observingSignals = true;
     } catch {
       try {
         dashboard.stop();
@@ -399,11 +393,6 @@ class PublicationProgressPresenter {
   }
 
   public stop(): void {
-    if (this.#observingSignals) {
-      this.#dependencies.removeSignalListener("SIGINT", this.#onInterrupt);
-      this.#dependencies.removeSignalListener("SIGTERM", this.#onTerminate);
-      this.#observingSignals = false;
-    }
     try {
       this.#dashboard?.stop();
     } catch {}
@@ -513,11 +502,6 @@ class PublicationProgressPresenter {
         ? sanitized
         : `${sanitized.slice(0, width - 1)}…`;
     this.#stream.write(`${visible}\n`);
-  }
-
-  #handleSignal(signal: SignalName): void {
-    this.stop();
-    this.#dependencies.forceExit(signal);
   }
 }
 
@@ -1507,6 +1491,15 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format, formatExplicit, options }) {
+      const controller = new AbortController();
+      let presentation: PublicationProgressPresenter | undefined;
+      const cancel = (signal: SignalName): void => {
+        presentation?.stop();
+        controller.abort(signal);
+      };
+      const onInterrupt = (): void => cancel("SIGINT");
+      const onTerminate = (): void => cancel("SIGTERM");
+      let observingSignals = false;
       try {
         const teamId =
           options.linearTeam?.trim() ||
@@ -1672,7 +1665,13 @@ export async function main(
           dependencies,
           publicationRepository,
         );
-        if (!options.dryRun) progress.start();
+        presentation = progress;
+        if (!options.dryRun) {
+          dependencies.addSignalListener("SIGINT", onInterrupt);
+          dependencies.addSignalListener("SIGTERM", onTerminate);
+          observingSignals = true;
+          progress.start();
+        }
         let result;
         try {
           result = await (dependencies.publishScan ?? publishScan)(
@@ -1685,6 +1684,7 @@ export async function main(
               ...(options.dryRun
                 ? {}
                 : {
+                    signal: controller.signal,
                     onProgress: (event: PublishScanProgress) =>
                       progress.observe(event),
                   }),
@@ -1693,6 +1693,7 @@ export async function main(
         } finally {
           progress.stop();
         }
+        controller.signal.throwIfAborted();
         if (result.failed.length > 0) exitCode = 2;
         if (
           format === "toon" &&
@@ -1709,9 +1710,28 @@ export async function main(
         }
         return { ...result };
       } catch (error) {
-        errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-        exitCode = 2;
+        const signal = controller.signal.reason;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          const reason =
+            signal === "SIGINT"
+              ? "Publication canceled by Ctrl-C."
+              : "Publication terminated by SIGTERM.";
+          const recovery =
+            error === signal
+              ? ""
+              : ` ${diagnosticValue(safeErrorMessage(error))}`;
+          errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+          exitCode = signal === "SIGINT" ? 130 : 143;
+        } else {
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          exitCode = 2;
+        }
         return undefined;
+      } finally {
+        if (observingSignals) {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
       }
     },
   });
