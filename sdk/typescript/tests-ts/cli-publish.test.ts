@@ -609,7 +609,9 @@ describe("publish scan", () => {
           CODEX_SECURITY_LINEAR_PROJECT: "  project-from-environment  ",
         },
       });
-      let destination: { teamId: string; projectId: string } | undefined;
+      let destination:
+        | { teamId: string; projectId: string | undefined }
+        | undefined;
       deps.publishScan = async (_scanDirectory, options) => {
         destination = {
           teamId: options.teamId,
