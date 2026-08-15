@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
+  cp,
+  lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -339,15 +343,63 @@ try {
     "Installed npm package does not match the complete bundled-plugin contract.",
   );
 
-  run(
-    process.execPath,
-    [
-      "--input-type=module",
-      "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity.");`,
-    ],
-    { cwd: consumer },
+  const installedPluginRoot = join(installedRoot, "_bundled_plugin");
+  const contractScan = join(consumer, "contract-scan");
+  await cp(
+    join(installedPluginRoot, "examples", "completed-scan"),
+    contractScan,
+    {
+      recursive: true,
+    },
   );
+  if (process.platform !== "win32") await chmod(contractScan, 0o700);
+
+  try {
+    run(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.loadContract !== "function") throw new Error("The installed package does not export loadContract."); const contract = await sdk.loadContract(${JSON.stringify(contractScan)}, { pluginRoot: ${JSON.stringify(installedPluginRoot)} }); if (contract.manifest.scan.id !== "scan_example_001") throw new Error("The installed package did not load its sealed example scan.");`,
+      ],
+      { cwd: consumer },
+    );
+  } catch (error) {
+    if (process.platform === "win32") {
+      try {
+        const path = join(contractScan, "scan-manifest.json");
+        const file = await open(path, "r");
+        try {
+          const [pathIdentity, openedIdentity, exactPath, exactOpened] =
+            await Promise.all([
+              lstat(path),
+              file.stat(),
+              lstat(path, { bigint: true }),
+              file.stat({ bigint: true }),
+            ]);
+          console.error(
+            "Sealed scan identity checks:",
+            JSON.stringify({
+              numberDeviceEqual: pathIdentity.dev === openedIdentity.dev,
+              numberInodeEqual: pathIdentity.ino === openedIdentity.ino,
+              bigintInodeEqual: exactPath.ino === exactOpened.ino,
+              low32DeviceEqual:
+                BigInt.asUintN(32, exactPath.dev) ===
+                BigInt.asUintN(32, exactOpened.dev),
+              pathRegular: exactPath.isFile(),
+              pathSymlink: exactPath.isSymbolicLink(),
+              openedRegular: exactOpened.isFile(),
+            }),
+          );
+        } finally {
+          await file.close();
+        }
+      } catch {
+        console.error("Sealed scan identity checks unavailable.");
+      }
+    }
+    throw error;
+  }
 
   assert.equal(
     typeof installedManifest.bin?.["codex-security"],
