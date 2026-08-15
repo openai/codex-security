@@ -242,17 +242,20 @@ def _bullets(items: list[str], fallback: str) -> list[str]:
 
 
 def _code_evidence_catalog(finding: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    raw = finding.get("codeEvidence", finding.get("code_evidence", []))
-    if not isinstance(raw, list):
-        return {}
-    return {
-        item["id"]: item
-        for item in raw
-        if isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and isinstance(item.get("code"), str)
-        and item["code"].strip()
-    }
+    catalog: dict[str, dict[str, Any]] = {}
+    for key in ("codeEvidence", "code_evidence"):
+        raw = finding.get(key, [])
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and isinstance(item.get("code"), str)
+                and item["code"].strip()
+            ):
+                catalog.setdefault(item["id"], item)
+    return catalog
 
 
 def _section_code_evidence(
@@ -261,20 +264,22 @@ def _section_code_evidence(
     catalog = _code_evidence_catalog(finding)
     resolved: list[dict[str, Any]] = []
     for section in sections:
-        refs = section.get("evidenceRefs", section.get("evidence_refs", []))
-        if isinstance(refs, list):
-            resolved.extend(
-                catalog[ref] for ref in refs if isinstance(ref, str) and ref in catalog
-            )
-        embedded = section.get("codeEvidence", section.get("code_evidence", []))
-        if isinstance(embedded, list):
-            resolved.extend(
-                item
-                for item in embedded
-                if isinstance(item, dict)
-                and isinstance(item.get("code"), str)
-                and item["code"].strip()
-            )
+        for key in ("evidenceRefs", "evidence_refs"):
+            refs = section.get(key, [])
+            if isinstance(refs, list):
+                resolved.extend(
+                    catalog[ref] for ref in refs if isinstance(ref, str) and ref in catalog
+                )
+        for key in ("codeEvidence", "code_evidence"):
+            embedded = section.get(key, [])
+            if isinstance(embedded, list):
+                resolved.extend(
+                    item
+                    for item in embedded
+                    if isinstance(item, dict)
+                    and isinstance(item.get("code"), str)
+                    and item["code"].strip()
+                )
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for item in resolved:
@@ -427,24 +432,27 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     raw_root_cause = finding.get("rootCause")
     root_cause = raw_root_cause if isinstance(raw_root_cause, dict) else {}
     attack_path = finding.get("attackPath") if isinstance(finding.get("attackPath"), dict) else {}
-    dataflow_aliases = [
-        attack_path[key] for key in ("dataFlow", "dataflow", "data_flow") if key in attack_path
+    dataflow_sections = [
+        {"summary": value} if isinstance(value, str) else value
+        for key in ("dataFlow", "dataflow", "data_flow")
+        if isinstance((value := attack_path.get(key)), (str, dict))
     ]
-    raw_dataflow = next(
-        (
-            value
-            for value in dataflow_aliases
-            if (isinstance(value, str) and value.strip()) or (isinstance(value, dict) and value)
-        ),
-        dataflow_aliases[0] if dataflow_aliases else None,
-    )
-    dataflow = (
-        {"summary": raw_dataflow}
-        if isinstance(raw_dataflow, str)
-        else raw_dataflow
-        if isinstance(raw_dataflow, dict)
-        else {}
-    )
+    dataflow: dict[str, Any] = {}
+    for key in ("summary", "source", "sink", "outcome", "transformations"):
+        value = next(
+            (
+                section[key]
+                for section in dataflow_sections
+                if key in section
+                and (
+                    (isinstance(section[key], str) and section[key].strip())
+                    or (isinstance(section[key], list) and section[key])
+                )
+            ),
+            None,
+        )
+        if value is not None:
+            dataflow[key] = value
     raw_reachability = attack_path.get("reachability")
     reachability = (
         {"summary": raw_reachability}
@@ -468,7 +476,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     )
     root_cause_code_evidence = _root_cause_code_evidence(finding, root_cause)
     validation_code_evidence = _section_code_evidence(finding, validation)
-    dataflow_code_evidence = _section_code_evidence(finding, attack_path, dataflow)
+    dataflow_code_evidence = _section_code_evidence(
+        finding, attack_path, *dataflow_sections
+    )
     reachability_code_evidence = _section_code_evidence(finding, reachability)
     dataflow_summary = _text(
         dataflow.get("summary"),

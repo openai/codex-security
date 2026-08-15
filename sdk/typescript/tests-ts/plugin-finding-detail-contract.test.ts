@@ -295,7 +295,7 @@ describe("bundled plugin finding detail contracts", () => {
   test("projects the populated data-flow alias", () => {
     const report = projectFindingDetails({
       attackPath: {
-        dataFlow: {},
+        dataFlow: { producerExtension: true },
         dataflow: {
           summary:
             "request -> populated lowercase dataflow -> filesystem write",
@@ -312,7 +312,8 @@ describe("bundled plugin finding detail contracts", () => {
     const report = projectFindingDetails({
       attackPath: {
         dataflow: {
-          evidenceRefs: ["archive-source"],
+          evidenceRefs: [],
+          evidence_refs: ["archive-source"],
           summary: "An archive entry path reaches a filesystem write.",
         },
         reachability: {
