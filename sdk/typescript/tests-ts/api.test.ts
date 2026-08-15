@@ -4099,7 +4099,11 @@ describe("CodexSecurity orchestration", () => {
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(codexConfig).not.toContain("model_reasoning_summary");
               expect(codexConfig).not.toContain("show_raw_agent_reasoning");
+              expect(options.config).not.toHaveProperty("projects");
+              expect(options.config).not.toHaveProperty("permissions");
               expect(options.config).toMatchObject({
+                default_permissions: "codex_security_scan",
+                allow_login_shell: false,
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
                 windows: { sandbox: "unelevated" },

@@ -1024,7 +1024,10 @@ export class CodexSecurity {
         ...runtimePaths,
       };
       const sdkCodexConfig = { ...sessionConfig };
+      // Projects and permissions already live in generated TOML files; the SDK
+      // cannot safely encode their path and selector keys as dotted overrides.
       delete sdkCodexConfig["projects"];
+      delete sdkCodexConfig["permissions"];
       const configuredResponsesMetadata = isRecord(
         sdkCodexConfig["responses_api_metadata"],
       )
