@@ -246,6 +246,175 @@ describe("connected Linear publication", () => {
     expect(receiptScanId).toBe("scan-example");
   });
 
+  test.each([
+    ["complete", false],
+    ["partial", true],
+  ] as const)(
+    "returns %s verified publication instead of retrying after a receipt failure",
+    async (_outcome, partial) => {
+      const publication = preparedPublication(2);
+      const updates: PublishScanProgress[] = [];
+      const output = [
+        issueEvent(publication.issues[0]!),
+        issueEvent(
+          publication.issues[1]!,
+          partial
+            ? { status: "failed", error: "The project rejected this finding." }
+            : {},
+        ),
+      ].join("\n");
+      let invocations = 0;
+      let receiptAttempts = 0;
+
+      const result = await publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, onProgress: (event) => updates.push(event) },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async () => {
+              invocations += 1;
+              return { exitCode: 0, stdout: output, stderr: "" };
+            },
+            writeReceipt: async () => {
+              receiptAttempts += 1;
+              throw new Error("The receipt disk is full");
+            },
+          },
+        ),
+      );
+
+      expect(result.created.map((issue) => issue.issueIdentifier)).toEqual(
+        partial ? ["SEC-1"] : ["SEC-1", "SEC-2"],
+      );
+      expect(result.failed).toEqual(
+        partial
+          ? [
+              {
+                findingId: "finding-2",
+                error: "The project rejected this finding.",
+              },
+            ]
+          : [],
+      );
+      expect(result.counts).toEqual({
+        findings: 2,
+        created: partial ? 1 : 2,
+        failed: partial ? 1 : 0,
+      });
+      expect(result.warnings).toEqual([
+        "Could not save the publication receipt: The receipt disk is full. Linear issues were already created; do not retry publication.",
+      ]);
+      expect(updates.at(-1)).toEqual({
+        type: "completed",
+        created: partial ? 1 : 2,
+        failed: partial ? 1 : 0,
+        total: 2,
+      });
+      expect(invocations).toBe(1);
+      expect(receiptAttempts).toBe(1);
+    },
+  );
+
+  test("redacts sensitive receipt diagnostics while returning verified issues", async () => {
+    const publication = preparedPublication();
+    const syntheticSecret = "sk-proj-SYNTHETIC_PUBLIC_TEST_TOKEN";
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      dependencies(
+        publication,
+        {},
+        {
+          writeReceipt: async () => {
+            throw new Error(`Authorization: Bearer ${syntheticSecret}`);
+          },
+        },
+      ),
+    );
+
+    expect(result.created[0]?.issueIdentifier).toBe("SEC-1");
+    expect(result.warnings).toEqual([
+      "Could not save the publication receipt: [redacted]. Linear issues were already created; do not retry publication.",
+    ]);
+    expect(JSON.stringify(result)).not.toContain(syntheticSecret);
+  });
+
+  test("keeps receipt failures fatal when no created Linear issue was verified", async () => {
+    const publication = preparedPublication();
+    const receiptFailure = new Error(
+      "The publication receipt cannot be saved.",
+    );
+    const updates: PublishScanProgress[] = [];
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, onProgress: (event) => updates.push(event) },
+        dependencies(
+          publication,
+          {
+            stdout: JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                text: "Created fabricated issue SEC-UNVERIFIED.",
+              },
+            }),
+          },
+          {
+            writeReceipt: async () => {
+              throw receiptFailure;
+            },
+          },
+        ),
+      ),
+    ).rejects.toBe(receiptFailure);
+
+    expect(updates.some((event) => event.type === "completed")).toBe(false);
+  });
+
+  test("keeps receipt failures fatal when cancellation has already interrupted publication", async () => {
+    const publication = preparedPublication();
+    const controller = new AbortController();
+    const cancellation = new Error("Publication was interrupted.");
+    const receiptFailure = new Error("The partial receipt cannot be saved.");
+    const updates: PublishScanProgress[] = [];
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          signal: controller.signal,
+          onProgress: (event) => updates.push(event),
+        },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async () => {
+              controller.abort(cancellation);
+              return {
+                exitCode: 1,
+                stdout: issueEvent(publication.issues[0]!),
+                stderr: "",
+              };
+            },
+            writeReceipt: async () => {
+              throw receiptFailure;
+            },
+          },
+        ),
+      ),
+    ).rejects.toBe(receiptFailure);
+
+    expect(controller.signal.reason).toBe(cancellation);
+    expect(updates.some((event) => event.type === "completed")).toBe(false);
+  });
+
   test("previews every finding without starting Codex or writing a receipt", async () => {
     const publication = preparedPublication(2);
     const result = await publishScanInternal(
