@@ -2462,7 +2462,11 @@ function scanPrompt(
             "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
           ]),
     ...(additionalPrompt?.trim()
-      ? ["Additional scan instructions:", additionalPrompt]
+      ? [
+          "Apply setup and testing instructions during validation.",
+          "Additional scan instructions:",
+          additionalPrompt,
+        ]
       : []),
   ].join("\n");
 }

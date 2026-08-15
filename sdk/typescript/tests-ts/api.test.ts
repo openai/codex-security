@@ -1964,7 +1964,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     ).toBe(false);
     expect(prompt).toContain(
-      "Additional scan instructions:\nFocus on authentication and authorization.",
+      "Apply setup and testing instructions during validation.\nAdditional scan instructions:\nFocus on authentication and authorization.",
     );
     expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
     expect(

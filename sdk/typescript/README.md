@@ -81,6 +81,7 @@ Pass scan configuration to `security.run(repository, options)` or
 | `target`                | Select a repository, repository-relative paths, committed diff, or working-tree diff. |
 | `mode`                  | Select `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
 | `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.         |
+| `scanPrompt`            | Add instructions for the scan, including application setup and validation.            |
 | `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
 | `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
 | `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
