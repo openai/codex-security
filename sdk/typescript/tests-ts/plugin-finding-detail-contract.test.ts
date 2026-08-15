@@ -27,6 +27,10 @@ const invalidFindingDetails: Array<{
     section: "attackPath",
     detail: { reachability: { preconditions: "upload access" } },
   },
+  {
+    section: "attackPath",
+    detail: { dataflow: { transformations: "decode, then dispatch" } },
+  },
   { section: "validation", detail: { assertions: "sink reached" } },
   { section: "validation", detail: { counterEvidence: "none" } },
   { section: "validation", detail: { evidence: { kind: "trace" } } },

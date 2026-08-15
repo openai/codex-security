@@ -165,6 +165,7 @@ export interface FindingsDocument {
             source?: string;
             sink?: string;
             outcome?: string;
+            transformations?: string[];
             evidenceRefs?: string[];
             evidence_refs?: string[];
             [k: string]: unknown;
@@ -176,6 +177,7 @@ export interface FindingsDocument {
             source?: string;
             sink?: string;
             outcome?: string;
+            transformations?: string[];
             evidenceRefs?: string[];
             evidence_refs?: string[];
             [k: string]: unknown;
@@ -187,6 +189,7 @@ export interface FindingsDocument {
             source?: string;
             sink?: string;
             outcome?: string;
+            transformations?: string[];
             evidenceRefs?: string[];
             evidence_refs?: string[];
             [k: string]: unknown;

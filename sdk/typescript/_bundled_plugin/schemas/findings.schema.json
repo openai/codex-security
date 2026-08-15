@@ -418,6 +418,10 @@
                   "source": { "type": "string", "minLength": 1 },
                   "sink": { "type": "string", "minLength": 1 },
                   "outcome": { "type": "string", "minLength": 1 },
+                  "transformations": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
                   "evidenceRefs": {
                     "type": "array",
                     "items": { "type": "string", "minLength": 1 }
@@ -439,6 +443,10 @@
                   "source": { "type": "string", "minLength": 1 },
                   "sink": { "type": "string", "minLength": 1 },
                   "outcome": { "type": "string", "minLength": 1 },
+                  "transformations": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
                   "evidenceRefs": {
                     "type": "array",
                     "items": { "type": "string", "minLength": 1 }
@@ -460,6 +468,10 @@
                   "source": { "type": "string", "minLength": 1 },
                   "sink": { "type": "string", "minLength": 1 },
                   "outcome": { "type": "string", "minLength": 1 },
+                  "transformations": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
                   "evidenceRefs": {
                     "type": "array",
                     "items": { "type": "string", "minLength": 1 }

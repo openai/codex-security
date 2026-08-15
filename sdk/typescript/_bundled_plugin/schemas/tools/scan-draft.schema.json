@@ -223,6 +223,9 @@
             "outcome": {
               "$ref": "#/$defs/text"
             },
+            "transformations": {
+              "$ref": "#/$defs/textList"
+            },
             "evidenceRefs": {
               "$ref": "#/$defs/textList"
             },
