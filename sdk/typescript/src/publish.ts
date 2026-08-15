@@ -9,17 +9,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { LinearClient } from "@linear/sdk";
 import {
   CodexSecurityError,
   ConfigurationError,
-  errorMessage,
   safeErrorMessage,
 } from "./errors.js";
-import {
-  prepareLinearApiPublication,
-  type LinearClientFactory,
-  type PreparedLinearApiPublication,
-} from "./linear-api.js";
 import {
   prepareScanPublication,
   type LinearPublicationDestination,
@@ -100,7 +95,9 @@ export interface PublicationCodexResult {
 
 export interface PublishScanDependencies {
   environment?: NodeJS.ProcessEnv;
-  linearClient?: LinearClientFactory;
+  linearClient?: (
+    options: ConstructorParameters<typeof LinearClient>[0],
+  ) => Pick<LinearClient, "viewer" | "users" | "createIssue">;
   prepare?: typeof prepareScanPublication;
   resolveCodex?: (environment: NodeJS.ProcessEnv) => CodexCommand;
   runCodex?: (
@@ -182,16 +179,36 @@ export async function publishScanInternal(
     environment,
   );
   options.signal?.throwIfAborted();
-  const directPublication =
+  const linearClient =
     linearApiKey === undefined
       ? undefined
-      : await prepareLinearApiPublication(
-          prepared,
-          linearApiKey,
-          options.assigneeId,
-          dependencies.linearClient,
-          options.signal,
+      : (
+          dependencies.linearClient ??
+          ((configuration) => new LinearClient(configuration))
+        )({
+          apiKey: linearApiKey,
+          redirect: "error",
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+  let assigneeId: string | undefined;
+  if (linearClient !== undefined) {
+    if (options.assigneeId === undefined) {
+      assigneeId = (await linearClient.viewer).id;
+    } else if (options.assigneeId.includes("@")) {
+      const users = await linearClient.users({
+        filter: { email: { eqIgnoreCase: options.assigneeId } },
+        first: 2,
+      });
+      if (users.nodes.length !== 1) {
+        throw new ConfigurationError(
+          "Linear could not resolve exactly one matching issue assignee.",
         );
+      }
+      assigneeId = users.nodes[0]!.id;
+    } else {
+      assigneeId = options.assigneeId;
+    }
+  }
   options.signal?.throwIfAborted();
   const handoff = await createPublicationHandoff(prepared, environment);
   const progressObserver = options.onProgress;
@@ -202,11 +219,12 @@ export async function publishScanInternal(
   });
   const completedFindings = new Set<string>();
   let invocation: PublicationCodexResult | undefined;
-  if (directPublication !== undefined && linearApiKey !== undefined) {
+  if (linearClient !== undefined && assigneeId !== undefined) {
     await publishLinearApiIssues(
       prepared,
       handoff.file,
-      directPublication,
+      linearClient,
+      assigneeId,
       completedFindings,
       progressObserver,
       options.signal,
@@ -253,7 +271,7 @@ export async function publishScanInternal(
     );
   }
   const failureMessage =
-    directPublication !== undefined
+    linearClient !== undefined
       ? options.signal?.aborted
         ? "Linear API publication was interrupted before this finding could be created."
         : "The Linear API did not create an issue for this finding."
@@ -282,7 +300,7 @@ export async function publishScanInternal(
         dependencies.recordPublishedIssues ?? recordPublishedIssues
       )(prepared, handoffResults.created, environment);
     } catch (error) {
-      const detail = errorMessage(error);
+      const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
         `Could not persist created Linear issues: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
@@ -299,7 +317,7 @@ export async function publishScanInternal(
         environment,
       );
     } catch (error) {
-      const detail = errorMessage(error);
+      const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
         `Linear publication was interrupted and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
@@ -353,7 +371,8 @@ export async function publishScanInternal(
 async function publishLinearApiIssues(
   publication: PreparedScanPublication,
   handoffFile: string,
-  client: PreparedLinearApiPublication,
+  client: Pick<LinearClient, "createIssue">,
+  assigneeId: string,
   completed: Set<string>,
   observer: PublishScanOptions["onProgress"],
   signal?: AbortSignal,
@@ -374,54 +393,54 @@ async function publishLinearApiIssues(
     const batch = publication.issues.slice(index, index + 20);
     const settled = await Promise.allSettled(
       batch.map(async (issue) => {
+        const content = {
+          title: issue.title,
+          description: issue.description,
+          ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+        };
         const arguments_ = {
           team: publication.destination.teamId,
           ...(publication.destination.projectId === undefined
             ? {}
             : { project: publication.destination.projectId }),
-          title: issue.title,
-          description: issue.description,
-          ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+          ...content,
         };
-        let created: Awaited<
-          ReturnType<PreparedLinearApiPublication["create"]>
-        >;
+        let outcome:
+          | { issueIdentifier: string; url: string }
+          | { error: string };
         try {
-          created = await client.create(issue);
+          const response = await client.createIssue({
+            teamId: publication.destination.teamId,
+            ...(publication.destination.projectId === undefined
+              ? {}
+              : { projectId: publication.destination.projectId }),
+            ...content,
+            assigneeId,
+          });
+          const result = await response.issue;
+          if (!response.success || result === undefined) {
+            throw new CodexSecurityError("Linear did not create an issue.");
+          }
+          outcome = { issueIdentifier: result.identifier, url: result.url };
         } catch (error) {
           if (signal?.aborted) return;
-          const message = safeErrorMessage(error);
-          await appendHandoff({
-            scanId: publication.scanId,
-            findingId: issue.findingId,
-            occurrenceId: issue.occurrenceId,
-            error: message,
-            arguments: arguments_,
-          });
-          completed.add(issue.findingId);
-          reportPublicationProgress(observer, {
-            type: "issue_completed",
-            findingId: issue.findingId,
-            error: message,
-            completed: completed.size,
-            total: publication.issues.length,
-          });
-          return;
+          outcome = { error: safeErrorMessage(error) };
         }
 
         await appendHandoff({
           scanId: publication.scanId,
           findingId: issue.findingId,
           occurrenceId: issue.occurrenceId,
-          issueIdentifier: created.issueIdentifier,
-          ...(created.url === undefined ? {} : { url: created.url }),
+          ...outcome,
           arguments: arguments_,
         });
         completed.add(issue.findingId);
         reportPublicationProgress(observer, {
           type: "issue_completed",
           findingId: issue.findingId,
-          issueIdentifier: created.issueIdentifier,
+          ...("error" in outcome
+            ? { error: outcome.error }
+            : { issueIdentifier: outcome.issueIdentifier }),
           completed: completed.size,
           total: publication.issues.length,
         });

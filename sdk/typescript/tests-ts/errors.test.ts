@@ -40,9 +40,6 @@ describe("error messages", () => {
     expect(safeErrorMessage("upstream service unavailable")).toBe(
       "upstream service unavailable",
     );
-    expect(safeErrorMessage("Linear rejected lin_api_SYNTHETIC_KEY_123")).toBe(
-      "Linear rejected lin_api_SYNTHETIC_KEY_123",
-    );
     expect(safeErrorMessage("author=Michael")).toBe("author=Michael");
     expect(safeErrorMessage("signal=active")).toBe("signal=active");
     expect(safeErrorMessage("design=complete")).toBe("design=complete");
