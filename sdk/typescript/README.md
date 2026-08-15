@@ -587,10 +587,9 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
   --linear-team TEAM_ID
 ```
 
-Direct API publication assigns every issue to the authenticated Linear user by
-default. Pass `--linear-assignee teammate@example.com` or
-`--linear-assignee USER_ID` to assign the issues to another Linear user by email
-address or user ID.
+Direct API publication leaves issues unassigned by default. Pass
+`--linear-assignee teammate@example.com` or `--linear-assignee USER_ID` to
+assign the issues to a Linear user by email address or user ID.
 `--linear-assignee` requires direct API publication.
 
 You can also pass `--linear-api-key KEY`, which takes precedence over
@@ -641,8 +640,8 @@ Add `projectId: "PROJECT_ID"` to the options to publish into a specific Linear
 project instead of directly to the team.
 
 Pass `linearApiKey` to publish directly through the Linear API. Omit
-`assigneeId` to assign issues to the authenticated user, or supply a Linear
-user ID or email address to select another assignee:
+`assigneeId` to leave issues unassigned, or supply a Linear user ID or email
+address to select an assignee:
 
 ```ts
 const directPublication = await publishScan("/path/to/completed-scan", {

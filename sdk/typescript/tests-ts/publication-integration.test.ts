@@ -280,7 +280,7 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
-  test("persists direct team-only publication with its selected assignee", async () => {
+  test("persists unassigned direct team-only publication", async () => {
     const completed = await fixture(23);
     const sealed = await artifactDigests(completed.scanDirectory);
     const key = "lin_api_SYNTHETIC_INTEGRATION_KEY";
@@ -306,12 +306,8 @@ describe("database-backed Linear publication integration", () => {
         linearClient: ({ apiKey }) => {
           expect(apiKey).toBe(key);
           return {
-            viewer: Promise.resolve({ id: "viewer-self" }),
-            users: async (options: Parameters<LinearClient["users"]>[0]) => {
-              expect(options).toMatchObject({
-                filter: { email: { eqIgnoreCase: "owner@example.test" } },
-              });
-              return { nodes: [{ id: "assigned-owner" }] };
+            users: async () => {
+              throw new Error("Unassigned publication must not look up users.");
             },
             createIssue: async (input: IssueInput) => {
               const index = completed.findings.findIndex(({ findingId }) =>
@@ -320,9 +316,9 @@ describe("database-backed Linear publication integration", () => {
               expect(index).toBeGreaterThanOrEqual(0);
               expect(input).toMatchObject({
                 teamId: OPTIONS.teamId,
-                assigneeId: "assigned-owner",
                 priority: 2,
               });
+              expect(input).not.toHaveProperty("assigneeId");
               expect(input).not.toHaveProperty("projectId");
               if (index >= 20)
                 expect(created.length).toBeGreaterThanOrEqual(20);
@@ -350,8 +346,6 @@ describe("database-backed Linear publication integration", () => {
           "linear",
           "--linear-team",
           OPTIONS.teamId,
-          "--linear-assignee",
-          "owner@example.test",
           "--json",
         ],
         stdout.stream,

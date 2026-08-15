@@ -159,7 +159,6 @@ function linearApiClient(
   return ({ apiKey, signal }) => {
     options.configured?.(apiKey ?? "");
     return {
-      viewer: Promise.resolve({ id: "viewer-self" }),
       users: async () => ({ nodes: [{ id: "assignee-from-email" }] }),
       createIssue: async (input: LinearIssueInput) => {
         await options.create?.(input, signal);
@@ -268,9 +267,9 @@ async function processHasExited(pid: number): Promise<boolean> {
 }
 
 describe("direct Linear API publication", () => {
-  test("uses the selected API key and resolves self, email, or explicit assignees", async () => {
+  test("leaves issues unassigned unless an email or user ID is selected", async () => {
     for (const scenario of [
-      { requested: undefined, assigned: "viewer-self", teamOnly: false },
+      { requested: undefined, assigned: undefined, teamOnly: false },
       {
         requested: "teammate@example.test",
         assigned: "assignee-from-email",
@@ -324,9 +323,14 @@ describe("direct Linear API publication", () => {
           title: publication.issues[0]!.title,
           description: publication.issues[0]!.description,
           priority: 2,
-          assigneeId: scenario.assigned,
+          ...(scenario.assigned === undefined
+            ? {}
+            : { assigneeId: scenario.assigned }),
         },
       ]);
+      if (scenario.assigned === undefined) {
+        expect(inputs[0]).not.toHaveProperty("assigneeId");
+      }
       expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
     }
   });

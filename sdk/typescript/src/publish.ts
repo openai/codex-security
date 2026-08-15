@@ -97,7 +97,7 @@ export interface PublishScanDependencies {
   environment?: NodeJS.ProcessEnv;
   linearClient?: (
     options: ConstructorParameters<typeof LinearClient>[0],
-  ) => Pick<LinearClient, "viewer" | "users" | "createIssue">;
+  ) => Pick<LinearClient, "users" | "createIssue">;
   prepare?: typeof prepareScanPublication;
   resolveCodex?: (environment: NodeJS.ProcessEnv) => CodexCommand;
   runCodex?: (
@@ -190,24 +190,18 @@ export async function publishScanInternal(
           redirect: "error",
           ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-  let assigneeId: string | undefined;
-  if (linearClient !== undefined) {
-    if (options.assigneeId === undefined) {
-      assigneeId = (await linearClient.viewer).id;
-    } else if (options.assigneeId.includes("@")) {
-      const users = await linearClient.users({
-        filter: { email: { eqIgnoreCase: options.assigneeId } },
-        first: 2,
-      });
-      if (users.nodes.length !== 1) {
-        throw new ConfigurationError(
-          "Linear could not resolve exactly one matching issue assignee.",
-        );
-      }
-      assigneeId = users.nodes[0]!.id;
-    } else {
-      assigneeId = options.assigneeId;
+  let assigneeId = options.assigneeId;
+  if (linearClient !== undefined && assigneeId?.includes("@")) {
+    const users = await linearClient.users({
+      filter: { email: { eqIgnoreCase: assigneeId } },
+      first: 2,
+    });
+    if (users.nodes.length !== 1) {
+      throw new ConfigurationError(
+        "Linear could not resolve exactly one matching issue assignee.",
+      );
     }
+    assigneeId = users.nodes[0]!.id;
   }
   options.signal?.throwIfAborted();
   const handoff = await createPublicationHandoff(prepared, environment);
@@ -219,7 +213,7 @@ export async function publishScanInternal(
   });
   const completedFindings = new Set<string>();
   let invocation: PublicationCodexResult | undefined;
-  if (linearClient !== undefined && assigneeId !== undefined) {
+  if (linearClient !== undefined) {
     await publishLinearApiIssues(
       prepared,
       handoff.file,
@@ -372,7 +366,7 @@ async function publishLinearApiIssues(
   publication: PreparedScanPublication,
   handoffFile: string,
   client: Pick<LinearClient, "createIssue">,
-  assigneeId: string,
+  assigneeId: string | undefined,
   completed: Set<string>,
   observer: PublishScanOptions["onProgress"],
   signal?: AbortSignal,
@@ -415,7 +409,7 @@ async function publishLinearApiIssues(
               ? {}
               : { projectId: publication.destination.projectId }),
             ...content,
-            assigneeId,
+            ...(assigneeId === undefined ? {} : { assigneeId }),
           });
           const result = await response.issue;
           if (!response.success || result === undefined) {

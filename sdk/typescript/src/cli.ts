@@ -1494,7 +1494,7 @@ export async function main(
       linearAssignee: optionValue("--linear-assignee")
         .optional()
         .describe(
-          "Linear assignee email or user ID; API-key publication defaults to its owner.",
+          "Linear assignee email or user ID; omit to leave issues unassigned.",
         ),
       dryRun: z
         .boolean()

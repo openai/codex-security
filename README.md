@@ -99,8 +99,8 @@ machine-readable results.
 By default, publishing uses your existing Codex sign-in and connected Linear
 app without a separate Linear token. To publish directly through the Linear API
 instead, set `CODEX_SECURITY_LINEAR_API_KEY` to a Linear personal API key.
-Direct publication assigns issues to the API-key owner by default; pass
-`--linear-assignee EMAIL_OR_USER_ID` to select another Linear user:
+Direct publication leaves issues unassigned by default; pass
+`--linear-assignee EMAIL_OR_USER_ID` to select a Linear user:
 
 ```bash
 export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
@@ -112,7 +112,7 @@ npx @openai/codex-security publish scan /path/to/scan \
 ```
 
 Use `--linear-assignee USER_ID` to select a Linear user ID instead of an email
-address, or omit the flag to assign issues to yourself.
+address, or omit the flag to leave the issues unassigned.
 
 `--linear-api-key KEY` also selects direct publication and takes precedence
 over the environment variable. Prefer the environment variable to keep API keys
