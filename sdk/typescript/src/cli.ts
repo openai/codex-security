@@ -1532,6 +1532,13 @@ export async function main(
           .positive()
           .default(1)
           .describe("Maximum scan attempts per repository."),
+        maxCost: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+          ),
         pluginPath: z
           .string()
           .min(1)
@@ -1612,6 +1619,9 @@ export async function main(
             workers: options.workers,
             mode: options.mode,
             maxAttempts: options.maxAttempts,
+            ...(options.maxCost === undefined
+              ? {}
+              : { maxCostUsd: options.maxCost }),
             knowledgeBasePaths: options.knowledgeBase,
             ...prompts,
             config: {
