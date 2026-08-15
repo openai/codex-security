@@ -1923,6 +1923,7 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain("$codex-security:security-scan");
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
+    expect(prompt).toContain("do not finalize or seal them");
     expect(prompt).toContain(
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
@@ -4099,7 +4100,11 @@ describe("CodexSecurity orchestration", () => {
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(codexConfig).not.toContain("model_reasoning_summary");
               expect(codexConfig).not.toContain("show_raw_agent_reasoning");
+              expect(options.config).not.toHaveProperty("projects");
+              expect(options.config).not.toHaveProperty("permissions");
               expect(options.config).toMatchObject({
+                default_permissions: "codex_security_scan",
+                allow_login_shell: false,
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
                 windows: { sandbox: "unelevated" },
@@ -5182,6 +5187,8 @@ describe("CodexSecurity orchestration", () => {
       `Scan target: Git diff from ${revision} to ${revision}.`,
     );
     expect(prompt).toContain("$codex-security:security-diff-scan");
+    expect(prompt).toContain("complete_codex_security_scan");
+    expect(prompt).not.toContain("do not finalize or seal them");
     expect(prompt).toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
@@ -5192,12 +5199,29 @@ describe("CodexSecurity orchestration", () => {
       "prompt captured",
     );
     expect(prompt).toContain("$codex-security:deep-security-scan");
+    expect(prompt).toContain("complete_codex_security_scan");
+    expect(prompt).not.toContain("do not finalize or seal them");
     expect(prompt).toContain(
       'start_codex_security_deep_scan with {"scanId":"scan_example_001"}',
     );
     expect(prompt).not.toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
+
+    await expect(
+      client.run(repository, { mode: "deep", maxCostUsd: 1 }),
+    ).rejects.toThrow("prompt captured");
+    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).not.toContain("complete_codex_security_scan");
+
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base, head }),
+        maxCostUsd: 1,
+      }),
+    ).rejects.toThrow("prompt captured");
+    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).not.toContain("complete_codex_security_scan");
 
     await expect(
       client.run(repository, { target: DiffTarget.workingTree({ base }) }),
