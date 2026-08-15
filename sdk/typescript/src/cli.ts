@@ -134,6 +134,7 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 type FailureSeverity = Exclude<SeverityLevel, "informational">;
+type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 const REPORTABLE_SEVERITIES: readonly FailureSeverity[] = [
   "critical",
@@ -697,7 +698,7 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  argv = defaultScansList(argv);
+  argv = defaultListCommand(argv);
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
   if (argumentError !== undefined) {
@@ -738,6 +739,33 @@ export async function main(
       exitCode = 2;
       return undefined;
     }
+  };
+  const latestScans = async (
+    count = 1,
+    status: "complete" | "any" = "complete",
+  ): Promise<SavedScan[] | undefined> => {
+    const result = await history(
+      [
+        "list-scans",
+        "--repository",
+        dependencies.currentDirectory(),
+        ...(status === "complete" ? ["--status", "complete"] : []),
+        "--limit",
+        String(count),
+      ],
+      (value) => {
+        if ((value["scans"] as SavedScan[]).length < count) {
+          const kind = status === "complete" ? "completed" : "saved";
+          throw new CodexSecurityError(
+            count === 1
+              ? `No ${kind} scans found for the current repository.`
+              : `At least ${count} ${kind} scans are required for the current repository.`,
+          );
+        }
+        return value;
+      },
+    );
+    return result?.["scans"] as SavedScan[] | undefined;
   };
   const matchScanPair = async (
     beforeId: string,
@@ -928,7 +956,8 @@ export async function main(
         scanId: z
           .string()
           .min(1)
-          .describe("Saved scan identifier or unique prefix."),
+          .optional()
+          .describe("Scan ID or unique prefix (default: latest completed)."),
       }),
       options: z.object({
         showLinkedFindings: z
@@ -938,8 +967,10 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
+        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        if (scanId === undefined) return;
         return presentHistory(
-          await history(["get-scan", "--scan-id", args.scanId], (value) => {
+          await history(["get-scan", "--scan-id", scanId], (value) => {
             const { scan, recipe, parentScanId } = value;
             return {
               ...(scan as JsonObject),
@@ -960,12 +991,16 @@ export async function main(
         scanId: z
           .string()
           .min(1)
-          .describe("Saved scan identifier or unique prefix."),
+          .optional()
+          .describe("Scan identifier or unique prefix (default: latest)."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args }) {
+        const scanId =
+          args.scanId ?? (await latestScans(1, "any"))?.[0]?.scanId;
+        if (scanId === undefined) return;
         return await history(
-          ["get-scan", "--scan-id", args.scanId],
+          ["get-scan", "--scan-id", scanId],
           async (value) => {
             const scan = value["scan"] as {
               scanId: string;
@@ -991,7 +1026,11 @@ export async function main(
       destructive: true,
       mcp: false,
       args: z.object({
-        scanId: z.string().min(1).describe("Saved scan identifier."),
+        scanId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Saved scan identifier (default: latest completed scan)."),
       }),
       options: z.object({
         verbose: z
@@ -1001,14 +1040,16 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, options }) {
+        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
             "get-scan-recipe",
             "--scan-id",
-            args.scanId,
+            scanId,
           ]);
-          scanArguments = scanArgumentsFromRecipe(recipe, args.scanId);
+          scanArguments = scanArgumentsFromRecipe(recipe, scanId);
           scanArguments.verbose = options.verbose;
         } catch (error) {
           const message = errorMessage(error);
@@ -1085,13 +1126,31 @@ export async function main(
       destructive: true,
       mcp: false,
       args: z.object({
-        beforeId: z.string().min(1).describe("Earlier saved scan identifier."),
-        afterId: z.string().min(1).describe("Later saved scan identifier."),
+        beforeId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Earlier saved scan identifier."),
+        afterId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Later saved scan identifier (default: latest completed)."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format }) {
+        let { beforeId, afterId } = args;
+        if (beforeId === undefined) {
+          const scans = await latestScans(2);
+          if (scans === undefined) return;
+          beforeId = scans[1]!.scanId;
+          afterId = scans[0]!.scanId;
+        } else if (afterId === undefined) {
+          afterId = (await latestScans())?.[0]?.scanId;
+          if (afterId === undefined) return;
+        }
         return presentHistory(
-          await matchScanPair(args.beforeId, args.afterId),
+          await matchScanPair(beforeId, afterId),
           "compare",
           format,
         );
@@ -1581,7 +1640,8 @@ export async function main(
       args: z.object({
         scanDir: z
           .string()
-          .describe("Completed Codex Security scan directory."),
+          .optional()
+          .describe("Completed scan directory (default: latest completed)."),
       }),
       options: z
         .object({
@@ -1614,9 +1674,11 @@ export async function main(
         ),
       async run({ args, options }) {
         const currentDirectory = dependencies.currentDirectory();
+        const scanDir = args.scanDir ?? (await latestScans())?.[0]?.scanDir;
+        if (scanDir === undefined) return;
         exitCode = await runExport(
           {
-            scanDir: resolve(currentDirectory, args.scanDir),
+            scanDir: resolve(currentDirectory, scanDir),
             format: options.exportFormat,
             output:
               options.output === "-"
@@ -1909,14 +1971,14 @@ export async function main(
   }
 }
 
-function defaultScansList(argv: readonly string[]): readonly string[] {
+function defaultListCommand(argv: readonly string[]): readonly string[] {
   const commandIndex = argv.findIndex((value, index) => {
     if (value.startsWith("-")) return false;
     return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
   });
   if (
     commandIndex < 0 ||
-    argv[commandIndex] !== "scans" ||
+    !["scans", "findings"].includes(argv[commandIndex]!) ||
     argv.includes("--help") ||
     argv.includes("-h")
   ) {

@@ -190,20 +190,20 @@ describe("CLI", () => {
       "codex-security install-hook [repository]",
     );
     expect(manifest.text()).toContain("codex-security bulk-scan [input]");
-    expect(manifest.text()).toContain("codex-security export <scanDir>");
+    expect(manifest.text()).toContain("codex-security export [scanDir]");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
     expect(manifest.text()).toContain("codex-security patch <issues...>");
     expect(manifest.text()).toContain(
       "codex-security findings false-positive <occurrenceId>",
     );
     expect(manifest.text()).toContain("codex-security scans list [repository]");
-    expect(manifest.text()).toContain("codex-security scans show <scanId>");
-    expect(manifest.text()).toContain("codex-security scans rerun <scanId>");
+    expect(manifest.text()).toContain("codex-security scans show [scanId]");
+    expect(manifest.text()).toContain("codex-security scans rerun [scanId]");
     expect(manifest.text()).toContain(
       "codex-security scans match [beforeId] [afterId]",
     );
     expect(manifest.text()).toContain(
-      "codex-security scans compare <beforeId> <afterId>",
+      "codex-security scans compare [beforeId] [afterId]",
     );
     expect(manifest.text()).toContain("codex-security info");
 
@@ -1096,6 +1096,55 @@ describe("CLI", () => {
     expect(text).not.toContain("target-internal-id");
   });
 
+  test("shows the latest completed scan for the current repository by default", async () => {
+    const stdout = capture();
+    const calls: Array<readonly string[]> = [];
+    const responses: JsonObject[] = [
+      { scans: [{ scanId: "latest-scan" }] },
+      { scan: { scanId: "latest-scan" } },
+    ];
+
+    expect(
+      await main(
+        ["scans", "show", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => responses[calls.push(args) - 1]!,
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({ scanId: "latest-scan" });
+    expect(calls).toEqual([
+      [
+        "list-scans",
+        "--repository",
+        "/current/repository",
+        "--status",
+        "complete",
+        "--limit",
+        "1",
+      ],
+      ["get-scan", "--scan-id", "latest-scan"],
+    ]);
+  });
+
+  test("reports when the current repository has no saved scans", async () => {
+    const stderr = capture();
+
+    expect(
+      await main(
+        ["scans", "show"],
+        capture().stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "No completed scans found for the current repository.",
+    );
+  });
+
   test("shows finding history and optionally reveals linked findings", async () => {
     const findings: JsonObject[] = [
       {
@@ -1800,7 +1849,7 @@ describe("CLI", () => {
     expect(
       await main(["export", "--help"], stdout.stream, stderr.stream, deps),
     ).toBe(0);
-    expect(stdout.text()).toContain("Usage: codex-security export <scanDir>");
+    expect(stdout.text()).toContain("Usage: codex-security export [scanDir]");
     expect(stdout.text()).toContain("--export-format <csv|json|sarif>");
     expect(stdout.text()).toContain("--source-root <string>");
     expect(stdout.text()).not.toContain("--format {sarif}");
@@ -2423,7 +2472,6 @@ describe("CLI", () => {
         ],
         "--effort conflicts with --codex model_reasoning_effort",
       ],
-      [["export"], "scanDir"],
       [["export", "scan", "--unknown"], "Unknown flag: --unknown"],
       [["export", "scan", "--format", "sarif"], "Invalid format"],
       [["export", "scan", "--export-format", "xml"], "Invalid option"],
