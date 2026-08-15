@@ -370,4 +370,28 @@ describe("bundled plugin finding detail contracts", () => {
       "attackPath.dataflow.evidenceRefs: unknown code-evidence ids: missing-evidence",
     );
   });
+
+  test("keeps legacy sealed nested evidence references compatible", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
+      "findings['findings'][0]['attackPath'] = {'dataFlow': {'evidenceRefs': ['legacy-missing-evidence']}}",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
+      "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
+      "print(json.dumps({'original': findings['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'compatible': compatible['findings'][0]['attackPath']['dataFlow']['evidenceRefs']}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      compatible: [],
+      original: ["legacy-missing-evidence"],
+    });
+  });
 });

@@ -1480,6 +1480,81 @@ def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     _validate_schema_node(payload, schema, schema_path.stem)
 
 
+def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str, Any]:
+    compatible = copy.deepcopy(findings)
+    finding_items = compatible.get("findings")
+    if not isinstance(finding_items, list):
+        return compatible
+    for finding in finding_items:
+        if not isinstance(finding, dict):
+            continue
+        evidence_ids = {
+            evidence["id"]
+            for evidence in finding.get("codeEvidence", [])
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("id"), str)
+            and evidence["id"]
+        }
+        for section_name, list_fields in (
+            ("rootCause", ("evidenceRefs",)),
+            (
+                "validation",
+                (
+                    "assertions",
+                    "counterEvidence",
+                    "evidence",
+                    "evidenceRefs",
+                    "evidence_refs",
+                    "limitations",
+                ),
+            ),
+            (
+                "attackPath",
+                (
+                    "assumptions",
+                    "blindspots",
+                    "controls",
+                    "evidenceRefs",
+                    "evidence_refs",
+                    "limitations",
+                    "preconditions",
+                    "steps",
+                ),
+            ),
+        ):
+            section = finding.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            for field in list_fields:
+                if isinstance(section.get(field), str):
+                    section[field] = [section[field]]
+        attack_path = finding.get("attackPath")
+        if not isinstance(attack_path, dict):
+            continue
+        for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
+            detail = attack_path.get(field)
+            if not isinstance(detail, dict):
+                continue
+            for list_field in ("evidenceRefs", "evidence_refs", "transformations"):
+                if isinstance(detail.get(list_field), str):
+                    detail[list_field] = [detail[list_field]]
+            for refs_field in ("evidenceRefs", "evidence_refs"):
+                refs = detail.get(refs_field)
+                if isinstance(refs, list):
+                    detail[refs_field] = [
+                        ref
+                        for ref in refs
+                        if not (
+                            isinstance(ref, str)
+                            and ref
+                            and ref not in evidence_ids
+                        )
+                    ]
+            if field == "reachability" and isinstance(detail.get("preconditions"), str):
+                detail["preconditions"] = [detail["preconditions"]]
+    return compatible
+
+
 def _validate_canonical_schemas_before_projection(
     manifest: dict[str, Any],
     findings: dict[str, Any],
@@ -1908,11 +1983,12 @@ def _read_sealed_scan(
         },
     )
     _validate_manifest(manifest)
-    _validate_findings(manifest, findings)
+    findings_for_validation = _legacy_sealed_findings_for_validation(findings)
+    _validate_findings(manifest, findings_for_validation)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_sealed_coverage_receipts(scan, coverage)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings, schema_dir / "findings.schema.json")
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _validate_derived_finding_identities(manifest, findings)
     return manifest, findings, coverage, findings_bytes
@@ -2210,8 +2286,11 @@ def _prepare_scan_finalization(
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
     _validate_target(_require_dict(scan, "target", "manifest.scan"))
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
+    findings_for_validation = (
+        _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
+    )
     if was_sealed:
-        _validate_findings(manifest, findings)
+        _validate_findings(manifest, findings_for_validation)
         _validate_derived_finding_identities(manifest, findings)
     elif completion_warnings is not None:
         discarded_findings = _recover_unsealed_findings(
@@ -2223,16 +2302,20 @@ def _prepare_scan_finalization(
         _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
     else:
         _populate_unsealed_finding_identities(manifest, findings)
-    _validate_findings(manifest, findings)
+    _validate_findings(manifest, findings_for_validation)
     _validate_coverage(manifest, coverage, scan_dir)
-    _validate_canonical_schemas_before_projection(manifest, findings, coverage, schema_dir)
+    _validate_canonical_schemas_before_projection(
+        manifest, findings_for_validation, coverage, schema_dir
+    )
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        validate_against_schema(findings, schema_dir / "findings.schema.json")
+        validate_against_schema(
+            findings_for_validation, schema_dir / "findings.schema.json"
+        )
         validate_against_schema(coverage, schema_dir / "coverage.schema.json")
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_report_output_paths(scan_dir)
