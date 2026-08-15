@@ -205,6 +205,8 @@ Trusted Access for Cyber. To apply or check your access, visit
 npx @openai/codex-security scan
 npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --headless
+npx @openai/codex-security scan /path/to/repository --patch
+npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --json
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -250,6 +252,9 @@ npx @openai/codex-security validate /path/outside/repository/findings.json "Poss
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
+npx @openai/codex-security patch OCCURRENCE_ID
+npx @openai/codex-security patch --scan SCAN_ID --severity high --json
+npx @openai/codex-security patch --scan latest --severity medium
 npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
 npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
 ```
@@ -333,6 +338,18 @@ Incomplete coverage and CLI/runtime errors exit 2 so they cannot be mistaken
 for a passing policy. Incomplete scans still write the available human or JSON
 result to stdout and a coverage warning to stderr, including in report-only
 mode.
+
+Use `--patch` to fix and verify confirmed findings after a complete scan.
+`--patch-severity high` selects high and critical findings; the default is low
+and above. After showing the findings summary, interactive scans with findings
+ask whether to open a color-coded finding browser with complete finding details
+and a separate patch-instructions panel. Use the arrow keys to
+browse, `Tab` to inspect details, `Space` to select individual findings, `i` to
+edit instructions for the focused finding, `1`–`4` to select by severity, and
+`Enter` to patch. Press `q` to keep the checkout unchanged. JSON scan results
+include `patchSeverity` and one `patches` entry per selected finding, with status
+`verified`, `no_change`, `blocked`, or `failed`. When `--fail-on-severity` is
+also set, verified and already-fixed findings no longer fail the policy.
 
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
 the implied provider. Use `--model gpt-5.6-terra` to switch models and
@@ -745,9 +762,10 @@ npx @openai/codex-security scan . \
 ```
 
 JSON scans never use interactive terminal controls, even when stderr is a TTY.
-The `validate`, `patch`, `login`, and `logout` commands reject `--json` because
-they do not produce structured CLI output. Sign-in commands remain interactive.
-CSV exports cannot be written to stdout while JSON output is requested.
+Saved-finding patch commands support `--json`; literal issue and file patch
+commands do not. The `validate`, `login`, and `logout` commands reject `--json`.
+Sign-in commands remain interactive. CSV exports cannot be written to stdout
+while JSON output is requested.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
 starting Codex or loading credentials. Without a scan directory, it exports the
@@ -761,10 +779,15 @@ Run `npx @openai/codex-security export --help` for all export options.
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
 input can be either a file, whose contents are read into the request, or literal
-text. Both commands operate on the current directory, use the scan model
-and reasoning defaults, disable plugins, and print the final response without
-the underlying Codex event stream. Patching starts a saved task in the Codex
-desktop app. Override the model with `--codex 'model="gpt-5.6-sol"'` and the
+text. These inputs operate on the current directory. Pass a saved finding or
+occurrence ID instead to patch its original repository, or use
+`patch --scan SCAN_ID --severity high` for high and critical findings from one
+scan. `--scan latest` selects the most recent scan of the current repository.
+Saved-finding patch commands accept `--json` and return a verified, already
+fixed, blocked, or failed result for each finding. Both commands use the scan
+model and reasoning defaults and disable plugins. Patching starts a saved task
+in the Codex desktop app. Override the model with
+`--codex 'model="gpt-5.6-sol"'` and the
 reasoning effort with `--effort high` or
 `--codex 'model_reasoning_effort="high"'`.
 
