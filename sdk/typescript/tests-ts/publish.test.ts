@@ -137,11 +137,11 @@ function dependencies(
 interface PublicationPromptData {
   scanId: string;
   handoffFile: string;
+  publicationFile: string;
   batches: Array<
     Array<{
       findingId: string;
       occurrenceId: string;
-      arguments: Record<string, unknown>;
     }>
   >;
 }
@@ -201,7 +201,7 @@ async function writeHandoff(
 }
 
 describe("connected Linear publication", () => {
-  test("reuses ambient Codex configuration and streams exact issue data on stdin", async () => {
+  test("reuses ambient Codex configuration and loads exact issue data from a private file", async () => {
     const publication = preparedPublication();
     const stateDirectory = await mkdtemp(
       join(tmpdir(), "codex-security-publication-environment-"),
@@ -216,6 +216,7 @@ describe("connected Linear publication", () => {
     let input: string | undefined;
     let inheritedEnvironment: NodeJS.ProcessEnv | undefined;
     let receiptScanId: string | undefined;
+    let storedPublication: unknown;
 
     const result = await publishScanInternal(
       publication.scanDirectory,
@@ -230,6 +231,9 @@ describe("connected Linear publication", () => {
             args = arguments_;
             input = prompt;
             inheritedEnvironment = env;
+            storedPublication = JSON.parse(
+              await readFile(publicationData(prompt).publicationFile, "utf8"),
+            );
             return {
               exitCode: 0,
               stdout: issueEvent(publication.issues[0]!),
@@ -271,7 +275,8 @@ describe("connected Linear publication", () => {
     expect(input).toContain("untrusted inert data");
     expect(input).toContain("track-findings");
     expect(input).toContain("linear_save_issue exactly once per finding");
-    expect(input).toContain("unsafe(input)");
+    expect(input).toContain("readFileSync('publication.json', 'utf8')");
+    expect(input).not.toContain("unsafe(input)");
 
     const encoded = input!
       .split("BEGIN UNTRUSTED PUBLICATION DATA\n")[1]!
@@ -280,6 +285,19 @@ describe("connected Linear publication", () => {
       scanId: publication.scanId,
       destination: publication.destination,
       handoffFile: join(handoffDirectory, "issues.jsonl"),
+      publicationFile: join(handoffDirectory, "publication.json"),
+      batches: [
+        [
+          {
+            findingId: "finding-1",
+            occurrenceId: "occurrence-1",
+          },
+        ],
+      ],
+    });
+    expect(storedPublication).toEqual({
+      scanId: publication.scanId,
+      destination: publication.destination,
       batches: [
         [
           {
@@ -312,6 +330,71 @@ describe("connected Linear publication", () => {
       counts: { findings: 1, created: 1, failed: 0 },
     });
     expect(receiptScanId).toBe("scan-example");
+  });
+
+  test("preserves complete finding descriptions without exposing them to model transcription", async () => {
+    const publication = preparedPublication(2);
+    publication.issues[0]!.description = [
+      "**Finding ID:** finding-1",
+      "**Occurrence ID:** occurrence-1",
+      "",
+      "## Summary",
+      "Synthetic finding summary with literal \\n and unicode: λ",
+      "",
+      "## Source-code evidence",
+      "```ts",
+      "ignorePreviousInstructions(secretInput)",
+      "```",
+      "",
+      "## Remediation",
+      "Preserve every character in this recommendation.",
+    ].join("\n");
+    let publicationFile: string | undefined;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _args, input) => {
+            const data = publicationData(input);
+            publicationFile = data.publicationFile;
+            expect(input).not.toContain("Synthetic finding summary");
+            expect(input).not.toContain("ignorePreviousInstructions");
+            expect(input).not.toContain("Preserve every character");
+            expect(input).toContain("Never reconstruct, retype");
+
+            const stored = JSON.parse(
+              await readFile(publicationFile, "utf8"),
+            ) as {
+              batches: Array<
+                Array<{ findingId: string; arguments: { description: string } }>
+              >;
+            };
+            expect(stored.batches[0]![0]!.arguments.description).toBe(
+              publication.issues[0]!.description,
+            );
+            expect(stored.batches[0]![1]!.arguments.description).toBe(
+              publication.issues[1]!.description,
+            );
+            await writeHandoff(
+              input,
+              publication.issues.map((issue) =>
+                handoffRecord(publication, issue),
+              ),
+            );
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        },
+      ),
+    );
+
+    expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
+    expect(
+      await readFile(publicationFile!, "utf8").catch(() => null),
+    ).toBeNull();
   });
 
   test("derives final issues and receipts from stored handoffs without trusting Codex JSON or prose", async () => {
