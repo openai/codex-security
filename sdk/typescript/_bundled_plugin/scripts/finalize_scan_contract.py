@@ -1236,19 +1236,33 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
 
-    for section_name in ("rootCause", "validation", "attackPath"):
-        section = finding.get(section_name)
-        if not isinstance(section, dict) or "evidenceRefs" not in section:
+    referenced_sections = [
+        (section_name, finding.get(section_name))
+        for section_name in ("rootCause", "validation", "attackPath")
+    ]
+    attack_path = finding.get("attackPath")
+    if isinstance(attack_path, dict):
+        referenced_sections.extend(
+            (f"attackPath.{section_name}", attack_path.get(section_name))
+            for section_name in ("dataFlow", "dataflow", "data_flow", "reachability")
+        )
+    for section_name, section in referenced_sections:
+        if not isinstance(section, dict):
             continue
-        refs = section["evidenceRefs"]
-        if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref for ref in refs):
-            raise ContractError(f"{context}.{section_name}.evidenceRefs: expected strings")
-        unknown_refs = sorted(set(refs) - evidence_ids)
-        if unknown_refs:
-            raise ContractError(
-                f"{context}.{section_name}.evidenceRefs: unknown code-evidence ids: "
-                + ", ".join(unknown_refs)
-            )
+        for refs_key in ("evidenceRefs", "evidence_refs"):
+            if refs_key not in section:
+                continue
+            refs = section[refs_key]
+            if not isinstance(refs, list) or any(
+                not isinstance(ref, str) or not ref for ref in refs
+            ):
+                raise ContractError(f"{context}.{section_name}.{refs_key}: expected strings")
+            unknown_refs = sorted(set(refs) - evidence_ids)
+            if unknown_refs:
+                raise ContractError(
+                    f"{context}.{section_name}.{refs_key}: unknown code-evidence ids: "
+                    + ", ".join(unknown_refs)
+                )
 
     provenance = _require_dict(finding, "provenance", context)
     _require_str(provenance, "source", f"{context}.provenance")

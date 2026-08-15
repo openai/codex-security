@@ -47,6 +47,8 @@ def _escape_markdown_text(value: str) -> str:
 
 
 def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
     if not isinstance(value, list):
         return []
     normalized: list[str] = []
@@ -254,22 +256,25 @@ def _code_evidence_catalog(finding: dict[str, Any]) -> dict[str, dict[str, Any]]
 
 
 def _section_code_evidence(
-    finding: dict[str, Any], section: dict[str, Any]
+    finding: dict[str, Any], *sections: dict[str, Any]
 ) -> list[dict[str, Any]]:
     catalog = _code_evidence_catalog(finding)
-    refs = section.get("evidenceRefs", section.get("evidence_refs", []))
-    resolved = (
-        [catalog[ref] for ref in refs if isinstance(ref, str) and ref in catalog]
-        if isinstance(refs, list)
-        else []
-    )
-    embedded = section.get("codeEvidence", section.get("code_evidence", []))
-    if isinstance(embedded, list):
-        resolved.extend(
-            item
-            for item in embedded
-            if isinstance(item, dict) and isinstance(item.get("code"), str) and item["code"].strip()
-        )
+    resolved: list[dict[str, Any]] = []
+    for section in sections:
+        refs = section.get("evidenceRefs", section.get("evidence_refs", []))
+        if isinstance(refs, list):
+            resolved.extend(
+                catalog[ref] for ref in refs if isinstance(ref, str) and ref in catalog
+            )
+        embedded = section.get("codeEvidence", section.get("code_evidence", []))
+        if isinstance(embedded, list):
+            resolved.extend(
+                item
+                for item in embedded
+                if isinstance(item, dict)
+                and isinstance(item.get("code"), str)
+                and item["code"].strip()
+            )
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for item in resolved:
@@ -422,9 +427,24 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     raw_root_cause = finding.get("rootCause")
     root_cause = raw_root_cause if isinstance(raw_root_cause, dict) else {}
     attack_path = finding.get("attackPath") if isinstance(finding.get("attackPath"), dict) else {}
-    dataflow = attack_path.get("dataflow") if isinstance(attack_path.get("dataflow"), dict) else {}
+    raw_dataflow = next(
+        (attack_path[key] for key in ("dataFlow", "dataflow", "data_flow") if key in attack_path),
+        None,
+    )
+    dataflow = (
+        {"summary": raw_dataflow}
+        if isinstance(raw_dataflow, str)
+        else raw_dataflow
+        if isinstance(raw_dataflow, dict)
+        else {}
+    )
+    raw_reachability = attack_path.get("reachability")
     reachability = (
-        attack_path.get("reachability") if isinstance(attack_path.get("reachability"), dict) else {}
+        {"summary": raw_reachability}
+        if isinstance(raw_reachability, str)
+        else raw_reachability
+        if isinstance(raw_reachability, dict)
+        else {}
     )
     severity = finding["severity"]
     validation_summary = _text(
@@ -432,14 +452,17 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         f"{finding['confidence']['rationale']} Validation details were not recorded separately.",
     )
     validation_evidence = _strings(validation.get("evidence"))
+    validation_assertions = _strings(validation.get("assertions"))
     validation_counterevidence = _strings(validation.get("counterEvidence"))
+    validation_limitations = _strings(validation.get("limitations"))
     root_cause_summary = _text(
         raw_root_cause if isinstance(raw_root_cause, str) else root_cause.get("summary"),
         "",
     )
     root_cause_code_evidence = _root_cause_code_evidence(finding, root_cause)
     validation_code_evidence = _section_code_evidence(finding, validation)
-    attack_path_code_evidence = _section_code_evidence(finding, attack_path)
+    dataflow_code_evidence = _section_code_evidence(finding, attack_path, dataflow)
+    reachability_code_evidence = _section_code_evidence(finding, reachability)
     dataflow_summary = _text(
         dataflow.get("summary"),
         f"The canonical finding records the affected path at {_locations(finding)}, but no expanded source-to-sink narrative was recorded.",
@@ -487,6 +510,8 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     if validation.get("method"):
         lines.extend(["", f"Validation method: {_text(validation['method'], 'not recorded')}"])
     lines.extend(_code_evidence_lines(validation_code_evidence))
+    if validation_assertions:
+        lines.extend(["", "Assertions:", *_bullets(validation_assertions, "None recorded.")])
     if validation_evidence:
         lines.extend(["", "Evidence:", *_bullets(validation_evidence, "No evidence recorded.")])
     if validation_counterevidence:
@@ -497,6 +522,8 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
                 *_bullets(validation_counterevidence, "None recorded."),
             ]
         )
+    if validation_limitations:
+        lines.extend(["", "Limitations:", *_bullets(validation_limitations, "None recorded.")])
     lines.extend(["", "#### Dataflow", "", dataflow_summary])
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
@@ -504,7 +531,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     transformations = _strings(dataflow.get("transformations"))
     if transformations:
         lines.extend(["", "Transformations:", *_bullets(transformations, "None recorded.")])
-    lines.extend(_code_evidence_lines(attack_path_code_evidence))
+    lines.extend(_code_evidence_lines(dataflow_code_evidence))
     lines.extend(["", "#### Reachability", "", reachability_summary])
     for label, key in (
         ("Attacker", "attacker"),
@@ -516,6 +543,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     preconditions = _strings(reachability.get("preconditions"))
     if preconditions:
         lines.extend(["", "Preconditions:", *_bullets(preconditions, "None recorded.")])
+    lines.extend(_code_evidence_lines(reachability_code_evidence))
     lines.extend(
         [
             "",

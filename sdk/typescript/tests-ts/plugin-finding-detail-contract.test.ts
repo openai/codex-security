@@ -82,6 +82,26 @@ const stringAssessmentInput = {
   ],
 };
 
+function projectFindingDetails(details: JsonObject): string {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const script = [
+    "import json, pathlib, runpy, sys",
+    "plugin = pathlib.Path(sys.argv[1])",
+    "examples = plugin / 'examples' / 'completed-scan'",
+    "manifest, findings, coverage = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
+    "findings['findings'][0].update(json.loads(sys.argv[2]))",
+    "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
+    "print(projection['build_report_markdown'](manifest, findings, coverage))",
+  ].join("\n");
+  const result = Bun.spawnSync(
+    [python!, "-I", "-B", "-c", script, PLUGIN_ROOT, JSON.stringify(details)],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  return new TextDecoder().decode(result.stdout);
+}
+
 async function readJson(path: string): Promise<JsonObject> {
   return JSON.parse(await readFile(path, "utf8")) as JsonObject;
 }
@@ -241,5 +261,96 @@ describe("bundled plugin finding detail contracts", () => {
         false,
       );
     }
+  });
+
+  test.each(["dataFlow", "dataflow", "data_flow"] as const)(
+    "projects scalar finding details for the %s alias",
+    (dataFlowKey) => {
+      const report = projectFindingDetails({
+        attackPath: {
+          [dataFlowKey]: "request -> archive extraction -> filesystem write",
+          reachability: "An authenticated uploader can trigger extraction.",
+        },
+        validation: {
+          assertions: ["The destination escapes the extraction root."],
+          evidence: "The archive entry path is not contained.",
+          limitations: ["The upload route was not exercised dynamically."],
+        },
+      });
+
+      expect(report).toContain(
+        "request -\\> archive extraction -\\> filesystem write",
+      );
+      expect(report).toContain(
+        "An authenticated uploader can trigger extraction.",
+      );
+      expect(report).toContain("The destination escapes the extraction root.");
+      expect(report).toContain("The archive entry path is not contained.");
+      expect(report).toContain(
+        "The upload route was not exercised dynamically.",
+      );
+    },
+  );
+
+  test("projects code evidence referenced by nested attack-path details", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        dataflow: {
+          evidenceRefs: ["archive-source"],
+          summary: "An archive entry path reaches a filesystem write.",
+        },
+        reachability: {
+          evidenceRefs: ["archive-sink"],
+          summary: "An authenticated uploader can trigger extraction.",
+        },
+      },
+      codeEvidence: [
+        {
+          code: "entry_path = archive_entry.name",
+          explanation: "The archive controls the path.",
+          id: "archive-source",
+          label: "Attacker-controlled archive path",
+          path: "src/archive.py",
+          startLine: 20,
+        },
+        {
+          code: "destination.write_bytes(entry.read())",
+          explanation: "The unchecked path reaches the write.",
+          id: "archive-sink",
+          label: "Unchecked filesystem write",
+          path: "src/archive.py",
+          startLine: 41,
+        },
+      ],
+    });
+
+    expect(report).toContain("entry_path = archive_entry.name");
+    expect(report).toContain("destination.write_bytes(entry.read())");
+  });
+
+  test("rejects unknown code evidence referenced by nested attack-path details", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())['findings'][0]",
+      "finding['attackPath'] = {'dataflow': {'evidenceRefs': ['missing-evidence']}}",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "try:",
+      "    finalizer['_validate_finding'](finding, 'findings[0]')",
+      "except finalizer['ContractError'] as error:",
+      "    print(error)",
+      "else:",
+      "    print('accepted')",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(new TextDecoder().decode(result.stdout)).toContain(
+      "attackPath.dataflow.evidenceRefs: unknown code-evidence ids: missing-evidence",
+    );
   });
 });
