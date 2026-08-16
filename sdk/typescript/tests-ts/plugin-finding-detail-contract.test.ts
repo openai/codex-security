@@ -444,7 +444,11 @@ describe("bundled plugin finding detail contracts", () => {
       "plugin = pathlib.Path(sys.argv[1])",
       "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
       "findings['findings'][0]['codeEvidence'] = [{'id': 'shared-source', 'code': 'canonical_source()'}]",
-      "findings['findings'][0]['code_evidence'] = [{'id': 'shared-source', 'code': 'legacy_source()'}]",
+      "findings['findings'][0]['code_evidence'] = [",
+      "    {'id': 'shared-source', 'code': 'legacy_source()'},",
+      "    {'id': 'legacy-duplicate', 'code': 'first_legacy_source()'},",
+      "    {'id': 'legacy-duplicate', 'code': 'second_legacy_source()'},",
+      "]",
       "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence']}",
       "findings['findings'][0]['attackPath'] = {'evidence_refs': ['legacy-attack-evidence'], 'dataFlow': {'evidenceRefs': ['legacy-missing-evidence']}}",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
@@ -459,11 +463,17 @@ describe("bundled plugin finding detail contracts", () => {
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
       compatibleAttack: [],
-      compatibleLegacyCatalog: [],
+      compatibleLegacyCatalog: [
+        { code: "first_legacy_source()", id: "legacy-duplicate" },
+      ],
       compatibleNested: [],
       compatibleValidation: [],
       originalAttack: ["legacy-attack-evidence"],
-      originalLegacyCatalog: [{ code: "legacy_source()", id: "shared-source" }],
+      originalLegacyCatalog: [
+        { code: "legacy_source()", id: "shared-source" },
+        { code: "first_legacy_source()", id: "legacy-duplicate" },
+        { code: "second_legacy_source()", id: "legacy-duplicate" },
+      ],
       originalNested: ["legacy-missing-evidence"],
       originalValidation: ["legacy-validation-evidence"],
     });
@@ -515,6 +525,8 @@ describe("bundled plugin finding detail contracts", () => {
       "    {'id': 'legacy-null-end', 'path': 'src/null_end.py', 'startLine': 48, 'endLine': None, 'code': 'null_end()'},",
       "    {'id': 'legacy-reversed-end', 'path': 'src/reversed_end.py', 'startLine': 59, 'endLine': 58, 'code': 'reversed_end()'},",
       "    {'id': 'legacy-text-end', 'path': 'src/text_end.py', 'startLine': 70, 'endLine': '71', 'code': 'text_end()'},",
+      "    {'id': 'legacy-zero-start', 'path': 'src/zero.py', 'startLine': 0, 'code': 'zero_start()'},",
+      "    {'id': 'legacy-unsafe-path', 'path': '../outside.py', 'startLine': 81, 'code': 'unsafe_path()'},",
       "]",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "result = finalizer['_sarif_result'](finding, 0)",
@@ -534,5 +546,11 @@ describe("bundled plugin finding detail contracts", () => {
       "src/reversed_end.py": { startLine: 59, endLine: 59 },
       "src/text_end.py": { startLine: 70, endLine: 70 },
     });
+    expect(
+      JSON.parse(new TextDecoder().decode(result.stdout)),
+    ).not.toHaveProperty("src/zero.py");
+    expect(
+      JSON.parse(new TextDecoder().decode(result.stdout)),
+    ).not.toHaveProperty("../outside.py");
   });
 });

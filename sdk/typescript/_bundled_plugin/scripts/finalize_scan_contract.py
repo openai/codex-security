@@ -1514,15 +1514,16 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         }
         legacy_evidence = finding.get("code_evidence")
         if isinstance(legacy_evidence, list):
-            finding["code_evidence"] = [
-                evidence
-                for evidence in legacy_evidence
-                if not (
-                    isinstance(evidence, dict)
-                    and isinstance(evidence.get("id"), str)
-                    and evidence["id"] in canonical_evidence_ids
-                )
-            ]
+            compatible_legacy_evidence = []
+            seen_evidence_ids = set(canonical_evidence_ids)
+            for evidence in legacy_evidence:
+                evidence_id = evidence.get("id") if isinstance(evidence, dict) else None
+                if isinstance(evidence_id, str) and evidence_id:
+                    if evidence_id in seen_evidence_ids:
+                        continue
+                    seen_evidence_ids.add(evidence_id)
+                compatible_legacy_evidence.append(evidence)
+            finding["code_evidence"] = compatible_legacy_evidence
         compatible_legacy_evidence = finding.get("code_evidence")
         compatible_legacy_evidence = (
             compatible_legacy_evidence if isinstance(compatible_legacy_evidence, list) else []
@@ -1747,24 +1748,34 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
         primary,
         *(location for location in finding["locations"] if location is not primary),
     ]
-    locations.extend(
-        {
-            "path": evidence["path"],
-            "startLine": evidence["startLine"],
-            "endLine": (
-                evidence["endLine"]
-                if isinstance(evidence.get("endLine"), int)
-                and not isinstance(evidence["endLine"], bool)
-                and evidence["endLine"] >= evidence["startLine"]
-                else evidence["startLine"]
-            ),
-            "role": f"evidence:{evidence['id']}",
-        }
-        for evidence in _merged_code_evidence(finding)
-        if isinstance(evidence.get("path"), str)
-        and isinstance(evidence.get("startLine"), int)
-        and not isinstance(evidence["startLine"], bool)
-    )
+    for evidence in _merged_code_evidence(finding):
+        path = evidence.get("path")
+        start_line = evidence.get("startLine")
+        if (
+            not isinstance(path, str)
+            or not isinstance(start_line, int)
+            or isinstance(start_line, bool)
+            or start_line < 1
+        ):
+            continue
+        try:
+            path = _require_safe_relative_path(path, "SARIF evidence location")
+        except ContractError:
+            continue
+        locations.append(
+            {
+                "path": path,
+                "startLine": start_line,
+                "endLine": (
+                    evidence["endLine"]
+                    if isinstance(evidence.get("endLine"), int)
+                    and not isinstance(evidence["endLine"], bool)
+                    and evidence["endLine"] >= start_line
+                    else start_line
+                ),
+                "role": f"evidence:{evidence['id']}",
+            }
+        )
     unique: dict[tuple[str, int, int], dict[str, Any]] = {}
     for location in locations:
         key = (
