@@ -12,6 +12,7 @@ import {
   skillCommandFailure,
 } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 describe("CLI skill commands", () => {
   test("runs validation and patch skills with file and literal inputs", async () => {
@@ -189,6 +190,14 @@ describe("CLI skill commands", () => {
       ? ["symbolic link"]
       : ["symbolic link", "FIFO"],
   )("rejects finding files replaced with a %s", async (replacement) => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        `rejects finding files replaced with a ${replacement}`,
+      )
+    ) {
+      return;
+    }
     const root = await mkdtemp(join(tmpdir(), "codex-security-skill-inputs-"));
     try {
       const repository = join(root, "repository");
@@ -200,6 +209,7 @@ describe("CLI skill commands", () => {
       const canonicalSelected = await filesystem.realpath(selected);
 
       const originalOpen = filesystem.open;
+      let replaced = false;
       const opening = spyOn(filesystem, "open").mockImplementation(
         async (...args: Parameters<typeof filesystem.open>) => {
           if (String(args[0]) === canonicalSelected) {
@@ -207,6 +217,7 @@ describe("CLI skill commands", () => {
             await rm(selected);
             if (replacement === "FIFO") execFileSync("mkfifo", [selected]);
             else await symlink(external, selected);
+            replaced = true;
           }
           return await originalOpen(...args);
         },
@@ -215,20 +226,20 @@ describe("CLI skill commands", () => {
       try {
         let started = false;
         const stderr = capture();
-        expect(
-          await main(
-            ["validate", "finding.txt"],
-            capture().stream,
-            stderr.stream,
-            dependencies({
-              currentDirectory: repository,
-              onCodex: () => {
-                started = true;
-                return 0;
-              },
-            }),
-          ),
-        ).toBe(2);
+        const status = await main(
+          ["validate", "finding.txt"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: repository,
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          }),
+        );
+        expect(replaced, "the file-open replacement hook ran").toBe(true);
+        expect(status).toBe(2);
         expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
         expect(started).toBe(false);
       } finally {
