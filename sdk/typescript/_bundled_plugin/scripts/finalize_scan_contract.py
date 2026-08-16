@@ -1495,6 +1495,19 @@ def _filter_unknown_legacy_evidence_refs(
             ]
 
 
+def _wrap_nonempty_legacy_list_scalars(
+    section: dict[str, Any], fields: tuple[str, ...]
+) -> None:
+    for field in fields:
+        value = section.get(field)
+        if not isinstance(value, str):
+            continue
+        if value.strip():
+            section[field] = [value]
+        else:
+            section.pop(field)
+
+
 def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str, Any]:
     compatible = copy.deepcopy(findings)
     finding_items = compatible.get("findings")
@@ -1565,9 +1578,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             section = finding.get(section_name)
             if not isinstance(section, dict):
                 continue
-            for field in list_fields:
-                if isinstance(section.get(field), str):
-                    section[field] = [section[field]]
+            _wrap_nonempty_legacy_list_scalars(section, list_fields)
             _filter_unknown_legacy_evidence_refs(section, evidence_ids)
         attack_path = finding.get("attackPath")
         if not isinstance(attack_path, dict):
@@ -1576,12 +1587,12 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             detail = attack_path.get(field)
             if not isinstance(detail, dict):
                 continue
-            for list_field in ("evidenceRefs", "evidence_refs", "transformations"):
-                if isinstance(detail.get(list_field), str):
-                    detail[list_field] = [detail[list_field]]
+            _wrap_nonempty_legacy_list_scalars(
+                detail, ("evidenceRefs", "evidence_refs", "transformations")
+            )
             _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
-            if field == "reachability" and isinstance(detail.get("preconditions"), str):
-                detail["preconditions"] = [detail["preconditions"]]
+            if field == "reachability":
+                _wrap_nonempty_legacy_list_scalars(detail, ("preconditions",))
     return compatible
 
 
