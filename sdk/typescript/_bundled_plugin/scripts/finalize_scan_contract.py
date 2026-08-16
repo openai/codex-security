@@ -1589,7 +1589,12 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         if not isinstance(attack_path, dict):
             continue
         for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
+            if field not in attack_path:
+                continue
             detail = attack_path.get(field)
+            if detail is None:
+                attack_path.pop(field)
+                continue
             if not isinstance(detail, dict):
                 continue
             _wrap_nonempty_legacy_list_scalars(
