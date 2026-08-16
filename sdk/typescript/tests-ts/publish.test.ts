@@ -4,6 +4,7 @@ import {
   appendFile,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   writeFile,
@@ -1139,7 +1140,7 @@ describe("connected Linear publication", () => {
     expect(result.failed).toEqual([]);
   });
 
-  test("salvages verified issue events missing from a partial handoff without overriding explicit failures", async () => {
+  test("prefers verified issue events over missing handoffs and model-authored failures", async () => {
     const publication = preparedPublication(3);
     let recovered: string | undefined;
     const result = await publishScanInternal(
@@ -1175,8 +1176,10 @@ describe("connected Linear publication", () => {
               "finding-1",
               "finding-3",
               "finding-2",
+              "finding-3",
             ]);
             expect(records[2]!["issueIdentifier"]).toBe("SEC-2");
+            expect(records[3]!["issueIdentifier"]).toBe("SEC-3");
             return [...created];
           },
         },
@@ -1186,16 +1189,13 @@ describe("connected Linear publication", () => {
     expect(result.created.map((issue) => issue.findingId)).toEqual([
       "finding-1",
       "finding-2",
+      "finding-3",
     ]);
-    expect(result.failed).toEqual([
-      {
-        findingId: "finding-3",
-        error: "The handoff explicitly rejected this finding.",
-      },
-    ]);
+    expect(result.failed).toEqual([]);
+    expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
   });
 
-  test("retains both written and salvaged issue mappings if the publication database fails", async () => {
+  test("retains verified issue mappings after model-authored failures if the publication database fails", async () => {
     const publication = preparedPublication(2);
     let handoffFile: string | undefined;
 
@@ -1212,6 +1212,9 @@ describe("connected Linear publication", () => {
               await writeHandoff(input, [
                 handoffRecord(publication, publication.issues[0]!, {
                   identifier: "SEC-RECOVERABLE",
+                }),
+                handoffRecord(publication, publication.issues[1]!, {
+                  error: "The model could not write the created issue.",
                 }),
               ]);
               return {
@@ -1240,8 +1243,12 @@ describe("connected Linear publication", () => {
       records.map((record) => [record["findingId"], record["issueIdentifier"]]),
     ).toEqual([
       ["finding-1", "SEC-RECOVERABLE"],
+      ["finding-2", undefined],
       ["finding-2", "SEC-2"],
     ]);
+    expect(records[1]!["error"]).toBe(
+      "The model could not write the created issue.",
+    );
   });
 
   test("recovers validated partial mappings after cancellation before preserving its private handoff", async () => {
@@ -1509,6 +1516,66 @@ describe("connected Linear publication", () => {
     }
   });
 
+  test("retains distinct duplicate Linear issue IDs for indeterminate recovery", async () => {
+    const publication = preparedPublication();
+    const issue = publication.issues[0]!;
+    let handoffFile: string | undefined;
+    let persisted = false;
+    let receipt = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [
+                handoffRecord(publication, issue, {
+                  identifier: "SYNTH-DUPLICATE-A",
+                }),
+                handoffRecord(publication, issue, {
+                  identifier: "SYNTH-DUPLICATE-B",
+                }),
+              ]);
+              return {
+                exitCode: 0,
+                stdout: [
+                  issueEvent(issue, { identifier: "SYNTH-DUPLICATE-A" }),
+                  issueEvent(issue, { identifier: "SYNTH-DUPLICATE-B" }),
+                ].join("\n"),
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async (_prepared, created) => {
+              persisted = true;
+              return [...created];
+            },
+            writeReceipt: async () => {
+              receipt = true;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /SYNTH-DUPLICATE-A and SYNTH-DUPLICATE-B.*indeterminate.*publication handoff remains at.*recover both issues.*avoid creating duplicate issues/u,
+    );
+
+    expect(persisted).toBe(false);
+    expect(receipt).toBe(false);
+    const records = (await readFile(handoffFile!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record["issueIdentifier"])).toEqual([
+      "SYNTH-DUPLICATE-A",
+      "SYNTH-DUPLICATE-B",
+    ]);
+  });
+
   test("matches durable publication handoffs by scan and finding IDs only", async () => {
     const publication = preparedPublication(3);
     const result = await publishScanInternal(
@@ -1602,6 +1669,100 @@ describe("connected Linear publication", () => {
       expect(result.created, scenario.name).toEqual([]);
       expect(result.failed, scenario.name).toHaveLength(1);
     }
+  });
+
+  test("does not create source-bearing handoffs when the Codex command cannot be resolved", async () => {
+    const publication = preparedPublication();
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        resolveCodex: () => {
+          throw new Error("The Codex executable could not be resolved.");
+        },
+        runCodex: undefined,
+      },
+    );
+
+    await expect(
+      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
+    ).rejects.toThrow("The Codex executable could not be resolved.");
+
+    const handoffRoot = join(
+      injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+      "publications",
+      "linear",
+      "handoffs",
+    );
+    expect(
+      await stat(handoffRoot).then(
+        () => false,
+        (error: NodeJS.ErrnoException) => error.code === "ENOENT",
+      ),
+    ).toBe(true);
+  });
+
+  test("removes source-bearing handoffs when the Codex executable cannot be spawned", async () => {
+    const publication = preparedPublication();
+    let persisted = false;
+    const missingExecutable = join(
+      tmpdir(),
+      `codex-security-missing-executable-${randomUUID()}`,
+    );
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        resolveCodex: () => ({ command: missingExecutable }),
+        runCodex: undefined,
+        recordPublishedIssues: async (_publication, issues) => {
+          persisted = true;
+          return [...issues];
+        },
+      },
+    );
+
+    await expect(
+      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
+    ).rejects.toThrow("Could not start Codex for Linear publication.");
+
+    const handoffRoot = join(
+      injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+      "publications",
+      "linear",
+      "handoffs",
+    );
+    expect(await readdir(handoffRoot)).toEqual([]);
+    expect(persisted).toBe(false);
+  });
+
+  test("retains handoffs when an injected publisher rejects after a possible mutation", async () => {
+    const publication = preparedPublication();
+    let handoffFile: string | undefined;
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        runCodex: async (_command, _args, input) => {
+          handoffFile = publicationData(input).handoffFile;
+          await writeHandoff(input, [
+            handoffRecord(publication, publication.issues[0]!, {
+              identifier: "SEC-RECOVERABLE",
+            }),
+          ]);
+          throw new Error("The publisher failed after a possible mutation.");
+        },
+      },
+    );
+
+    await expect(
+      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
+    ).rejects.toThrow("The publisher failed after a possible mutation.");
+
+    expect(await readFile(handoffFile!, "utf8")).toContain("SEC-RECOVERABLE");
+    expect(
+      await readFile(join(dirname(handoffFile!), "publication.json"), "utf8"),
+    ).toContain("unsafe(input)");
   });
 
   test("verifies the existing publication database before starting Codex or creating issues", async () => {
@@ -2329,6 +2490,72 @@ describe("connected Linear publication", () => {
     expect(first.uploadId).toBe(second.uploadId);
     expect(first.created[0]!.issueIdentifier).toBe("SEC-1");
     expect(second.created[0]!.issueIdentifier).toBe("SEC-2");
+  });
+
+  test("preserves both private receipts when the same scan is published concurrently", async () => {
+    const stateDirectory = await mkdtemp(
+      join(tmpdir(), "codex-security-concurrent-publication-receipts-"),
+    );
+    temporaryDirectories.push(stateDirectory);
+    const publication = preparedPublication();
+    let calls = 0;
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+        runCodex: async () => {
+          calls += 1;
+          return {
+            exitCode: 0,
+            stdout: issueEvent(publication.issues[0]!, {
+              identifier: `SEC-CONCURRENT-${calls}`,
+            }),
+            stderr: "",
+          };
+        },
+      },
+    );
+    delete injected.writeReceipt;
+
+    const results = await Promise.all([
+      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
+      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
+    ]);
+    const directory = join(stateDirectory, "publications", "linear");
+    const digest = createHash("sha256")
+      .update(publication.scanId)
+      .digest("hex");
+    const attempts = (await readdir(directory)).filter(
+      (name) => name.startsWith(`${digest}-`) && name.endsWith(".json"),
+    );
+
+    expect(attempts).toHaveLength(2);
+    const receipts = await Promise.all(
+      attempts.map(async (name) => {
+        const path = join(directory, name);
+        if (process.platform !== "win32") {
+          expect((await stat(path)).mode & 0o077).toBe(0);
+        }
+        return JSON.parse(await readFile(path, "utf8")) as {
+          created: Array<{ issueIdentifier: string }>;
+        };
+      }),
+    );
+    expect(
+      receipts
+        .flatMap((receipt) =>
+          receipt.created.map((issue) => issue.issueIdentifier),
+        )
+        .sort(),
+    ).toEqual(["SEC-CONCURRENT-1", "SEC-CONCURRENT-2"]);
+    const latest = JSON.parse(
+      await readFile(join(directory, `${digest}.json`), "utf8"),
+    ) as (typeof results)[number];
+    expect(results).toContainEqual(latest);
+    expect(
+      results.map((result) => result.created[0]!.issueIdentifier).sort(),
+    ).toEqual(["SEC-CONCURRENT-1", "SEC-CONCURRENT-2"]);
   });
 
   test("keeps publication receipts outside sealed scans and hashes unsafe scan IDs", async () => {

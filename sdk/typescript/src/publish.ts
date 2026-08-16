@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
   mkdir,
@@ -203,6 +203,10 @@ export async function publishScanInternal(
     }
     assigneeId = users.nodes[0]!.id;
   }
+  const command =
+    linearClient === undefined
+      ? (dependencies.resolveCodex ?? resolveCodexCommand)(environment)
+      : undefined;
   options.signal?.throwIfAborted();
   const handoff = await createPublicationHandoff(prepared, environment);
   const progressObserver = options.onProgress;
@@ -224,12 +228,8 @@ export async function publishScanInternal(
       options.signal,
     );
   } else {
-    const command = (dependencies.resolveCodex ?? resolveCodexCommand)(
-      environment,
-    );
-    options.signal?.throwIfAborted();
     invocation = await (dependencies.runCodex ?? runPublicationCodex)(
-      command,
+      command!,
       [
         "exec",
         "--model",
@@ -262,7 +262,23 @@ export async function publishScanInternal(
             );
           },
       options.signal,
-    );
+    ).catch(async (error: unknown) => {
+      const cause =
+        error instanceof CodexSecurityError ? error.cause : undefined;
+      if (
+        dependencies.runCodex === undefined &&
+        error instanceof CodexSecurityError &&
+        error.message === "Could not start Codex for Linear publication." &&
+        isRecord(cause) &&
+        typeof cause["syscall"] === "string" &&
+        cause["syscall"].startsWith("spawn ")
+      ) {
+        await rm(handoff.directory, { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+      }
+      throw error;
+    });
   }
   const failureMessage =
     linearClient !== undefined
@@ -638,6 +654,7 @@ async function collectPublicationHandoff(
   const created = new Map<string, PublishedScanIssue>();
   const failed = new Map<string, string>();
   const observed = new Set<string>();
+  const explicitFailures = new Set<string>();
   const unexpected: string[] = [];
   const expectedIssues = new Map(
     publication.issues.map((issue) => [issue.findingId, issue]),
@@ -664,6 +681,29 @@ async function collectPublicationHandoff(
       continue;
     }
     if (observed.has(issue.findingId)) {
+      const saved = created.get(issue.findingId);
+      const identifiers = ["issueIdentifier", "identifier", "id"].filter(
+        (name) => Object.hasOwn(record, name),
+      );
+      const identifier =
+        identifiers.length === 1 ? record[identifiers[0]!] : undefined;
+      const url = record["url"];
+      if (
+        saved !== undefined &&
+        record["scanId"] === publication.scanId &&
+        record["occurrenceId"] === issue.occurrenceId &&
+        !Object.hasOwn(record, "error") &&
+        typeof identifier === "string" &&
+        identifier.trim().length > 0 &&
+        identifier !== saved.issueIdentifier &&
+        (url === undefined ||
+          (typeof url === "string" && url.trim().length > 0))
+      ) {
+        throw new CodexSecurityError(
+          `More than one Linear issue was created for finding ${issue.findingId}: ${saved.issueIdentifier} and ${identifier}. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover both issues before retrying to avoid creating duplicate issues.`,
+        );
+      }
+      explicitFailures.delete(issue.findingId);
       created.delete(issue.findingId);
       failed.set(
         issue.findingId,
@@ -698,6 +738,7 @@ async function collectPublicationHandoff(
           "Codex wrote an invalid Linear publication failure.",
         );
       } else {
+        explicitFailures.add(issue.findingId);
         failed.set(issue.findingId, record["error"]);
       }
       continue;
@@ -748,8 +789,8 @@ async function collectPublicationHandoff(
     const eventFailure = eventFailed.get(issue.findingId);
     if (
       saved === undefined &&
-      !observed.has(issue.findingId) &&
-      verified !== undefined
+      verified !== undefined &&
+      (!observed.has(issue.findingId) || explicitFailures.has(issue.findingId))
     ) {
       failed.delete(issue.findingId);
       created.set(issue.findingId, verified);
@@ -808,7 +849,11 @@ async function preserveVerifiedHandoff(
     if (line.trim().length === 0) continue;
     try {
       const record = JSON.parse(line) as unknown;
-      if (isRecord(record) && typeof record["findingId"] === "string") {
+      if (
+        isRecord(record) &&
+        typeof record["findingId"] === "string" &&
+        !Object.hasOwn(record, "error")
+      ) {
         recorded.add(record["findingId"]);
       }
     } catch {
@@ -1024,7 +1069,13 @@ async function writePublicationReceipt(
   );
   await mkdir(directory, { mode: 0o700, recursive: true });
   const name = createHash("sha256").update(result.scanId).digest("hex");
-  await writeFile(join(directory, `${name}.json`), JSON.stringify(result), {
+  const contents = JSON.stringify(result);
+  await writeFile(join(directory, `${name}-${randomUUID()}.json`), contents, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+  await writeFile(join(directory, `${name}.json`), contents, {
     encoding: "utf8",
     mode: 0o600,
   });
