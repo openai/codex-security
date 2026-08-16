@@ -27,6 +27,8 @@ jobs:
             node: "24.0.0"
           - os: ubuntu-latest
             node: "24"
+            # Exercise a fresh seed without adding another full-suite job.
+            test_script: test:randomized
           - os: ubuntu-latest
             node: "26.0.0"
           - os: ubuntu-latest
@@ -68,14 +70,14 @@ jobs:
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
 
-      - name: Test
+      - name: Test (${{ matrix.test_script || 'test' }})
         timeout-minutes: 10
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: pnpm --dir sdk/typescript run test
+        run: pnpm --dir sdk/typescript run ${{ matrix.test_script || 'test' }}
 
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format
