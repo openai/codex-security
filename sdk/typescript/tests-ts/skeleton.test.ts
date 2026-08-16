@@ -75,7 +75,7 @@ describe("TypeScript package skeleton", () => {
       "bun test --timeout 30000 ./tests-ts",
     );
     expect(packageJson.scripts["test:randomized"]).toBe(
-      "bun test --timeout 30000 --randomize ./tests-ts",
+      "pnpm run test --randomize",
     );
     expect(ciWorkflow).toContain(
       "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
