@@ -128,12 +128,9 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str):
         prepared["writeup"] = {"reportPath": bounded_json_text(writeup["reportPath"], 512)[0]}
 
-    evidence_key = next(
-        (key for key in ("codeEvidence", "code_evidence") if key in value),
-        None,
-    )
+    evidence_key, evidence = merged_code_evidence(value)
     if evidence_key is not None:
-        prepared[evidence_key] = bounded_code_evidence(value[evidence_key])
+        prepared[evidence_key] = bounded_code_evidence(evidence)
 
     for key in (
         "confidence",
@@ -233,14 +230,21 @@ def bounded_finding_section(
     for key in (*priority_keys, *value):
         if key in value and key not in ordered:
             ordered[key] = value[key]
-    evidence_key = next(
-        (key for key in ("codeEvidence", "code_evidence") if key in ordered),
-        None,
-    )
+    evidence_key, evidence = merged_code_evidence(ordered)
     if evidence_key is not None:
-        ordered[evidence_key] = bounded_code_evidence(ordered[evidence_key])
+        ordered[evidence_key] = bounded_code_evidence(evidence)
         ordered.pop("code_evidence" if evidence_key == "codeEvidence" else "codeEvidence", None)
     return bounded_json_value(ordered, [maximum_bytes])
+
+
+def merged_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
+    evidence_keys = [key for key in ("codeEvidence", "code_evidence") if key in value]
+    if not evidence_keys:
+        return None, None
+    catalogs = [value[key] for key in evidence_keys if isinstance(value[key], list)]
+    if catalogs:
+        return evidence_keys[0], [item for catalog in catalogs for item in catalog]
+    return evidence_keys[0], value[evidence_keys[0]]
 
 
 def bounded_code_evidence(value: Any) -> Any:

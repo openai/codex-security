@@ -24,6 +24,11 @@ describe("bundled finding previews", () => {
       absentAttackPath: {
         rootCause: { summary: "Synthetic root cause." },
       },
+      bothEvidenceAliases: {
+        codeEvidence: [{ id: "canonical", code: "canonical_source()" }],
+        code_evidence: [{ id: "legacy", code: "legacy_source()" }],
+        rootCause: { summary: "Synthetic root cause." },
+      },
     };
     const program = [
       "import json, sys",
@@ -58,6 +63,13 @@ describe("bundled finding previews", () => {
         structured: original.structured,
         absentAssessments: original.absentAssessments,
         absentAttackPath: original.absentAttackPath,
+        bothEvidenceAliases: {
+          codeEvidence: [
+            { id: "canonical", code: "canonical_source()" },
+            { id: "legacy", code: "legacy_source()" },
+          ],
+          rootCause: { summary: "Synthetic root cause." },
+        },
       },
       original,
     });
