@@ -1137,12 +1137,13 @@ describe("plugin runtime preparation", () => {
     ).toBe(false);
   });
 
-  test("extracts a plugin in one top-level directory", async () => {
+  test("extracts a plugin in one top-level directory and ignores macOS metadata", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "plugin.zip");
     await writeFile(
       archive,
       zipSync({
+        "__MACOSX/release/._plugin.json": strToU8("metadata"),
         "release/.codex-plugin/plugin.json": strToU8(
           JSON.stringify({ name: "codex-security", version: "1.2.3" }),
         ),
@@ -1150,6 +1151,14 @@ describe("plugin runtime preparation", () => {
     );
     const extracted = await extractPluginZip(archive, join(root, "extracted"));
     expect(extracted).toBe(join(root, "extracted", "release"));
+    expect(existsSync(join(root, "extracted", "__MACOSX"))).toBe(false);
+    if (process.platform !== "win32") {
+      expect((await stat(join(root, "extracted"))).mode & 0o777).toBe(0o700);
+      expect(
+        (await stat(join(extracted, ".codex-plugin", "plugin.json"))).mode &
+          0o777,
+      ).toBe(0o600);
+    }
   });
 
   test("decodes flag-clear ZIP filenames with the legacy CP437 encoding", async () => {
@@ -1226,7 +1235,10 @@ describe("plugin runtime preparation", () => {
           "release/.codex-plugin/plugin.json": strToU8(
             JSON.stringify({ name: "codex-security", version: "1.2.3" }),
           ),
-          "release/link": [strToU8("target"), { os: 3, attrs: 0o120777 << 16 }],
+          "release/link": [
+            strToU8("../../outside"),
+            { os: 3, attrs: 0o120777 << 16 },
+          ],
         }),
       ],
     ];
@@ -1237,6 +1249,15 @@ describe("plugin runtime preparation", () => {
       await expect(
         extractPluginZip(path, join(root, "extract")),
       ).rejects.toThrow(PluginBootstrapError);
+      if (name === "symlink") {
+        expect(existsSync(join(root, "outside"))).toBe(false);
+        expect(existsSync(join(root, "extract"))).toBe(false);
+        expect(
+          (await readdir(root)).some((entry) =>
+            entry.startsWith(".codex-security-plugin-"),
+          ),
+        ).toBe(false);
+      }
     }
   });
 

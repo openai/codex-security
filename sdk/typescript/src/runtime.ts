@@ -1,6 +1,12 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, readdirSync, type Stats } from "node:fs";
+import {
+  constants,
+  createWriteStream,
+  existsSync,
+  readdirSync,
+  type Stats,
+} from "node:fs";
 import {
   chmod,
   cp,
@@ -24,12 +30,14 @@ import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { crc32 } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
-import extractZip from "extract-zip";
 import { parse } from "smol-toml";
+import * as yauzl from "yauzl";
+import type { Entry as ZipEntry, ZipFile } from "yauzl";
 import {
   CodexSecurityError,
   OutputDirectoryError,
@@ -1740,84 +1748,130 @@ export async function extractPluginZip(
   signal?: AbortSignal,
 ): Promise<string> {
   const archivePath = resolve(expandHome(archive));
-  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  const staging = await realpath(
-    await mkdtemp(join(dirname(destination), ".codex-security-plugin-")),
-  );
+  let staging: string | undefined;
   try {
     throwIfSignalAborted(signal);
     await rejectBackslashZipNames(archivePath, signal);
-    let expandedSize = 0;
-    const paths = new Set<string>();
-    const checksums: Array<{ path: string; checksum: number }> = [];
-    await extractZip(archivePath, {
-      dir: staging,
-      defaultDirMode: 0o700,
-      defaultFileMode: 0o600,
-      onEntry(entry, archive) {
-        throwIfSignalAborted(signal);
-        if (archive.entryCount > MAX_ZIP_ENTRIES) {
-          throw new PluginBootstrapError(
-            `Plugin ZIP contains too many entries: ${archive.entryCount}.`,
-          );
-        }
-        const path = safeArchivePath(entry.fileName);
-        const collisionKey = path.toLowerCase();
-        if (paths.has(collisionKey)) {
-          throw new PluginBootstrapError(
-            `Plugin ZIP contains a duplicate path: ${entry.fileName}`,
-          );
-        }
-        paths.add(collisionKey);
-        if (((entry.externalFileAttributes >>> 16) & 0o170000) === 0o120000) {
-          throw new PluginBootstrapError(
-            `Plugin ZIP contains an unsafe path: ${entry.fileName}`,
-          );
-        }
-        if (entry.uncompressedSize > MAX_ZIP_ENTRY_SIZE) {
-          throw new PluginBootstrapError(
-            `Plugin ZIP entry exceeds the safety limit: ${entry.fileName}`,
-          );
-        }
-        expandedSize += entry.uncompressedSize;
-        if (expandedSize > MAX_ZIP_EXPANDED_SIZE) {
-          throw new PluginBootstrapError(
-            "Plugin ZIP expanded size exceeds the safety limit.",
-          );
-        }
-        const mode = (entry.externalFileAttributes >>> 16) & 0o170000;
-        const directory =
-          entry.fileName.endsWith("/") ||
-          mode === 0o040000 ||
-          (entry.versionMadeBy >>> 8 === 0 &&
-            entry.externalFileAttributes === 16);
-        if (!directory) {
-          checksums.push({ path, checksum: entry.crc32 >>> 0 });
-        }
-      },
+    const zipfile = await yauzl.openPromise(archivePath, {
+      autoClose: false,
+      decodeStrings: true,
+      lazyEntries: true,
+      strictFileNames: true,
+      validateEntrySizes: true,
     });
-    for (const { path, checksum } of checksums) {
+    try {
+      const entries = await inspectPluginZipEntries(zipfile, signal);
       throwIfSignalAborted(signal);
-      const bytes = await readFile(join(staging, ...path.split("/")));
-      if (crc32(bytes) !== checksum) {
-        throw new PluginBootstrapError(
-          `Plugin ZIP entry failed CRC-32 validation: ${path}`,
-        );
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      staging = await realpath(
+        await mkdtemp(join(dirname(destination), ".codex-security-plugin-")),
+      );
+      for (const item of entries) {
+        throwIfSignalAborted(signal);
+        const target = join(staging, ...item.path.split("/"));
+        if (item.directory) {
+          await mkdir(target, { recursive: true, mode: item.mode });
+          continue;
+        }
+        await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+        const readStream = await zipfile.openReadStreamPromise(item.entry);
+        const writeStream = createWriteStream(target, {
+          flags: "wx",
+          mode: item.mode,
+        });
+        if (signal === undefined) {
+          await pipeline(readStream, writeStream);
+        } else {
+          await pipeline(readStream, writeStream, { signal });
+        }
+        throwIfSignalAborted(signal);
+        const bytes = await readFile(target);
+        if (crc32(bytes) !== item.entry.crc32 >>> 0) {
+          throw new PluginBootstrapError(
+            `Plugin ZIP entry failed CRC-32 validation: ${item.path}`,
+          );
+        }
       }
+    } finally {
+      zipfile.close();
     }
+    if (staging === undefined) throw new Error("missing plugin ZIP staging");
     const pluginRoot = await discoverPluginRoot(staging);
     throwIfSignalAborted(signal);
     const relativeRoot = relative(staging, pluginRoot);
     await rename(staging, destination);
     return await validatePluginRoot(join(destination, relativeRoot));
   } catch (error) {
-    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    if (staging !== undefined) {
+      await rm(staging, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
     throwIfSignalAborted(signal);
     if (error instanceof PluginBootstrapError) throw error;
     throw new PluginBootstrapError(`Invalid plugin ZIP: ${archivePath}`, {
       cause: error,
     });
   }
+}
+
+interface PluginZipEntry {
+  entry: ZipEntry;
+  path: string;
+  directory: boolean;
+  mode: number;
+}
+
+async function inspectPluginZipEntries(
+  zipfile: ZipFile,
+  signal?: AbortSignal,
+): Promise<PluginZipEntry[]> {
+  if (zipfile.entryCount > MAX_ZIP_ENTRIES) {
+    throw new PluginBootstrapError(
+      `Plugin ZIP contains too many entries: ${zipfile.entryCount}.`,
+    );
+  }
+  let expandedSize = 0;
+  const paths = new Set<string>();
+  const entries: PluginZipEntry[] = [];
+  for await (const entry of zipfile.eachEntry()) {
+    throwIfSignalAborted(signal);
+    if (entry.fileName.startsWith("__MACOSX/")) continue;
+    const path = safeArchivePath(entry.fileName);
+    const collisionKey = path.toLowerCase();
+    if (paths.has(collisionKey)) {
+      throw new PluginBootstrapError(
+        `Plugin ZIP contains a duplicate path: ${entry.fileName}`,
+      );
+    }
+    paths.add(collisionKey);
+    const archivedMode = (entry.externalFileAttributes >>> 16) & 0xffff;
+    const type = archivedMode & 0o170000;
+    if (type === 0o120000) {
+      throw new PluginBootstrapError(
+        `Plugin ZIP contains an unsafe path: ${entry.fileName}`,
+      );
+    }
+    if (entry.uncompressedSize > MAX_ZIP_ENTRY_SIZE) {
+      throw new PluginBootstrapError(
+        `Plugin ZIP entry exceeds the safety limit: ${entry.fileName}`,
+      );
+    }
+    expandedSize += entry.uncompressedSize;
+    if (expandedSize > MAX_ZIP_EXPANDED_SIZE) {
+      throw new PluginBootstrapError(
+        "Plugin ZIP expanded size exceeds the safety limit.",
+      );
+    }
+    const directory =
+      entry.fileName.endsWith("/") ||
+      type === 0o040000 ||
+      (entry.versionMadeBy >>> 8 === 0 && entry.externalFileAttributes === 16);
+    const mode =
+      archivedMode === 0 ? (directory ? 0o700 : 0o600) : archivedMode & 0o777;
+    entries.push({ entry, path, directory, mode });
+  }
+  return entries;
 }
 
 async function rejectBackslashZipNames(
