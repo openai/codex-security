@@ -4578,10 +4578,7 @@ describe("CodexSecurity orchestration", () => {
                       expect(before["deep_scan"]).toMatchObject({
                         workers: index + 2,
                       });
-                      await Promise.race([
-                        concurrentScans,
-                        new Promise((resolve) => setTimeout(resolve, 5_000)),
-                      ]);
+                      await concurrentScans;
                       const after = parseToml(
                         await readFile(deepScanConfigPath!, "utf8"),
                       );
@@ -4604,7 +4601,9 @@ describe("CodexSecurity orchestration", () => {
     try {
       const results = await Promise.allSettled(
         clients.map((client, index) =>
-          client.run(repository, { mode: "deep", workers: index + 2 }),
+          client
+            .run(repository, { mode: "deep", workers: index + 2 })
+            .finally(releaseScans),
         ),
       );
       for (const result of results) {
@@ -4627,6 +4626,7 @@ describe("CodexSecurity orchestration", () => {
         ),
       ).toBe(true);
     } finally {
+      releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
