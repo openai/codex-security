@@ -23,6 +23,19 @@ function resultWithFindings(severities: readonly SeverityLevel[]) {
   return result;
 }
 
+function savedScan(
+  result: ReturnType<typeof resultWithFindings>,
+  scanId = "scan-1",
+): JsonObject {
+  return {
+    scan: {
+      scanId,
+      targetPath: "/saved/repository",
+      findings: result.findings.findings as unknown as JsonObject[],
+    },
+  };
+}
+
 function completePatches(
   args: readonly string[],
   output?: { stdout: { write(value: string): unknown } },
@@ -55,7 +68,13 @@ async function runWorkflow(
 ) {
   const stdout = capture();
   const stderr = capture(options.interactive);
-  const current = dependencies(fixtures);
+  const current = dependencies({
+    onCodex: (args, output) => {
+      completePatches(args, output);
+      return 0;
+    },
+    ...fixtures,
+  });
   if (options.interactive) {
     current.confirmPatchReview = async (question) => {
       stderr.stream.write(`\n${question} (y/N)\n`);
@@ -183,86 +202,14 @@ describe("scan and patch workflow", () => {
     );
   });
 
-  test("creates a GitHub pull request from verified scan patch files", async () => {
-    const result = resultWithFindings(["high", "medium"]);
-    result.findings.findings[0]!.title = "Synthetic private finding";
-    const commands: Array<{
-      command: "git" | "gh";
-      args: readonly string[];
-      repository: string;
-    }> = [];
-    const url = "https://github.example.test/example/repository/pull/12";
-    const outcome = await runWorkflow(
-      ["scan", "--patch", "--patch-severity", "high", "--create-pr", "--json"],
-      {
-        result,
-        onCodex: (args, output) => {
-          completePatches(args, output);
-          return 0;
-        },
-        onRepositoryCommand: (command, args, repository) => {
-          commands.push({ command, args, repository });
-          return command === "gh" ? url : "";
-        },
-      },
-    );
-
-    expect(outcome.exitCode).toBe(0);
-    expect(commands).toEqual([
-      {
-        command: "git",
-        args: ["switch", "-c", "codex-security/patch-scan"],
-        repository: "/current/repository",
-      },
-      {
-        command: "git",
-        args: ["--literal-pathspecs", "add", "--", "src/finding-1.ts"],
-        repository: "/current/repository",
-      },
-      {
-        command: "git",
-        args: [
-          "--literal-pathspecs",
-          "commit",
-          "--only",
-          "-m",
-          "fix: patch verified security findings",
-          "--",
-          "src/finding-1.ts",
-        ],
-        repository: "/current/repository",
-      },
-      {
-        command: "git",
-        args: ["push", "--set-upstream", "origin", "codex-security/patch-scan"],
-        repository: "/current/repository",
-      },
-      {
-        command: "gh",
-        args: [
-          "pr",
-          "create",
-          "--head",
-          "codex-security/patch-scan",
-          "--title",
-          "fix: patch verified security findings",
-          "--body",
-          "Applies verified security fixes from a completed scan.",
-        ],
-        repository: "/current/repository",
-      },
-    ]);
-    expect(JSON.parse(outcome.stdout)).toMatchObject({
-      pullRequest: { branch: "codex-security/patch-scan", url },
-    });
-    expect(outcome.stderr).toContain(`Pull request: ${url}`);
-    expect(JSON.stringify(commands)).not.toContain("Synthetic private finding");
-  });
-
-  test("pushes only verified patch files and preserves unrelated staged changes", async () => {
+  test("publishes only verified patch files and preserves unrelated staged changes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-pr-"));
     const repository = join(directory, "repository");
     const remote = join(directory, "remote.git");
+    const url = "https://github.example.test/example/repository/pull/15";
+    const result = resultWithFindings(["high", "medium"]);
+    result.findings.findings[0]!.title = "Synthetic private finding";
+    let pullRequestArguments: readonly string[] = [];
     await mkdir(join(repository, "src"), { recursive: true });
     const git = (...args: string[]) =>
       execFileSync("git", args, {
@@ -287,19 +234,28 @@ describe("scan and patch workflow", () => {
       git("add", "--", "unrelated.ts");
 
       const outcome = await runWorkflow(
-        ["scan", "--patch", "--create-pr", "--json"],
+        [
+          "scan",
+          "--patch",
+          "--patch-severity",
+          "high",
+          "--create-pr",
+          "--json",
+        ],
         {
           currentDirectory: repository,
-          result: resultWithFindings(["high"]),
+          result,
           onCodex: async (args, output) => {
             await writeFile(join(repository, "src", "finding-1.ts"), "fixed\n");
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (command, args) =>
-            command === "git"
-              ? git(...args)
-              : "https://github.example.test/example/repository/pull/15",
+          onRepositoryCommand: (command, args, workingDirectory) => {
+            expect(workingDirectory).toBe(repository);
+            if (command === "git") return git(...args);
+            pullRequestArguments = args;
+            return url;
+          },
         },
       );
 
@@ -312,6 +268,23 @@ describe("scan and patch workflow", () => {
       expect(git("rev-parse", "HEAD")).toBe(
         git("rev-parse", "origin/codex-security/patch-scan"),
       );
+      expect(pullRequestArguments).toEqual([
+        "pr",
+        "create",
+        "--head",
+        "codex-security/patch-scan",
+        "--title",
+        "fix: patch verified security findings",
+        "--body",
+        "Applies verified security fixes from a completed scan.",
+      ]);
+      expect(JSON.stringify(pullRequestArguments)).not.toContain(
+        "Synthetic private finding",
+      );
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        patchSeverity: "high",
+        pullRequest: { branch: "codex-security/patch-scan", url },
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -368,10 +341,6 @@ describe("scan and patch workflow", () => {
       ["scan", "--patch", "--create-pr", "--json"],
       {
         result: resultWithFindings(["high"]),
-        onCodex: (args, output) => {
-          completePatches(args, output);
-          return 0;
-        },
         onRepositoryCommand: () => {
           throw new Error("GitHub authentication failed.");
         },
@@ -581,13 +550,7 @@ describe("scan and patch workflow", () => {
     finding.locations[0]!.path = "src/\u001B[31mquery.ts\u001B[0m";
     const outcome = await runWorkflow(
       ["scan"],
-      {
-        result,
-        onCodex: (args, output) => {
-          completePatches(args, output);
-          return 0;
-        },
-      },
+      { result },
       {
         interactive: true,
         configure: (value) => {
@@ -658,10 +621,6 @@ describe("scan and patch workflow", () => {
       ["scan"],
       {
         result: resultWithFindings(["high"]),
-        onCodex: (args, output) => {
-          completePatches(args, output);
-          return 0;
-        },
         onRepositoryCommand: (command) => {
           published ||= command === "gh";
           return command === "gh" ? url : "";
@@ -693,13 +652,7 @@ describe("scan and patch workflow", () => {
       {
         onWorkbench: (args): JsonObject => {
           expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
-          return {
-            scan: {
-              scanId: "scan-1",
-              targetPath: "/saved/repository",
-              findings: result.findings.findings as unknown as JsonObject[],
-            },
-          };
+          return savedScan(result);
         },
         onCodex: (args, output) => {
           workingDirectory = args[args.indexOf("--cd") + 1]!;
@@ -725,17 +678,7 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
       {
-        onWorkbench: (): JsonObject => ({
-          scan: {
-            scanId: "scan-1",
-            targetPath: "/saved/repository",
-            findings: result.findings.findings as unknown as JsonObject[],
-          },
-        }),
-        onCodex: (args, output) => {
-          completePatches(args, output);
-          return 0;
-        },
+        onWorkbench: () => savedScan(result),
         onRepositoryCommand: (command, _args, target) => {
           repository = target;
           return command === "gh" ? url : "";
@@ -756,17 +699,7 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--create-pr"],
       {
-        onWorkbench: (): JsonObject => ({
-          scan: {
-            scanId: "scan-1",
-            targetPath: "/saved/repository",
-            findings: result.findings.findings as unknown as JsonObject[],
-          },
-        }),
-        onCodex: (args, output) => {
-          completePatches(args, output);
-          return 0;
-        },
+        onWorkbench: () => savedScan(result),
         onRepositoryCommand: () => {
           throw new Error("GitHub rejected github_pat_SYNTHETIC_SECRET_123");
         },
@@ -793,13 +726,7 @@ describe("scan and patch workflow", () => {
             ],
           };
         }
-        return {
-          scan: {
-            scanId: "scan-1",
-            targetPath: "/saved/repository",
-            findings: [finding as unknown as JsonObject],
-          },
-        };
+        return savedScan(result);
       },
       onCodex: (args, output) => {
         patched = completePatches(args, output);
@@ -824,17 +751,7 @@ describe("scan and patch workflow", () => {
         if (args[0] === "list-scans") {
           return { scans: [{ scanId: "scan-complete" }] };
         }
-        return {
-          scan: {
-            scanId: "scan-complete",
-            targetPath: "/saved/repository",
-            findings: result.findings.findings as unknown as JsonObject[],
-          },
-        };
-      },
-      onCodex: (args, output) => {
-        completePatches(args, output);
-        return 0;
+        return savedScan(result, "scan-complete");
       },
     });
     expect(outcome.exitCode).toBe(0);

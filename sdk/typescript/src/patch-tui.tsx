@@ -196,18 +196,17 @@ function findingLines(
   repository: string,
   width: number,
 ): string[] {
-  const entries = Object.entries(finding);
   const evidenceById = new Map(
     (finding.codeEvidence ?? []).map((item) => [item.id, item]),
   );
   const fields = [
-    ...DETAIL_ORDER.map((name) => entries.find(([key]) => key === name)),
-    ...entries.filter(
+    ...DETAIL_ORDER.map((key) => [key, finding[key]] as const),
+    ...Object.entries(finding).filter(
       ([key]) =>
         key !== "title" &&
         !DETAIL_ORDER.includes(key as (typeof DETAIL_ORDER)[number]),
     ),
-  ].filter((entry): entry is [string, unknown] => entry !== undefined);
+  ];
 
   const lines = [safeLine(finding.title), ""];
   for (const [key, value] of fields) {
