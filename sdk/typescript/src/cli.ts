@@ -82,6 +82,7 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
+import { importLinearIssues, type LinearClientFactory } from "./linear.js";
 import { runMultiscan } from "./multiscan.js";
 import {
   publishScan,
@@ -204,6 +205,9 @@ const VALUE_OPTIONS = new Set([
   "--plugin-path",
   "--python",
   "--codex",
+  "--linear",
+  "--linear-project",
+  "--filter",
   "--fail-on-severity",
   "--max-cost",
   "--workers",
@@ -715,6 +719,7 @@ interface CliDependencies {
     environment?: NodeJS.ProcessEnv,
   ): Promise<number>;
   bulkScan?: BulkScanDiscoveryDependencies;
+  linearClient?: LinearClientFactory;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -2450,10 +2455,21 @@ export async function main(
         "issues...": z
           .string()
           .min(1, "An issue must not be empty.")
+          .optional()
           .describe("Issue text or a file containing issues."),
       }),
       options: z.object({
         effort: effortOption(),
+        linear: z
+          .array(optionValue("--linear"))
+          .default([])
+          .describe("Linear issue identifier or URL; repeat for more issues."),
+        linearProject: optionValue("--linear-project")
+          .optional()
+          .describe("Patch every open issue in this Linear project."),
+        filter: optionValue("--filter")
+          .optional()
+          .describe("JSON Linear issue filter for --linear-project."),
         codex: z
           .array(optionValue("--codex"))
           .default([])
@@ -2463,14 +2479,50 @@ export async function main(
       }),
       async run({ options }) {
         try {
+          const linear = options.linear.length > 0 || !!options.linearProject;
+          if (options.linear.length > 0 && options.linearProject) {
+            throw new CodexSecurityError(
+              "Use either --linear or --linear-project, not both.",
+            );
+          }
+          if (options.filter && !options.linearProject) {
+            throw new CodexSecurityError("--filter requires --linear-project.");
+          }
+          if (positionals.length === 0 && !linear) {
+            throw new CodexSecurityError(
+              "Patch requires an issue, --linear, or --linear-project.",
+            );
+          }
+
+          const imports = linear
+            ? await importLinearIssues({
+                issues: options.linear,
+                project: options.linearProject,
+                filter: options.filter,
+                environment: dependencies.environment,
+                linearClient: dependencies.linearClient,
+              })
+            : [];
+          const environment =
+            imports.length === 0
+              ? undefined
+              : Object.fromEntries(
+                  Object.entries(dependencies.environment).filter(
+                    ([name]) =>
+                      !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
+                        name,
+                      ),
+                  ),
+                );
           exitCode = await runSkill(
             "fix-finding",
-            positionals,
+            [...positionals, ...imports],
             options.codex,
             options.effort,
             output,
             errorOutput,
             dependencies,
+            environment,
           );
         } catch (error) {
           exitCode = 2;
@@ -3107,6 +3159,7 @@ async function runSkill(
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
+  environment?: NodeJS.ProcessEnv,
 ): Promise<number> {
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
@@ -3226,6 +3279,7 @@ async function runSkill(
       stdout,
       stderr,
     },
+    environment,
   );
 }
 

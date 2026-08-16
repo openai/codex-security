@@ -248,6 +248,8 @@ npx @openai/codex-security validate /path/outside/repository/findings.json "Poss
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
+npx @openai/codex-security patch --linear SEC-123 --linear SEC-124
+npx @openai/codex-security patch --linear-project "Security backlog" --filter '{"labels":{"name":{"eq":"security"}}}'
 ```
 
 Run `npx @openai/codex-security --version` for the installed CLI version or
@@ -435,7 +437,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default Linear team and project for completed-scan publication.                               |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Publish directly to Linear with a personal API key; safer than a command-line key.            |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Patch Linear issues or publish directly with a personal API key.                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
@@ -756,6 +758,16 @@ and reasoning defaults, ignore unrelated user configuration and plugins, and
 print the final response without the underlying Codex event stream. Override
 the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
 `--effort high` or `--codex 'model_reasoning_effort="high"'`.
+
+Use `patch --linear ISSUE` to import a Linear issue by identifier or URL.
+Repeat `--linear` to include more issues. Use
+`patch --linear-project "PROJECT"` to patch every open issue in a project. Add
+`--filter '{"labels":{"name":{"eq":"security"}}}'` to apply a native Linear
+issue filter on the server. Completed and canceled issues are excluded unless
+the filter explicitly sets `state`. Set `CODEX_SECURITY_LINEAR_API_KEY` for a
+personal API key, or `LINEAR_ACCESS_TOKEN` for an OAuth access token.
+`LINEAR_API_KEY` is also accepted. Linear access is read-only, and these
+credentials are not passed to the patch subprocess.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or

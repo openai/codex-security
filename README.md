@@ -74,6 +74,11 @@ directory outside the repository.
 `findings list [repository]` shows open findings across a repository's scans
 and identifies findings not confirmed in its latest scan.
 
+Use `patch --linear SEC-123` to import and fix a Linear issue, or
+`patch --linear-project "Security backlog" --filter '{"labels":{"name":{"eq":"security"}}}'`
+to fix matching open issues from a project. Set
+`CODEX_SECURITY_LINEAR_API_KEY` to authorize read-only Linear access.
+
 `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
 root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is
