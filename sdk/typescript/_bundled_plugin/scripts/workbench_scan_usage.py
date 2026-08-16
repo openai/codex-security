@@ -55,6 +55,32 @@ def measured_scan_cost_json(usage: Mapping[str, Any]) -> str:
     return json.dumps({"usage": dict(usage)}, separators=(",", ":"), allow_nan=False)
 
 
+def reconcile_completed_scan_cost(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    cost_json: str,
+) -> None:
+    """Persist authoritative SDK cost without discarding measured worker usage."""
+
+    existing = json.loads(scan["cost_json"]) if scan["cost_json"] is not None else {}
+    if isinstance(existing, dict) and "usage" in existing:
+        cost_json = json.dumps(
+            {**existing, "cost": json.loads(cost_json)},
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
+            (cost_json, scan["id"]),
+        )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
 def collect_scan_usage(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,

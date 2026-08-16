@@ -312,7 +312,7 @@ describe("CodexSecurity preflight configuration", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
       approval_policy: "on-request",
-      approvals_reviewer: "auto_review",
+      approvals_reviewer: "user",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",
@@ -326,7 +326,8 @@ describe("CodexSecurity preflight configuration", () => {
     };
 
     expect(scanRuntimeCodexConfig(original, stateDirectory)).toEqual({
-      approval_policy: "never",
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       allow_login_shell: false,
       default_permissions: "codex_security_scan",
       permissions: {
@@ -342,7 +343,7 @@ describe("CodexSecurity preflight configuration", () => {
     });
     expect(original).toMatchObject({
       approval_policy: "on-request",
-      approvals_reviewer: "auto_review",
+      approvals_reviewer: "user",
       sandbox_mode: "workspace-write",
       allow_login_shell: true,
       default_permissions: "unsafe",
@@ -366,6 +367,40 @@ describe("CodexSecurity preflight configuration", () => {
         },
       },
     });
+  });
+
+  test("preserves an explicitly requested strict approval policy", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+
+    expect(
+      scanRuntimeCodexConfig(
+        { approval_policy: "never", approvals_reviewer: "user" },
+        stateDirectory,
+      ),
+    ).toMatchObject({
+      approval_policy: "never",
+      approvals_reviewer: "auto_review",
+      default_permissions: "codex_security_scan",
+    });
+  });
+
+  test("preserves a strict approval policy from the selected profile", () => {
+    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+    const config = {
+      approval_policy: "on-request",
+      profile: "strict",
+      profiles: {
+        strict: { approval_policy: "never", model: "profile-model" },
+        other: { approval_policy: "on-request" },
+      },
+    };
+
+    expect(scanRuntimeCodexConfig(config, stateDirectory)).toMatchObject({
+      approval_policy: "never",
+      approvals_reviewer: "auto_review",
+      profiles: { strict: { model: "profile-model" }, other: {} },
+    });
+    expect(config.profiles.strict.approval_policy).toBe("never");
   });
 
   test("removes execution and permission overrides from every configured profile", () => {
@@ -394,7 +429,8 @@ describe("CodexSecurity preflight configuration", () => {
 
     const hardened = scanRuntimeCodexConfig(original, stateDirectory);
     expect(hardened).toMatchObject({
-      approval_policy: "never",
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
       default_permissions: "codex_security_scan",
       profile: "selected",
     });

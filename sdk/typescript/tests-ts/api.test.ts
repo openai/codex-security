@@ -294,6 +294,65 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  test.each([
+    ["root configuration", { approval_policy: "never" }],
+    [
+      "selected profile",
+      {
+        approval_policy: "on-request",
+        profile: "strict",
+        profiles: {
+          strict: { approval_policy: "never", model: "profile-model" },
+        },
+      },
+    ],
+  ] as const)(
+    "preserves strict approvals from %s in scan threads and saved recipes",
+    async (_source, codexOverrides) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      await Promise.all([mkdir(repository), mkdir(codexHome)]);
+      let threadOptions: Record<string, unknown> | undefined;
+      let recipe: Record<string, unknown> | undefined;
+      const client = new TestClient(
+        { codexOverrides },
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            if (args[0] === "register-cli-scan") {
+              recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+            }
+            return mockWorkbench(args);
+          },
+          createCodex: () => ({
+            startThread: (options: Record<string, unknown>) => {
+              threadOptions = options;
+              return {
+                id: null,
+                async runStreamed() {
+                  throw new Error("scan approval policy captured");
+                },
+              };
+            },
+          }),
+        },
+      );
+
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("scan approval policy captured");
+      expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+      expect(recipe).toMatchObject({
+        config: { approval_policy: "never" },
+      });
+      await client.close();
+    },
+  );
+
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
       stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
@@ -1905,16 +1964,14 @@ describe("CodexSecurity orchestration", () => {
       "CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST",
     );
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
+      approvals_reviewer: "auto_review",
       default_permissions: "codex_security_scan",
       allow_login_shell: false,
     });
-    expect((codexOptions as CodexOptions | null)?.config).not.toHaveProperty(
-      "approvals_reviewer",
-    );
     expect(threadOptions as Record<string, unknown> | null).toEqual({
       workingDirectory: scanDir,
       skipGitRepoCheck: true,
-      approvalPolicy: "never",
+      approvalPolicy: "on-request",
     });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
@@ -1923,6 +1980,7 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt).toContain("$codex-security:security-scan");
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
+    expect(prompt).toContain("do not finalize or seal them");
     expect(prompt).toContain(
       "This Standard scan authorizes its independent baseline auditor and focused investigators",
     );
@@ -1974,7 +2032,7 @@ describe("CodexSecurity orchestration", () => {
       mode: "standard",
       repositoryRevision: "deadbeef",
       pluginVersion: "0.1.0",
-      config: { model: "replay-model" },
+      config: { approval_policy: "on-request", model: "replay-model" },
     });
     expect(commands[1]).toEqual([
       "get-scan-feedback",
@@ -4034,6 +4092,7 @@ describe("CodexSecurity orchestration", () => {
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
+          approval_policy: "never",
           features: { goals: true },
           projects: {
             ...unrelatedProjects,
@@ -4074,6 +4133,7 @@ describe("CodexSecurity orchestration", () => {
                   await readFile(join(codexHome!, "config.toml"), "utf8"),
                 ),
               ).toMatchObject({
+                approval_policy: "never",
                 permissions: {
                   codex_security_scan: {
                     filesystem: {
@@ -4099,7 +4159,11 @@ describe("CodexSecurity orchestration", () => {
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(codexConfig).not.toContain("model_reasoning_summary");
               expect(codexConfig).not.toContain("show_raw_agent_reasoning");
+              expect(options.config).not.toHaveProperty("projects");
+              expect(options.config).not.toHaveProperty("permissions");
               expect(options.config).toMatchObject({
+                default_permissions: "codex_security_scan",
+                allow_login_shell: false,
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
                 windows: { sandbox: "unelevated" },
@@ -5182,6 +5246,9 @@ describe("CodexSecurity orchestration", () => {
       `Scan target: Git diff from ${revision} to ${revision}.`,
     );
     expect(prompt).toContain("$codex-security:security-diff-scan");
+    expect(prompt).toContain("record_codex_security_scan_draft");
+    expect(prompt).toContain("complete_codex_security_scan");
+    expect(prompt).not.toContain("do not finalize or seal them");
     expect(prompt).toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
@@ -5192,12 +5259,30 @@ describe("CodexSecurity orchestration", () => {
       "prompt captured",
     );
     expect(prompt).toContain("$codex-security:deep-security-scan");
+    expect(prompt).not.toContain("record_codex_security_scan_draft");
+    expect(prompt).toContain("complete_codex_security_scan");
+    expect(prompt).not.toContain("do not finalize or seal them");
     expect(prompt).toContain(
       'start_codex_security_deep_scan with {"scanId":"scan_example_001"}',
     );
     expect(prompt).not.toContain(
       "This exhaustive scan authorizes the delegated-worker phases",
     );
+
+    await expect(
+      client.run(repository, { mode: "deep", maxCostUsd: 1 }),
+    ).rejects.toThrow("prompt captured");
+    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).not.toContain("complete_codex_security_scan");
+
+    await expect(
+      client.run(repository, {
+        target: DiffTarget.refs({ base, head }),
+        maxCostUsd: 1,
+      }),
+    ).rejects.toThrow("prompt captured");
+    expect(prompt).toContain("do not finalize or seal them");
+    expect(prompt).not.toContain("complete_codex_security_scan");
 
     await expect(
       client.run(repository, { target: DiffTarget.workingTree({ base }) }),
