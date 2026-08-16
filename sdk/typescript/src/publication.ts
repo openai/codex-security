@@ -171,7 +171,7 @@ function renderTargetIdentity(target: ScanTargetRecord): string[] {
 function scanMode(mode: LoadedContract["coverage"]["mode"]): string {
   if (mode === "deep_repository") return "deep";
   if (mode === "repository") return "standard";
-  return "unknown";
+  return mode;
 }
 
 function renderLocation(
