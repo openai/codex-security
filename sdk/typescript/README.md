@@ -242,6 +242,8 @@ npx @openai/codex-security export
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID
+npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
@@ -432,6 +434,8 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default Linear team and project for completed-scan publication.                               |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Publish directly to Linear with a personal API key; safer than a command-line key.            |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
@@ -543,6 +547,118 @@ and scans stopped at their configured cost limit do not start another turn.
 `4`. `--max-attempts` sets how many times each pending repository can run per
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
+
+### Publish completed scans to Linear
+
+Publish every finding from a completed standard, deep, or scoped scan to one
+Linear team:
+
+```bash
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Add `--project PROJECT_ID` to place the issues in a Linear project. Without a
+project, issues are created directly in the selected team.
+
+To choose from all completed scans saved in your local scan history, omit the
+scan directory. The selector highlights each repository and shows its finding
+count, relative run time, and abbreviated scan ID:
+
+```bash
+npx @openai/codex-security publish scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and the
+optional `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue
+titles without creating them, or `--json` to return structured publication
+results.
+Interactive publication shows a full-screen activity view with live Codex
+output and issue-creation progress. Other terminals receive plain progress on
+stderr, so `--json` output remains machine-readable.
+
+By default, publishing starts Codex with your existing Codex configuration and
+connected Linear app. Sign in to Codex and connect Linear before publishing in
+this mode. No separate Linear API token is required, and publication does not
+use the isolated Codex home created for security scans.
+
+To publish directly through the Linear API without starting Codex, configure a
+Linear personal API key:
+
+```bash
+export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Direct API publication leaves issues unassigned by default. Pass
+`--linear-assignee teammate@example.com` or `--linear-assignee USER_ID` to
+assign the issues to a Linear user by email address or user ID.
+`--linear-assignee` requires direct API publication.
+
+You can also pass `--linear-api-key KEY`, which takes precedence over
+`CODEX_SECURITY_LINEAR_API_KEY`. Prefer the environment variable to avoid
+exposing your API key in shell history and process listings. API keys are not
+added to successful publication results, scan history, or sealed scan artifacts.
+Error messages are preserved as returned. `--dry-run` never contacts Linear in
+either mode.
+
+Each finding creates a separate new issue titled
+`[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
+repository, scanned scope, source locations and code snippets, severity,
+confidence, vulnerability classification, summary, and remediation guidance.
+Verified immutable Git revisions include source links. Findings are published
+concurrently in batches of up to 20. Successful issue identifiers are linked
+to their findings in the local scan-history database, and structured results
+are read back from that database rather than generated by Codex. The completed
+scan must already exist in the local scan history. Running publication again
+creates another set of issues for the same scan; existing issues are not
+matched, updated, or reused.
+
+Issue descriptions contain source code and vulnerability details. Select a
+Linear destination authorized to receive that information. Publication receipts
+are stored separately from the sealed scan artifacts.
+
+You can also publish a scan from TypeScript:
+
+```ts
+import { publishScan } from "@openai/codex-security";
+
+const publication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  onProgress: (progress) => {
+    if (progress.type === "issue_completed") {
+      console.error(
+        `Processed ${progress.completed} of ${progress.total} findings.`,
+      );
+    }
+  },
+});
+
+console.log(publication.scanId);
+console.log(publication.created.length);
+```
+
+Add `projectId: "PROJECT_ID"` to the options to publish into a specific Linear
+project instead of directly to the team.
+
+Pass `linearApiKey` to publish directly through the Linear API. Omit
+`assigneeId` to leave issues unassigned, or supply a Linear user ID or email
+address to select an assignee:
+
+```ts
+const directPublication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  linearApiKey: process.env["CODEX_SECURITY_LINEAR_API_KEY"],
+  assigneeId: "teammate@example.com",
+});
+```
 
 ### Scan history and reruns
 
