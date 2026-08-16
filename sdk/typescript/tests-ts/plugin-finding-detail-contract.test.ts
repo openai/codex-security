@@ -339,7 +339,7 @@ describe("bundled plugin finding detail contracts", () => {
     expect(report).toContain("- decode archive entry");
     expect(report).toContain("- dispatch extraction");
     expect(report.match(/- decode archive entry/gu)).toHaveLength(1);
-    expect(report.split("\n")).toContain("- parse \\*input\\*");
+    expect(report.split(/\r?\n/u)).toContain("- parse \\*input\\*");
   });
 
   test("projects code evidence referenced by nested attack-path details", () => {
