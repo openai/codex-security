@@ -2837,7 +2837,9 @@ function scanArgumentsFromRecipe(
     ...deepScan.data,
     archiveExisting: false,
     codex: [],
-    codexOverrides: config,
+    codexOverrides: Object.hasOwn(config, "approval_policy")
+      ? config
+      : { ...config, approval_policy: "never" },
     failOnSeverity: threshold as FailureSeverity | undefined,
     maxCostUsd,
     dryRun: false,

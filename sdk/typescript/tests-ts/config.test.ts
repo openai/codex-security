@@ -102,13 +102,11 @@ async function scanSandboxFixture() {
 }
 
 describe("Codex configuration", () => {
-  test("never grants scan execution approvals by default", async () => {
+  test("automatically reviews scan execution approvals by default", async () => {
     expect(await mergedCodexConfig({})).toMatchObject({
-      approval_policy: "never",
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
     });
-    expect(await mergedCodexConfig({})).not.toHaveProperty(
-      "approvals_reviewer",
-    );
   });
 
   test("lets Codex honor native and managed credential storage", async () => {
