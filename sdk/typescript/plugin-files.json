@@ -9,6 +9,7 @@
     "assets/logo.png",
     "examples/completed-scan/coverage.json",
     "examples/completed-scan/findings.json",
+    "examples/completed-scan/report.md",
     "examples/completed-scan/scan-manifest.json",
     "mcp/server.mjs",
     "mcp/server.mjs.br.part-000",
