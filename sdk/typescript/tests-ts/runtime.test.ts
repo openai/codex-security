@@ -461,21 +461,57 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("bounds preserved context before starting a headless scan", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
+  test("accepts preserved context before starting a headless scan", () => {
+    const messages = [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "codex-security-test", version: "1.0.0" },
+        },
+      },
+      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ];
+    const server = spawnSync(
+      process.execPath,
+      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+      {
+        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+        encoding: "utf8",
+        timeout: 10_000,
+      },
     );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const schema =
-      /var startHeadlessStandardScanSchema = \{[\s\S]*?\n\};/u.exec(
-        runtime,
-      )?.[0];
+    expect(server.status, server.stderr).toBe(0);
+    const responses = server.stdout
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            id: number;
+            result: {
+              tools?: Array<{
+                name: string;
+                inputSchema: {
+                  properties: { userContext?: { maxLength?: number } };
+                };
+              }>;
+            };
+          },
+      );
+    const tool = responses
+      .find((response) => response.id === 2)
+      ?.result.tools?.find(
+        (candidate) => candidate.name === "start_codex_security_standard_scan",
+      );
+    const userContext = "Assess the HTTP boundary. ".repeat(320);
 
-    expect(schema).toContain(
-      "userContext: editableUserContextSchema.max(2400).optional()",
-    );
+    expect(userContext.length).toBeGreaterThan(2400);
+    expect(tool?.inputSchema.properties.userContext?.maxLength).toBeUndefined();
   });
 
   test("keeps native scan tools without the obsolete setup widget", async () => {

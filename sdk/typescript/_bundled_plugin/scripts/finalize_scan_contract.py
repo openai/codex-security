@@ -1223,9 +1223,9 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
 
     evidence_ids: set[str] = set()
     for evidence_key in ("codeEvidence", "code_evidence"):
-        code_evidence = finding.get(evidence_key)
-        if code_evidence is None:
+        if evidence_key not in finding:
             continue
+        code_evidence = finding[evidence_key]
         if not isinstance(code_evidence, list):
             raise ContractError(f"{context}.{evidence_key}: expected an array")
         for index, evidence in enumerate(code_evidence):
@@ -1503,9 +1503,11 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
     for finding in finding_items:
         if not isinstance(finding, dict):
             continue
+        canonical_evidence = finding.get("codeEvidence")
+        canonical_evidence = canonical_evidence if isinstance(canonical_evidence, list) else []
         canonical_evidence_ids = {
             evidence["id"]
-            for evidence in finding.get("codeEvidence", [])
+            for evidence in canonical_evidence
             if isinstance(evidence, dict)
             and isinstance(evidence.get("id"), str)
             and evidence["id"]
@@ -1521,9 +1523,13 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
                     and evidence["id"] in canonical_evidence_ids
                 )
             ]
+        compatible_legacy_evidence = finding.get("code_evidence")
+        compatible_legacy_evidence = (
+            compatible_legacy_evidence if isinstance(compatible_legacy_evidence, list) else []
+        )
         evidence_ids = canonical_evidence_ids | {
             evidence["id"]
-            for evidence in finding.get("code_evidence", [])
+            for evidence in compatible_legacy_evidence
             if isinstance(evidence, dict)
             and isinstance(evidence.get("id"), str)
             and evidence["id"]
@@ -1720,6 +1726,21 @@ def _sarif_primary_location(finding: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _merged_code_evidence(finding: dict[str, Any]) -> list[dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    for evidence_key in ("codeEvidence", "code_evidence"):
+        code_evidence = finding.get(evidence_key)
+        if not isinstance(code_evidence, list):
+            continue
+        for evidence in code_evidence:
+            if not isinstance(evidence, dict):
+                continue
+            evidence_id = evidence.get("id")
+            if isinstance(evidence_id, str) and evidence_id:
+                catalog.setdefault(evidence_id, evidence)
+    return list(catalog.values())
+
+
 def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     primary = _sarif_primary_location(finding)
     locations = [
@@ -1730,10 +1751,19 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "path": evidence["path"],
             "startLine": evidence["startLine"],
-            "endLine": evidence.get("endLine", evidence["startLine"]),
+            "endLine": (
+                evidence["endLine"]
+                if isinstance(evidence.get("endLine"), int)
+                and not isinstance(evidence["endLine"], bool)
+                and evidence["endLine"] >= evidence["startLine"]
+                else evidence["startLine"]
+            ),
             "role": f"evidence:{evidence['id']}",
         }
-        for evidence in finding.get("codeEvidence", [])
+        for evidence in _merged_code_evidence(finding)
+        if isinstance(evidence.get("path"), str)
+        and isinstance(evidence.get("startLine"), int)
+        and not isinstance(evidence["startLine"], bool)
     )
     unique: dict[tuple[str, int, int], dict[str, Any]] = {}
     for location in locations:

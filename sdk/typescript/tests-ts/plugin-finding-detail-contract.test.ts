@@ -468,4 +468,71 @@ describe("bundled plugin finding detail contracts", () => {
       originalValidation: ["legacy-validation-evidence"],
     });
   });
+
+  test("reports nullable sealed evidence catalogs as contract errors", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import copy, json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "example = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())['findings'][0]",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "errors = {}",
+      "for field in ('codeEvidence', 'code_evidence'):",
+      "    finding = copy.deepcopy(example)",
+      "    finding[field] = None",
+      "    compatible = finalizer['_legacy_sealed_findings_for_validation']({'findings': [finding]})",
+      "    try:",
+      "        finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
+      "    except finalizer['ContractError'] as error:",
+      "        errors[field] = str(error)",
+      "    else:",
+      "        errors[field] = 'accepted'",
+      "print(json.dumps(errors))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      codeEvidence: "findings[0].codeEvidence: expected an array",
+      code_evidence: "findings[0].code_evidence: expected an array",
+    });
+  });
+
+  test("projects canonical and legacy code evidence into safe SARIF locations", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "finding = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())['findings'][0]",
+      "finding['codeEvidence'] = [{'id': 'canonical-source', 'path': 'src/canonical.py', 'startLine': 12, 'code': 'canonical_source()'}]",
+      "finding['code_evidence'] = [",
+      "    {'id': 'legacy-sink', 'path': 'src/legacy.py', 'startLine': 37, 'endLine': 39, 'code': 'legacy_sink()'},",
+      "    {'id': 'legacy-null-end', 'path': 'src/null_end.py', 'startLine': 48, 'endLine': None, 'code': 'null_end()'},",
+      "    {'id': 'legacy-reversed-end', 'path': 'src/reversed_end.py', 'startLine': 59, 'endLine': 58, 'code': 'reversed_end()'},",
+      "    {'id': 'legacy-text-end', 'path': 'src/text_end.py', 'startLine': 70, 'endLine': '71', 'code': 'text_end()'},",
+      "]",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "result = finalizer['_sarif_result'](finding, 0)",
+      "regions = {location['physicalLocation']['artifactLocation']['uri']: location['physicalLocation']['region'] for location in result['locations']}",
+      "print(json.dumps(regions, sort_keys=True))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toMatchObject({
+      "src/canonical.py": { startLine: 12, endLine: 12 },
+      "src/legacy.py": { startLine: 37, endLine: 39 },
+      "src/null_end.py": { startLine: 48, endLine: 48 },
+      "src/reversed_end.py": { startLine: 59, endLine: 59 },
+      "src/text_end.py": { startLine: 70, endLine: 70 },
+    });
+  });
 });

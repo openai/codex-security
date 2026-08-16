@@ -446,10 +446,9 @@ describe("compact diff scan", () => {
       expect(tools.map((tool) => tool.name)).toContain(
         "record_codex_security_discovery_candidates",
       );
-      expect(
-        tools.find((tool) => tool.name === "start_codex_security_standard_scan")
-          ?.inputSchema.properties["userContext"]?.maxLength,
-      ).toBe(2400);
+      const preservedContextMaxLength = tools.find(
+        (tool) => tool.name === "start_codex_security_standard_scan",
+      )?.inputSchema.properties["userContext"]?.maxLength;
 
       const selection = {
         targetPath: repository,
@@ -520,10 +519,68 @@ describe("compact diff scan", () => {
         ],
       });
       await call("record_candidate_attack_paths", { scanId, attackPaths: [] });
+      const finding = {
+        ruleId: "path-traversal.archive-extraction",
+        title: "Unsafe archive extraction",
+        summary: "An untrusted archive entry reaches a filesystem write.",
+        severity: { level: "high" },
+        confidence: {
+          level: "high",
+          rationale: "Source evidence establishes reachability.",
+        },
+        taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+        locations: [{ path: "src/handler.py", startLine: 1 }],
+        remediation: "Validate each output path before writing.",
+        provenance: { source: "local_plugin" },
+      };
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
-        findings: [],
+        findings: [
+          {
+            ...finding,
+            ruleId: "path-traversal.archive-upload",
+            identity: {
+              anchor: "candidate-cross-rule",
+              instance: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "second-report",
+            },
+          },
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-authored-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              reportId: "DSS-147-A",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              ledgerRowId: "ledger-row-c",
+            },
+          },
+        ],
         coverage: {
           completeness: "complete",
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
@@ -556,6 +613,22 @@ describe("compact diff scan", () => {
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",
       );
+      expect(
+        ((completed["findings"] as JsonObject)["findings"] as JsonObject[]).map(
+          (completedFinding) => completedFinding["identity"],
+        ),
+      ).toEqual([
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "second-report" },
+        { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+        {
+          anchor: "candidate-authored-instance",
+          instance: "dss-147-a-2",
+        },
+        { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
+      ]);
+      expect(preservedContextMaxLength).toBeUndefined();
     } finally {
       await client.close();
     }
