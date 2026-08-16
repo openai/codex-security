@@ -318,6 +318,7 @@ describe("bundled plugin finding detail contracts", () => {
           summary: "request -> archive extraction -> filesystem write",
           transformations: ["dispatch extraction", "decode archive entry"],
         },
+        data_flow: { transformations: null },
       },
     });
 

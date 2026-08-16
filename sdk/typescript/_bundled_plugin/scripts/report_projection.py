@@ -460,7 +460,9 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             for transformation in (
                 [section.get("transformations")]
                 if isinstance(section.get("transformations"), str)
-                else section.get("transformations", [])
+                else section.get("transformations")
+                if isinstance(section.get("transformations"), list)
+                else []
             )
             if isinstance(transformation, str) and transformation.strip()
         )
