@@ -1499,7 +1499,12 @@ def _wrap_nonempty_legacy_list_scalars(
     section: dict[str, Any], fields: tuple[str, ...]
 ) -> None:
     for field in fields:
-        value = section.get(field)
+        if field not in section:
+            continue
+        value = section[field]
+        if value is None:
+            section.pop(field)
+            continue
         if not isinstance(value, str):
             continue
         if value.strip():

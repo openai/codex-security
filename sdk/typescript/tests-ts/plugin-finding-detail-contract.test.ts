@@ -452,12 +452,12 @@ describe("bundled plugin finding detail contracts", () => {
       "    {'id': 'legacy-duplicate', 'code': 'first_legacy_source()'},",
       "    {'id': 'legacy-duplicate', 'code': 'second_legacy_source()'},",
       "]",
-      "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence'], 'limitations': ''}",
+      "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence'], 'counterEvidence': None, 'limitations': ''}",
       "findings['findings'][0]['attackPath'] = {'evidence_refs': ['legacy-attack-evidence'], 'dataFlow': {'evidenceRefs': ['legacy-missing-evidence']}}",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
       "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
-      "print(json.dumps({'originalNested': findings['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'compatibleNested': compatible['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'originalAttack': findings['findings'][0]['attackPath']['evidence_refs'], 'compatibleAttack': compatible['findings'][0]['attackPath']['evidence_refs'], 'originalValidation': findings['findings'][0]['validation']['evidence_refs'], 'compatibleValidation': compatible['findings'][0]['validation']['evidence_refs'], 'compatibleHasLimitations': 'limitations' in compatible['findings'][0]['validation'], 'originalLegacyCatalog': findings['findings'][0]['code_evidence'], 'compatibleLegacyCatalog': compatible['findings'][0]['code_evidence']}))",
+      "print(json.dumps({'originalNested': findings['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'compatibleNested': compatible['findings'][0]['attackPath']['dataFlow']['evidenceRefs'], 'originalAttack': findings['findings'][0]['attackPath']['evidence_refs'], 'compatibleAttack': compatible['findings'][0]['attackPath']['evidence_refs'], 'originalValidation': findings['findings'][0]['validation']['evidence_refs'], 'compatibleValidation': compatible['findings'][0]['validation']['evidence_refs'], 'compatibleHasCounterEvidence': 'counterEvidence' in compatible['findings'][0]['validation'], 'compatibleHasLimitations': 'limitations' in compatible['findings'][0]['validation'], 'originalLegacyCatalog': findings['findings'][0]['code_evidence'], 'compatibleLegacyCatalog': compatible['findings'][0]['code_evidence']}))",
     ].join("\n");
     const result = Bun.spawnSync(
       [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
@@ -471,6 +471,7 @@ describe("bundled plugin finding detail contracts", () => {
       ],
       compatibleNested: [],
       compatibleValidation: [],
+      compatibleHasCounterEvidence: false,
       compatibleHasLimitations: false,
       originalAttack: ["legacy-attack-evidence"],
       originalLegacyCatalog: [
