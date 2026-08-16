@@ -304,6 +304,10 @@ def parse_args(description: str) -> argparse.Namespace:
     export_findings.add_argument("--scan-id", required=True)
     export_findings.add_argument("--format", choices=EXPORT_FORMATS, required=True)
 
+    for command in ("prepare-linear-publication", "record-linear-publications"):
+        publication = subparsers.add_parser(command)
+        publication.add_argument("--input-file", required=True)
+
     subparsers.add_parser("database-info")
     return parser.parse_args()
 

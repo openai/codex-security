@@ -200,6 +200,7 @@ Trusted Access for Cyber. To apply or check your access, visit
 ## CLI
 
 ```bash
+npx @openai/codex-security scan
 npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --headless
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
@@ -223,17 +224,26 @@ npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
+npx @openai/codex-security scans show
 npx @openai/codex-security scans show SCAN_ID
+npx @openai/codex-security scans logs
 npx @openai/codex-security scans logs SCAN_ID
+npx @openai/codex-security scans rerun
 npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
+npx @openai/codex-security scans compare
+npx @openai/codex-security scans compare PREVIOUS_SCAN_ID
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings
 npx @openai/codex-security findings list /path/to/repository
 npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
+npx @openai/codex-security export
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID
+npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
@@ -333,7 +343,8 @@ configuration. Each scan starts with a private runtime and these Codex
 defaults:
 
 ```toml
-approval_policy = "never"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
@@ -383,8 +394,10 @@ and `features.multi_agent_v2.enabled=false` are incompatible and rejected.
 `model_reasoning_effort` `--codex` keys; they do not accept general scan
 runtime overrides.
 
-These overrides do not change the scan's approval policy or filesystem
-permissions. See [Local security model](#local-security-model).
+These overrides cannot replace the scanner-owned approval reviewer or
+filesystem profile. Use `--codex 'approval_policy="never"'` to deny approval
+requests instead of reviewing them automatically. See
+[Local security model](#local-security-model).
 
 ### Deep-scan engine configuration
 
@@ -424,6 +437,8 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default Linear team and project for completed-scan publication.                               |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Publish directly to Linear with a personal API key; safer than a command-line key.            |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
@@ -536,16 +551,129 @@ and scans stopped at their configured cost limit do not start another turn.
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
 
+### Publish completed scans to Linear
+
+Publish every finding from a completed standard, deep, or scoped scan to one
+Linear team:
+
+```bash
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Add `--project PROJECT_ID` to place the issues in a Linear project. Without a
+project, issues are created directly in the selected team.
+
+To choose from all completed scans saved in your local scan history, omit the
+scan directory. The selector highlights each repository and shows its finding
+count, relative run time, and abbreviated scan ID:
+
+```bash
+npx @openai/codex-security publish scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and the
+optional `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue
+titles without creating them, or `--json` to return structured publication
+results.
+Interactive publication shows a full-screen activity view with live Codex
+output and issue-creation progress. Other terminals receive plain progress on
+stderr, so `--json` output remains machine-readable.
+
+By default, publishing starts Codex with your existing Codex configuration and
+connected Linear app. Sign in to Codex and connect Linear before publishing in
+this mode. No separate Linear API token is required, and publication does not
+use the isolated Codex home created for security scans.
+
+To publish directly through the Linear API without starting Codex, configure a
+Linear personal API key:
+
+```bash
+export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Direct API publication leaves issues unassigned by default. Pass
+`--linear-assignee teammate@example.com` or `--linear-assignee USER_ID` to
+assign the issues to a Linear user by email address or user ID.
+`--linear-assignee` requires direct API publication.
+
+You can also pass `--linear-api-key KEY`, which takes precedence over
+`CODEX_SECURITY_LINEAR_API_KEY`. Prefer the environment variable to avoid
+exposing your API key in shell history and process listings. API keys are not
+added to successful publication results, scan history, or sealed scan artifacts.
+Error messages are preserved as returned. `--dry-run` never contacts Linear in
+either mode.
+
+Each finding creates a separate new issue titled
+`[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
+repository, scanned scope, source locations and code snippets, severity,
+confidence, vulnerability classification, summary, and remediation guidance.
+Verified immutable Git revisions include source links. Findings are published
+concurrently in batches of up to 20. Successful issue identifiers are linked
+to their findings in the local scan-history database, and structured results
+are read back from that database rather than generated by Codex. The completed
+scan must already exist in the local scan history. Running publication again
+creates another set of issues for the same scan; existing issues are not
+matched, updated, or reused.
+
+Issue descriptions contain source code and vulnerability details. Select a
+Linear destination authorized to receive that information. Publication receipts
+are stored separately from the sealed scan artifacts.
+
+You can also publish a scan from TypeScript:
+
+```ts
+import { publishScan } from "@openai/codex-security";
+
+const publication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  onProgress: (progress) => {
+    if (progress.type === "issue_completed") {
+      console.error(
+        `Processed ${progress.completed} of ${progress.total} findings.`,
+      );
+    }
+  },
+});
+
+console.log(publication.scanId);
+console.log(publication.created.length);
+```
+
+Add `projectId: "PROJECT_ID"` to the options to publish into a specific Linear
+project instead of directly to the team.
+
+Pass `linearApiKey` to publish directly through the Linear API. Omit
+`assigneeId` to leave issues unassigned, or supply a Linear user ID or email
+address to select an assignee:
+
+```ts
+const directPublication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  linearApiKey: process.env["CODEX_SECURITY_LINEAR_API_KEY"],
+  assigneeId: "teammate@example.com",
+});
+```
+
 ### Scan history and reruns
 
-`npx @openai/codex-security scans list` lists scans for the current repository. Pass a
-repository path to inspect another checkout, `--scan-root DIR` to list scans
-whose artifacts are under a particular root. `scans show SCAN_ID` includes the
-scan configuration, results, coverage, and artifact locations. Add
+`scans` or `scans list` lists scans for the current repository. Pass a repository
+path to inspect another checkout, or `--scan-root DIR` to list scans whose
+artifacts are under a particular root. `scans show` opens the latest completed
+scan for the current repository. Pass `SCAN_ID` to inspect another scan. Scan
+details include the configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
-`scans logs SCAN_ID` shows complete session events from the scan and its
-workers, which can include source code and credentials.
+`scans logs` shows session events from the latest scan, including an active scan.
+Pass `SCAN_ID` to select another scan. Logs can contain source code and credentials.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
@@ -565,22 +693,25 @@ default directory, select a writable directory outside the scanned repository:
 export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
 ```
 
-Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as
-a false positive and explain why. Later scans dismiss a matching finding only
-when the same reason still applies.
+`findings` or `findings list` lists open findings for the current repository.
+Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as a
+false positive and explain why. Later scans dismiss a matching finding only when
+the same reason still applies.
 
-`scans rerun SCAN_ID` repeats the original configuration against the current
-checkout so a fixed vulnerability can be checked again.
+`scans rerun` repeats the latest completed scan against the current checkout.
+Pass `SCAN_ID` to rerun another scan.
 
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
 cause; `scans match --all` matches all completed scans of the current repository,
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
 
-`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
-root cause, reuses saved matches, and reports findings as new, persisting,
-reopened, resolved, or unknown. Missing findings are not treated as resolved when
-the later scan is incomplete or does not cover their original scope.
+`scans compare` compares the two latest completed scans. Pass one scan ID to
+compare it with the latest completed scan, or two IDs to select both scans. It
+matches findings by root cause, reuses saved matches, and reports findings as
+new, persisting, reopened, resolved, or unknown. Missing findings are not
+treated as resolved when the later scan is incomplete or does not cover their
+original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
@@ -612,7 +743,8 @@ they do not produce structured CLI output. Sign-in commands remain interactive.
 CSV exports cannot be written to stdout while JSON output is requested.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
-starting Codex or loading credentials. JSON preserves the sealed findings
+starting Codex or loading credentials. Without a scan directory, it exports the
+latest completed scan for the current repository. JSON preserves the sealed findings
 document. CSV uses the portable findings columns, marks findings as open, and
 does not include local workbench triage state. The exporter validates the seal
 before writing, accepts `--output -` for stdout, and can use
@@ -699,13 +831,16 @@ repository, Git installation, configured tools, and other scans under the
 same account are not separate security principals.
 
 Every scan uses the `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. Its profile allows reads of the local filesystem and
-writes to workspace roots and the selected scan state directory. Scans do not
-request interactive approval or grant filesystem escalations. Setting
-`approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permissions
-through `--codex` or SDK `codexOverrides` does not replace these controls or
-make the filesystem profile more restrictive. Independently enforced host and
-network restrictions still apply.
+automatically reviewed execution approvals. Its baseline profile allows reads
+of the local filesystem and writes to workspace roots and the selected scan
+state directory. Approval requests are reviewed without an interactive prompt;
+approved requests can grant additional permissions for a specific operation.
+Use `--codex 'approval_policy="never"'` or a selected profile with that policy
+to deny all requests instead. Other `approval_policy`, `approvals_reviewer`,
+`sandbox_mode`, or permission overrides cannot replace the reviewer or baseline
+filesystem profile. Saved scans retain their effective approval policy; older
+saved scans remain deny-all when rerun. Independently enforced host and network
+restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment, including
 unrelated API tokens and cloud credentials. Start a scan with only the

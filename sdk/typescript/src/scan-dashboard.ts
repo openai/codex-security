@@ -44,6 +44,7 @@ interface DashboardInput {
 
 interface ScanDashboardOptions {
   repository: string;
+  presentation?: "scan" | "publication";
   mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
@@ -100,6 +101,7 @@ export class ScanDashboard {
   readonly #activities: TimedScanActivity[] = [];
   #stage = "Preparing scan";
   #files: ScanProgress | null = null;
+  #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
   #timer: NodeJS.Timeout | null = null;
   #scrollOffset = 0;
@@ -226,6 +228,11 @@ export class ScanDashboard {
     this.#refresh();
   }
 
+  public setPublicationProgress(completed: number, total: number): void {
+    this.#publicationProgress = { completed, total };
+    this.#refresh();
+  }
+
   public setCost(cost: Readonly<ScanCost>): void {
     this.#cost = cost;
     this.#refresh();
@@ -293,6 +300,7 @@ export class ScanDashboard {
   }
 
   #render(): void {
+    const publication = this.#options.presentation === "publication";
     const width = this.#width();
     const activityRows = this.#activityRows();
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
@@ -326,7 +334,7 @@ export class ScanDashboard {
     const activity = history.slice(first, first + activityRows);
     if (activity.length === 0) {
       activity.push({
-        text: `  [${formatLocalTime(this.#options.clock.now())}] · Waiting for scan activity…`,
+        text: `  [${formatLocalTime(this.#options.clock.now())}] · Waiting for ${publication ? "publication" : "scan"} activity…`,
         kind: "path",
       });
     }
@@ -340,15 +348,22 @@ export class ScanDashboard {
     const model = this.#options.model;
 
     const lines = [
-      `  CODEX SECURITY  ·  ${basename(this.#options.repository)}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}`,
+      `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : ""}${basename(this.#options.repository)}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}`,
       divider,
       ...activity,
       divider,
-      ...(this.#options.mode === "deep"
-        ? []
-        : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
-      `  TOKENS   ${tokens}`,
-      `  COST     ${cost}`,
+      ...(publication
+        ? [
+            `  STAGE     ${this.#stage}`,
+            `  FINDINGS  ${this.#publicationProgress === null ? "waiting for findings" : `${formatCount(this.#publicationProgress.completed)} / ${formatCount(this.#publicationProgress.total)} processed`}`,
+          ]
+        : [
+            ...(this.#options.mode === "deep"
+              ? []
+              : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
+            `  TOKENS   ${tokens}`,
+            `  COST     ${cost}`,
+          ]),
       `  TIME     ${time}  ·  ${scrollStatus}`,
     ];
 
@@ -397,7 +412,11 @@ export class ScanDashboard {
       1,
       (this.#stream.rows ?? 24) -
         FIXED_SCREEN_ROWS +
-        (this.#options.mode === "deep" ? 2 : 0),
+        (this.#options.presentation === "publication"
+          ? 2
+          : this.#options.mode === "deep"
+            ? 2
+            : 0),
     );
   }
 

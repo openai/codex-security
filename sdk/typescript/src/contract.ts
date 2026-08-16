@@ -831,8 +831,8 @@ async function openCheckedScanFile(
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
-      opened.dev !== checked.metadata.dev ||
-      opened.ino !== checked.metadata.ino
+      opened.ino !== checked.metadata.ino ||
+      !(await sameCheckedFileDevice(file, checked, opened))
     ) {
       throw new ContractValidationError(
         `${context}: expected the checked regular file.`,
@@ -873,6 +873,46 @@ async function openCheckedScanFile(
       `${context}: unable to open the checked regular file.`,
       { cause: error },
     );
+  }
+}
+
+export async function sameCheckedFileDevice(
+  file: FileHandle,
+  checked: CheckedScanFile,
+  opened: Stats,
+  platform: NodeJS.Platform = process.platform,
+  openReference: (path: string, flags: number) => Promise<FileHandle> = open,
+): Promise<boolean> {
+  if (opened.ino !== checked.metadata.ino) return false;
+  if (opened.dev === checked.metadata.dev) return true;
+  if (platform !== "win32") return false;
+
+  const [openedIdentity, checkedIdentity] = await Promise.all([
+    file.stat({ bigint: true }),
+    lstat(checked.path, { bigint: true }),
+  ]);
+  if (
+    !openedIdentity.isFile() ||
+    !checkedIdentity.isFile() ||
+    checkedIdentity.isSymbolicLink() ||
+    openedIdentity.ino !== checkedIdentity.ino
+  ) {
+    return false;
+  }
+
+  const reference = await openReference(
+    checked.path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const referenceIdentity = await reference.stat({ bigint: true });
+    return (
+      referenceIdentity.isFile() &&
+      openedIdentity.dev === referenceIdentity.dev &&
+      openedIdentity.ino === referenceIdentity.ino
+    );
+  } finally {
+    await reference.close();
   }
 }
 

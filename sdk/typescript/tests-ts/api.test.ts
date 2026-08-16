@@ -294,6 +294,65 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  test.each([
+    ["root configuration", { approval_policy: "never" }],
+    [
+      "selected profile",
+      {
+        approval_policy: "on-request",
+        profile: "strict",
+        profiles: {
+          strict: { approval_policy: "never", model: "profile-model" },
+        },
+      },
+    ],
+  ] as const)(
+    "preserves strict approvals from %s in scan threads and saved recipes",
+    async (_source, codexOverrides) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      await Promise.all([mkdir(repository), mkdir(codexHome)]);
+      let threadOptions: Record<string, unknown> | undefined;
+      let recipe: Record<string, unknown> | undefined;
+      const client = new TestClient(
+        { codexOverrides },
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          repositoryRevision: async () => null,
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            if (args[0] === "register-cli-scan") {
+              recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+            }
+            return mockWorkbench(args);
+          },
+          createCodex: () => ({
+            startThread: (options: Record<string, unknown>) => {
+              threadOptions = options;
+              return {
+                id: null,
+                async runStreamed() {
+                  throw new Error("scan approval policy captured");
+                },
+              };
+            },
+          }),
+        },
+      );
+
+      await expect(
+        client.run(repository, { outputDir: join(root, "scan") }),
+      ).rejects.toThrow("scan approval policy captured");
+      expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+      expect(recipe).toMatchObject({
+        config: { approval_policy: "never" },
+      });
+      await client.close();
+    },
+  );
+
   test("selects a real-scan target in the active repository layout", async () => {
     await expect(
       stat(join(REPOSITORY_ROOT, INTEGRATION_TARGET)),
@@ -1905,16 +1964,14 @@ describe("CodexSecurity orchestration", () => {
       "CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST",
     );
     expect((codexOptions as CodexOptions | null)?.config).toMatchObject({
+      approvals_reviewer: "auto_review",
       default_permissions: "codex_security_scan",
       allow_login_shell: false,
     });
-    expect((codexOptions as CodexOptions | null)?.config).not.toHaveProperty(
-      "approvals_reviewer",
-    );
     expect(threadOptions as Record<string, unknown> | null).toEqual({
       workingDirectory: scanDir,
       skipGitRepoCheck: true,
-      approvalPolicy: "never",
+      approvalPolicy: "on-request",
     });
     expect((codexOptions as CodexOptions | null)?.apiKey).toBeUndefined();
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
@@ -1975,7 +2032,7 @@ describe("CodexSecurity orchestration", () => {
       mode: "standard",
       repositoryRevision: "deadbeef",
       pluginVersion: "0.1.0",
-      config: { model: "replay-model" },
+      config: { approval_policy: "on-request", model: "replay-model" },
     });
     expect(commands[1]).toEqual([
       "get-scan-feedback",
@@ -4035,6 +4092,7 @@ describe("CodexSecurity orchestration", () => {
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
+          approval_policy: "never",
           features: { goals: true },
           projects: {
             ...unrelatedProjects,
@@ -4075,6 +4133,7 @@ describe("CodexSecurity orchestration", () => {
                   await readFile(join(codexHome!, "config.toml"), "utf8"),
                 ),
               ).toMatchObject({
+                approval_policy: "never",
                 permissions: {
                   codex_security_scan: {
                     filesystem: {
