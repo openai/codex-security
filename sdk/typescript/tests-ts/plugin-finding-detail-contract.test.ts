@@ -311,7 +311,9 @@ describe("bundled plugin finding detail contracts", () => {
   test("merges transformations across data-flow aliases", () => {
     const report = projectFindingDetails({
       attackPath: {
-        dataFlow: { transformations: ["decode archive entry"] },
+        dataFlow: {
+          transformations: ["decode archive entry", "parse *input*"],
+        },
         dataflow: {
           summary: "request -> archive extraction -> filesystem write",
           transformations: ["dispatch extraction", "decode archive entry"],
@@ -322,6 +324,7 @@ describe("bundled plugin finding detail contracts", () => {
     expect(report).toContain("- decode archive entry");
     expect(report).toContain("- dispatch extraction");
     expect(report.match(/- decode archive entry/gu)).toHaveLength(1);
+    expect(report.split("\n")).toContain("- parse \\*input\\*");
   });
 
   test("projects code evidence referenced by nested attack-path details", () => {

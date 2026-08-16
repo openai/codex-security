@@ -457,7 +457,12 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         dict.fromkeys(
             transformation
             for section in dataflow_sections
-            for transformation in _strings(section.get("transformations"))
+            for transformation in (
+                [section.get("transformations")]
+                if isinstance(section.get("transformations"), str)
+                else section.get("transformations", [])
+            )
+            if isinstance(transformation, str) and transformation.strip()
         )
     )
     if transformations:
