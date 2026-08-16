@@ -1601,7 +1601,9 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
                 _remove_empty_legacy_fields(root_cause, ("code", "language"))
         validation = finding.get("validation")
         if isinstance(validation, dict):
-            _remove_empty_legacy_fields(validation, ("method", "summary"))
+            _remove_empty_legacy_fields(
+                validation, ("method", "status", "summary", "disposition", "result")
+            )
         attack_path = finding.get("attackPath")
         if not isinstance(attack_path, dict):
             continue
