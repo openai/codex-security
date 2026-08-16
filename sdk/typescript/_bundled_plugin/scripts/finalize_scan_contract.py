@@ -1513,11 +1513,11 @@ def _wrap_nonempty_legacy_list_scalars(
             section.pop(field)
 
 
-def _remove_null_legacy_fields(
+def _remove_empty_legacy_fields(
     section: dict[str, Any], fields: tuple[str, ...]
 ) -> None:
     for field in fields:
-        if field in section and section[field] is None:
+        if field in section and section[field] in (None, ""):
             section.pop(field)
 
 
@@ -1595,17 +1595,17 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             _filter_unknown_legacy_evidence_refs(section, evidence_ids)
         root_cause = finding.get("rootCause")
         if isinstance(root_cause, dict):
-            if root_cause.get("summary") is None:
+            if root_cause.get("summary") in (None, ""):
                 finding.pop("rootCause")
             else:
-                _remove_null_legacy_fields(root_cause, ("code", "language"))
+                _remove_empty_legacy_fields(root_cause, ("code", "language"))
         validation = finding.get("validation")
         if isinstance(validation, dict):
-            _remove_null_legacy_fields(validation, ("method", "summary"))
+            _remove_empty_legacy_fields(validation, ("method", "summary"))
         attack_path = finding.get("attackPath")
         if not isinstance(attack_path, dict):
             continue
-        _remove_null_legacy_fields(attack_path, ("summary",))
+        _remove_empty_legacy_fields(attack_path, ("summary",))
         for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
             if field not in attack_path:
                 continue
@@ -1618,7 +1618,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             detail_scalar_fields = ("summary", "source", "sink", "outcome")
             if field == "reachability":
                 detail_scalar_fields += ("attacker", "entrypoint")
-            _remove_null_legacy_fields(detail, detail_scalar_fields)
+            _remove_empty_legacy_fields(detail, detail_scalar_fields)
             _wrap_nonempty_legacy_list_scalars(
                 detail, ("evidenceRefs", "evidence_refs", "transformations")
             )
@@ -1628,7 +1628,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         for field in ("impact", "likelihood"):
             detail = attack_path.get(field)
             if isinstance(detail, dict):
-                _remove_null_legacy_fields(detail, ("level", "rationale", "why"))
+                _remove_empty_legacy_fields(detail, ("level", "rationale", "why"))
     return compatible
 
 
