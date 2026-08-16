@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { prepareScanPublication } from "../src/publication.js";
 import type {
+  CoverageDocument,
   FindingsDocument,
   ScanManifest,
   SeverityLevel,
@@ -107,6 +108,34 @@ describe("scan publication preparation", () => {
     expect(issue.description).toContain("Normalize destinations");
     expect(issue.description).not.toContain("/blob/deadbeef/");
   });
+
+  test.each([
+    ["repository", "standard"],
+    ["scoped_path", "scoped_path"],
+    ["diff", "diff"],
+    ["commit", "commit"],
+    ["branch_diff", "branch_diff"],
+    ["working_tree", "working_tree"],
+    ["deep_repository", "deep"],
+  ] as const)(
+    "preserves truthful scan provenance for %s coverage",
+    async (mode, expectedMode) => {
+      const scanDirectory = await copyExample();
+      const coveragePath = join(scanDirectory, "coverage.json");
+      const coverage = await readJson<CoverageDocument>(coveragePath);
+      coverage.mode = mode;
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDirectory);
+
+      const { description } = (
+        await prepareScanPublication(scanDirectory, DESTINATION)
+      ).issues[0]!;
+
+      expect(description).toContain(`**Coverage mode:** ${mode}`);
+      expect(description).toContain(`**Scan mode:** ${expectedMode}`);
+      expect(description).not.toContain("**Scan mode:** unknown");
+    },
+  );
 
   test("prepares sealed findings for a Linear team without a project", async () => {
     const scanDirectory = await copyExample();
