@@ -1443,6 +1443,8 @@ def complete_scan_locked(
         verify_manifest_binding(scan, manifest)
         manifest_digest = published_manifest_digest(scan_dir, manifest)
         pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
+        if cost_json is not None and scan["recipe_json"] is not None:
+            scan_usage.reconcile_completed_scan_cost(connection, scan, cost_json)
         return scan_context(connection, scan["id"])
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
