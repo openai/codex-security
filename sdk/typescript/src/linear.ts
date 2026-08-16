@@ -7,19 +7,48 @@ import {
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError, safeErrorMessage } from "./errors.js";
 
-export type LinearClientFactory = (
+export type LinearClientFactory<
+  Method extends keyof LinearClient = "issue" | "projects",
+> = (
   options: ConstructorParameters<typeof LinearClient>[0],
-) => Pick<LinearClient, "issue" | "projects">;
+) => Pick<LinearClient, Method>;
+
+export function resolveLinearApiKey(
+  environment: NodeJS.ProcessEnv,
+  explicit?: string,
+): string | undefined {
+  return (
+    explicit?.trim() ||
+    environment["CODEX_SECURITY_LINEAR_API_KEY"]?.trim() ||
+    undefined
+  );
+}
+
+export function createLinearClient<Method extends keyof LinearClient>(
+  options: ConstructorParameters<typeof LinearClient>[0],
+  factory?: LinearClientFactory<Method>,
+): Pick<LinearClient, Method> {
+  const configuration = { ...options, redirect: "error" as const };
+  return factory ? factory(configuration) : new LinearClient(configuration);
+}
+
+export interface ImportedIssue {
+  source: "linear";
+  id: string;
+  url: string;
+  text: string;
+}
 
 export async function importLinearIssues(options: {
   issues: readonly string[];
   project?: string;
   filter?: string;
+  apiKey?: string;
   environment: NodeJS.ProcessEnv;
   linearClient?: LinearClientFactory;
-}): Promise<string[]> {
+}): Promise<ImportedIssue[]> {
   const apiKey =
-    options.environment["CODEX_SECURITY_LINEAR_API_KEY"]?.trim() ||
+    resolveLinearApiKey(options.environment, options.apiKey) ||
     options.environment["LINEAR_API_KEY"]?.trim();
   const accessToken = options.environment["LINEAR_ACCESS_TOKEN"]?.trim();
   const credential = apiKey || accessToken;
@@ -29,10 +58,9 @@ export async function importLinearIssues(options: {
     );
   }
 
-  const client = (
-    options.linearClient ?? ((configuration) => new LinearClient(configuration))
-  )(
-    apiKey ? { apiKey, redirect: "error" } : { accessToken, redirect: "error" },
+  const client = createLinearClient(
+    apiKey ? { apiKey } : { accessToken },
+    options.linearClient,
   );
 
   try {
@@ -65,21 +93,31 @@ export async function importLinearIssues(options: {
       }
     } else {
       for (const input of options.issues) {
-        const id = linearIssueIdentifier(input);
+        const { id, workspace } = linearIssueReference(input);
         const issue = await client.issue(id);
         if (!issue) {
           throw new CodexSecurityError(
             `Linear issue "${id}" was not found or is not accessible.`,
           );
         }
+        if (
+          workspace !== undefined &&
+          linearIssueReference(issue.url).workspace !== workspace
+        ) {
+          throw new CodexSecurityError(
+            "Fetched Linear issue does not match the workspace in the selected URL.",
+          );
+        }
         issues.push(issue);
       }
     }
 
-    return issues.map(
-      ({ identifier, title, url, description }) =>
-        `Linear issue: ${identifier}\nTitle: ${title}\nURL: ${url}\n\n${description ?? ""}`,
-    );
+    return issues.map(({ identifier, title, url, description }) => ({
+      source: "linear",
+      id: identifier,
+      url,
+      text: `Title: ${title}\n\n${description ?? ""}`,
+    }));
   } catch (error) {
     if (error instanceof CodexSecurityError) throw error;
     if (
@@ -111,15 +149,22 @@ function linearIssueFilter(input: string | undefined): JsonObject {
   if (typeof filter === "object" && filter !== null && !Array.isArray(filter)) {
     return filter as JsonObject;
   }
-  throw new CodexSecurityError("--filter must be a JSON Linear issue filter.");
+  throw new CodexSecurityError(
+    "--linear-filter must be a JSON Linear issue filter.",
+  );
 }
 
-function linearIssueIdentifier(input: string): string {
-  if (!/^https?:\/\//iu.test(input)) return input;
+function linearIssueReference(input: string): {
+  id: string;
+  workspace?: string;
+} {
+  if (!/^https?:\/\//iu.test(input)) return { id: input };
   const url = new URL(input);
-  const match = /\/issue\/([A-Z][A-Z0-9]*-\d+)(?:\/|$)/iu.exec(url.pathname);
+  const match = /^\/([^/]+)\/issue\/([A-Z][A-Z0-9]*-\d+)(?:\/|$)/iu.exec(
+    url.pathname,
+  );
   if (url.hostname !== "linear.app" || match === null) {
     throw new CodexSecurityError("Linear issue URL is invalid.");
   }
-  return match[1]!;
+  return { id: match[2]!, workspace: match[1]!.toLowerCase() };
 }

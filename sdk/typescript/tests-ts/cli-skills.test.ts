@@ -2,7 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, spyOn, test } from "bun:test";
 import {
@@ -127,10 +127,12 @@ describe("CLI skill commands", () => {
       await main(
         [
           "patch",
-          "--linear",
+          "--linear-issue",
           "SEC-123",
-          "--linear",
+          "--linear-issue",
           "https://linear.app/example/issue/SEC-124/a-synthetic-finding",
+          "--linear-api-key",
+          "lin_api_SYNTHETIC_EXPLICIT",
         ],
         capture().stream,
         capture().stream,
@@ -142,7 +144,7 @@ describe("CLI skill commands", () => {
             OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
           },
           linearClient: ({ apiKey, redirect }) => {
-            expect(apiKey).toBe("lin_api_SYNTHETIC_SECRET");
+            expect(apiKey).toBe("lin_api_SYNTHETIC_EXPLICIT");
             expect(redirect).toBe("error");
             return {
               issue: async (id: string) => {
@@ -162,12 +164,77 @@ describe("CLI skill commands", () => {
 
     expect(requests).toEqual(["SEC-123", "SEC-124"]);
     expect(inputs).toHaveLength(2);
-    expect(inputs[0]).toContain("Linear issue: SEC-123");
+    expect(inputs[0]).toContain("Issue: SEC-123");
     expect(inputs[1]).toContain("Synthetic evidence for SEC-124");
     expect(environment).toEqual({
       OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
     });
     expect(JSON.stringify(inputs)).not.toContain("lin_api_SYNTHETIC_SECRET");
+    expect(JSON.stringify(inputs)).not.toContain("lin_api_SYNTHETIC_EXPLICIT");
+  });
+
+  test("keeps imported Unix and Windows paths literal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-linear-input-"));
+    try {
+      const repository = join(root, "repository");
+      const selected = join(repository, "selected.txt");
+      const external = join(root, "external.txt");
+      await mkdir(repository);
+      await writeFile(selected, "selected file contents");
+      await writeFile(external, "SYNTHETIC_EXTERNAL_FILE");
+
+      for (const [paths, target] of [
+        [posix, process.platform === "win32" ? "/synthetic.txt" : external],
+        [win32, process.platform === "win32" ? external : "C:\\synthetic.txt"],
+      ] as const) {
+        const issue = {
+          ...linearIssue("SEC-123"),
+          description:
+            paths.sep +
+            `..${paths.sep}`.repeat(32) +
+            paths.relative(paths.parse(target).root, target),
+        };
+        const expected = `Source: linear\nIssue: SEC-123\nURL: ${issue.url}\n\nTitle: ${issue.title}\n\n${issue.description}`;
+        const forbiddenPath = resolve(repository, expected);
+        const originalLstat = filesystem.lstat;
+        let probed = false;
+        let inputs: string[] = [];
+        const reading = spyOn(filesystem, "lstat").mockImplementation((async (
+          ...args: Parameters<typeof filesystem.lstat>
+        ) => {
+          if (String(args[0]) === forbiddenPath) probed = true;
+          return await originalLstat(...args);
+        }) as typeof filesystem.lstat);
+        try {
+          expect(
+            await main(
+              ["patch", selected, "--linear-issue", "SEC-123"],
+              capture().stream,
+              capture().stream,
+              dependencies({
+                currentDirectory: repository,
+                environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
+                linearClient: () =>
+                  ({
+                    issue: async () => issue,
+                  }) as unknown as ReturnType<LinearClientFactory>,
+                onCodex: (args) => {
+                  inputs = JSON.parse(args.at(-1)!.split("\n").at(-1)!);
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(probed).toBe(false);
+          expect(inputs).toEqual(["selected file contents", expected]);
+          expect(inputs).not.toContain("SYNTHETIC_EXTERNAL_FILE");
+        } finally {
+          reading.mockRestore();
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("imports every matching open project issue across Linear pages", async () => {
@@ -182,7 +249,7 @@ describe("CLI skill commands", () => {
           "patch",
           "--linear-project",
           "Security backlog",
-          "--filter",
+          "--linear-filter",
           '{"labels":{"name":{"eq":"security"}}}',
         ],
         capture().stream,
@@ -239,33 +306,44 @@ describe("CLI skill commands", () => {
     });
     expect(nextPages).toBe(1);
     expect(inputs).toHaveLength(2);
-    expect(inputs[0]).toContain("Linear issue: SEC-123");
-    expect(inputs[1]).toContain("Linear issue: SEC-124");
+    expect(inputs[0]).toContain("Issue: SEC-123");
+    expect(inputs[1]).toContain("Issue: SEC-124");
   });
 
   test("rejects invalid Linear selections before starting Codex", async () => {
     const cases: [string[], string, NodeJS.ProcessEnv?][] = [
-      [["patch"], "Patch requires an issue, --linear, or --linear-project."],
       [
-        ["patch", "--linear", "SEC-123"],
+        ["patch"],
+        "Patch requires an issue, --linear-issue, or --linear-project.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123"],
         "Linear access requires CODEX_SECURITY_LINEAR_API_KEY, LINEAR_API_KEY, or LINEAR_ACCESS_TOKEN.",
         {},
       ],
       [
-        ["patch", "--linear-project", "Backlog", "--filter", "invalid"],
-        "--filter must be a JSON Linear issue filter.",
+        ["patch", "--linear-project", "Backlog", "--linear-filter", "invalid"],
+        "--linear-filter must be a JSON Linear issue filter.",
       ],
       [
-        ["patch", "--linear", "SEC-123", "--filter", "{}"],
-        "--filter requires --linear-project.",
+        ["patch", "--linear-issue", "SEC-123", "--linear-filter", "{}"],
+        "--linear-filter requires --linear-project.",
       ],
       [
-        ["patch", "--linear", "SEC-123", "--linear-project", "Backlog"],
-        "Use either --linear or --linear-project, not both.",
+        ["patch", "--linear-issue", "SEC-123", "--linear-project", "Backlog"],
+        "Use either --linear-issue or --linear-project, not both.",
       ],
       [
-        ["patch", "--linear", "https://example.test/issue/SEC-123"],
+        ["patch", "--linear-issue", "https://example.test/issue/SEC-123"],
         "Linear issue URL is invalid.",
+      ],
+      [
+        ["patch", "ordinary issue", "--linear-api-key", "synthetic-key"],
+        "--linear-api-key requires --linear-issue or --linear-project.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123", "--linear-api-key", "   "],
+        "--linear-api-key must not be empty.",
       ],
     ];
 
