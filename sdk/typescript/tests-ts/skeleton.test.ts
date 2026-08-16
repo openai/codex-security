@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
+import { parse } from "smol-toml";
 import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
 import { main } from "../src/cli.js";
 
@@ -62,7 +63,7 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("uses the default test timeout consistently across CI platforms", async () => {
+  test("randomizes tests with the default timeout across CI platforms", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -70,23 +71,21 @@ describe("TypeScript package skeleton", () => {
       new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
       "utf8",
     );
+    const bunConfig = parse(
+      await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
+    );
 
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
-    expect(packageJson.scripts["test:randomized"]).toBe(
-      "pnpm run test --randomize",
-    );
+    expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(ciWorkflow).toContain(
       "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
     );
     expect(ciWorkflow).toContain(
       "name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
     );
-    expect(ciWorkflow).toContain("test_script: test:randomized");
-    expect(ciWorkflow).toContain(
-      "run: pnpm --dir sdk/typescript run ${{ matrix.test_script || 'test' }}",
-    );
+    expect(ciWorkflow).toContain("run: pnpm --dir sdk/typescript run test");
     expect(ciWorkflow).not.toContain("--timeout 60000");
   });
 

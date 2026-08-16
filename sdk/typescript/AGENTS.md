@@ -39,10 +39,10 @@ From the SDK directory, run a focused test while iterating, then run the package
 
 ```bash
 bun test --timeout 30000 tests-ts/<module>.test.ts
-pnpm run test:randomized --seed 12345
+pnpm run test --seed 12345
 pnpm run types
 pnpm run format
 pnpm run test
 ```
 
-To reproduce a randomized failure, use the seed printed in Bun's test summary.
+Tests run in random order by default. To reproduce a failure, use the seed printed in Bun's test summary.
