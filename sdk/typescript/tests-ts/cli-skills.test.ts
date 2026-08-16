@@ -24,6 +24,7 @@ describe("CLI skill commands", () => {
         const file = join(directory, `${command}.txt`);
         await writeFile(file, `${command} file contents\n`);
         let invocation: readonly string[] = [];
+        let prompt = "";
         const stdout = capture();
         const stderr = capture();
         expect(
@@ -39,22 +40,23 @@ describe("CLI skill commands", () => {
             stderr.stream,
             dependencies({
               currentDirectory: directory,
-              onCodex: (args) => {
+              onCodex: (args, output) => {
                 invocation = args;
+                prompt = output?.appServer?.prompt ?? args.at(-1)!;
                 return status;
               },
             }),
           ),
         ).toBe(status);
-        expect(invocation.slice(0, -1)).toEqual([
-          "exec",
-          "--ignore-user-config",
+        expect(invocation).toEqual([
+          ...(command === "patch"
+            ? ["app-server"]
+            : ["exec", "--ignore-user-config"]),
           "--disable",
           "plugins",
-          "--ephemeral",
-          "--color",
-          "never",
-          "--json",
+          ...(command === "patch"
+            ? []
+            : ["--ephemeral", "--color", "never", "--json"]),
           "--config",
           'model="gpt-5.6-sol"',
           "--config",
@@ -63,13 +65,17 @@ describe("CLI skill commands", () => {
           'approval_policy="never"',
           "--config",
           'responses_api_metadata.codex_security_surface="cli"',
-          "--sandbox",
-          "workspace-write",
-          "--skip-git-repo-check",
-          "--cd",
-          directory,
+          ...(command === "patch"
+            ? []
+            : [
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "--cd",
+                directory,
+                prompt,
+              ]),
         ]);
-        const prompt = invocation.at(-1)!;
         expect(prompt).toContain(
           JSON.stringify(join("skills", skill, "SKILL.md")).slice(1, -1),
         );
@@ -132,6 +138,7 @@ describe("CLI skill commands", () => {
 
       for (const command of ["validate", "patch"] as const) {
         let invocation: readonly string[] | undefined;
+        let prompt: string | undefined;
         for (const input of [
           "linked-finding.txt",
           join("linked-directory", "finding.txt"),
@@ -144,8 +151,9 @@ describe("CLI skill commands", () => {
               stderr.stream,
               dependencies({
                 currentDirectory: repository,
-                onCodex: (args) => {
+                onCodex: (args, output) => {
                   invocation = args;
+                  prompt = output?.appServer?.prompt ?? args.at(-1);
                   return 0;
                 },
               }),
@@ -167,14 +175,15 @@ describe("CLI skill commands", () => {
               capture().stream,
               dependencies({
                 currentDirectory: repository,
-                onCodex: (args) => {
+                onCodex: (args, output) => {
                   invocation = args;
+                  prompt = output?.appServer?.prompt ?? args.at(-1);
                   return 0;
                 },
               }),
             ),
           ).toBe(0);
-          expect(JSON.parse(invocation!.at(-1)!.split("\n").at(-1)!)).toEqual([
+          expect(JSON.parse(prompt!.split("\n").at(-1)!)).toEqual([
             "SYNTHETIC_EXTERNAL_FINDING\n",
           ]);
         }
@@ -726,6 +735,81 @@ describe("CLI skill commands", () => {
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
       expect(stderr.text()).not.toContain("/private");
     }
+  });
+
+  test("runs patching in a saved app-server thread", async () => {
+    const source = [
+      'const readline=require("node:readline");',
+      "const lines=readline.createInterface({input:process.stdin});",
+      'const send=(message)=>process.stdout.write(JSON.stringify(message)+"\\n");',
+      "lines.on('line',(line)=>{",
+      "const request=JSON.parse(line);",
+      "if(request.id===1){",
+      'if(request.method!=="initialize")process.exit(8);',
+      "send({id:1,result:{}});",
+      "}else if(request.id===2){",
+      'if(request.method!=="thread/start"||request.params.cwd!=="/synthetic/repository"||request.params.approvalPolicy!=="never"||request.params.sandbox!=="workspace-write")process.exit(9);',
+      'send({id:2,result:{thread:{id:"visible-thread",source:"vscode",ephemeral:false}}});',
+      "}else if(request.id===3){",
+      'if(request.method!=="turn/start"||request.params.threadId!=="visible-thread"||request.params.input[0].text!=="Fix the synthetic finding")process.exit(10);',
+      'send({id:3,result:{turn:{id:"patch-turn"}}});',
+      'send({method:"item/completed",params:{item:{type:"agentMessage",text:"Intermediate details"}}});',
+      'send({method:"item/completed",params:{item:{type:"agentMessage",text:"Patched finding"}}});',
+      'send({method:"turn/completed",params:{turn:{status:"completed",error:null}}});',
+      "}});",
+    ].join("");
+    const stdout = capture();
+    const stderr = capture();
+
+    await expect(
+      runCodexSkillCommand(
+        ["-e", source],
+        {
+          command: "patch",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          appServer: {
+            directory: "/synthetic/repository",
+            prompt: "Fix the synthetic finding",
+          },
+        },
+        { command: process.execPath },
+      ),
+    ).resolves.toBe(0);
+    expect(stdout.text()).toBe("Patched finding\n");
+    expect(stderr.text()).toBe("");
+  });
+
+  test("redacts app-server patch failures", async () => {
+    const source = [
+      'const readline=require("node:readline");',
+      "const lines=readline.createInterface({input:process.stdin});",
+      "lines.once('line',()=>process.stdout.write(JSON.stringify({",
+      'id:1,error:{code:-1,message:"401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
+      '})+"\\n"));',
+    ].join("");
+    const stdout = capture();
+    const stderr = capture();
+
+    await expect(
+      runCodexSkillCommand(
+        ["-e", source],
+        {
+          command: "patch",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          appServer: {
+            directory: "/synthetic/repository",
+            prompt: "Fix the synthetic finding",
+          },
+        },
+        { command: process.execPath },
+      ),
+    ).resolves.toBe(1);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Authentication failed");
+    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+    expect(stderr.text()).not.toContain("/private");
   });
 
   test.skipIf(process.platform === "win32")(

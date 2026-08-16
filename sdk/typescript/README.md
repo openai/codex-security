@@ -752,10 +752,11 @@ Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
 input can be either a file, whose contents are read into the request, or literal
 text. Both commands operate on the current directory, use the scan model
-and reasoning defaults, ignore unrelated user configuration and plugins, and
-print the final response without the underlying Codex event stream. Override
-the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
-`--effort high` or `--codex 'model_reasoning_effort="high"'`.
+and reasoning defaults, disable plugins, and print the final response without
+the underlying Codex event stream. Patching starts a saved task in the Codex
+desktop app. Override the model with `--codex 'model="gpt-5.6-sol"'` and the
+reasoning effort with `--effort high` or
+`--codex 'model_reasoning_effort="high"'`.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
