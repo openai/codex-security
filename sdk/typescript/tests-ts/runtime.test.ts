@@ -2203,11 +2203,6 @@ describe("runtime directories and plugin Python boundary", () => {
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     });
     const lock = join(home, ".codex-security-scan.lock");
-    // `process.kill` reads 0 as the caller's own process group and -1 as every process
-    // it may signal, so both report a live owner forever, and a fractional pid, a pid
-    // just past the signed 32-bit range, or one past the safe-integer range makes it
-    // throw an argument error instead. None of them identifies a process holding this
-    // lock, so an aged lock naming one has to be reclaimed like any other stale lock.
     for (const pid of [0, -1, 0.5, 2 ** 31, 2 ** 53]) {
       await mkdir(lock, { mode: 0o700 });
       await writeFile(
@@ -2218,8 +2213,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const aged = new Date(Date.now() - 10 * 60_000);
       await utimes(lock, aged, aged);
 
-      // An owner that is treated as live is waited on forever, so the acquisition is
-      // bounded here to fail the test rather than hang it.
+      // Bound acquisition so a false live-owner result cannot hang the test.
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), 5_000);
       try {
