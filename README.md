@@ -32,6 +32,7 @@ stored in Codex's credential home or system keyring.
 After showing the findings summary, interactive scans with findings ask whether
 to open a finding browser where you can inspect full details, choose a severity
 threshold, select individual findings, and add patch instructions for each one.
+Each selected finding runs in its own saved Codex desktop task.
 Use `--patch --patch-severity high` to fix high and critical findings. Add
 `--create-pr`, or enable the pull request option during review, to commit the
 verified files and open a GitHub pull request. Ordinary scans do not change

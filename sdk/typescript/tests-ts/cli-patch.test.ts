@@ -38,10 +38,11 @@ function savedScan(
 
 function completePatches(
   args: readonly string[],
-  output?: { stdout: { write(value: string): unknown } },
+  output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
   status: "verified" | "blocked" = "verified",
 ): Finding[] {
-  const findings = JSON.parse(args.at(-1)!.split("\n").at(-1)!) as Finding[];
+  const prompt = output?.appServer?.prompt ?? args.at(-1)!;
+  const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
   output?.stdout.write(
     JSON.stringify({
       patches: findings.map((finding) => ({
@@ -92,8 +93,12 @@ async function runWorkflow(
 describe("scan and patch workflow", () => {
   test("patches selected scan findings in the scanned repository and returns JSON", async () => {
     const result = resultWithFindings(["critical", "high", "medium", "low"]);
-    let invocation: readonly string[] = [];
-    let patched: Finding[] = [];
+    const invocations: Array<{
+      args: readonly string[];
+      directory: string | undefined;
+      prompt: string | undefined;
+    }> = [];
+    const patched: Finding[] = [];
     const outcome = await runWorkflow(
       [
         "scan",
@@ -108,8 +113,12 @@ describe("scan and patch workflow", () => {
       {
         result,
         onCodex: (args, output) => {
-          invocation = args;
-          patched = completePatches(args, output);
+          invocations.push({
+            args,
+            directory: output?.appServer?.directory,
+            prompt: output?.appServer?.prompt,
+          });
+          patched.push(...completePatches(args, output));
           return 0;
         },
       },
@@ -120,10 +129,12 @@ describe("scan and patch workflow", () => {
       "occ_1",
       "occ_2",
     ]);
-    expect(invocation[invocation.indexOf("--cd") + 1]).toBe(
-      "/current/other/repository",
-    );
-    expect(invocation.at(-1)).toContain("Return exactly one JSON object");
+    expect(invocations).toHaveLength(2);
+    for (const invocation of invocations) {
+      expect(invocation.args[0]).toBe("app-server");
+      expect(invocation.directory).toBe("/current/other/repository");
+      expect(invocation.prompt).toContain("Return exactly one JSON object");
+    }
     expect(JSON.parse(outcome.stdout)).toMatchObject({
       manifest: result.manifest,
       findings: result.findings,
@@ -134,6 +145,38 @@ describe("scan and patch workflow", () => {
       ],
     });
     expect(outcome.stderr).toContain("Patching 2 confirmed findings...");
+  });
+
+  test("continues with separate patch tasks when one finding fails", async () => {
+    const result = resultWithFindings(["critical", "high", "medium"]);
+    const tasks: string[] = [];
+    const outcome = await runWorkflow(["scan", "--patch", "--json"], {
+      result,
+      onCodex: (args, output) => {
+        expect(args[0]).toBe("app-server");
+        const [finding] = JSON.parse(
+          output!.appServer!.prompt.split("\n").at(-1)!,
+        ) as Finding[];
+        tasks.push(finding!.occurrenceId);
+        if (finding!.occurrenceId === "occ_2") return 1;
+        completePatches(args, output);
+        return 0;
+      },
+    });
+
+    expect(tasks).toEqual(["occ_1", "occ_2", "occ_3"]);
+    expect(outcome.exitCode).toBe(2);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      patches: [
+        { occurrenceId: "occ_1", status: "verified" },
+        {
+          occurrenceId: "occ_2",
+          status: "failed",
+          reason: "Patch command exited with status 1.",
+        },
+        { occurrenceId: "occ_3", status: "verified" },
+      ],
+    });
   });
 
   test("passes the scan model, provider, and selected authentication to patching", async () => {
@@ -430,13 +473,13 @@ describe("scan and patch workflow", () => {
       [["scan"], null, []],
     ] as const) {
       let reviewed: readonly Finding[] = [];
-      let patched: Finding[] = [];
+      const patched: Finding[] = [];
       const outcome = await runWorkflow(
         [...argv],
         {
           result: resultWithFindings(["high", "medium", "low"]),
           onCodex: (args, output) => {
-            patched = completePatches(args, output);
+            patched.push(...completePatches(args, output));
             return 0;
           },
         },
@@ -567,15 +610,15 @@ describe("scan and patch workflow", () => {
   });
 
   test("passes separate instructions only for interactively selected findings", async () => {
-    let prompt = "";
-    let patched: Finding[] = [];
+    const prompts: string[] = [];
+    const patched: Finding[] = [];
     const outcome = await runWorkflow(
       ["scan"],
       {
         result: resultWithFindings(["high", "medium", "low"]),
         onCodex: (args, output) => {
-          prompt = args.at(-1)!;
-          patched = completePatches(args, output);
+          prompts.push(output!.appServer!.prompt);
+          patched.push(...completePatches(args, output));
           return 0;
         },
       },
@@ -601,16 +644,20 @@ describe("scan and patch workflow", () => {
       "occ_3",
     ]);
 
-    const lines = prompt.split("\n");
-    const instructionsLine = lines.findIndex((line) =>
-      line.startsWith("Follow these user-provided patch instructions"),
-    );
-    expect(instructionsLine).toBeGreaterThan(-1);
-    expect(JSON.parse(lines[instructionsLine + 1]!)).toEqual({
-      occ_1: "Reuse the shared validator.\nDo not add a dependency.",
-      occ_3: "Preserve the public API.",
-    });
-    expect(prompt).not.toContain("This unselected guidance");
+    expect(prompts).toHaveLength(2);
+    for (const [index, prompt] of prompts.entries()) {
+      const lines = prompt.split("\n");
+      const instructionsLine = lines.findIndex((line) =>
+        line.startsWith("Follow these user-provided patch instructions"),
+      );
+      expect(instructionsLine).toBeGreaterThan(-1);
+      expect(JSON.parse(lines[instructionsLine + 1]!)).toEqual(
+        index === 0
+          ? { occ_1: "Reuse the shared validator.\nDo not add a dependency." }
+          : { occ_3: "Preserve the public API." },
+      );
+      expect(prompt).not.toContain("This unselected guidance");
+    }
     expect(patched[0]).not.toHaveProperty("instructions");
   });
 
@@ -655,7 +702,7 @@ describe("scan and patch workflow", () => {
           return savedScan(result);
         },
         onCodex: (args, output) => {
-          workingDirectory = args[args.indexOf("--cd") + 1]!;
+          workingDirectory = output!.appServer!.directory;
           patched = completePatches(args, output);
           return 0;
         },
@@ -769,7 +816,7 @@ describe("scan and patch workflow", () => {
 
   test("reads every page when saved scan findings are truncated", async () => {
     const result = resultWithFindings(["high", "medium"]);
-    let patched: Finding[] = [];
+    const patched: Finding[] = [];
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "scan-1"], {
       onWorkbench: (args): JsonObject => {
@@ -797,7 +844,7 @@ describe("scan and patch workflow", () => {
         };
       },
       onCodex: (args, output) => {
-        patched = completePatches(args, output);
+        patched.push(...completePatches(args, output));
         return 0;
       },
     });

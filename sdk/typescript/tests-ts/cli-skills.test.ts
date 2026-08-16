@@ -326,6 +326,10 @@ describe("CLI skill commands", () => {
         "Patch requires an issue, --linear-issue, or --linear-project.",
       ],
       [
+        ["patch", "--scan", "scan-1", "--linear-issue", "SEC-123"],
+        "Saved findings cannot be combined with Linear issues or projects.",
+      ],
+      [
         ["patch", "--linear-issue", "SEC-123"],
         "Linear access requires CODEX_SECURITY_LINEAR_API_KEY, LINEAR_API_KEY, or LINEAR_ACCESS_TOKEN.",
         {},

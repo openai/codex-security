@@ -349,9 +349,10 @@ and a separate patch-instructions panel. Use the arrow keys to
 browse, `Tab` to inspect details, `Space` to select individual findings, `i` to
 edit instructions for the focused finding, `1`–`4` to select by severity, and
 `r` to optionally create a GitHub pull request after patching. Press `Enter` to
-patch or `q` to keep the checkout unchanged. Add `--create-pr` to `scan --patch`
-or a saved-finding `patch` command to commit only verified patch files and open
-a pull request with `gh`. JSON scan results include `patchSeverity`. Scan and
+patch or `q` to keep the checkout unchanged. Each selected finding runs in its
+own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
+saved-finding `patch` command to commit only verified patch files and open a
+pull request with `gh`. JSON scan results include `patchSeverity`. Scan and
 saved-finding results include one `patches` entry per selected finding with
 status `verified`, `no_change`, `blocked`, or `failed`, plus `pullRequest` when
 one is created. When `--fail-on-severity` is also set, verified and already-fixed
@@ -791,8 +792,8 @@ occurrence ID instead to patch its original repository, or use
 scan. `--scan latest` selects the most recent scan of the current repository.
 Saved-finding patch commands accept `--json` and return a verified, already
 fixed, blocked, or failed result for each finding. Both commands use the scan
-model and reasoning defaults and disable plugins. Patching starts a saved task
-in the Codex desktop app. Override the model with
+model and reasoning defaults and disable plugins. Patching starts a separate
+saved task in the Codex desktop app for each finding. Override the model with
 `--codex 'model="gpt-5.6-sol"'` and the
 reasoning effort with `--effort high` or
 `--codex 'model_reasoning_effort="high"'`.

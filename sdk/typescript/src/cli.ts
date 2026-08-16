@@ -3619,93 +3619,86 @@ async function runFindingPatches(
   stderr.write(
     `\nPatching ${selected.findings.length} confirmed finding${selected.findings.length === 1 ? "" : "s"}...\n`,
   );
-  let response = "";
-  const stdout: Writable = {
-    write(value: string | Uint8Array): boolean {
-      response += value.toString();
-      return true;
-    },
-  };
-  const instructions = Object.fromEntries(
-    selected.findings.flatMap(({ occurrenceId }) => {
-      const instruction = options.findingInstructions?.[occurrenceId];
-      return instruction?.trim() ? [[occurrenceId, instruction]] : [];
-    }),
-  );
-  const status = await runSkill(
-    "fix-finding",
-    [],
-    codexOverrides,
-    effort,
-    stdout,
-    stderr,
-    dependencies,
-    {
-      ...options,
-      directory: selected.repository,
-      findings: selected.findings,
-      findingInstructions:
-        Object.keys(instructions).length === 0 ? undefined : instructions,
-    },
-  );
-  const failed = (reason: string): FindingPatch[] =>
-    selected.findings.map(({ occurrenceId }) => ({
-      occurrenceId,
-      status: "failed",
-      files: [],
-      reason,
-    }));
-  if (status === 130 || status === 143) {
-    throw new CodexSecurityError("Patch operation was interrupted.");
-  }
-  if (status !== 0) {
-    return failed(`Patch command exited with status ${status}.`);
-  }
-
-  let entries: unknown[];
-  try {
-    const reported = JSON.parse(response) as { patches?: unknown };
-    entries = Array.isArray(reported?.patches) ? reported.patches : [];
-  } catch {
-    stderr.write("codex-security: Patch results were not valid JSON.\n");
-    return failed("Patch results were not valid JSON.");
-  }
-
-  const patches = selected.findings.map((finding): FindingPatch => {
-    const matches = entries.filter(
-      (entry) =>
-        typeof entry === "object" &&
-        entry !== null &&
-        "occurrenceId" in entry &&
-        entry.occurrenceId === finding.occurrenceId,
+  const patches: FindingPatch[] = [];
+  for (const finding of selected.findings) {
+    let response = "";
+    const stdout: Writable = {
+      write(value: string | Uint8Array): boolean {
+        response += value.toString();
+        return true;
+      },
+    };
+    const instruction = options.findingInstructions?.[finding.occurrenceId];
+    const status = await runSkill(
+      "fix-finding",
+      [],
+      codexOverrides,
+      effort,
+      stdout,
+      stderr,
+      dependencies,
+      {
+        ...options,
+        directory: selected.repository,
+        findings: [finding],
+        findingInstructions: instruction?.trim()
+          ? { [finding.occurrenceId]: instruction }
+          : undefined,
+      },
     );
-    const parsed = findingPatchSchema.safeParse(matches[0]);
-    if (matches.length !== 1 || !parsed.success) {
-      return {
-        occurrenceId: finding.occurrenceId,
-        status: "failed",
-        files: [],
-        reason: "No complete patch result was returned for this finding.",
-      };
+    if (status === 130 || status === 143) {
+      throw new CodexSecurityError("Patch operation was interrupted.");
     }
 
-    const patch = parsed.data;
-    if (patch.status === "verified" && !patch.verification?.trim()) {
-      return {
-        occurrenceId: finding.occurrenceId,
-        status: "failed",
-        files: patch.files,
-        reason: "Patch verification was not reported.",
-      };
+    const failed = (reason: string, files: string[] = []): FindingPatch => ({
+      occurrenceId: finding.occurrenceId,
+      status: "failed",
+      files,
+      reason,
+    });
+    let patch: FindingPatch;
+    if (status !== 0) {
+      patch = failed(`Patch command exited with status ${status}.`);
+    } else {
+      try {
+        const reported = JSON.parse(response) as { patches?: unknown };
+        const entries = Array.isArray(reported?.patches)
+          ? reported.patches
+          : [];
+        const matches = entries.filter(
+          (entry) =>
+            typeof entry === "object" &&
+            entry !== null &&
+            "occurrenceId" in entry &&
+            entry.occurrenceId === finding.occurrenceId,
+        );
+        const parsed = findingPatchSchema.safeParse(matches[0]);
+        if (matches.length !== 1 || !parsed.success) {
+          patch = failed(
+            "No complete patch result was returned for this finding.",
+          );
+        } else if (
+          parsed.data.status === "verified" &&
+          !parsed.data.verification?.trim()
+        ) {
+          patch = failed(
+            "Patch verification was not reported.",
+            parsed.data.files,
+          );
+        } else {
+          patch = parsed.data;
+        }
+      } catch {
+        stderr.write("codex-security: Patch results were not valid JSON.\n");
+        patch = failed("Patch results were not valid JSON.");
+      }
     }
-    return patch;
-  });
 
-  for (const [index, patch] of patches.entries()) {
-    const title = safePatchText(selected.findings[index]!.title);
+    const title = safePatchText(finding.title);
     stderr.write(
       `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
     );
+    patches.push(patch);
   }
   return patches;
 }
