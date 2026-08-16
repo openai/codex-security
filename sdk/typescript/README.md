@@ -200,6 +200,7 @@ Trusted Access for Cyber. To apply or check your access, visit
 ## CLI
 
 ```bash
+npx @openai/codex-security scan
 npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --headless
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
@@ -223,14 +224,21 @@ npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
+npx @openai/codex-security scans show
 npx @openai/codex-security scans show SCAN_ID
+npx @openai/codex-security scans logs
 npx @openai/codex-security scans logs SCAN_ID
+npx @openai/codex-security scans rerun
 npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
+npx @openai/codex-security scans compare
+npx @openai/codex-security scans compare PREVIOUS_SCAN_ID
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings
 npx @openai/codex-security findings list /path/to/repository
 npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
+npx @openai/codex-security export
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
@@ -538,14 +546,15 @@ same command to resume.
 
 ### Scan history and reruns
 
-`npx @openai/codex-security scans list` lists scans for the current repository. Pass a
-repository path to inspect another checkout, `--scan-root DIR` to list scans
-whose artifacts are under a particular root. `scans show SCAN_ID` includes the
-scan configuration, results, coverage, and artifact locations. Add
+`scans` or `scans list` lists scans for the current repository. Pass a repository
+path to inspect another checkout, or `--scan-root DIR` to list scans whose
+artifacts are under a particular root. `scans show` opens the latest completed
+scan for the current repository. Pass `SCAN_ID` to inspect another scan. Scan
+details include the configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
-`scans logs SCAN_ID` shows complete session events from the scan and its
-workers, which can include source code and credentials.
+`scans logs` shows session events from the latest scan, including an active scan.
+Pass `SCAN_ID` to select another scan. Logs can contain source code and credentials.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
@@ -565,22 +574,25 @@ default directory, select a writable directory outside the scanned repository:
 export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
 ```
 
-Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as
-a false positive and explain why. Later scans dismiss a matching finding only
-when the same reason still applies.
+`findings` or `findings list` lists open findings for the current repository.
+Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as a
+false positive and explain why. Later scans dismiss a matching finding only when
+the same reason still applies.
 
-`scans rerun SCAN_ID` repeats the original configuration against the current
-checkout so a fixed vulnerability can be checked again.
+`scans rerun` repeats the latest completed scan against the current checkout.
+Pass `SCAN_ID` to rerun another scan.
 
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
 cause; `scans match --all` matches all completed scans of the current repository,
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
 
-`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
-root cause, reuses saved matches, and reports findings as new, persisting,
-reopened, resolved, or unknown. Missing findings are not treated as resolved when
-the later scan is incomplete or does not cover their original scope.
+`scans compare` compares the two latest completed scans. Pass one scan ID to
+compare it with the latest completed scan, or two IDs to select both scans. It
+matches findings by root cause, reuses saved matches, and reports findings as
+new, persisting, reopened, resolved, or unknown. Missing findings are not
+treated as resolved when the later scan is incomplete or does not cover their
+original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
@@ -612,7 +624,8 @@ they do not produce structured CLI output. Sign-in commands remain interactive.
 CSV exports cannot be written to stdout while JSON output is requested.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
-starting Codex or loading credentials. JSON preserves the sealed findings
+starting Codex or loading credentials. Without a scan directory, it exports the
+latest completed scan for the current repository. JSON preserves the sealed findings
 document. CSV uses the portable findings columns, marks findings as open, and
 does not include local workbench triage state. The exporter validates the seal
 before writing, accepts `--output -` for stdout, and can use

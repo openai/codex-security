@@ -460,6 +460,94 @@ describe("malformed scan artifact recovery", () => {
     expect((await completeScan(fixture)).progress.status).toBe("complete");
   });
 
+  test.each([
+    ["unavailable", undefined],
+    [
+      "worker-inclusive",
+      {
+        coverage: "complete",
+        source: "codex_rollout",
+        threadCount: 3,
+        inputTokens: 5_000,
+        cachedInputTokens: 400,
+        cacheWriteInputTokens: 0,
+        outputTokens: 120,
+        reasoningOutputTokens: 20,
+        totalTokens: 5_120,
+      },
+    ],
+  ] as const)(
+    "reconciles authoritative scan cost without replacing %s usage or sealed artifacts",
+    async (_scenario, measuredUsage) => {
+      const fixture = await startDraftScan();
+      const firstCompletion = await workbench(fixture, [
+        "complete-scan",
+        "--scan-id",
+        fixture.scanId,
+        ...(measuredUsage === undefined
+          ? []
+          : ["--cost-json", JSON.stringify({ usage: measuredUsage })]),
+      ]);
+      const initiallyCompleted = firstCompletion["scan"] as ScanSummary & {
+        usage: Record<string, unknown>;
+        cost?: unknown;
+      };
+      expect(initiallyCompleted.progress.status).toBe("complete");
+      expect(initiallyCompleted.usage).toBeDefined();
+      if (measuredUsage !== undefined) {
+        expect(initiallyCompleted.usage).toEqual(measuredUsage);
+      }
+      expect(initiallyCompleted.cost).toBeUndefined();
+
+      const artifactNames = [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+        "report.md",
+      ];
+      const sealedArtifacts = await Promise.all(
+        artifactNames.map((name) => readFile(join(fixture.scanDir, name))),
+      );
+      const cost = {
+        model: "gpt-5.6-sol",
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        cacheWriteInputTokens: 0,
+        outputTokens: 30,
+        estimatedUsd: 0.00625,
+      };
+
+      const reconciled = await workbench(fixture, [
+        "complete-scan",
+        "--scan-id",
+        fixture.scanId,
+        "--cost-json",
+        JSON.stringify(cost),
+      ]);
+      expect(reconciled["scan"]).toMatchObject({
+        progress: { status: "complete" },
+        usage: initiallyCompleted.usage,
+        cost,
+      });
+
+      const persisted = await workbench(fixture, [
+        "get-scan",
+        "--scan-id",
+        fixture.scanId,
+      ]);
+      expect(persisted["scan"]).toMatchObject({
+        progress: { status: "complete" },
+        usage: initiallyCompleted.usage,
+        cost,
+      });
+      expect(
+        await Promise.all(
+          artifactNames.map((name) => readFile(join(fixture.scanDir, name))),
+        ),
+      ).toEqual(sealedArtifacts);
+    },
+  );
+
   test("preserves target-drift classification from prepared completion", async () => {
     const fixture = await startDraftScan();
     const source = join(fixture.repository, "src", "extract.py");

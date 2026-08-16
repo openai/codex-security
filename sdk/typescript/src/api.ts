@@ -914,6 +914,7 @@ export class CodexSecurity {
         runtime.configPath !== undefined,
         knowledgeBase !== null,
         options.scanPrompt,
+        options.maxCostUsd !== undefined,
       );
       checkOpen();
       const feedback = await workbench(
@@ -1024,7 +1025,10 @@ export class CodexSecurity {
         ...runtimePaths,
       };
       const sdkCodexConfig = { ...sessionConfig };
+      // Projects and permissions already live in generated TOML files; the SDK
+      // cannot safely encode their path and selector keys as dotted overrides.
       delete sdkCodexConfig["projects"];
+      delete sdkCodexConfig["permissions"];
       const configuredResponsesMetadata = isRecord(
         sdkCodexConfig["responses_api_metadata"],
       )
@@ -2384,6 +2388,7 @@ function scanPrompt(
   hasConfigPath = false,
   hasKnowledgeBase = false,
   additionalPrompt?: string,
+  enforceCostLimit = false,
 ): string {
   const python = `${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")}`;
   return [
@@ -2445,7 +2450,17 @@ function scanPrompt(
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target, python),
-    "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+    ...(skillName === "security-scan" || enforceCostLimit
+      ? [
+          "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
+        ]
+      : skillName === "deep-security-scan"
+        ? [
+            "The Deep Scan coordinator already wrote the canonical scan artifacts. Call complete_codex_security_scan exactly once without submitting another semantic draft; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
+          ]
+        : [
+            "Use record_codex_security_scan_draft and complete_codex_security_scan as directed by the selected skill; the workbench owns authoritative metadata, finalization, report generation, and sealing.",
+          ]),
     ...(additionalPrompt?.trim()
       ? ["Additional scan instructions:", additionalPrompt]
       : []),
