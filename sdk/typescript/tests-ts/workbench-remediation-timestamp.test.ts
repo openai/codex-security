@@ -2,43 +2,41 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const remediationLeaseProbe = [
-  "import json, sqlite3, sys",
-  "from datetime import datetime, timezone",
-  "sys.path.insert(0, sys.argv[1])",
-  "import workbench_remediation as remediation",
-  "",
-  "class Python310DateTime(datetime):",
-  "    @classmethod",
-  "    def fromisoformat(cls, value):",
-  "        if value.endswith(('Z', 'z')):",
-  "            raise ValueError(f'Invalid isoformat string: {value!r}')",
-  "        return datetime.fromisoformat(value)",
-  "",
-  "    @classmethod",
-  "    def now(cls, tz=None):",
-  "        return datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)",
-  "",
-  "remediation.datetime = Python310DateTime",
-  "case = json.loads(sys.argv[2])",
-  "connection = sqlite3.connect(':memory:')",
-  "connection.row_factory = sqlite3.Row",
-  "row = connection.execute('SELECT ? AS pending_action_claim_token, ? AS pending_action_delivered_at, ? AS pending_action_claimed_at', (case.get('token'), case.get('deliveredAt'), case.get('claimedAt'))).fetchone()",
-  "print(json.dumps({'active': remediation.remediation_claim_is_active(row)}))",
-].join("\n");
+const remediationLeaseProbe = `
+import json, sys
+from datetime import datetime, timezone
+sys.path.insert(0, sys.argv[1])
+import workbench_remediation as remediation
+
+class Python310DateTime(datetime):
+    @classmethod
+    def fromisoformat(cls, value):
+        if value.endswith(("Z", "z")):
+            raise ValueError("Python 3.10 rejects Z-suffixed timestamps")
+        return datetime.fromisoformat(value)
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+
+remediation.datetime = Python310DateTime
+case = json.loads(sys.argv[2])
+print(json.dumps(remediation.remediation_claim_is_active({
+    "pending_action_claim_token": case.get("token"),
+    "pending_action_delivered_at": case.get("deliveredAt"),
+    "pending_action_claimed_at": case.get("claimedAt"),
+})))
+`;
 
 interface RemediationClaim {
-  token: string;
+  token: string | null;
   claimedAt?: string;
   deliveredAt?: string;
 }
 
 function isClaimActive(claim: RemediationClaim): boolean {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  expect(python).not.toBeNull();
-  if (python === null) {
-    throw new Error("A Python interpreter is required for remediation tests.");
-  }
+  if (python === null) throw new Error("A Python interpreter is required.");
 
   const result = Bun.spawnSync(
     [
@@ -52,51 +50,44 @@ function isClaimActive(claim: RemediationClaim): boolean {
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
-  expect(new TextDecoder().decode(result.stderr)).toBe("");
-  expect(result.exitCode).toBe(0);
-  return (
-    JSON.parse(new TextDecoder().decode(result.stdout)) as {
-      active: boolean;
-    }
-  ).active;
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  return JSON.parse(new TextDecoder().decode(result.stdout)) as boolean;
 }
 
 describe("workbench remediation timestamps on Python 3.10", () => {
   test.each([
-    {
-      description: "an abandoned Z-suffixed claim",
-      claim: { token: "abandoned", claimedAt: "2026-08-15T11:57:59Z" },
-    },
-    {
-      description: "an abandoned lowercase-z claim",
-      claim: { token: "abandoned", claimedAt: "2026-08-15T11:57:59z" },
-    },
-    {
-      description: "an abandoned delivered action",
-      claim: {
-        token: "abandoned",
+    [
+      "expires at the claim deadline",
+      { claimedAt: "2026-08-15T11:58:00Z" },
+      false,
+    ],
+    ["accepts lowercase UTC", { claimedAt: "2026-08-15T11:58:00z" }, false],
+    [
+      "preserves explicit offsets",
+      { claimedAt: "2026-08-15T13:58:00+02:00" },
+      false,
+    ],
+    ["keeps a fresh claim", { claimedAt: "2026-08-15T11:58:01Z" }, true],
+    [
+      "expires at the delivery deadline",
+      {
         claimedAt: "2026-08-15T11:30:00Z",
-        deliveredAt: "2026-08-15T11:44:59Z",
+        deliveredAt: "2026-08-15T11:45:00Z",
       },
-    },
-  ])("expires $description", ({ claim }) => {
-    expect(isClaimActive(claim)).toBe(false);
-  });
-
-  test.each([
-    {
-      description: "a fresh claim",
-      claim: { token: "active", claimedAt: "2026-08-15T11:58:01Z" },
-    },
-    {
-      description: "a fresh delivery after an older claim",
-      claim: {
-        token: "active",
+      false,
+    ],
+    [
+      "keeps a fresh delivery after an older claim",
+      {
         claimedAt: "2026-08-15T11:30:00Z",
         deliveredAt: "2026-08-15T11:45:01Z",
       },
-    },
-  ])("preserves $description", ({ claim }) => {
-    expect(isClaimActive(claim)).toBe(true);
+      true,
+    ],
+    ["has no claim without a token", { token: null }, false],
+    ["preserves an invalid timestamp", { claimedAt: "not-a-timestamp" }, true],
+    ["preserves a naive timestamp", { claimedAt: "2026-08-15T11:00:00" }, true],
+  ] as const)("%s", (_label, fields, active) => {
+    expect(isClaimActive({ token: "claim", ...fields })).toBe(active);
   });
 });
