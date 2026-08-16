@@ -187,6 +187,13 @@ describe("bundled plugin finding detail contracts", () => {
       validate(stringAssessmentInput),
       JSON.stringify(validate.errors),
     ).toBe(true);
+    expect(
+      validate({
+        ...scanDraftInput,
+        findings: [{ ...scanDraftFinding, code_evidence: null }],
+      }),
+      JSON.stringify(validate.errors),
+    ).toBe(false);
     for (const { section, detail } of invalidFindingDetails) {
       expect(
         validate({
@@ -219,6 +226,13 @@ describe("bundled plugin finding detail contracts", () => {
         validate(stringAssessmentInput),
         JSON.stringify(validate.errors),
       ).toBe(true);
+      expect(
+        validate({
+          ...scanDraftInput,
+          findings: [{ ...scanDraftFinding, code_evidence: null }],
+        }),
+        JSON.stringify(validate.errors),
+      ).toBe(false);
       for (const { section, detail } of invalidFindingDetails) {
         expect(
           validate({

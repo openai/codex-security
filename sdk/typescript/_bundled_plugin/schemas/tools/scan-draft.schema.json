@@ -181,6 +181,22 @@
       ],
       "additionalProperties": true
     },
+    "legacyCodeEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/text"
+        },
+        "code": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "id",
+        "code"
+      ],
+      "additionalProperties": true
+    },
     "findingAssessment": {
       "anyOf": [
         {
@@ -462,6 +478,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/codeEvidence"
+          }
+        },
+        "code_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/legacyCodeEvidence"
           }
         },
         "rootCause": {
