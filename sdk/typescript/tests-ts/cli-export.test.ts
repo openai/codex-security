@@ -77,6 +77,28 @@ describe("CLI", () => {
     }
   });
 
+  test("exports the latest completed scan when no directory is provided", async () => {
+    const scanDir = join(tmpdir(), "codex-security-latest-scan");
+    const deps = dependencies({
+      onWorkbench: () => ({ scans: [{ scanId: "latest-scan", scanDir }] }),
+    });
+    let exportedScanDir = "";
+    deps.exportFindings = async (arguments_) => {
+      exportedScanDir = arguments_.scanDir;
+      return new Uint8Array();
+    };
+
+    expect(
+      await main(
+        ["export", "--output", "-"],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(exportedScanDir).toBe(scanDir);
+  });
+
   test("waits for delayed stdout writes without closing the destination", async () => {
     let contents = "";
     const stdout = new Writable({
