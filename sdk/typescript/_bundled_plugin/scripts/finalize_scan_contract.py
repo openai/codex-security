@@ -1491,7 +1491,7 @@ def _filter_unknown_legacy_evidence_refs(
             section[refs_field] = [
                 ref
                 for ref in refs
-                if not (isinstance(ref, str) and ref and ref not in evidence_ids)
+                if isinstance(ref, str) and ref.strip() and ref in evidence_ids
             ]
 
 

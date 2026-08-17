@@ -717,6 +717,36 @@ describe("bundled plugin finding detail contracts", () => {
     });
   });
 
+  test("ignores malformed legacy evidence references in sealed validation", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
+      "finding = findings['findings'][0]",
+      "finding['code_evidence'] = [{'id': 'legacy-source', 'code': 'legacy_source()'}]",
+      "finding['validation'] = {'evidenceRefs': [None, '', 42, 'legacy-source', 'missing-source']}",
+      "finding['attackPath'] = {'dataflow': {'evidence_refs': [None, '', 42, 'legacy-source', 'missing-source']}}",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
+      "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
+      "print(json.dumps({'originalValidation': finding['validation']['evidenceRefs'], 'compatibleValidation': compatible['findings'][0]['validation']['evidenceRefs'], 'originalDataflow': finding['attackPath']['dataflow']['evidence_refs'], 'compatibleDataflow': compatible['findings'][0]['attackPath']['dataflow']['evidence_refs']}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      originalValidation: [null, "", 42, "legacy-source", "missing-source"],
+      compatibleValidation: ["legacy-source"],
+      originalDataflow: [null, "", 42, "legacy-source", "missing-source"],
+      compatibleDataflow: ["legacy-source"],
+    });
+  });
+
   test("drops unsupported legacy attack-path sequences from sealed validation", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
