@@ -101,7 +101,6 @@ export class ScanDashboard {
   readonly #startedAt: number;
   readonly #activities: TimedScanActivity[] = [];
   readonly #details: (ScanSessionEvent & { recordedAt: number })[] = [];
-  readonly #workers = new Map<string, number>();
   #detailsCache: {
     width: number;
     source: "all" | "main" | number;
@@ -117,7 +116,6 @@ export class ScanDashboard {
   #scrollOffset = 0;
   #view: "activity" | "details" = "activity";
   #source: "all" | "main" | number = "all";
-  #mainThreadId: string | null = null;
   #inputWasRaw = false;
   #noteCount = 0;
   #observingStreamErrors = false;
@@ -311,13 +309,6 @@ export class ScanDashboard {
       this.#view === "details" && this.#scrollOffset !== 0
         ? this.#activityLines(this.#width()).length
         : 0;
-    this.#mainThreadId ??= session.parentThreadId ?? session.threadId;
-    if (session.threadId !== this.#mainThreadId) {
-      this.#workers.set(
-        session.threadId,
-        this.#workers.get(session.threadId) ?? this.#workers.size + 1,
-      );
-    }
     const timestamp = session.event["timestamp"];
     const recordedAt =
       typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
@@ -513,8 +504,7 @@ export class ScanDashboard {
       if (cache.count === this.#details.length) return cache.lines;
       const events = this.#details.slice(cache.count);
       cache.count = this.#details.length;
-      for (const { threadId, event, recordedAt } of events) {
-        const worker = this.#workers.get(threadId);
+      for (const { threadId, worker, event, recordedAt } of events) {
         if (this.#source !== "all" && this.#source !== (worker ?? "main")) {
           continue;
         }

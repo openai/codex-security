@@ -501,6 +501,160 @@ describe("live scan cost tracking", () => {
     expect(events).toHaveLength(6);
   });
 
+  test.each([false, true])(
+    "shares worker labels with session events when activity is enabled: %s",
+    async (withActivity) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scan");
+      const usage = { input_tokens: 10, output_tokens: 1 };
+      await writeSession(
+        home,
+        "scan-thread",
+        usage,
+        undefined,
+        scanDirectory,
+        "2026-07-26T12:00:00Z",
+      );
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        usage,
+        undefined,
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "one",
+          "output",
+        ),
+        "2026-07-26T12:01:00Z",
+      );
+      await appendSessionItem(worker, {
+        id: "worker-message",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Worker output." }],
+      });
+      const events: ScanSessionEvent[] = [];
+      const activities: ScanActivity[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        repository: home,
+        scanDirectory,
+        model: "gpt-5.6-sol",
+        onSessionEvent: (event) => events.push(event),
+        onActivity: withActivity
+          ? (activity) => activities.push(activity)
+          : undefined,
+      });
+      tracker.start("scan-thread");
+      await tracker.stop();
+
+      expect(
+        events
+          .filter((event) => event.threadId === "scan-thread")
+          .map((event) => event.worker),
+      ).toEqual([undefined, undefined]);
+      expect(
+        new Set(
+          events
+            .filter((event) => event.threadId === "worker-thread")
+            .map((event) => event.worker),
+        ),
+      ).toEqual(new Set([1]));
+      if (withActivity) {
+        expect(
+          activities.find(
+            (activity) => activity.description === "Worker output.",
+          )?.worker,
+        ).toBe(1);
+      } else {
+        expect(activities).toEqual([]);
+      }
+    },
+  );
+
+  test.each(["parent", "main"] as const)(
+    "replays early worker events when the %s session arrives later",
+    async (missing) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scan");
+      const usage = { input_tokens: 10, output_tokens: 1 };
+      const writeMain = () =>
+        writeSession(
+          home,
+          "scan-thread",
+          usage,
+          undefined,
+          scanDirectory,
+          "2026-07-26T12:00:00Z",
+        );
+      if (missing === "parent") await writeMain();
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        usage,
+        missing === "parent" ? "parent-worker" : undefined,
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "one",
+          "output",
+        ),
+        "2026-07-26T12:01:00Z",
+      );
+      const message = (text: string) => ({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      });
+      await appendSessionItem(worker, message("Early worker output."));
+      const unrelated = await writeSession(home, "unrelated-thread", usage);
+      await appendSessionItem(unrelated, message("Unrelated output."));
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        scanDirectory: missing === "main" ? scanDirectory : undefined,
+        model: "gpt-5.6-sol",
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      expect(events.some((event) => event.threadId === "worker-thread")).toBe(
+        false,
+      );
+
+      if (missing === "parent") {
+        await writeSession(home, "parent-worker", usage, "scan-thread");
+      } else {
+        await writeMain();
+      }
+      await appendSessionItem(worker, message("Late worker output."));
+      await tracker.refresh();
+      await tracker.refresh();
+      await tracker.stop();
+
+      const workerEvents = events.filter(
+        (event) => event.threadId === "worker-thread",
+      );
+      expect(workerEvents.map((event) => event.event)).toEqual([
+        expect.objectContaining({ type: "session_meta" }),
+        expect.objectContaining({ type: "event_msg" }),
+        { type: "response_item", payload: message("Early worker output.") },
+        { type: "response_item", payload: message("Late worker output.") },
+      ]);
+      expect(new Set(workerEvents.map((event) => event.worker))).toEqual(
+        new Set([1]),
+      );
+      expect(
+        events.some((event) => event.threadId === "unrelated-thread"),
+      ).toBe(false);
+    },
+  );
+
   test("counts independent Deep workers inside the scan directory only", async () => {
     const home = await codexHome();
     const scanDirectory = join(home, "scans", "current");
@@ -1556,9 +1710,11 @@ describe("live scan cost tracking", () => {
       input_tokens: 100,
       output_tokens: 10,
     });
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
     await tracker.refresh();
@@ -1575,9 +1731,12 @@ describe("live scan cost tracking", () => {
     const padding = " ".repeat(128 * 1_024);
     await appendFile(path, `${padding}${event.slice(0, 40)}`);
     expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+    expect(events).toHaveLength(2);
 
     await appendFile(path, `${event.slice(40)}\n`);
     expect((await tracker.stop()).cost?.inputTokens).toBe(250);
+    expect(events).toHaveLength(3);
+    expect(events.at(-1)?.event).toEqual(JSON.parse(event));
   });
 
   test("reads session events larger than 16 MiB", async () => {

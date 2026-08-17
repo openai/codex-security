@@ -763,14 +763,11 @@ describe("live scan dashboard", () => {
       { repository: "/code/juice-shop", input, clock: fakeClock() },
     );
     let payloadReads = 0;
-    const event = (
-      threadId: string,
-      text: string,
-      parentThreadId: string | null = null,
-    ) => {
+    const event = (threadId: string, text: string, worker?: number) => {
       dashboard.recordDetails({
         threadId,
-        parentThreadId,
+        parentThreadId: null,
+        worker,
         event: {
           type: "event_msg",
           get payload() {
@@ -782,9 +779,9 @@ describe("live scan dashboard", () => {
     };
 
     dashboard.start();
-    event("worker-one", "Worker one inspected routes.", "scan-thread");
+    event("worker-one", "Worker one inspected routes.", 1);
     event("scan-thread", "Main scan started.");
-    event("worker-two", "Independent worker inspected models.");
+    event("worker-two", "Independent worker inspected models.", 2);
     for (let index = 1; index <= 10; index += 1) {
       event("scan-thread", `trace ${index}`);
     }

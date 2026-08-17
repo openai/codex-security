@@ -94,9 +94,9 @@ Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
 `onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
 `onTrustedAccessStatus`, `onReconnect`, `onSessionEvent`, `onWorkerStatus`,
 `onWarning`, and `onObserverError`. `onSessionEvent` receives saved scan and
-worker events with their thread IDs. Preflight does not start the runtime,
-authenticate, resolve Python, inspect the plugin, or run those scan-lifecycle
-callbacks.
+worker events with their thread IDs and worker numbers. Preflight does not start
+the runtime, authenticate, resolve Python, inspect the plugin, or run those
+scan-lifecycle callbacks.
 
 ## Authentication
 

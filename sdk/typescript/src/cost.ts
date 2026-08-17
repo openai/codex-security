@@ -21,6 +21,7 @@ export interface ScanCost {
 export interface ScanSessionEvent {
   threadId: string;
   parentThreadId: string | null;
+  worker?: number;
   event: Record<string, unknown>;
 }
 
@@ -98,6 +99,30 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
+
+function createSessionUsage(): SessionUsage {
+  return {
+    offset: 0,
+    pendingLine: [],
+    pendingLineBytes: 0,
+    unreadable: false,
+    threadId: null,
+    parentThreadId: null,
+    workingDirectory: null,
+    startedAt: null,
+    inheritedUsage: null,
+    replaying: false,
+    usage: null,
+    calls: new Map(),
+    activities: [],
+    progress: [],
+    filesCompleted: 0,
+    filesTotal: null,
+    prose: new Set(),
+    reasoning: null,
+    reasoningCount: 0,
+  };
+}
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
@@ -189,28 +214,7 @@ export class ScanCostTracker {
     )) {
       let session = this.#sessions.get(path);
       if (session === undefined) {
-        session = {
-          offset: 0,
-          pendingLine: [],
-          pendingLineBytes: 0,
-          unreadable: false,
-          threadId: null,
-          parentThreadId: null,
-          workingDirectory: null,
-          startedAt: null,
-          inheritedUsage: null,
-          replaying: false,
-          usage: null,
-          calls: new Map(),
-          activities: [],
-          progress: [],
-          filesCompleted: 0,
-          filesTotal: null,
-          prose: new Set(),
-          reasoning: null,
-          reasoningCount: 0,
-          ...(this.#options.onSessionEvent === undefined ? {} : { events: [] }),
-        };
+        session = createSessionUsage();
         this.#sessions.set(path, session);
       }
       try {
@@ -273,20 +277,35 @@ export class ScanCostTracker {
     }
 
     let usage: ScanTokenUsage | null = null;
-    for (const session of this.#sessions.values()) {
-      if (session.threadId === null || !included.has(session.threadId)) {
-        session.events?.splice(0);
-        continue;
+    for (const [path, tracked] of this.#sessions) {
+      const threadId = tracked.threadId;
+      if (threadId === null || !included.has(threadId)) continue;
+      let session = tracked;
+      if (
+        this.#options.onSessionEvent !== undefined &&
+        session.events === undefined
+      ) {
+        // Replay only newly associated sessions, including their early events.
+        session = createSessionUsage();
+        session.events = [];
+        await readSessionUsage(path, session, this.#options.repository);
+        this.#sessions.set(path, session);
+      }
+      let worker: number | undefined;
+      if (threadId !== this.#threadId) {
+        worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
+        this.#workers.set(threadId, worker);
       }
       for (const event of session.events?.splice(0) ?? []) {
         this.#options.onSessionEvent?.({
-          threadId: session.threadId,
+          threadId,
           parentThreadId: session.parentThreadId,
+          worker,
           event,
         });
       }
-      if (session.threadId !== this.#threadId) {
-        this.#reportWorkerActivities(session);
+      if (worker !== undefined) {
+        this.#reportWorkerActivities(session, worker);
         this.#reportWorkerProgress(session);
       }
       if (session.usage !== null) {
@@ -299,14 +318,9 @@ export class ScanCostTracker {
     this.#reportCost(cost);
   }
 
-  #reportWorkerActivities(session: SessionUsage): void {
+  #reportWorkerActivities(session: SessionUsage, worker: number): void {
     if (this.#options.onActivity === undefined || session.threadId === null) {
       return;
-    }
-    let worker = this.#workers.get(session.threadId);
-    if (worker === undefined) {
-      worker = this.#workers.size + 1;
-      this.#workers.set(session.threadId, worker);
     }
     for (const activity of session.activities.splice(0)) {
       this.#options.onActivity({
