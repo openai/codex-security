@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 "evidence_refs",
                 "assertions",
                 "evidence",
+                "counterEvidence",
                 "limitations",
             ),
             (
@@ -70,6 +72,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 (("evidenceRefs", "evidence_refs"), 400),
                 (("assertions",), 400),
                 (("evidence",), 400),
+                (("counterEvidence",), 400),
                 (("limitations",), 400),
             ),
         ),
@@ -116,7 +119,17 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 section = dict(section)
                 for assessment in ("impact", "likelihood"):
                     if isinstance(section.get(assessment), str):
-                        section[assessment] = {"level": section[assessment]}
+                        assessment_value = section[assessment]
+                        assessment_key = (
+                            "level"
+                            if re.fullmatch(
+                                r"critical|high|medium|low|informational|ignore|unknown",
+                                assessment_value,
+                                flags=re.IGNORECASE,
+                            )
+                            else "rationale"
+                        )
+                        section[assessment] = {assessment_key: assessment_value}
             prepared[key] = bounded_finding_section(
                 section,
                 maximum_bytes,
@@ -182,9 +195,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     )
     core = {key: prepared[key] for key in core_keys if key in prepared}
     extras = {
-        key: item
-        for key, item in prepared.items()
-        if key not in core and key not in guidance
+        key: item for key, item in prepared.items() if key not in core and key not in guidance
     }
     complete_guidance = {key: items[:1] for key, items in guidance.items()}
     minimum_guidance = {
