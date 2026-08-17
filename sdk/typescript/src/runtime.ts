@@ -239,25 +239,19 @@ export async function requireSecureCredentialHome(
       `Codex Security credential home was replaced: ${canonical}`,
     );
   }
-  if (platform === "win32") {
-    if (options.validateWindowsAcl !== false) {
-      await requirePrivateCredentialHome(
-        { mode: Number(metadata.mode), uid: Number(metadata.uid) },
-        canonical,
-        {
-          platform,
-          secureWindowsHome: options.secureWindowsHome,
-        },
-      );
-    }
-    return metadata;
+  if (platform !== "win32" || options.validateWindowsAcl !== false) {
+    await requirePrivateCredentialHome(
+      { mode: Number(metadata.mode), uid: Number(metadata.uid) },
+      canonical,
+      {
+        platform,
+        secureWindowsHome: options.secureWindowsHome,
+      },
+    );
   }
-  await requirePrivateCredentialHome(
-    { mode: Number(metadata.mode), uid: Number(metadata.uid) },
-    canonical,
-    { platform },
-  );
-  await requireSecureOutputAncestry(canonical);
+  if (platform !== "win32") {
+    await requireSecureOutputAncestry(canonical);
+  }
   return metadata;
 }
 
