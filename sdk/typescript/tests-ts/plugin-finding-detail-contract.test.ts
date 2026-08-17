@@ -386,6 +386,24 @@ describe("bundled plugin finding detail contracts", () => {
     expect(reachability).not.toContain("Reachability was not recorded");
   });
 
+  test("projects typed attack-path steps", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        steps: [
+          "Upload an archive with a traversal entry.",
+          "Trigger automatic extraction.",
+        ],
+      },
+    });
+
+    const dataflow = report
+      .split("#### Dataflow", 2)[1]!
+      .split("#### Reachability", 1)[0]!;
+    expect(dataflow).toContain("Attack steps:");
+    expect(dataflow).toContain("- Upload an archive with a traversal entry.");
+    expect(dataflow).toContain("- Trigger automatic extraction.");
+  });
+
   test("merges root-cause aliases in generated reports", () => {
     const report = projectFindingDetails({
       rootCause: { summary: "" },
@@ -531,7 +549,7 @@ describe("bundled plugin finding detail contracts", () => {
       "]",
       "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence'], 'counterEvidence': None, 'limitations': '', 'method': [], 'status': '', 'summary': {}, 'disposition': '', 'result': ''}",
       "findings['findings'][0]['rootCause'] = {'summary': '', 'code': None, 'language': None}",
-      "findings['findings'][0]['attackPath'] = {'evidence_refs': ['legacy-attack-evidence'], 'dataFlow': None, 'dataflow': {'summary': '', 'source': None, 'sink': None, 'outcome': None, 'evidenceRefs': ['legacy-missing-evidence']}, 'impact': {'level': '', 'rationale': None, 'why': None}, 'likelihood': {'level': None, 'rationale': None, 'why': None}, 'reachability': None, 'summary': ''}",
+      "findings['findings'][0]['attackPath'] = {'evidence_refs': ['legacy-attack-evidence'], 'dataFlow': '', 'dataflow': {'summary': '', 'source': None, 'sink': None, 'outcome': None, 'evidenceRefs': ['legacy-missing-evidence']}, 'impact': {'level': '', 'rationale': None, 'why': None}, 'likelihood': {'level': None, 'rationale': None, 'why': None}, 'reachability': None, 'summary': ''}",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
       "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
@@ -567,7 +585,7 @@ describe("bundled plugin finding detail contracts", () => {
         { code: "second_legacy_source()", id: "legacy-duplicate" },
       ],
       originalMethod: [],
-      originalDataFlow: null,
+      originalDataFlow: "",
       originalNested: ["legacy-missing-evidence"],
       originalReachability: null,
       originalRootCauseSummary: "",

@@ -576,6 +576,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     )
     remediation_tests = _strings(finding.get("remediationTests"))
     preventive_controls = _strings(finding.get("preventiveControls"))
+    attack_steps = _strings(attack_path.get("steps"))
     cwes = ", ".join(finding["taxonomy"]["cwe"]) or "none"
     title = _text(finding["title"], "Untitled finding")
     lines = [
@@ -620,6 +621,8 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     if validation_limitations:
         lines.extend(["", "Limitations:", *_bullets(validation_limitations, "None recorded.")])
     lines.extend(["", "#### Dataflow", "", dataflow_summary])
+    if attack_steps:
+        lines.extend(["", "Attack steps:", *_bullets(attack_steps, "None recorded.")])
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
             lines.extend(["", f"- **{label}:** {_text(dataflow[key], 'not recorded')}"])
