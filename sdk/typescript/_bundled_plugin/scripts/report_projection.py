@@ -291,6 +291,67 @@ def _section_code_evidence(
     return unique
 
 
+def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
+    keys = [key for key in ("rootCause", "root_cause") if key in value]
+    if not keys:
+        return None, None
+    if len(keys) == 1:
+        return keys[0], value[keys[0]]
+    details: list[dict[str, Any]] = []
+    for key in keys:
+        detail = value[key]
+        if isinstance(detail, str):
+            details.append({"summary": detail})
+        elif isinstance(detail, dict):
+            details.append(detail)
+        elif detail is not None:
+            return keys[0], value[keys[0]]
+    if not details:
+        return keys[0], None
+
+    merged: dict[str, Any] = {}
+    for detail in details:
+        for field, item in detail.items():
+            if field in ("evidenceRefs", "evidence_refs", "language"):
+                continue
+            if field not in merged or merged[field] in (None, "", [], {}):
+                merged[field] = item
+
+    evidence_values = [
+        detail[field]
+        for detail in details
+        for field in ("evidenceRefs", "evidence_refs")
+        if field in detail
+    ]
+    evidence_lists = [item for item in evidence_values if isinstance(item, list)]
+    if evidence_lists:
+        merged["evidenceRefs"] = list(
+            dict.fromkeys(
+                item for evidence in evidence_lists for item in evidence if isinstance(item, str)
+            )
+        )
+    elif evidence_values:
+        merged["evidenceRefs"] = evidence_values[0]
+
+    code = merged.get("code")
+    matching_details = (
+        details
+        if not isinstance(code, str) or not code.strip()
+        else [detail for detail in details if detail.get("code") == code]
+    )
+    language = next(
+        (
+            detail["language"]
+            for detail in matching_details
+            if isinstance(detail.get("language"), str) and detail["language"].strip()
+        ),
+        None,
+    )
+    if language is not None:
+        merged["language"] = language
+    return keys[0], merged
+
+
 def _root_cause_code_evidence(
     finding: dict[str, Any], root_cause: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -429,7 +490,7 @@ def _surface_notes(surface: dict[str, Any]) -> str:
 
 def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     validation = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
-    raw_root_cause = finding.get("rootCause")
+    _, raw_root_cause = merged_root_cause(finding)
     root_cause = raw_root_cause if isinstance(raw_root_cause, dict) else {}
     attack_path = finding.get("attackPath") if isinstance(finding.get("attackPath"), dict) else {}
     dataflow_sections = [
@@ -492,9 +553,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     )
     root_cause_code_evidence = _root_cause_code_evidence(finding, root_cause)
     validation_code_evidence = _section_code_evidence(finding, validation)
-    dataflow_code_evidence = _section_code_evidence(
-        finding, attack_path, *dataflow_sections
-    )
+    dataflow_code_evidence = _section_code_evidence(finding, attack_path, *dataflow_sections)
     reachability_code_evidence = _section_code_evidence(finding, reachability)
     dataflow_summary = _text(
         dataflow.get("summary"),

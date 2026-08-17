@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from report_projection import merged_root_cause
 from workbench_constants import (
     FINDING_ATTACK_PATH_PREVIEW_BYTES,
     FINDING_CODE_EVIDENCE_LIMIT,
@@ -261,67 +262,6 @@ def merged_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
     return evidence_keys[0], value[evidence_keys[0]]
 
 
-def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
-    keys = [key for key in ("rootCause", "root_cause") if key in value]
-    if not keys:
-        return None, None
-    if len(keys) == 1:
-        return keys[0], value[keys[0]]
-    details: list[dict[str, Any]] = []
-    for key in keys:
-        detail = value[key]
-        if isinstance(detail, str):
-            details.append({"summary": detail})
-        elif isinstance(detail, dict):
-            details.append(detail)
-        elif detail is not None:
-            return keys[0], value[keys[0]]
-    if not details:
-        return keys[0], None
-
-    merged: dict[str, Any] = {}
-    for detail in details:
-        for field, item in detail.items():
-            if field in ("evidenceRefs", "evidence_refs", "language"):
-                continue
-            if field not in merged or merged[field] in (None, "", [], {}):
-                merged[field] = item
-
-    evidence_values = [
-        detail[field]
-        for detail in details
-        for field in ("evidenceRefs", "evidence_refs")
-        if field in detail
-    ]
-    evidence_lists = [item for item in evidence_values if isinstance(item, list)]
-    if evidence_lists:
-        merged["evidenceRefs"] = list(
-            dict.fromkeys(
-                item for evidence in evidence_lists for item in evidence if isinstance(item, str)
-            )
-        )
-    elif evidence_values:
-        merged["evidenceRefs"] = evidence_values[0]
-
-    code = merged.get("code")
-    matching_details = (
-        details
-        if not isinstance(code, str) or not code.strip()
-        else [detail for detail in details if detail.get("code") == code]
-    )
-    language = next(
-        (
-            detail["language"]
-            for detail in matching_details
-            if isinstance(detail.get("language"), str) and detail["language"].strip()
-        ),
-        None,
-    )
-    if language is not None:
-        merged["language"] = language
-    return keys[0], merged
-
-
 def bounded_code_evidence(value: Any) -> Any:
     if not isinstance(value, list):
         return value
@@ -331,6 +271,27 @@ def bounded_code_evidence(value: Any) -> Any:
             bounded.append(item)
             continue
         evidence = dict(item)
+        for field in ("explanation", "label", "language", "path"):
+            if field in evidence and not isinstance(evidence[field], str):
+                evidence.pop(field)
+        if (
+            "role" in evidence
+            and evidence["role"] is not None
+            and not isinstance(evidence["role"], str)
+        ):
+            evidence.pop("role")
+        start_line = evidence.get("startLine")
+        if "startLine" in evidence and (
+            not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1
+        ):
+            evidence.pop("startLine")
+        end_line = evidence.get("endLine")
+        if (
+            "endLine" in evidence
+            and end_line is not None
+            and (not isinstance(end_line, int) or isinstance(end_line, bool) or end_line < 1)
+        ):
+            evidence.pop("endLine")
         code = evidence.get("code")
         if isinstance(code, str):
             evidence["code"] = bounded_json_text(

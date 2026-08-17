@@ -370,6 +370,24 @@ describe("bundled plugin finding detail contracts", () => {
     );
   });
 
+  test("merges root-cause aliases in generated reports", () => {
+    const report = projectFindingDetails({
+      rootCause: { summary: "" },
+      root_cause: {
+        summary: "The destination is not contained before the write.",
+        code: "destination.write_bytes(payload)",
+        language: "python",
+      },
+    });
+
+    expect(report).toContain(
+      "The destination is not contained before the write.",
+    );
+    expect(report).toContain(
+      "```python\ndestination.write_bytes(payload)\n```",
+    );
+  });
+
   test("projects code evidence referenced by nested attack-path details", () => {
     const report = projectFindingDetails({
       attackPath: {

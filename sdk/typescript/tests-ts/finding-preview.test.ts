@@ -62,6 +62,18 @@ describe("bundled finding previews", () => {
           summary: "The destination is not contained.",
         },
       },
+      invalidLegacyEvidenceFields: {
+        code_evidence: [
+          {
+            id: "legacy-source",
+            code: "dangerous_call()",
+            startLine: 0,
+            endLine: "12",
+            label: 7,
+            role: { kind: "sink" },
+          },
+        ],
+      },
     };
     expect(projectFindingDetails(original)).toEqual({
       projected: {
@@ -87,6 +99,9 @@ describe("bundled finding previews", () => {
             evidenceRefs: ["legacy-source"],
             summary: "The destination is not contained.",
           },
+        },
+        invalidLegacyEvidenceFields: {
+          code_evidence: [{ id: "legacy-source", code: "dangerous_call()" }],
         },
       },
       original,
