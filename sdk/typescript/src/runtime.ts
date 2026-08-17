@@ -1,6 +1,12 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, readdirSync, type Stats } from "node:fs";
+import {
+  constants,
+  existsSync,
+  readdirSync,
+  type BigIntStats,
+  type Stats,
+} from "node:fs";
 import {
   chmod,
   cp,
@@ -148,7 +154,7 @@ export async function prepareCodexSecurityCredentialHome(
       throw error;
     }
     if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
-    const metadata = await lstat(path);
+    const metadata = await lstat(path, { bigint: true });
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
       throw new OutputDirectoryError(
         `Codex Security credential home is not a directory: ${path}`,
@@ -183,17 +189,17 @@ export async function requireSecureCredentialHome(
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-    metadata?: Stats;
-    expectedDevice?: number;
-    expectedInode?: number;
+    metadata?: BigIntStats;
+    expectedDevice?: bigint;
+    expectedInode?: bigint;
     validateWindowsAcl?: boolean;
   } = {},
-): Promise<Stats> {
+): Promise<BigIntStats> {
   const platform = options.platform ?? process.platform;
   let metadata = options.metadata;
   if (metadata === undefined) {
     try {
-      metadata = await lstat(path);
+      metadata = await lstat(path, { bigint: true });
     } catch (error) {
       throw new OutputDirectoryError(
         `Unable to inspect the Codex Security credential home: ${path}`,
@@ -208,7 +214,7 @@ export async function requireSecureCredentialHome(
   }
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
-  const canonicalMetadata = await lstat(canonical);
+  const canonicalMetadata = await lstat(canonical, { bigint: true });
   if (
     canonicalMetadata.dev !== metadata.dev ||
     canonicalMetadata.ino !== metadata.ino
@@ -235,14 +241,22 @@ export async function requireSecureCredentialHome(
   }
   if (platform === "win32") {
     if (options.validateWindowsAcl !== false) {
-      await requirePrivateCredentialHome(metadata, canonical, {
-        platform,
-        secureWindowsHome: options.secureWindowsHome,
-      });
+      await requirePrivateCredentialHome(
+        { mode: Number(metadata.mode), uid: Number(metadata.uid) },
+        canonical,
+        {
+          platform,
+          secureWindowsHome: options.secureWindowsHome,
+        },
+      );
     }
     return metadata;
   }
-  await requirePrivateCredentialHome(metadata, canonical, { platform });
+  await requirePrivateCredentialHome(
+    { mode: Number(metadata.mode), uid: Number(metadata.uid) },
+    canonical,
+    { platform },
+  );
   await requireSecureOutputAncestry(canonical);
   return metadata;
 }
@@ -2490,9 +2504,10 @@ async function isRegularFile(path: string): Promise<boolean> {
 
 async function sameFile(left: string, right: string): Promise<boolean> {
   try {
+    // NTFS file IDs can exceed JavaScript's safe integer range.
     const [leftMetadata, rightMetadata] = await Promise.all([
-      stat(left),
-      stat(right),
+      stat(left, { bigint: true }),
+      stat(right, { bigint: true }),
     ]);
     return (
       leftMetadata.dev === rightMetadata.dev &&
