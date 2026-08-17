@@ -447,6 +447,29 @@ describe("bundled plugin finding detail contracts", () => {
     );
   });
 
+  test("projects attack-path context lists", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        assumptions: ["Automatic extraction is enabled."],
+        blindspots: ["A downstream sandbox was not exercised."],
+        controls: ["Archive uploads require authentication."],
+        limitations: ["The exploit was validated statically."],
+      },
+    });
+
+    const reachability = report
+      .split("#### Reachability", 2)[1]!
+      .split("#### Severity", 1)[0]!;
+    expect(reachability).toContain("Assumptions:");
+    expect(reachability).toContain("- Automatic extraction is enabled.");
+    expect(reachability).toContain("Existing controls:");
+    expect(reachability).toContain("- Archive uploads require authentication.");
+    expect(reachability).toContain("Blind spots:");
+    expect(reachability).toContain("- A downstream sandbox was not exercised.");
+    expect(reachability).toContain("Limitations:");
+    expect(reachability).toContain("- The exploit was validated statically.");
+  });
+
   test("merges root-cause aliases in generated reports", () => {
     const report = projectFindingDetails({
       rootCause: { summary: "" },

@@ -665,6 +665,15 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     )
     if preconditions:
         lines.extend(["", "Preconditions:", *_bullets(preconditions, "None recorded.")])
+    for label, key in (
+        ("Assumptions", "assumptions"),
+        ("Existing controls", "controls"),
+        ("Blind spots", "blindspots"),
+        ("Limitations", "limitations"),
+    ):
+        values = _strings(attack_path.get(key))
+        if values:
+            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
     lines.extend(_code_evidence_lines(reachability_code_evidence))
     lines.extend(
         [
