@@ -6515,20 +6515,17 @@ setInterval(() => {}, 1000);
     );
     const login = client.loginApiKey("secret-key");
     void login.catch(() => undefined);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const started = await import("node:fs/promises").then(({ stat }) =>
-        stat(ready).catch(() => null),
-      );
-      if (started !== null) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(ready) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(existsSync(ready), "the fake login process started").toBe(true);
+      await client.close();
+      await expect(login).rejects.toThrow();
+      await expect(stat(codexHome)).resolves.toBeDefined();
+    } finally {
+      await client.close();
     }
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(ready)),
-    ).resolves.toBeDefined();
-    await client.close();
-    await expect(login).rejects.toThrow();
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(codexHome)),
-    ).resolves.toBeDefined();
-  });
+  }, 30_000);
 });
