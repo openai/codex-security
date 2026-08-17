@@ -534,6 +534,32 @@ describe("compact diff scan", () => {
         remediation: "Validate each output path before writing.",
         provenance: { source: "local_plugin" },
       };
+      const invalidRootCauseReference = await client.request("tools/call", {
+        name: "record_codex_security_scan_draft",
+        arguments: {
+          scanId,
+          handoffClaimToken,
+          findings: [
+            {
+              ...finding,
+              root_cause: {
+                evidenceRefs: ["missing-root-cause-evidence"],
+              },
+            },
+          ],
+          coverage: {
+            completeness: "complete",
+            surfaces: [{ label: "Changed files", disposition: "rejected" }],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        },
+        _meta: { "openai/threadId": owner },
+      });
+      expect(invalidRootCauseReference["isError"]).toBe(true);
+      expect(JSON.stringify(invalidRootCauseReference)).toContain(
+        "root_cause.evidenceRefs",
+      );
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,

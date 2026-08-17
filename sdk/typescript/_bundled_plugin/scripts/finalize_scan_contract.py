@@ -1240,7 +1240,7 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
 
     referenced_sections = [
         (section_name, finding.get(section_name))
-        for section_name in ("rootCause", "validation", "attackPath")
+        for section_name in ("rootCause", "root_cause", "validation", "attackPath")
     ]
     attack_path = finding.get("attackPath")
     if isinstance(attack_path, dict):
@@ -1513,11 +1513,13 @@ def _wrap_nonempty_legacy_list_scalars(
             section.pop(field)
 
 
-def _remove_empty_legacy_fields(
+def _remove_unsupported_legacy_scalar_fields(
     section: dict[str, Any], fields: tuple[str, ...]
 ) -> None:
     for field in fields:
-        if field in section and section[field] in (None, ""):
+        if field in section and (
+            not isinstance(section[field], str) or section[field] == ""
+        ):
             section.pop(field)
 
 
@@ -1563,6 +1565,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         }
         for section_name, list_fields in (
             ("rootCause", ("evidenceRefs", "evidence_refs")),
+            ("root_cause", ("evidenceRefs", "evidence_refs")),
             (
                 "validation",
                 (
@@ -1595,19 +1598,22 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             _filter_unknown_legacy_evidence_refs(section, evidence_ids)
         root_cause = finding.get("rootCause")
         if isinstance(root_cause, dict):
-            if root_cause.get("summary") in (None, ""):
+            summary = root_cause.get("summary")
+            if not isinstance(summary, str) or summary == "":
                 finding.pop("rootCause")
             else:
-                _remove_empty_legacy_fields(root_cause, ("code", "language"))
+                _remove_unsupported_legacy_scalar_fields(
+                    root_cause, ("code", "language")
+                )
         validation = finding.get("validation")
         if isinstance(validation, dict):
-            _remove_empty_legacy_fields(
+            _remove_unsupported_legacy_scalar_fields(
                 validation, ("method", "status", "summary", "disposition", "result")
             )
         attack_path = finding.get("attackPath")
         if not isinstance(attack_path, dict):
             continue
-        _remove_empty_legacy_fields(attack_path, ("summary",))
+        _remove_unsupported_legacy_scalar_fields(attack_path, ("summary",))
         for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
             if field not in attack_path:
                 continue
@@ -1623,7 +1629,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             detail_scalar_fields = ("summary", "source", "sink", "outcome")
             if field == "reachability":
                 detail_scalar_fields += ("attacker", "entrypoint")
-            _remove_empty_legacy_fields(detail, detail_scalar_fields)
+            _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
             _wrap_nonempty_legacy_list_scalars(
                 detail, ("evidenceRefs", "evidence_refs", "transformations")
             )
@@ -1633,7 +1639,9 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
         for field in ("impact", "likelihood"):
             detail = attack_path.get(field)
             if isinstance(detail, dict):
-                _remove_empty_legacy_fields(detail, ("level", "rationale", "why"))
+                _remove_unsupported_legacy_scalar_fields(
+                    detail, ("level", "rationale", "why")
+                )
             elif detail is not None and not isinstance(detail, str):
                 attack_path.pop(field)
     return compatible

@@ -513,7 +513,7 @@ describe("bundled plugin finding detail contracts", () => {
       "    {'id': 'legacy-duplicate', 'code': 'first_legacy_source()'},",
       "    {'id': 'legacy-duplicate', 'code': 'second_legacy_source()'},",
       "]",
-      "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence'], 'counterEvidence': None, 'limitations': '', 'method': '', 'status': '', 'summary': None, 'disposition': '', 'result': ''}",
+      "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence'], 'counterEvidence': None, 'limitations': '', 'method': [], 'status': '', 'summary': {}, 'disposition': '', 'result': ''}",
       "findings['findings'][0]['rootCause'] = {'summary': '', 'code': None, 'language': None}",
       "findings['findings'][0]['attackPath'] = {'evidence_refs': ['legacy-attack-evidence'], 'dataFlow': None, 'dataflow': {'summary': '', 'source': None, 'sink': None, 'outcome': None, 'evidenceRefs': ['legacy-missing-evidence']}, 'impact': {'level': '', 'rationale': None, 'why': None}, 'likelihood': {'level': None, 'rationale': None, 'why': None}, 'reachability': None, 'summary': ''}",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
@@ -550,12 +550,12 @@ describe("bundled plugin finding detail contracts", () => {
         { code: "first_legacy_source()", id: "legacy-duplicate" },
         { code: "second_legacy_source()", id: "legacy-duplicate" },
       ],
-      originalMethod: "",
+      originalMethod: [],
       originalDataFlow: null,
       originalNested: ["legacy-missing-evidence"],
       originalReachability: null,
       originalRootCauseSummary: "",
-      originalSummary: null,
+      originalSummary: {},
       originalValidation: ["legacy-validation-evidence"],
     });
   });
