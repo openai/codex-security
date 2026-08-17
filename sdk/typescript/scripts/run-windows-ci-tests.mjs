@@ -103,7 +103,9 @@ const results = await Promise.all(
               ? ""
               : " --test-name-pattern " + testNamePattern),
         );
-        const args = ["test", "--timeout", "30000"];
+        // Native Windows credential and document checks can exceed 30 seconds.
+        // The workflow still bounds each complete shard to ten minutes.
+        const args = ["test", "--timeout", "120000"];
         if (testNamePattern !== undefined) {
           args.push("--test-name-pattern", testNamePattern);
         }
