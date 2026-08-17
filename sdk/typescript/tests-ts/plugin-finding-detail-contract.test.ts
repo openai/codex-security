@@ -322,6 +322,17 @@ describe("bundled plugin finding detail contracts", () => {
     );
   });
 
+  test("ignores malformed data-flow alias values", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        dataFlow: { summary: ["invalid canonical value"] },
+        dataflow: { summary: "request -> validated sink" },
+      },
+    });
+
+    expect(report).toContain("request -\\> validated sink");
+  });
+
   test("merges transformations across data-flow aliases", () => {
     const report = projectFindingDetails({
       attackPath: {
@@ -488,6 +499,24 @@ describe("bundled plugin finding detail contracts", () => {
     );
   });
 
+  test("treats whitespace root-cause fields as unpopulated", () => {
+    const report = projectFindingDetails({
+      rootCause: { summary: "   ", code: "\t", language: "text" },
+      root_cause: {
+        summary: "The destination is not contained before the write.",
+        code: "destination.write_bytes(payload)",
+        language: "python",
+      },
+    }).replaceAll("\r\n", "\n");
+
+    expect(report).toContain(
+      "The destination is not contained before the write.",
+    );
+    expect(report).toContain(
+      "```python\ndestination.write_bytes(payload)\n```",
+    );
+  });
+
   test("projects code evidence referenced by nested attack-path details", () => {
     const report = projectFindingDetails({
       attackPath: {
@@ -523,6 +552,34 @@ describe("bundled plugin finding detail contracts", () => {
 
     expect(report).toContain("entry_path = archive_entry.name");
     expect(report).toContain("destination.write_bytes(entry.read())");
+  });
+
+  test("normalizes scalar code-evidence references in generated reports", () => {
+    const report = projectFindingDetails({
+      root_cause: {
+        summary: "The authorization check occurs after the write.",
+        evidence_refs: "root-source",
+      },
+      attackPath: {
+        dataflow: {
+          summary: "An attacker-controlled value reaches the write.",
+          evidence_refs: "dataflow-source",
+        },
+        reachability: {
+          summary: "An authenticated caller can reach the handler.",
+          evidence_refs: "reachability-source",
+        },
+      },
+      codeEvidence: [
+        { id: "root-source", code: "root_source()" },
+        { id: "dataflow-source", code: "dataflow_source()" },
+        { id: "reachability-source", code: "reachability_source()" },
+      ],
+    });
+
+    expect(report).toContain("root_source()");
+    expect(report).toContain("dataflow_source()");
+    expect(report).toContain("reachability_source()");
   });
 
   test("rejects unknown code evidence referenced by nested attack-path details", () => {
@@ -687,7 +744,7 @@ describe("bundled plugin finding detail contracts", () => {
     });
   });
 
-  test("reports nullable sealed evidence catalogs as contract errors", () => {
+  test("keeps nullable legacy sealed evidence catalogs compatible", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
     const script = [
@@ -695,7 +752,7 @@ describe("bundled plugin finding detail contracts", () => {
       "plugin = pathlib.Path(sys.argv[1])",
       "example = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())['findings'][0]",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
-      "errors = {}",
+      "results = {}",
       "for field in ('codeEvidence', 'code_evidence'):",
       "    finding = copy.deepcopy(example)",
       "    finding[field] = None",
@@ -703,10 +760,11 @@ describe("bundled plugin finding detail contracts", () => {
       "    try:",
       "        finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
       "    except finalizer['ContractError'] as error:",
-      "        errors[field] = str(error)",
+      "        outcome = str(error)",
       "    else:",
-      "        errors[field] = 'accepted'",
-      "print(json.dumps(errors))",
+      "        outcome = 'accepted'",
+      "    results[field] = {'outcome': outcome, 'present': field in compatible['findings'][0]} ",
+      "print(json.dumps(results))",
     ].join("\n");
     const result = Bun.spawnSync(
       [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
@@ -715,8 +773,11 @@ describe("bundled plugin finding detail contracts", () => {
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
-      codeEvidence: "findings[0].codeEvidence: expected an array",
-      code_evidence: "findings[0].code_evidence: expected an array",
+      codeEvidence: {
+        outcome: "findings[0].codeEvidence: expected an array",
+        present: true,
+      },
+      code_evidence: { outcome: "accepted", present: false },
     });
   });
 

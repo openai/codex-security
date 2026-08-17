@@ -129,4 +129,34 @@ describe("bundled finding previews", () => {
     ]);
     expect(result.original).toEqual(original);
   });
+
+  test("deduplicates evidence before applying the preview limit", () => {
+    const original = {
+      finding: {
+        codeEvidence: [
+          { id: "shared", code: "canonical_shared()" },
+          { id: "shared", code: "duplicate_shared()" },
+          { id: "canonical-two", code: "canonical_two()" },
+          { id: "canonical-three", code: "canonical_three()" },
+        ],
+        code_evidence: [
+          { id: "shared", code: "legacy_shared()" },
+          { id: "legacy-four", code: "legacy_four()" },
+          { id: "legacy-five", code: "legacy_five()" },
+        ],
+      },
+    };
+
+    const result = projectFindingDetails(original);
+
+    expect(
+      result.projected.finding.codeEvidence.map(
+        (item: { id: string }) => item.id,
+      ),
+    ).toEqual(["shared", "canonical-two", "canonical-three", "legacy-four"]);
+    expect(result.projected.finding.codeEvidence[0].code).toBe(
+      "canonical_shared()",
+    );
+    expect(result.original).toEqual(original);
+  });
 });

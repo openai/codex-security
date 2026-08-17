@@ -266,6 +266,8 @@ def _section_code_evidence(
     for section in sections:
         for key in ("evidenceRefs", "evidence_refs"):
             refs = section.get(key, [])
+            if isinstance(refs, str):
+                refs = [refs]
             if isinstance(refs, list):
                 resolved.extend(
                     catalog[ref] for ref in refs if isinstance(ref, str) and ref in catalog
@@ -314,7 +316,10 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
         for field, item in detail.items():
             if field in ("evidenceRefs", "evidence_refs", "language"):
                 continue
-            if field not in merged or merged[field] in (None, "", [], {}):
+            current = merged.get(field)
+            if field not in merged or current in (None, "", [], {}) or (
+                isinstance(current, str) and not current.strip()
+            ):
                 merged[field] = item
 
     evidence_values = [
@@ -505,10 +510,8 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
                 section[key]
                 for section in dataflow_sections
                 if key in section
-                and (
-                    (isinstance(section[key], str) and section[key].strip())
-                    or (isinstance(section[key], list) and section[key])
-                )
+                and isinstance(section[key], str)
+                and section[key].strip()
             ),
             None,
         )

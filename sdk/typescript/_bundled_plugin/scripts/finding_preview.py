@@ -258,7 +258,17 @@ def merged_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
         return None, None
     catalogs = [value[key] for key in evidence_keys if isinstance(value[key], list)]
     if catalogs:
-        return evidence_keys[0], [item for catalog in catalogs for item in catalog]
+        merged = []
+        seen_ids: set[str] = set()
+        for catalog in catalogs:
+            for item in catalog:
+                evidence_id = item.get("id") if isinstance(item, dict) else None
+                if isinstance(evidence_id, str) and evidence_id:
+                    if evidence_id in seen_ids:
+                        continue
+                    seen_ids.add(evidence_id)
+                merged.append(item)
+        return evidence_keys[0], merged
     return evidence_keys[0], value[evidence_keys[0]]
 
 

@@ -1552,6 +1552,8 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
                     seen_evidence_ids.add(evidence_id)
                 compatible_legacy_evidence.append(evidence)
             finding["code_evidence"] = compatible_legacy_evidence
+        elif "code_evidence" in finding:
+            finding.pop("code_evidence")
         compatible_legacy_evidence = finding.get("code_evidence")
         compatible_legacy_evidence = (
             compatible_legacy_evidence if isinstance(compatible_legacy_evidence, list) else []
