@@ -153,7 +153,7 @@ function releaseShell(): string {
 const bash = releaseShell();
 const jqMock = [
   "jq() {",
-  '  node -e \'const fs=require("node:fs");const filter=process.argv.at(-1);const value=JSON.parse(fs.readFileSync(0,"utf8"));if(filter.includes("@tsv")){const fields=[value.object?.type,value.object?.sha];if(fields.some((field)=>typeof field!=="string"))process.exit(1);process.stdout.write(fields.join("\\t")+"\\n");}else if(filter.includes(".status")){if(value.status!=null)process.stdout.write(String(value.status)+"\\n");}else process.exit(64);\' -- "$@"',
+  '  node -e \'const fs=require("node:fs");const filter=process.argv.at(-1);const value=JSON.parse(fs.readFileSync(0,"utf8"));if(filter==="[.object.type, .object.sha] | @tsv"){const fields=[value.object?.type,value.object?.sha];if(fields.some((field)=>typeof field!=="string"))process.exit(1);process.stdout.write(fields.join("\\t")+"\\n");}else if(filter===".status // empty"){if(value.status!=null)process.stdout.write(String(value.status)+"\\n");}else process.exit(64);\' -- "$@"',
   "}",
 ].join("\n");
 const releaseSigningCertificate =
@@ -1434,6 +1434,19 @@ describe("GitHub release workflow safeguards", () => {
     ) as ReleaseMetadata,
   );
   const checkedOutTag = `npm-v${checkedOutVersion}`;
+
+  test("rejects unsupported jq mock filters", () => {
+    const result = spawnSync(
+      bash,
+      [
+        "-c",
+        `${jqMock}\nprintf '%s\\n' '{"object":{"type":"commit","sha":"abc"}}' | jq -r '.wrong | @tsv'`,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(64);
+  });
 
   test("requires a real tag for protected npm publication", () => {
     expect(protectedReleaseWorkflow).toContain("release-tag");
