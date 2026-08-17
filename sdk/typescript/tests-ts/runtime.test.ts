@@ -853,7 +853,10 @@ describe("plugin runtime preparation", () => {
         cases.map((item) => ({
           ...item,
           inScope: true,
-          contractValid: item.path.length > 0 && !item.path.includes("\\"),
+          contractValid:
+            item.path.length > 0 &&
+            !item.path.includes("\\") &&
+            !/[\u0000-\u001f]/u.test(item.path),
         })),
       );
     },

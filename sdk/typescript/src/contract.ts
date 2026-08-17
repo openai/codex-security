@@ -619,7 +619,7 @@ function safeRelativePath(value: string, context: string): string {
     value.startsWith("/") ||
     parts.includes("..") ||
     value.includes("\\") ||
-    value.includes("\0")
+    /[\u0000-\u001f]/u.test(value)
   ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,

@@ -235,6 +235,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
         or (normalized == "." and not allow_dot)
         or "\\" in value
         or "\0" in value
+        or any(ord(character) < 32 for character in value)
         or path.is_absolute()
         or ".." in path.parts
     ):
