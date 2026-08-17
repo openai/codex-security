@@ -4099,6 +4099,10 @@ async function executeScan(
           dashboard.setStage("inspecting repository files");
         }
       },
+      onSessionEvent:
+        process.stdin.isTTY === true
+          ? dashboard?.recordDetails.bind(dashboard)
+          : undefined,
       onProgress: (update) => {
         const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
         if (key === lastProgressUpdate) return;

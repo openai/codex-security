@@ -92,9 +92,11 @@ Pass scan configuration to `security.run(repository, options)` or
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
 `onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
-`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
-`onObserverError`. Preflight does not start the runtime, authenticate, resolve
-Python, inspect the plugin, or run those scan-lifecycle callbacks.
+`onTrustedAccessStatus`, `onReconnect`, `onSessionEvent`, `onWorkerStatus`,
+`onWarning`, and `onObserverError`. `onSessionEvent` receives saved scan and
+worker events with their thread IDs and worker numbers. Preflight does not start
+the runtime, authenticate, resolve Python, inspect the plugin, or run those
+scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -500,9 +502,8 @@ Progress and summaries use stderr; structured scan results remain on stdout.
 Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Structured JSON results remain on stdout. Verbose diagnostics may contain
-sensitive data; review local logs before sharing them. The interactive
-dashboard omits activity containing recognizable credentials.
+Structured JSON results remain on stdout. Review sensitive verbose logs before
+sharing them. The normal activity feed hides credentials.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
@@ -676,7 +677,9 @@ details include the configuration, results, coverage, and artifact locations. Ad
 `--show-linked-findings` to include finding links from previous scans.
 
 `scans logs` shows session events from the latest scan, including an active scan.
-Pass `SCAN_ID` to select another scan. Logs can contain source code and credentials.
+Pass `SCAN_ID` to select another scan. During a scan, press `d` for live details.
+Filter with `a` for all sources, `m` for the main scan, or `1`–`9` for a worker.
+Logs and live details can contain source code and credentials.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
