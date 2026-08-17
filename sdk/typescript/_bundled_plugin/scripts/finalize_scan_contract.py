@@ -66,6 +66,19 @@ EXPORT_PATHS = {
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
+WINDOWS_INVALID_PATH_CHARACTERS = frozenset('<>:"|?*')
+WINDOWS_RESERVED_DEVICE_NAMES = {
+    "AUX",
+    "CON",
+    "CONIN$",
+    "CONOUT$",
+    "NUL",
+    "PRN",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+    *(f"COM{number}" for number in "¹²³"),
+    *(f"LPT{number}" for number in "¹²³"),
+}
 
 
 class ContractError(ValueError):
@@ -224,9 +237,21 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
         or "\0" in value
         or path.is_absolute()
         or ".." in path.parts
+        or any(_windows_unsafe_path_component(part) for part in value.split("/"))
     ):
         raise ContractError(f"{context}: expected a safe repository-relative POSIX path")
     return normalized
+
+
+def _windows_unsafe_path_component(value: str) -> bool:
+    if not value or value == ".":
+        return False
+    return (
+        any(character in WINDOWS_INVALID_PATH_CHARACTERS for character in value)
+        or any(ord(character) < 32 for character in value)
+        or value.endswith((" ", "."))
+        or value.split(".", 1)[0].upper() in WINDOWS_RESERVED_DEVICE_NAMES
+    )
 
 
 def _require_scan_directory(scan_dir: Path) -> Path:
@@ -1336,6 +1361,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     if not artifacts:
         raise ContractError("manifest.scan.artifacts: expected generated artifact records")
     artifact_paths: set[str] = set()
+    artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
         if not isinstance(artifact, dict):
@@ -1343,9 +1369,11 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         path = _require_safe_relative_path(
             _require_str(artifact, "path", context), f"{context}.path"
         )
-        if path in artifact_paths:
+        collision_key = path.lower()
+        if collision_key in artifact_collision_keys:
             raise ContractError(f"{context}.path: duplicate artifact path")
         artifact_paths.add(path)
+        artifact_collision_keys.add(collision_key)
         _require_str(artifact, "sha256", context)
         _require_str(artifact, "mediaType", context)
     for required_path in ("findings.json", "coverage.json"):
@@ -1848,6 +1876,7 @@ def _validate_existing_seal(
     if not isinstance(artifacts, list) or not artifacts:
         raise ContractError("manifest.scan.artifacts: sealed manifest requires artifact records")
     artifact_paths: set[str] = set()
+    artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
         if not isinstance(artifact, dict):
@@ -1855,9 +1884,11 @@ def _validate_existing_seal(
         path = _require_safe_relative_path(
             _require_str(artifact, "path", context), f"{context}.path"
         )
-        if path in artifact_paths:
+        collision_key = path.lower()
+        if collision_key in artifact_collision_keys:
             raise ContractError(f"{context}.path: duplicate artifact path")
         artifact_paths.add(path)
+        artifact_collision_keys.add(collision_key)
         expected_sha256 = _require_str(artifact, "sha256", context)
         contents = (artifact_contents or {}).get(path)
         actual_sha256 = (

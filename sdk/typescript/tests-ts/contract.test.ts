@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   type FileHandle,
@@ -415,7 +416,12 @@ describe("canonical scan contract", () => {
   });
 
   test("rejects unsafe Windows and traversal artifact paths", async () => {
-    for (const unsafe of ["D:/escape", "../escape", "artifacts\\escape"]) {
+    for (const unsafe of [
+      "D:/escape",
+      "../escape",
+      "artifacts\\escape",
+      "artifacts/report?.json",
+    ]) {
       const scanDir = await copyExample();
       const path = join(scanDir, "scan-manifest.json");
       const manifest = await readJson(path);
@@ -429,6 +435,114 @@ describe("canonical scan contract", () => {
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
       ).rejects.toThrow(ContractValidationError);
     }
+
+    for (const unsafe of [
+      "artifacts/report.json.",
+      "artifacts/report.json ",
+      "artifacts/CON.txt",
+    ]) {
+      const scanDir = await copyExample();
+      const path = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(path);
+      manifest["scan"]["artifacts"].push({
+        path: unsafe,
+        sha256: "0".repeat(64),
+        mediaType: "text/plain",
+      });
+      await writeJson(path, manifest);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("safe scan-relative POSIX path");
+    }
+  });
+
+  test("keeps bundled finalizer paths portable to Windows", () => {
+    const python =
+      process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    if (python === null) return;
+    const program = [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "import finalize_scan_contract as finalizer",
+      "def accepted(value):",
+      "    try:",
+      "        finalizer._require_safe_relative_path(value, 'artifact path')",
+      "    except finalizer.ContractError:",
+      "        return False",
+      "    return True",
+      "print(json.dumps([accepted(value) for value in ['artifacts/report.json.', 'artifacts/report.json ', 'artifacts/CON.txt', 'artifacts/report?.json', 'artifacts/report:stream']]))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  test("rejects trailing-dot aliases for sealed artifacts", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    await writeFile(
+      join(scanDir, "findings.json."),
+      await readFile(join(scanDir, "findings.json")),
+    );
+    manifest["scan"]["artifacts"].push({
+      ...manifest["scan"]["artifacts"][0],
+      path: "findings.json.",
+    });
+    await writeJson(manifestPath, manifest);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("safe scan-relative POSIX path");
+  });
+
+  test("rejects case-insensitive aliases for sealed artifacts", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    await writeFile(
+      join(scanDir, "FINDINGS.json"),
+      await readFile(join(scanDir, "findings.json")),
+    );
+    manifest["scan"]["artifacts"].push({
+      ...manifest["scan"]["artifacts"][0],
+      path: "FINDINGS.json",
+    });
+    await writeJson(manifestPath, manifest);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("duplicate artifact path");
+
+    const python =
+      process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    if (python === null) return;
+    const result = Bun.spawnSync(
+      [
+        python,
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+        "--scan-dir",
+        await realpath(scanDir),
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const stderr = new TextDecoder().decode(result.stderr);
+    expect(result.exitCode, stderr).not.toBe(0);
+    expect(stderr).toContain("duplicate artifact path");
   });
 
   test("rejects calendar-invalid RFC 3339 timestamps", async () => {

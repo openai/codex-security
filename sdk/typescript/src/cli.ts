@@ -97,6 +97,7 @@ import {
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
+  canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   expandHome,
@@ -1320,6 +1321,14 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         const directory = dependencies.currentDirectory();
+        const scanRoot =
+          options.scanRoot === undefined
+            ? undefined
+            : process.platform === "win32"
+              ? await canonicalizeModelSafePath(
+                  resolve(directory, options.scanRoot),
+                )
+              : resolve(directory, options.scanRoot);
         const repository =
           options.scanRoot !== undefined && args.repository === undefined
             ? undefined
@@ -1328,18 +1337,13 @@ export async function main(
           await history([
             "list-scans",
             ...(repository === undefined ? [] : ["--repository", repository]),
-            ...(options.scanRoot === undefined
-              ? []
-              : ["--scan-root", resolve(directory, options.scanRoot)]),
+            ...(scanRoot === undefined ? [] : ["--scan-root", scanRoot]),
           ]),
           "list",
           format,
           {
             repository,
-            scanRoot:
-              options.scanRoot === undefined
-                ? undefined
-                : resolve(directory, options.scanRoot),
+            scanRoot,
           },
         );
       },

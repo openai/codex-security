@@ -39,6 +39,10 @@ import {
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  isWindowsUnsafePathComponent,
+  windowsUnsafePathComponent,
+} from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -112,10 +116,20 @@ export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
   const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
-  if (configured !== undefined) return resolve(expandHome(configured));
-  const codexHome =
-    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
-  return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
+  const path =
+    configured !== undefined
+      ? resolve(expandHome(configured))
+      : resolve(
+          expandHome(
+            environmentValue(environment, "CODEX_HOME") ??
+              join(homedir(), ".codex"),
+          ),
+          "state",
+          "plugins",
+          "codex-security",
+        );
+  requireModelSafeOutputDir(path);
+  return path;
 }
 
 export function codexSecurityCredentialHome(
@@ -1272,6 +1286,7 @@ export async function preparePersistentScanRoot(
   stateDirectory: string,
   repositoryName: string,
 ): Promise<string> {
+  requireModelSafeOutputDir(stateDirectory);
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   let root = await realpath(stateDirectory);
   for (const directory of ["scans", safePrefix(repositoryName)]) {
@@ -1462,6 +1477,31 @@ export function requireModelSafeOutputDir(path: string): void {
     throw new OutputDirectoryError(
       "Scan output directory must not contain control or line-separator characters.",
     );
+  }
+  const ambiguous =
+    process.platform === "win32" ? windowsUnsafePathComponent(path) : undefined;
+  if (ambiguous !== undefined) {
+    throw new OutputDirectoryError(
+      `Codex Security paths must not contain Windows-ambiguous components: ${ambiguous}`,
+    );
+  }
+}
+
+export async function canonicalizeModelSafePath(
+  input: string,
+): Promise<string> {
+  const path = resolve(expandHome(input));
+  requireModelSafeOutputDir(path);
+  for (let ancestor = path; ; ancestor = dirname(ancestor)) {
+    try {
+      const canonicalAncestor = resolve(ancestor, await realpath(ancestor));
+      const canonical = resolve(canonicalAncestor, relative(ancestor, path));
+      requireModelSafeOutputDir(canonical);
+      return canonical;
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") throw error;
+      if (dirname(ancestor) === ancestor) throw error;
+    }
   }
 }
 
@@ -2400,7 +2440,7 @@ function safeArchivePath(value: string): string {
     parts.includes("..") ||
     value.includes("\\") ||
     value.includes("\0") ||
-    parts.some((part) => part.includes(":")) ||
+    parts.some(isWindowsUnsafePathComponent) ||
     normalized.length === 0
   ) {
     throw new PluginBootstrapError(

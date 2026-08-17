@@ -20,6 +20,7 @@ import {
   requireSecureOutputAncestry,
 } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
+import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 const DOCUMENTS = {
   "scan-manifest.json": "scan-manifest.schema.json",
@@ -376,16 +377,19 @@ async function validateSeal(
   }
 
   const artifactPaths = new Set<string>();
+  const artifactCollisionKeys = new Set<string>();
   for (const [index, artifact] of scan.artifacts.entries()) {
     throwIfAborted(signal);
     const context = `manifest.scan.artifacts[${index}]`;
     const normalized = safeRelativePath(artifact.path, `${context}.path`);
-    if (artifactPaths.has(normalized)) {
+    const collisionKey = normalized.toLowerCase();
+    if (artifactCollisionKeys.has(collisionKey)) {
       throw new ContractValidationError(
         `${context}.path: duplicate artifact path.`,
       );
     }
     artifactPaths.add(normalized);
+    artifactCollisionKeys.add(collisionKey);
     const digest =
       documentDigests.get(normalized) ??
       (await sha256ScanFile(
@@ -617,7 +621,7 @@ function safeRelativePath(value: string, context: string): string {
     parts.includes("..") ||
     value.includes("\\") ||
     value.includes("\0") ||
-    parts.some((part) => part.includes(":"))
+    parts.some(isWindowsUnsafePathComponent)
   ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
