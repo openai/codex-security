@@ -1615,7 +1615,10 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             if detail is None:
                 attack_path.pop(field)
                 continue
-            if not isinstance(detail, dict):
+            if not isinstance(detail, (str, dict)):
+                attack_path.pop(field)
+                continue
+            if isinstance(detail, str):
                 continue
             detail_scalar_fields = ("summary", "source", "sink", "outcome")
             if field == "reachability":
@@ -1631,6 +1634,8 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             detail = attack_path.get(field)
             if isinstance(detail, dict):
                 _remove_empty_legacy_fields(detail, ("level", "rationale", "why"))
+            elif detail is not None and not isinstance(detail, str):
+                attack_path.pop(field)
     return compatible
 
 

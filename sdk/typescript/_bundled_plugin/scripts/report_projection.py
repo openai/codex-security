@@ -573,7 +573,14 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     ):
         if reachability.get(key):
             lines.extend(["", f"- **{label}:** {_text(reachability[key], 'not recorded')}"])
-    preconditions = _strings(reachability.get("preconditions"))
+    preconditions = list(
+        dict.fromkeys(
+            [
+                *_strings(attack_path.get("preconditions")),
+                *_strings(reachability.get("preconditions")),
+            ]
+        )
+    )
     if preconditions:
         lines.extend(["", "Preconditions:", *_bullets(preconditions, "None recorded.")])
     lines.extend(_code_evidence_lines(reachability_code_evidence))

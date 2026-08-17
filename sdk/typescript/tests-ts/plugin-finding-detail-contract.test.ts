@@ -342,6 +342,34 @@ describe("bundled plugin finding detail contracts", () => {
     expect(report.split(/\r?\n/u)).toContain("- parse \\*input\\*");
   });
 
+  test("merges top-level and reachability preconditions", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        preconditions: [
+          "The service processes uploaded archives.",
+          "The attacker can upload an archive.",
+        ],
+        reachability: {
+          summary: "An authenticated uploader can trigger extraction.",
+          preconditions: [
+            "The attacker can upload an archive.",
+            "Automatic extraction is enabled.",
+          ],
+        },
+      },
+    });
+
+    expect(
+      report.match(/- The service processes uploaded archives\./gu),
+    ).toHaveLength(1);
+    expect(
+      report.match(/- The attacker can upload an archive\./gu),
+    ).toHaveLength(1);
+    expect(report.match(/- Automatic extraction is enabled\./gu)).toHaveLength(
+      1,
+    );
+  });
+
   test("projects code evidence referenced by nested attack-path details", () => {
     const report = projectFindingDetails({
       attackPath: {
@@ -511,6 +539,33 @@ describe("bundled plugin finding detail contracts", () => {
       originalRootCauseSummary: "",
       originalSummary: null,
       originalValidation: ["legacy-validation-evidence"],
+    });
+  });
+
+  test("drops unsupported legacy attack-path sequences from sealed validation", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
+      "findings['findings'][0]['attackPath'] = {'dataflow': ['source', 'sink'], 'reachability': ['authenticated uploader']}",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
+      "finalizer['validate_against_schema'](compatible, plugin / 'schemas' / 'findings.schema.json')",
+      "print(json.dumps({'original': findings['findings'][0]['attackPath'], 'compatible': compatible['findings'][0]['attackPath']}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      original: {
+        dataflow: ["source", "sink"],
+        reachability: ["authenticated uploader"],
+      },
+      compatible: {},
     });
   });
 

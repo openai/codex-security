@@ -10,21 +10,17 @@ function projectFindingDetails(original: Record<string, unknown>) {
     "import json, sys",
     "sys.path.insert(0, sys.argv[1])",
     "from finding_preview import bounded_finding_details",
-    "original = json.loads(sys.argv[2])",
+    "original = json.loads(sys.stdin.read())",
     "projected = {name: bounded_finding_details(details) for name, details in original.items()}",
     "print(json.dumps({'projected': projected, 'original': original}))",
   ].join("\n");
   const result = Bun.spawnSync(
-    [
-      python!,
-      "-I",
-      "-B",
-      "-c",
-      program,
-      join(PLUGIN_ROOT, "scripts"),
-      JSON.stringify(original),
-    ],
-    { stdout: "pipe", stderr: "pipe" },
+    [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
+    {
+      stdin: new TextEncoder().encode(JSON.stringify(original)),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
   );
 
   expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
