@@ -82,6 +82,12 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
+import {
+  importLinearIssues,
+  resolveLinearApiKey,
+  type ImportedIssue,
+  type LinearClientFactory,
+} from "./linear.js";
 import { runMultiscan } from "./multiscan.js";
 import {
   publishScan,
@@ -204,6 +210,9 @@ const VALUE_OPTIONS = new Set([
   "--plugin-path",
   "--python",
   "--codex",
+  "--linear-issue",
+  "--linear-project",
+  "--linear-filter",
   "--fail-on-severity",
   "--max-cost",
   "--workers",
@@ -234,6 +243,17 @@ const PROVIDER_OPTION = z
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
+}
+
+function linearApiKeyOption() {
+  return z
+    .string()
+    .trim()
+    .min(1, "--linear-api-key must not be empty.")
+    .optional()
+    .describe(
+      "Linear personal API key; defaults to CODEX_SECURITY_LINEAR_API_KEY.",
+    );
 }
 
 function publicationScanAge(timestamp: string, now: number): string {
@@ -716,6 +736,7 @@ interface CliDependencies {
     environment?: NodeJS.ProcessEnv,
   ): Promise<number>;
   bulkScan?: BulkScanDiscoveryDependencies;
+  linearClient?: LinearClientFactory;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -874,7 +895,7 @@ export async function runCodexSkillCommand(
   }
   const invocation = spawn(command.command, [...args], {
     env: environment,
-    cwd: parse(process.execPath).root,
+    cwd: output?.appServer?.directory ?? parse(process.execPath).root,
     stdio:
       output === undefined
         ? "inherit"
@@ -922,7 +943,10 @@ export async function runCodexSkillCommand(
               invocation.stdout,
               output.appServer === undefined
                 ? undefined
-                : { ...output.appServer, input: invocation.stdin! },
+                : {
+                    prompt: output.appServer.prompt,
+                    input: invocation.stdin!,
+                  },
             ),
             new Promise<undefined>((resolve) => {
               forceCaptureCompletion = () => resolve(undefined);
@@ -966,7 +990,11 @@ export async function runCodexSkillCommand(
       );
       return status;
     }
-    if (events?.message === undefined || events.message.trim().length === 0) {
+    if (
+      (output.appServer !== undefined && events?.completed !== true) ||
+      events?.message === undefined ||
+      events.message.trim().length === 0
+    ) {
       await writeCliOutput(
         output.stderr,
         `codex-security: Codex did not return a completed ${output.command} response.\n`,
@@ -1552,16 +1580,16 @@ export async function main(
       linearTeam: optionValue("--linear-team")
         .optional()
         .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
-      linearApiKey: optionValue("--linear-api-key")
-        .optional()
-        .describe(
-          "Linear personal API key; defaults to CODEX_SECURITY_LINEAR_API_KEY.",
-        ),
-      project: optionValue("--project")
+      linearApiKey: linearApiKeyOption(),
+      linearProject: optionValue("--linear-project")
         .optional()
         .describe(
           "Optional Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
         ),
+      project: optionValue("--project")
+        .optional()
+        .describe("Alias for --linear-project.")
+        .meta({ deprecated: true }),
       linearAssignee: optionValue("--linear-assignee")
         .optional()
         .describe(
@@ -1584,13 +1612,10 @@ export async function main(
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
       try {
-        const selectedApiKey =
-          options.linearApiKey ??
-          dependencies.environment["CODEX_SECURITY_LINEAR_API_KEY"];
-        const linearApiKey = selectedApiKey?.trim() || undefined;
-        if (options.linearApiKey !== undefined && linearApiKey === undefined) {
-          throw new CodexSecurityError("--linear-api-key must not be empty.");
-        }
+        const linearApiKey = resolveLinearApiKey(
+          dependencies.environment,
+          options.linearApiKey,
+        );
         const assigneeId = options.linearAssignee?.trim();
         if (options.linearAssignee !== undefined && !assigneeId) {
           throw new CodexSecurityError("--linear-assignee must not be empty.");
@@ -1608,9 +1633,21 @@ export async function main(
             "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required.",
           );
         }
-        const selectedProject = options.project?.trim();
-        if (options.project !== undefined && !selectedProject) {
-          throw new CodexSecurityError("--project must not be empty.");
+        if (
+          options.linearProject !== undefined &&
+          options.project !== undefined &&
+          options.linearProject.trim() !== options.project.trim()
+        ) {
+          throw new CodexSecurityError(
+            "--linear-project and --project must select the same project.",
+          );
+        }
+        const projectOption = options.linearProject ?? options.project;
+        const selectedProject = projectOption?.trim();
+        if (projectOption !== undefined && !selectedProject) {
+          throw new CodexSecurityError(
+            `${options.linearProject === undefined ? "--project" : "--linear-project"} must not be empty.`,
+          );
         }
         const projectId =
           selectedProject ||
@@ -2462,10 +2499,22 @@ export async function main(
         "issues...": z
           .string()
           .min(1, "An issue must not be empty.")
+          .optional()
           .describe("Issue text or a file containing issues."),
       }),
       options: z.object({
         effort: effortOption(),
+        linearIssue: z
+          .array(optionValue("--linear-issue"))
+          .default([])
+          .describe("Linear issue identifier or URL; repeat for more issues."),
+        linearProject: optionValue("--linear-project")
+          .optional()
+          .describe("Patch every open issue in this Linear project."),
+        linearFilter: optionValue("--linear-filter")
+          .optional()
+          .describe("JSON Linear issue filter for --linear-project."),
+        linearApiKey: linearApiKeyOption(),
         codex: z
           .array(optionValue("--codex"))
           .default([])
@@ -2475,14 +2524,59 @@ export async function main(
       }),
       async run({ options }) {
         try {
+          const linear =
+            options.linearIssue.length > 0 || !!options.linearProject;
+          if (options.linearIssue.length > 0 && options.linearProject) {
+            throw new CodexSecurityError(
+              "Use either --linear-issue or --linear-project, not both.",
+            );
+          }
+          if (options.linearFilter && !options.linearProject) {
+            throw new CodexSecurityError(
+              "--linear-filter requires --linear-project.",
+            );
+          }
+          if (options.linearApiKey !== undefined && !linear) {
+            throw new CodexSecurityError(
+              "--linear-api-key requires --linear-issue or --linear-project.",
+            );
+          }
+          if (positionals.length === 0 && !linear) {
+            throw new CodexSecurityError(
+              "Patch requires an issue, --linear-issue, or --linear-project.",
+            );
+          }
+
+          const imports = linear
+            ? await importLinearIssues({
+                issues: options.linearIssue,
+                project: options.linearProject,
+                filter: options.linearFilter,
+                apiKey: options.linearApiKey,
+                environment: dependencies.environment,
+                linearClient: dependencies.linearClient,
+              })
+            : [];
+          const environment =
+            imports.length === 0
+              ? undefined
+              : Object.fromEntries(
+                  Object.entries(dependencies.environment).filter(
+                    ([name]) =>
+                      !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
+                        name,
+                      ),
+                  ),
+                );
           exitCode = await runSkill(
             "fix-finding",
-            positionals,
+            [...positionals, ...imports],
             options.codex,
             options.effort,
             output,
             errorOutput,
             dependencies,
+            environment,
           );
         } catch (error) {
           exitCode = 2;
@@ -2849,7 +2943,9 @@ function scanArgumentsFromRecipe(
     ...deepScan.data,
     archiveExisting: false,
     codex: [],
-    codexOverrides: config,
+    codexOverrides: Object.hasOwn(config, "approval_policy")
+      ? config
+      : { ...config, approval_policy: "never" },
     failOnSeverity: threshold as FailureSeverity | undefined,
     maxCostUsd,
     dryRun: false,
@@ -3113,12 +3209,13 @@ function staysWithinWindowsDeviceRoot(input: string, root: string): boolean {
 
 async function runSkill(
   skill: "validation" | "fix-finding",
-  inputs: readonly string[],
+  inputs: readonly (string | ImportedIssue)[],
   codexOverrides: readonly string[],
   effort: ScanReasoningEffort | undefined,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
+  environment?: NodeJS.ProcessEnv,
 ): Promise<number> {
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
@@ -3136,6 +3233,12 @@ async function runSkill(
   const directory = dependencies.currentDirectory();
   const contents: string[] = [];
   for (const input of inputs) {
+    if (typeof input !== "string") {
+      contents.push(
+        `Source: ${input.source}\nIssue: ${input.id}\nURL: ${input.url}\n\n${input.text}`,
+      );
+      continue;
+    }
     if (input.trim().length === 0) {
       throw new CodexSecurityError(
         "Finding or issue inputs must not be empty.",
@@ -3241,20 +3344,28 @@ async function runSkill(
       stderr,
       ...(patch ? { appServer: { directory, prompt } } : {}),
     },
+    environment,
   );
 }
 
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
   appServer?: {
-    readonly directory: string;
     readonly prompt: string;
     readonly input: NodeJS.WritableStream;
   },
-): Promise<{ message?: string; error?: string; malformed: boolean }> {
+): Promise<{
+  message?: string;
+  error?: string;
+  malformed: boolean;
+  completed?: boolean;
+}> {
   let message: string | undefined;
   let error: string | undefined;
   let malformed = false;
+  let threadId: string | undefined;
+  let turnId: string | undefined;
+  let completed = false;
   const send = (request: JsonObject): void => {
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
@@ -3280,59 +3391,84 @@ export async function readSkillCommandOutput(
       continue;
     }
     const value = event as Record<string, unknown>;
-    if (appServer !== undefined && value["id"] !== undefined) {
-      const responseError = value["error"] as { message: string } | undefined;
-      if (responseError !== undefined) {
-        error = responseError.message;
+    if (appServer !== undefined) {
+      if (value["id"] !== undefined) {
+        if (typeof value["method"] === "string") {
+          send({
+            id: value["id"] as string | number,
+            error: { code: -32601, message: "Unsupported client request" },
+          });
+        } else if (value["error"] !== undefined) {
+          error = (value["error"] as { message: string }).message;
+          appServer.input.end();
+        } else if (value["id"] === 1) {
+          send({ method: "notifications/initialized" });
+          send({
+            id: 2,
+            method: "thread/start",
+            // An explicit cwd makes Codex persist trust for a new project.
+            // Inherit the child process cwd and preserve the user's decision.
+            params: { approvalPolicy: "never", sandbox: "workspace-write" },
+          });
+        } else if (value["id"] === 2) {
+          threadId = (value["result"] as { thread: { id: string } }).thread.id;
+          send({
+            id: 3,
+            method: "turn/start",
+            params: {
+              threadId,
+              input: [
+                { type: "text", text: appServer.prompt, text_elements: [] },
+              ],
+            },
+          });
+        } else if (value["id"] === 3) {
+          turnId = (value["result"] as { turn: { id: string } }).turn.id;
+        }
+      } else if (value["method"] === "turn/started") {
+        const params = value["params"] as {
+          threadId: string;
+          turn: { id: string };
+        };
+        if (params.threadId === threadId && turnId === undefined) {
+          turnId = params.turn.id;
+        }
+      } else if (value["method"] === "turn/completed") {
+        const params = value["params"] as {
+          threadId: string;
+          turn: { id: string; status: string; error?: { message: string } };
+        };
+        if (params.threadId !== threadId || params.turn.id !== turnId) continue;
+        completed = params.turn.status === "completed";
+        if (!completed) {
+          error =
+            params.turn.error?.message ?? "Codex did not complete the patch.";
+        }
         appServer.input.end();
-      } else if (value["id"] === 1) {
-        send({ method: "notifications/initialized" });
-        send({
-          id: 2,
-          method: "thread/start",
-          params: {
-            cwd: appServer.directory,
-            approvalPolicy: "never",
-            sandbox: "workspace-write",
-          },
-        });
-      } else if (value["id"] === 2) {
-        const { thread } = value["result"] as { thread: { id: string } };
-        send({
-          id: 3,
-          method: "turn/start",
-          params: {
-            threadId: thread.id,
-            input: [
-              { type: "text", text: appServer.prompt, text_elements: [] },
-            ],
-          },
-        });
+      } else if (value["method"] === "item/completed") {
+        const params = value["params"] as {
+          threadId: string;
+          turnId: string;
+          item: { type: string; text?: string; phase?: string | null };
+        };
+        if (
+          params.threadId === threadId &&
+          params.turnId === turnId &&
+          params.item.type === "agentMessage" &&
+          params.item.phase !== "commentary"
+        ) {
+          message = params.item.text;
+        }
       }
-    } else if (
-      appServer !== undefined &&
-      value["method"] === "turn/completed"
-    ) {
-      const { turn } = value["params"] as {
-        turn: { status: string; error?: { message: string } };
-      };
-      if (turn.status !== "completed") {
-        error = turn.error?.message ?? "Codex did not complete the patch.";
-      }
-      appServer.input.end();
-    } else if (
-      value["type"] === "item.completed" ||
-      (appServer !== undefined && value["method"] === "item/completed")
-    ) {
-      const item =
-        value["type"] === "item.completed"
-          ? value["item"]
-          : (value["params"] as { item: unknown }).item;
+      continue;
+    }
+    if (value["type"] === "item.completed") {
+      const item = value["item"];
       if (
         typeof item === "object" &&
         item !== null &&
         "type" in item &&
-        (item.type === "agent_message" || item.type === "agentMessage") &&
+        item.type === "agent_message" &&
         "text" in item &&
         typeof item.text === "string"
       ) {
@@ -3359,6 +3495,7 @@ export async function readSkillCommandOutput(
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
     malformed,
+    ...(appServer === undefined ? {} : { completed }),
   };
 }
 

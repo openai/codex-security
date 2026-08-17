@@ -248,6 +248,8 @@ npx @openai/codex-security validate /path/outside/repository/findings.json "Poss
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
+npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
+npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
 ```
 
 Run `npx @openai/codex-security --version` for the installed CLI version or
@@ -343,7 +345,8 @@ configuration. Each scan starts with a private runtime and these Codex
 defaults:
 
 ```toml
-approval_policy = "never"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
 cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
@@ -393,8 +396,10 @@ and `features.multi_agent_v2.enabled=false` are incompatible and rejected.
 `model_reasoning_effort` `--codex` keys; they do not accept general scan
 runtime overrides.
 
-These overrides do not change the scan's approval policy or filesystem
-permissions. See [Local security model](#local-security-model).
+These overrides cannot replace the scanner-owned approval reviewer or
+filesystem profile. Use `--codex 'approval_policy="never"'` to deny approval
+requests instead of reviewing them automatically. See
+[Local security model](#local-security-model).
 
 ### Deep-scan engine configuration
 
@@ -435,7 +440,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default Linear team and project for completed-scan publication.                               |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Publish directly to Linear with a personal API key; safer than a command-line key.            |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Patch Linear issues or publish directly with a personal API key.                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
@@ -559,8 +564,9 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
   --linear-team TEAM_ID
 ```
 
-Add `--project PROJECT_ID` to place the issues in a Linear project. Without a
-project, issues are created directly in the selected team.
+Add `--linear-project PROJECT_ID` to place the issues in a Linear project.
+The existing `--project` flag remains an alias. Without a project, issues are
+created directly in the selected team.
 
 To choose from all completed scans saved in your local scan history, omit the
 scan directory. The selector highlights each repository and shows its finding
@@ -758,6 +764,19 @@ desktop app. Override the model with `--codex 'model="gpt-5.6-sol"'` and the
 reasoning effort with `--effort high` or
 `--codex 'model_reasoning_effort="high"'`.
 
+Use `patch --linear-issue ISSUE` to import a Linear issue by identifier or URL.
+Repeat `--linear-issue` to include more issues. Use
+`patch --linear-project "PROJECT"` to patch every open issue in a project. Add
+`--linear-filter '{"labels":{"name":{"eq":"security"}}}'` to apply a native
+Linear issue filter on the server. Completed and canceled issues are excluded
+unless the filter explicitly sets `state`. Set `CODEX_SECURITY_LINEAR_API_KEY`
+for a personal API key, or `LINEAR_ACCESS_TOKEN` for an OAuth access token.
+`LINEAR_API_KEY` is also accepted. `--linear-api-key KEY` overrides these
+environment settings; prefer the environment variable to keep keys out of shell
+history. Imported content is always literal, and issue URLs must match the
+selected workspace. Linear access is read-only, and its credentials are not
+passed to the patch subprocess.
+
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
 a runtime/export error, `130` for interruption, and `143` for termination.
@@ -829,13 +848,16 @@ repository, Git installation, configured tools, and other scans under the
 same account are not separate security principals.
 
 Every scan uses the `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. Its profile allows reads of the local filesystem and
-writes to workspace roots and the selected scan state directory. Scans do not
-request interactive approval or grant filesystem escalations. Setting
-`approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permissions
-through `--codex` or SDK `codexOverrides` does not replace these controls or
-make the filesystem profile more restrictive. Independently enforced host and
-network restrictions still apply.
+automatically reviewed execution approvals. Its baseline profile allows reads
+of the local filesystem and writes to workspace roots and the selected scan
+state directory. Approval requests are reviewed without an interactive prompt;
+approved requests can grant additional permissions for a specific operation.
+Use `--codex 'approval_policy="never"'` or a selected profile with that policy
+to deny all requests instead. Other `approval_policy`, `approvals_reviewer`,
+`sandbox_mode`, or permission overrides cannot replace the reviewer or baseline
+filesystem profile. Saved scans retain their effective approval policy; older
+saved scans remain deny-all when rerun. Independently enforced host and network
+restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment, including
 unrelated API tokens and cloud credentials. Start a scan with only the
