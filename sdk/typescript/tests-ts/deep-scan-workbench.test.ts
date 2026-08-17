@@ -132,6 +132,60 @@ test("copies a Deep Scan publication when the filesystem rejects hardlinks", asy
   expect(await readFile(destination, "utf8")).toBe('{"finding":"synthetic"}\n');
 });
 
+test("recovers an interrupted copied Deep Scan publication", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-security-deep-copy-recovery-")),
+  );
+  temporaryDirectories.push(root);
+  const python =
+    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+
+  const result = Bun.spawnSync(
+    [
+      python!,
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import json, shutil, sqlite3, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import deep_scan_workbench as deep_scan",
+        "root = Path(sys.argv[2])",
+        "scan_dir = root / 'scan'",
+        "ledger = scan_dir / 'artifacts' / '02_discovery' / 'candidate_ledger.jsonl'",
+        "snapshot = root / 'worker' / 'canonical' / ledger.name",
+        "backup = ledger.with_name(f'.{ledger.name}.fixture.backup')",
+        "ledger.parent.mkdir(parents=True)",
+        "snapshot.parent.mkdir(parents=True)",
+        "ledger.write_text('old ledger\\n', encoding='utf-8')",
+        "shutil.copy2(ledger, backup)",
+        "snapshot.write_text('new ledger\\n', encoding='utf-8')",
+        "shutil.copy2(snapshot, ledger)",
+        "connection = sqlite3.connect(':memory:')",
+        "connection.row_factory = sqlite3.Row",
+        "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, scan_dir TEXT)')",
+        "connection.execute('CREATE TABLE deep_scan_workers (scan_id TEXT, kind TEXT, status TEXT, artifact_dir TEXT, updated_at TEXT)')",
+        "connection.execute('INSERT INTO scans VALUES (?, ?)', ('scan', str(scan_dir)))",
+        "connection.execute('INSERT INTO deep_scan_workers VALUES (?, ?, ?, ?, ?)', ('scan', 'dedup', 'running', str(snapshot.parent.parent), 'now'))",
+        "deep_scan.require_scan = lambda database, value: database.execute('SELECT * FROM scans WHERE id = ?', (value,)).fetchone()",
+        "deep_scan.recover_candidate_ledger_publication(connection, 'scan')",
+        "print(json.dumps({'ledger': ledger.read_text(encoding='utf-8'), 'backup': backup.exists()}))",
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      root,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+    ledger: "old ledger\n",
+    backup: false,
+  });
+});
+
 describe("deep scan workbench ownership", () => {
   test("rejects completion before an SDK-created Deep Scan finishes", async () => {
     const root = await realpath(

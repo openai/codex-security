@@ -330,6 +330,24 @@ def create_publication_copy(source: str | Path, destination: str | Path) -> None
         shutil.copy2(source, destination)
 
 
+def publication_matches_snapshot(publication: Path, snapshot: Path) -> bool:
+    try:
+        if publication.samefile(snapshot):
+            return True
+        if publication.stat().st_size != snapshot.stat().st_size:
+            return False
+        with publication.open("rb") as published, snapshot.open("rb") as source:
+            while True:
+                published_chunk = published.read(1024 * 1024)
+                source_chunk = source.read(1024 * 1024)
+                if published_chunk != source_chunk:
+                    return False
+                if not published_chunk:
+                    return True
+    except OSError:
+        return False
+
+
 def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
     discovery_dir = Path(scan["scan_dir"]) / "artifacts" / "02_discovery"
     artifacts = {
@@ -1077,7 +1095,7 @@ def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id
         snapshot = Path(reducer["artifact_dir"]) / "canonical" / ledger.name
         if not snapshot.exists():
             continue
-        published = ledger.exists() and ledger.samefile(snapshot)
+        published = publication_matches_snapshot(ledger, snapshot)
         interrupted = reducer["status"] != "succeeded"
         if not published and not (interrupted and backups and not ledger.exists()):
             continue
