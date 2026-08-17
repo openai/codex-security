@@ -27,6 +27,7 @@ from urllib.parse import quote, urlsplit
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
+REPORT_NAME_RE = re.compile(r"report\.md", re.IGNORECASE | re.ASCII)
 SARIF_SCHEMA = "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json"
 SEVERITIES = {"critical", "high", "medium", "low", "informational"}
 CONFIDENCES = {"high", "medium", "low"}
@@ -1011,7 +1012,8 @@ def _validate_derived_finding_identities(
             raise ContractError(f"{context}.findingId: does not match derived fingerprint identity")
         if finding.get("occurrenceId") != occurrence_id:
             raise ContractError(f"{context}.occurrenceId: does not match scan occurrence identity")
-        if finding.get("fingerprints") != fingerprints:
+        actual_fingerprints = _require_dict(finding, "fingerprints", context)
+        if any(actual_fingerprints.get(key) != value for key, value in fingerprints.items()):
             raise ContractError(f"{context}.fingerprints: does not match derived fingerprint")
 
 
@@ -1904,6 +1906,82 @@ def _read_sealed_scan(
     return manifest, findings, coverage, findings_bytes
 
 
+def write_report_projection(scan_dir: Path, schema_dir: Path | None = None) -> None:
+    """Refresh only an unsealed report, preserving authenticated historical reports."""
+    scan_dir = _require_scan_directory(scan_dir)
+    manifest, findings, coverage, _ = _read_sealed_scan(
+        scan_dir, schema_dir, "report projection"
+    )
+    artifact_paths = {
+        _require_safe_relative_path(artifact["path"], "sealed artifact path")
+        for artifact in manifest["scan"]["artifacts"]
+    }
+    if "report.md" in artifact_paths:
+        return
+    try:
+        output_metadata = (scan_dir / "report.md").stat(follow_symlinks=False)
+    except FileNotFoundError:
+        output_metadata = None
+    except OSError as exc:
+        raise ContractError("report.md: unable to inspect report output") from exc
+    same_file_artifacts: list[str] = []
+    if output_metadata is not None:
+        for artifact_path in artifact_paths:
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, artifact_path, f"sealed artifact {artifact_path}"
+            )
+            try:
+                artifact_metadata = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            if os.path.samestat(output_metadata, artifact_metadata):
+                same_file_artifacts.append(artifact_path)
+    if output_metadata is not None and same_file_artifacts:
+        try:
+            entries = set(os.listdir(scan_dir))
+            report_entries = [name for name in entries if REPORT_NAME_RE.fullmatch(name)]
+            report_entry = None
+            if "report.md" in entries:
+                report_entry = "report.md"
+            elif len(report_entries) == 1:
+                report_entry = report_entries[0]
+            if report_entry is not None and report_entry != "report.md":
+                descriptor = open_scan_local_file_descriptor(
+                    scan_dir, report_entry, "report directory entry"
+                )
+                try:
+                    if not os.path.samestat(output_metadata, os.fstat(descriptor)):
+                        report_entry = None
+                finally:
+                    os.close(descriptor)
+            if (
+                report_entry is not None
+                and len(report_entries) == 1
+                and any(REPORT_NAME_RE.fullmatch(path) for path in same_file_artifacts)
+            ):
+                return
+            root_metadata = scan_dir.stat(follow_symlinks=False)
+            for artifact_path in same_file_artifacts:
+                artifact = PurePosixPath(artifact_path)
+                parent = _require_scan_directory(scan_dir.joinpath(*artifact.parts[:-1]))
+                if not os.path.samestat(root_metadata, parent.stat(follow_symlinks=False)):
+                    continue
+                if (
+                    report_entry is not None
+                    and artifact.name in entries
+                    and artifact.name != report_entry
+                ):
+                    continue
+                raise ContractError(
+                    "report.md: cannot safely replace an ambiguous sealed artifact alias"
+                )
+        except OSError as exc:
+            raise ContractError("report.md: unable to inspect sealed artifact aliases") from exc
+    write_scan_local_bytes(
+        scan_dir, "report.md", _generate_report_projection(manifest, findings, coverage)
+    )
+
+
 def build_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> dict[str, Any]:
@@ -2316,18 +2394,27 @@ def main() -> int:
     parser.add_argument("--schema-dir", type=Path)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--sarif-only", action="store_true")
+    parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--sarif-output", type=Path)
     parser.add_argument("--export-format", choices=sorted(EXPORT_PATHS))
     parser.add_argument("--export-output", type=Path)
     args = parser.parse_args()
     try:
+        if args.report_only and (
+            args.sarif_only or args.export_format is not None or args.source_root is not None
+        ):
+            parser.error(
+                "--report-only cannot be combined with SARIF, export, or source-root options"
+            )
         if args.sarif_only and args.export_format is not None:
             parser.error("--sarif-only cannot be combined with --export-format")
         if args.export_output is not None and args.export_format is None:
             parser.error("--export-output requires --export-format")
         if args.sarif_output is not None and not args.sarif_only:
             parser.error("--sarif-output requires --sarif-only")
-        if args.export_format is not None:
+        if args.report_only:
+            write_report_projection(args.scan_dir, args.schema_dir)
+        elif args.export_format is not None:
             contents = build_findings_export(
                 args.scan_dir, args.export_format, args.source_root, args.schema_dir
             )

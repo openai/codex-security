@@ -3,6 +3,7 @@ import { constants, type Stats } from "node:fs";
 import {
   lstat,
   open,
+  readdir,
   readFile,
   realpath,
   type FileHandle,
@@ -27,6 +28,7 @@ const DOCUMENTS = {
   "coverage.json": "coverage.schema.json",
 } as const;
 const PRODUCER_NAME = "codex-security-plugin";
+const REPORT_NAME = /^[rR][eE][pP][oO][rR][tT]\.[mM][dD]$/u;
 const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
   "scan",
   "target",
@@ -289,6 +291,64 @@ export async function requireScanFile(
   return (
     await requireCheckedScanFile(scanDirectory, relativePath, context, signal)
   ).path;
+}
+
+// The manifest must already have passed loadContract's seal validation.
+export async function hasSealedReport(
+  scanDirectory: string,
+  manifest: ScanManifest,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    throwIfAborted(signal);
+    const artifactPaths = manifest.scan.artifacts
+      .map((artifact, index) =>
+        safeRelativePath(
+          artifact.path,
+          `manifest.scan.artifacts[${index}].path`,
+        ),
+      )
+      .filter((path) => REPORT_NAME.test(path));
+    if (artifactPaths.includes("report.md")) return true;
+    if (artifactPaths.length === 0) return false;
+
+    const scanRoot = await requireScanRoot(scanDirectory, signal);
+    const reportEntries = (await readdir(scanRoot.path)).filter((name) =>
+      REPORT_NAME.test(name),
+    );
+    throwIfAborted(signal);
+    if (reportEntries.length !== 1) return false;
+    const report = await requireCheckedScanFile(
+      scanRoot.path,
+      "report.md",
+      "report.md",
+      signal,
+      scanRoot,
+    );
+    for (const artifactPath of artifactPaths) {
+      const file = await openCheckedScanFile(
+        scanRoot.path,
+        artifactPath,
+        `sealed artifact ${artifactPath}`,
+        signal,
+        scanRoot,
+      );
+      try {
+        const sameFile = await sameCheckedFileDevice(
+          file,
+          report,
+          await file.stat(),
+        );
+        throwIfAborted(signal);
+        if (sameFile) return true;
+      } finally {
+        await file.close();
+      }
+    }
+  } catch {
+    throwIfAborted(signal);
+  }
+  return false;
 }
 
 async function requireCheckedScanFile(

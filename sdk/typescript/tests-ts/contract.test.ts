@@ -12,13 +12,20 @@ import {
   type FileHandle,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { dirname, join, resolve } from "node:path";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { ContractValidationError, loadContract } from "../src/index.js";
-import { sameCheckedFileDevice } from "../src/contract.js";
-import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
+import { hasSealedReport, sameCheckedFileDevice } from "../src/contract.js";
+import type {
+  NormalizedTarget,
+  ScanExpectation,
+  ScanManifest,
+} from "../src/index.js";
+import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
@@ -105,6 +112,136 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
+  test("recognizes only the authenticated report directory entry", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "recognizes only the authenticated report directory entry",
+      )
+    ) {
+      return;
+    }
+    const root = resolve("saved-scan");
+    const original = { ...fsPromises };
+    const metadata = (ino: number, directory = false): Stats =>
+      ({
+        dev: 1,
+        ino,
+        isDirectory: () => directory,
+        isFile: () => !directory,
+        isSymbolicLink: () => false,
+      }) as Stats;
+    let entries: string[] = [];
+    let artifactInode = 7;
+    let missingReport = false;
+    let onList: (() => void) | undefined;
+    let opened = 0;
+    let closed = 0;
+    const inspected = (path: unknown): Stats => {
+      const absolute = resolve(String(path));
+      if (absolute === root) return metadata(1, true);
+      if (dirname(absolute) !== root) throw new Error("Unexpected mock path.");
+      if (missingReport && absolute === join(root, "report.md")) {
+        throw Object.assign(new Error("Missing mock report."), {
+          code: "ENOENT",
+        });
+      }
+      return metadata(absolute === join(root, "REPORT.md") ? artifactInode : 7);
+    };
+    const privateOutput = spyOn(
+      runtime,
+      "requirePrivateOutputDirectory",
+    ).mockImplementation(() => {});
+    const secureAncestry = spyOn(
+      runtime,
+      "requireSecureOutputAncestry",
+    ).mockResolvedValue(undefined);
+    mock.module("node:fs/promises", () => ({
+      ...original,
+      lstat: async (path: unknown) => inspected(path),
+      realpath: async (path: unknown) => resolve(String(path)),
+      readdir: async () => {
+        onList?.();
+        return entries;
+      },
+      open: async (path: unknown) => {
+        const fileMetadata = inspected(path);
+        opened += 1;
+        return {
+          stat: async () => fileMetadata,
+          close: async () => {
+            closed += 1;
+          },
+        };
+      },
+    }));
+    const manifest = (paths: string[]): ScanManifest =>
+      ({
+        scan: { artifacts: paths.map((path) => ({ path })) },
+      }) as unknown as ScanManifest;
+    try {
+      const cases: Array<{
+        paths: string[];
+        entries: string[];
+        expected: boolean;
+        inode?: number;
+        missing?: boolean;
+      }> = [
+        { paths: ["./report.md"], entries: [], expected: true },
+        {
+          paths: ["findings.json", "coverage.json"],
+          entries: ["report.md", "findings.json", "coverage.json"],
+          expected: false,
+        },
+        { paths: ["REPORT.md"], entries: ["REPORT.md"], expected: true },
+        { paths: ["REPORT.md"], entries: ["report.md"], expected: true },
+        {
+          paths: ["REPORT.md"],
+          entries: ["REPORT.md", "report.md"],
+          expected: false,
+        },
+        {
+          paths: ["REPORT.md"],
+          entries: ["REPORT.md"],
+          inode: 8,
+          expected: false,
+        },
+        {
+          paths: ["REPORT.md"],
+          entries: ["REPORT.md"],
+          missing: true,
+          expected: false,
+        },
+        { paths: ["REPORT.md"], entries: [], expected: false },
+      ];
+      for (const value of cases) {
+        entries = value.entries;
+        artifactInode = value.inode ?? 7;
+        missingReport = value.missing ?? false;
+        expect(await hasSealedReport(root, manifest(value.paths))).toBe(
+          value.expected,
+        );
+        expect(closed).toBe(opened);
+      }
+      entries = [];
+      for (const throwDuringList of [false, true]) {
+        const controller = new AbortController();
+        const reason = new Error("Report inspection cancelled.");
+        onList = () => {
+          controller.abort(reason);
+          if (throwDuringList) throw reason;
+        };
+        await expect(
+          hasSealedReport(root, manifest(["REPORT.md"]), controller.signal),
+        ).rejects.toBe(reason);
+      }
+    } finally {
+      mock.module("node:fs/promises", () => original);
+      privateOutput.mockRestore();
+      secureAncestry.mockRestore();
+    }
+  });
+
   test("compares exact Windows volume serials without rounding file identity", async () => {
     const scanDir = await copyExample();
     const path = join(scanDir, "scan-manifest.json");
