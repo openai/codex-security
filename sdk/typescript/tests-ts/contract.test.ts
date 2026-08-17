@@ -467,7 +467,7 @@ describe("canonical scan contract", () => {
       "import finalize_scan_contract as finalizer",
       "def accepted(value):",
       "    try:",
-      "        finalizer._require_safe_relative_path(value, 'artifact path')",
+      "        finalizer._require_portable_relative_path(value, 'artifact path')",
       "    except finalizer.ContractError:",
       "        return False",
       "    return True",
@@ -486,6 +486,27 @@ describe("canonical scan contract", () => {
       false,
       false,
     ]);
+  });
+
+  test("accepts Unix-valid source and scope path components", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const findingsPath = join(scanDir, "findings.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifest = await readJson(manifestPath);
+    const findings = await readJson(findingsPath);
+    const coverage = await readJson(coveragePath);
+    findings["findings"][0]["locations"][0]["path"] = "src/app.ts:fixture";
+    manifest["scan"]["scope"]["includePaths"] = ["src/CON.py"];
+    coverage["includePaths"] = ["src/CON.py"];
+    await writeJson(findingsPath, findings);
+    await writeJson(coveragePath, coverage);
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
   });
 
   test("rejects trailing-dot aliases for sealed artifacts", async () => {
