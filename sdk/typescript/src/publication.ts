@@ -1,6 +1,5 @@
 import {
-  loadContract,
-  requireCanonicalScanDirectory,
+  loadContractWithScanDirectory,
   type LoadedContract,
 } from "./contract.js";
 import type {
@@ -53,11 +52,10 @@ export async function prepareScanPublication(
   scanDirectory: string,
   options: PrepareScanPublicationOptions,
 ): Promise<PreparedScanPublication> {
-  const canonicalScanDirectory =
-    await requireCanonicalScanDirectory(scanDirectory);
-  const contract = await loadContract(canonicalScanDirectory, {
-    pluginRoot: await bundledPluginRoot(),
-  });
+  const { contract, scanDirectory: canonicalScanDirectory } =
+    await loadContractWithScanDirectory(scanDirectory, {
+      pluginRoot: await bundledPluginRoot(),
+    });
   const uploadedAt = options.uploadedAt ?? new Date().toISOString();
   const scanId = contract.manifest.scan.id;
 
