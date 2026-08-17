@@ -781,6 +781,39 @@ describe("bundled plugin finding detail contracts", () => {
     });
   });
 
+  test("ignores malformed legacy evidence rows in sealed validation", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
+      "findings['findings'][0]['code_evidence'] = [None, 'legacy source', {}, {'id': '', 'code': 'empty_id()'}, {'id': 'missing-code'}, {'id': 'empty-code', 'code': ''}, {'id': 'legacy-source', 'code': 'legacy_source()'}]",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
+      "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
+      "print(json.dumps({'original': findings['findings'][0]['code_evidence'], 'compatible': compatible['findings'][0]['code_evidence']}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      original: [
+        null,
+        "legacy source",
+        {},
+        { id: "", code: "empty_id()" },
+        { id: "missing-code" },
+        { id: "empty-code", code: "" },
+        { id: "legacy-source", code: "legacy_source()" },
+      ],
+      compatible: [{ id: "legacy-source", code: "legacy_source()" }],
+    });
+  });
+
   test("projects canonical and legacy code evidence into safe SARIF locations", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();

@@ -1545,11 +1545,20 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             compatible_legacy_evidence = []
             seen_evidence_ids = set(canonical_evidence_ids)
             for evidence in legacy_evidence:
-                evidence_id = evidence.get("id") if isinstance(evidence, dict) else None
-                if isinstance(evidence_id, str) and evidence_id:
-                    if evidence_id in seen_evidence_ids:
-                        continue
-                    seen_evidence_ids.add(evidence_id)
+                if not isinstance(evidence, dict):
+                    continue
+                evidence_id = evidence.get("id")
+                evidence_code = evidence.get("code")
+                if (
+                    not isinstance(evidence_id, str)
+                    or not evidence_id.strip()
+                    or not isinstance(evidence_code, str)
+                    or not evidence_code.strip()
+                ):
+                    continue
+                if evidence_id in seen_evidence_ids:
+                    continue
+                seen_evidence_ids.add(evidence_id)
                 compatible_legacy_evidence.append(evidence)
             finding["code_evidence"] = compatible_legacy_evidence
         elif "code_evidence" in finding:
