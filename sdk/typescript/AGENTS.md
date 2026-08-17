@@ -14,6 +14,9 @@ outside an approved path.
 ## Keep it simple
 
 - Prefer one source of truth for types, schemas, arguments, and state.
+- Keep `--to` as the only generic integration selector. Namespace other
+  integration-specific options, such as `--linear-*` and `--jira-*`; do not
+  generalize fields whose semantics differ across integrations.
 - Reuse Codex APIs and shared helpers instead of adding extra trust gates or orchestration.
 - Root read and workspace write are enough for the sandbox.
 - Treat repository paths, symlinks, archives, and other repository-controlled data as untrusted.
@@ -44,3 +47,9 @@ pnpm run types
 pnpm run format
 pnpm run test
 ```
+
+After the implementation is verified, keep the test in the final change only
+when it provides meaningful, durable regression coverage. If it is merely
+disposable implementation scaffolding, duplicates existing coverage, or would
+add brittle or low-value maintenance burden, remove it before committing or
+opening a PR and do not include it in the submitted change.
