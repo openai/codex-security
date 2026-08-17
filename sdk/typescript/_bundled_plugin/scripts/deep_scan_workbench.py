@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -320,6 +321,13 @@ def finish_staged_file(promotion: tuple[Path, Path, Path | None]) -> None:
     backup = promotion[2]
     if backup is not None:
         backup.unlink(missing_ok=True)
+
+
+def create_publication_copy(source: str | Path, destination: str | Path) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
 
 
 def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
@@ -1571,7 +1579,7 @@ def commit_deep_scan_dedup_locked(
             publication_copy = canonical_path.with_name(
                 f".{canonical_path.name}.{uuid.uuid4()}.publish"
             )
-            os.link(candidate_ledger_path, publication_copy)
+            create_publication_copy(candidate_ledger_path, publication_copy)
             promotion = promote_staged_file(
                 str(publication_copy),
                 canonical_candidate_ledger_path,
