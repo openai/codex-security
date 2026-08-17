@@ -14,7 +14,7 @@ outside an approved path.
 ## Keep it simple
 
 - Prefer one source of truth for types, schemas, arguments, and state.
-- Keep `--to` as the only generic integration selector. Namespace all other
+- Keep `--to` as the only generic integration selector. Namespace other
   integration-specific options, such as `--linear-*` and `--jira-*`; do not
   generalize fields whose semantics differ across integrations.
 - Reuse Codex APIs and shared helpers instead of adding extra trust gates or orchestration.
