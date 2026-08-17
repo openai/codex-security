@@ -2,7 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, spyOn, test } from "bun:test";
 import {
@@ -11,7 +11,17 @@ import {
   runCodexSkillCommand,
   skillCommandFailure,
 } from "../src/cli.js";
+import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+
+function linearIssue(identifier: string) {
+  return {
+    identifier,
+    title: `Fix ${identifier}`,
+    description: `Synthetic evidence for ${identifier}`,
+    url: `https://linear.app/example/issue/${identifier}`,
+  };
+}
 
 describe("CLI skill commands", () => {
   test("runs validation and patch skills with file and literal inputs", async () => {
@@ -93,7 +103,7 @@ describe("CLI skill commands", () => {
           ),
         ).toBe(0);
         expect(help.text()).toContain(
-          `Usage: codex-security ${command} <${argument}>`,
+          `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
         );
         expect(help.text()).toContain(
           "--effort <minimal|low|medium|high|xhigh|max>",
@@ -105,6 +115,260 @@ describe("CLI skill commands", () => {
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("imports selected Linear issues without exposing its credential to Codex", async () => {
+    const requests: string[] = [];
+    let inputs: string[] = [];
+    let environment: NodeJS.ProcessEnv | undefined;
+
+    expect(
+      await main(
+        [
+          "patch",
+          "--linear-issue",
+          "SEC-123",
+          "--linear-issue",
+          "https://linear.app/example/issue/SEC-124/a-synthetic-finding",
+          "--linear-api-key",
+          "lin_api_SYNTHETIC_EXPLICIT",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
+            LINEAR_API_KEY: "lin_api_SYNTHETIC_FALLBACK",
+            LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN",
+            OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
+          },
+          linearClient: ({ apiKey, redirect }) => {
+            expect(apiKey).toBe("lin_api_SYNTHETIC_EXPLICIT");
+            expect(redirect).toBe("error");
+            return {
+              issue: async (id: string) => {
+                requests.push(id);
+                return linearIssue(id);
+              },
+            } as ReturnType<LinearClientFactory>;
+          },
+          onCodex: (args, processEnvironment) => {
+            inputs = JSON.parse(args.at(-1)!.split("\n").at(-1)!);
+            environment = processEnvironment;
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(requests).toEqual(["SEC-123", "SEC-124"]);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]).toContain("Issue: SEC-123");
+    expect(inputs[1]).toContain("Synthetic evidence for SEC-124");
+    expect(environment).toEqual({
+      OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
+    });
+    expect(JSON.stringify(inputs)).not.toContain("lin_api_SYNTHETIC_SECRET");
+    expect(JSON.stringify(inputs)).not.toContain("lin_api_SYNTHETIC_EXPLICIT");
+  });
+
+  test("keeps imported Unix and Windows paths literal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-linear-input-"));
+    try {
+      const repository = join(root, "repository");
+      const selected = join(repository, "selected.txt");
+      const external = join(root, "external.txt");
+      await mkdir(repository);
+      await writeFile(selected, "selected file contents");
+      await writeFile(external, "SYNTHETIC_EXTERNAL_FILE");
+
+      for (const [paths, target] of [
+        [posix, process.platform === "win32" ? "/synthetic.txt" : external],
+        [win32, process.platform === "win32" ? external : "C:\\synthetic.txt"],
+      ] as const) {
+        const issue = {
+          ...linearIssue("SEC-123"),
+          description:
+            paths.sep +
+            `..${paths.sep}`.repeat(32) +
+            paths.relative(paths.parse(target).root, target),
+        };
+        const expected = `Source: linear\nIssue: SEC-123\nURL: ${issue.url}\n\nTitle: ${issue.title}\n\n${issue.description}`;
+        const forbiddenPath = resolve(repository, expected);
+        const originalLstat = filesystem.lstat;
+        let probed = false;
+        let inputs: string[] = [];
+        const reading = spyOn(filesystem, "lstat").mockImplementation((async (
+          ...args: Parameters<typeof filesystem.lstat>
+        ) => {
+          if (String(args[0]) === forbiddenPath) probed = true;
+          return await originalLstat(...args);
+        }) as typeof filesystem.lstat);
+        try {
+          expect(
+            await main(
+              ["patch", selected, "--linear-issue", "SEC-123"],
+              capture().stream,
+              capture().stream,
+              dependencies({
+                currentDirectory: repository,
+                environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
+                linearClient: () =>
+                  ({
+                    issue: async () => issue,
+                  }) as unknown as ReturnType<LinearClientFactory>,
+                onCodex: (args) => {
+                  inputs = JSON.parse(args.at(-1)!.split("\n").at(-1)!);
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(probed).toBe(false);
+          expect(inputs).toEqual(["selected file contents", expected]);
+          expect(inputs).not.toContain("SYNTHETIC_EXTERNAL_FILE");
+        } finally {
+          reading.mockRestore();
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("imports every matching open project issue across Linear pages", async () => {
+    let projectOptions: unknown;
+    let issueOptions: unknown;
+    let nextPages = 0;
+    let inputs: string[] = [];
+
+    expect(
+      await main(
+        [
+          "patch",
+          "--linear-project",
+          "Security backlog",
+          "--linear-filter",
+          '{"labels":{"name":{"eq":"security"}}}',
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
+          linearClient: ({ accessToken }) => {
+            expect(accessToken).toBe("SYNTHETIC_OAUTH_TOKEN");
+            const page = {
+              nodes: [linearIssue("SEC-123")],
+              pageInfo: { hasNextPage: true },
+              async fetchNext() {
+                nextPages++;
+                this.nodes.push(linearIssue("SEC-124"));
+                this.pageInfo.hasNextPage = false;
+                return this;
+              },
+            };
+            return {
+              projects: async (options: unknown) => {
+                projectOptions = options;
+                return {
+                  nodes: [
+                    {
+                      issues: async (options: unknown) => {
+                        issueOptions = options;
+                        return page;
+                      },
+                    },
+                  ],
+                };
+              },
+            } as unknown as ReturnType<LinearClientFactory>;
+          },
+          onCodex: (args, environment) => {
+            inputs = JSON.parse(args.at(-1)!.split("\n").at(-1)!);
+            expect(environment).toEqual({});
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(projectOptions).toEqual({
+      filter: { name: { eqIgnoreCase: "Security backlog" } },
+      first: 2,
+    });
+    expect(issueOptions).toEqual({
+      first: 50,
+      filter: {
+        state: { type: { nin: ["completed", "canceled"] } },
+        labels: { name: { eq: "security" } },
+      },
+    });
+    expect(nextPages).toBe(1);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]).toContain("Issue: SEC-123");
+    expect(inputs[1]).toContain("Issue: SEC-124");
+  });
+
+  test("rejects invalid Linear selections before starting Codex", async () => {
+    const cases: [string[], string, NodeJS.ProcessEnv?][] = [
+      [
+        ["patch"],
+        "Patch requires an issue, --linear-issue, or --linear-project.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123"],
+        "Linear access requires CODEX_SECURITY_LINEAR_API_KEY, LINEAR_API_KEY, or LINEAR_ACCESS_TOKEN.",
+        {},
+      ],
+      [
+        ["patch", "--linear-project", "Backlog", "--linear-filter", "invalid"],
+        "--linear-filter must be a JSON Linear issue filter.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123", "--linear-filter", "{}"],
+        "--linear-filter requires --linear-project.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123", "--linear-project", "Backlog"],
+        "Use either --linear-issue or --linear-project, not both.",
+      ],
+      [
+        ["patch", "--linear-issue", "https://example.test/issue/SEC-123"],
+        "Linear issue URL is invalid.",
+      ],
+      [
+        ["patch", "ordinary issue", "--linear-api-key", "synthetic-key"],
+        "--linear-api-key requires --linear-issue or --linear-project.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123", "--linear-api-key", "   "],
+        "--linear-api-key must not be empty.",
+      ],
+    ];
+
+    for (const [args, message, environment] of cases) {
+      let started = false;
+      const stderr = capture();
+      expect(
+        await main(
+          args,
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            environment: environment ?? {
+              CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
+            },
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(message);
+      expect(stderr.text()).not.toContain("lin_api_SYNTHETIC_SECRET");
+      expect(started).toBe(false);
     }
   });
 

@@ -82,6 +82,12 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import type { SeverityLevel } from "./models.js";
+import {
+  importLinearIssues,
+  resolveLinearApiKey,
+  type ImportedIssue,
+  type LinearClientFactory,
+} from "./linear.js";
 import { runMultiscan } from "./multiscan.js";
 import {
   publishScan,
@@ -204,6 +210,9 @@ const VALUE_OPTIONS = new Set([
   "--plugin-path",
   "--python",
   "--codex",
+  "--linear-issue",
+  "--linear-project",
+  "--linear-filter",
   "--fail-on-severity",
   "--max-cost",
   "--workers",
@@ -234,6 +243,17 @@ const PROVIDER_OPTION = z
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
+}
+
+function linearApiKeyOption() {
+  return z
+    .string()
+    .trim()
+    .min(1, "--linear-api-key must not be empty.")
+    .optional()
+    .describe(
+      "Linear personal API key; defaults to CODEX_SECURITY_LINEAR_API_KEY.",
+    );
 }
 
 function publicationScanAge(timestamp: string, now: number): string {
@@ -715,6 +735,7 @@ interface CliDependencies {
     environment?: NodeJS.ProcessEnv,
   ): Promise<number>;
   bulkScan?: BulkScanDiscoveryDependencies;
+  linearClient?: LinearClientFactory;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1540,16 +1561,16 @@ export async function main(
       linearTeam: optionValue("--linear-team")
         .optional()
         .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
-      linearApiKey: optionValue("--linear-api-key")
-        .optional()
-        .describe(
-          "Linear personal API key; defaults to CODEX_SECURITY_LINEAR_API_KEY.",
-        ),
-      project: optionValue("--project")
+      linearApiKey: linearApiKeyOption(),
+      linearProject: optionValue("--linear-project")
         .optional()
         .describe(
           "Optional Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
         ),
+      project: optionValue("--project")
+        .optional()
+        .describe("Alias for --linear-project.")
+        .meta({ deprecated: true }),
       linearAssignee: optionValue("--linear-assignee")
         .optional()
         .describe(
@@ -1572,13 +1593,10 @@ export async function main(
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
       try {
-        const selectedApiKey =
-          options.linearApiKey ??
-          dependencies.environment["CODEX_SECURITY_LINEAR_API_KEY"];
-        const linearApiKey = selectedApiKey?.trim() || undefined;
-        if (options.linearApiKey !== undefined && linearApiKey === undefined) {
-          throw new CodexSecurityError("--linear-api-key must not be empty.");
-        }
+        const linearApiKey = resolveLinearApiKey(
+          dependencies.environment,
+          options.linearApiKey,
+        );
         const assigneeId = options.linearAssignee?.trim();
         if (options.linearAssignee !== undefined && !assigneeId) {
           throw new CodexSecurityError("--linear-assignee must not be empty.");
@@ -1596,9 +1614,21 @@ export async function main(
             "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required.",
           );
         }
-        const selectedProject = options.project?.trim();
-        if (options.project !== undefined && !selectedProject) {
-          throw new CodexSecurityError("--project must not be empty.");
+        if (
+          options.linearProject !== undefined &&
+          options.project !== undefined &&
+          options.linearProject.trim() !== options.project.trim()
+        ) {
+          throw new CodexSecurityError(
+            "--linear-project and --project must select the same project.",
+          );
+        }
+        const projectOption = options.linearProject ?? options.project;
+        const selectedProject = projectOption?.trim();
+        if (projectOption !== undefined && !selectedProject) {
+          throw new CodexSecurityError(
+            `${options.linearProject === undefined ? "--project" : "--linear-project"} must not be empty.`,
+          );
         }
         const projectId =
           selectedProject ||
@@ -2450,10 +2480,22 @@ export async function main(
         "issues...": z
           .string()
           .min(1, "An issue must not be empty.")
+          .optional()
           .describe("Issue text or a file containing issues."),
       }),
       options: z.object({
         effort: effortOption(),
+        linearIssue: z
+          .array(optionValue("--linear-issue"))
+          .default([])
+          .describe("Linear issue identifier or URL; repeat for more issues."),
+        linearProject: optionValue("--linear-project")
+          .optional()
+          .describe("Patch every open issue in this Linear project."),
+        linearFilter: optionValue("--linear-filter")
+          .optional()
+          .describe("JSON Linear issue filter for --linear-project."),
+        linearApiKey: linearApiKeyOption(),
         codex: z
           .array(optionValue("--codex"))
           .default([])
@@ -2463,14 +2505,59 @@ export async function main(
       }),
       async run({ options }) {
         try {
+          const linear =
+            options.linearIssue.length > 0 || !!options.linearProject;
+          if (options.linearIssue.length > 0 && options.linearProject) {
+            throw new CodexSecurityError(
+              "Use either --linear-issue or --linear-project, not both.",
+            );
+          }
+          if (options.linearFilter && !options.linearProject) {
+            throw new CodexSecurityError(
+              "--linear-filter requires --linear-project.",
+            );
+          }
+          if (options.linearApiKey !== undefined && !linear) {
+            throw new CodexSecurityError(
+              "--linear-api-key requires --linear-issue or --linear-project.",
+            );
+          }
+          if (positionals.length === 0 && !linear) {
+            throw new CodexSecurityError(
+              "Patch requires an issue, --linear-issue, or --linear-project.",
+            );
+          }
+
+          const imports = linear
+            ? await importLinearIssues({
+                issues: options.linearIssue,
+                project: options.linearProject,
+                filter: options.linearFilter,
+                apiKey: options.linearApiKey,
+                environment: dependencies.environment,
+                linearClient: dependencies.linearClient,
+              })
+            : [];
+          const environment =
+            imports.length === 0
+              ? undefined
+              : Object.fromEntries(
+                  Object.entries(dependencies.environment).filter(
+                    ([name]) =>
+                      !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
+                        name,
+                      ),
+                  ),
+                );
           exitCode = await runSkill(
             "fix-finding",
-            positionals,
+            [...positionals, ...imports],
             options.codex,
             options.effort,
             output,
             errorOutput,
             dependencies,
+            environment,
           );
         } catch (error) {
           exitCode = 2;
@@ -3103,12 +3190,13 @@ function staysWithinWindowsDeviceRoot(input: string, root: string): boolean {
 
 async function runSkill(
   skill: "validation" | "fix-finding",
-  inputs: readonly string[],
+  inputs: readonly (string | ImportedIssue)[],
   codexOverrides: readonly string[],
   effort: ScanReasoningEffort | undefined,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
+  environment?: NodeJS.ProcessEnv,
 ): Promise<number> {
   const overrides = parseCodexOverrides(codexOverrides, undefined, effort);
   if (
@@ -3126,6 +3214,12 @@ async function runSkill(
   const directory = dependencies.currentDirectory();
   const contents: string[] = [];
   for (const input of inputs) {
+    if (typeof input !== "string") {
+      contents.push(
+        `Source: ${input.source}\nIssue: ${input.id}\nURL: ${input.url}\n\n${input.text}`,
+      );
+      continue;
+    }
     if (input.trim().length === 0) {
       throw new CodexSecurityError(
         "Finding or issue inputs must not be empty.",
@@ -3228,6 +3322,7 @@ async function runSkill(
       stdout,
       stderr,
     },
+    environment,
   );
 }
 
