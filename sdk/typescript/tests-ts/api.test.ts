@@ -4532,8 +4532,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(repository);
     await mkdir(ambientHome);
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
-    let activeScans = 0;
-    let maximumActiveScans = 0;
+    let scansStarted = 0;
     const deepScanConfigPaths = new Set<string>();
     let releaseScans!: () => void;
     const concurrentScans = new Promise<void>((resolve) => {
@@ -4577,40 +4576,28 @@ describe("CodexSecurity orchestration", () => {
                         join(credentialHome, ".codex-security-scan.lock"),
                       ),
                     ).toBe(false);
-                    activeScans += 1;
-                    maximumActiveScans = Math.max(
-                      maximumActiveScans,
-                      activeScans,
+                    if (++scansStarted === 2) releaseScans();
+                    const credentialConfig = parseToml(
+                      await readFile(
+                        join(credentialHome, "config.toml"),
+                        "utf8",
+                      ),
                     );
-                    if (activeScans === 2) releaseScans();
-                    try {
-                      const credentialConfig = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
-                      );
-                      expect(credentialConfig["model"]).toBeUndefined();
-                      const before = parseToml(
-                        await readFile(deepScanConfigPath!, "utf8"),
-                      );
-                      expect(before["deep_scan"]).toMatchObject({
-                        workers: index + 2,
-                      });
-                      await Promise.race([
-                        concurrentScans,
-                        new Promise((resolve) => setTimeout(resolve, 5_000)),
-                      ]);
-                      const after = parseToml(
-                        await readFile(deepScanConfigPath!, "utf8"),
-                      );
-                      expect(after["deep_scan"]).toMatchObject({
-                        workers: index + 2,
-                      });
-                      throw new Error("parallel managed scan reached");
-                    } finally {
-                      activeScans -= 1;
-                    }
+                    expect(credentialConfig["model"]).toBeUndefined();
+                    const before = parseToml(
+                      await readFile(deepScanConfigPath!, "utf8"),
+                    );
+                    expect(before["deep_scan"]).toMatchObject({
+                      workers: index + 2,
+                    });
+                    await concurrentScans;
+                    const after = parseToml(
+                      await readFile(deepScanConfigPath!, "utf8"),
+                    );
+                    expect(after["deep_scan"]).toMatchObject({
+                      workers: index + 2,
+                    });
+                    throw new Error("parallel managed scan reached");
                   },
                 }),
               };
@@ -4635,7 +4622,7 @@ describe("CodexSecurity orchestration", () => {
         });
       }
       expect(existsSync(credentialHome)).toBe(true);
-      expect(maximumActiveScans).toBe(2);
+      expect(scansStarted).toBe(2);
       expect(deepScanConfigPaths.size).toBe(2);
       const pluginConfiguration = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),

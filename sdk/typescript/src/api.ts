@@ -13,7 +13,12 @@ import {
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
-import { Codex, type CodexOptions } from "@openai/codex-sdk";
+import {
+  Codex,
+  type CodexOptions,
+  type ThreadOptions,
+  type TurnOptions,
+} from "@openai/codex-sdk";
 import {
   parse as parseToml,
   stringify as stringifyToml,
@@ -129,7 +134,7 @@ interface CodexThreadLike {
   readonly id: string | null;
   runStreamed(
     input: string,
-    options: { signal: AbortSignal },
+    options: TurnOptions,
   ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
 }
 
@@ -139,11 +144,7 @@ interface ScanEvent {
 }
 
 interface CodexClientLike {
-  startThread(options: {
-    workingDirectory: string;
-    skipGitRepoCheck: boolean;
-    approvalPolicy: "never" | "on-request";
-  }): CodexThreadLike;
+  startThread(options: ThreadOptions): CodexThreadLike;
 }
 
 interface PreparedRuntime {
@@ -156,6 +157,24 @@ interface PreparedRuntime {
   environment: Record<string, string>;
   credentialsAvailable: boolean;
   effectiveConfig?: JsonObject;
+}
+
+interface PreparedSession {
+  runtime: PreparedRuntime;
+  runtimeHome: string;
+  effectiveConfig: JsonObject;
+  preflightConfig: JsonObject;
+  sessionConfig: JsonObject;
+  modelProvider: unknown;
+  externalProvider:
+    | (typeof EXTERNAL_CODEX_PROVIDERS)[keyof typeof EXTERNAL_CODEX_PROVIDERS]
+    | null;
+  apiKey: string | null;
+  scanEnvironment: ProcessEnvironment;
+  authentication: ScanAuthentication;
+  approvalPolicy: "never" | "on-request";
+  python: string;
+  releaseCredentialHome: (() => Promise<void>) | null;
 }
 
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
@@ -376,6 +395,13 @@ export class CodexSecurity {
       options,
       options.signal,
     );
+    return await this.#preflightInputs(inputs, options);
+  }
+
+  async #preflightInputs(
+    inputs: LocalScanInputs,
+    options: ScanOptions,
+  ): Promise<ScanPreflight> {
     requireOutputOutsideRepository(
       inputs.protectedRoot,
       await realpath(tmpdir()),
@@ -487,74 +513,24 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const requestedConfig = await mergedCodexConfig(this.config);
-      const modelProvider = scanModelProvider(requestedConfig);
-      const externalProvider = isExternalModelProvider(modelProvider)
-        ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
-        : null;
-      let authentication = scanAuthentication(
-        this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      );
-      const apiKey =
-        authentication.method === "api_key"
-          ? environmentApiKey(this.#dependencies.environment, modelProvider)
-          : null;
-      if (externalProvider !== null && apiKey === null) {
-        throw new AuthenticationRequiredError(
-          `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
-        );
-      }
-      const scanEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      );
-      if (this.#dependencies.prepareRuntime === undefined) {
-        const credentialHome = await prepareCodexSecurityCredentialHome(
-          scanEnvironment,
-          (path) =>
-            requireOutputOutsideRepository(protectedRoot, path, "runtime"),
-        );
-        releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
-          credentialHome,
-          signal,
-        );
-      }
-      const previousRuntime = this.#runtime;
-      const runtime = await this.#ensureRuntime(
+      const session = await this.#prepareSession(
+        { protectedRoot, stateDirectory },
+        options,
         signal,
         temporaryRoot,
-        (path) =>
-          requireOutputOutsideRepository(protectedRoot, path, "runtime"),
-        options.auth,
-        requestedConfig,
+        mode === "deep",
       );
-      if (
-        runtime === previousRuntime &&
-        this.#dependencies.prepareRuntime === undefined
-      ) {
-        await this.#refreshPersistentRuntime(
-          runtime,
-          scanEnvironment,
-          signal,
-          requestedConfig,
-        );
-      }
-      const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
-      const approvalPolicy = scanApprovalPolicy(effectiveConfig);
-      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
-      if (runtime.configPath !== undefined) {
-        await writeCodexConfig(runtime.configPath, preflightConfig);
-      }
-      const runtimeHome = await realpath(runtime.codexHome);
-      requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
-      const sessionConfig = scanRuntimeCodexConfig(
-        effectiveConfig,
-        stateDirectory,
+      const {
+        runtime,
         runtimeHome,
-      );
+        effectiveConfig,
+        preflightConfig,
+        modelProvider,
+        authentication,
+        approvalPolicy,
+        python,
+      } = session;
+      releaseCredentialHome = session.releaseCredentialHome;
       const deepScanConfigPath =
         mode === "deep"
           ? runtime.deepScanConfigPath ??
@@ -568,82 +544,6 @@ export class CodexSecurity {
           signal,
         );
       }
-      if (
-        options.expectedPluginVersion !== undefined &&
-        runtime.plugin.version !== options.expectedPluginVersion
-      ) {
-        throw new CodexSecurityError(
-          `The original scan used plugin version ${options.expectedPluginVersion}, but the installed version is ${runtime.plugin.version}.`,
-        );
-      }
-      checkOpen();
-      if (
-        authentication.method === "stored_credentials" &&
-        this.#runtimeCredentialSource === "api_key"
-      ) {
-        const ambientHome =
-          environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
-          join(homedir(), ".codex");
-        runtime.credentialsAvailable = await importAmbientAuth(
-          ambientHome,
-          runtime.codexHome,
-        );
-        this.#runtimeCredentialSource = runtime.credentialsAvailable
-          ? "stored_credentials"
-          : null;
-      }
-      if (mode !== "deep" || runtime.deepScanConfigPath !== undefined) {
-        await releaseCredentialHome?.();
-        releaseCredentialHome = null;
-      }
-      if (externalProvider === null && apiKey !== null) {
-        this.#runtimeCredentialSource = "api_key";
-      }
-      if (
-        !runtime.credentialsAvailable &&
-        authentication.method === "stored_credentials"
-      ) {
-        const status = await accountStatus(
-          this.#codexCommand(),
-          runtime.environment,
-          signal,
-        );
-        runtime.credentialsAvailable = status.authenticated;
-        this.#runtimeCredentialSource = status.authenticated
-          ? "stored_credentials"
-          : null;
-      }
-      if (
-        !runtime.credentialsAvailable &&
-        apiKey === null &&
-        authentication.method !== "aws_credentials"
-      ) {
-        throw new AuthenticationRequiredError(
-          "No credentials were found. Run 'codex-security login', use " +
-            "'codex-security login --device-auth' on a remote or headless machine, or set " +
-            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
-        );
-      }
-      authentication = await runtimeScanAuthentication(
-        this.#dependencies.environment,
-        runtime.codexHome,
-        options.auth,
-        modelProvider,
-      );
-      notifyObserver(
-        "onAuthentication",
-        options.onAuthentication,
-        options.onObserverError,
-        authentication,
-      );
-      const python = await (
-        this.#dependencies.resolvePluginPython ?? resolvePluginPython
-      )({
-        configuredPath: this.config.pythonPath,
-        environment: scanEnvironment,
-        protectedRoot,
-        signal,
-      });
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
@@ -1026,55 +926,11 @@ export class CodexSecurity {
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
       };
-      const environment = {
-        ...pluginExecutionEnvironment(
-          python,
-          withoutCodexHome(
-            selectedScanEnvironment(
-              runtime.environment,
-              options.auth,
-              modelProvider,
-            ),
-          ),
-        ),
-        ...(externalProvider === null
-          ? {}
-          : { [externalProvider.env_key]: apiKey! }),
-        CODEX_HOME: runtime.codexHome,
-        ...runtimePaths,
-      };
-      const sdkCodexConfig = { ...sessionConfig };
-      // Projects and permissions already live in generated TOML files; the SDK
-      // cannot safely encode their path and selector keys as dotted overrides.
-      delete sdkCodexConfig["projects"];
-      delete sdkCodexConfig["permissions"];
-      const configuredResponsesMetadata = isRecord(
-        sdkCodexConfig["responses_api_metadata"],
-      )
-        ? sdkCodexConfig["responses_api_metadata"]
-        : {};
-      const codexPathOverride =
-        environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
-        undefined
-          ? undefined
-          : this.#codexCommand().command;
-      const codex = this.#dependencies.createCodex({
-        ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
-        ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-        env: definedEnvironment(
-          selectedScanEnvironment(environment, "chatgpt"),
-        ),
-        config: {
-          ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-          approvals_reviewer: "auto_review",
-          default_permissions: SCAN_PERMISSION_PROFILE,
-          allow_login_shell: false,
-          responses_api_metadata: {
-            ...configuredResponsesMetadata,
-            codex_security_surface: this.#surface,
-          },
-        },
-      });
+      const { codex, environment } = this.#createSessionCodex(
+        session,
+        runtimePaths,
+        options.auth,
+      );
       const thread = codex.startThread({
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
@@ -1685,6 +1541,255 @@ export class CodexSecurity {
     }
   }
 
+  #createSessionCodex(
+    session: PreparedSession,
+    runtimePaths: Record<string, string>,
+    auth: ScanAuthMode = "auto",
+  ): { codex: CodexClientLike; environment: ProcessEnvironment } {
+    const {
+      runtime,
+      python,
+      modelProvider,
+      externalProvider,
+      apiKey,
+      sessionConfig,
+    } = session;
+    const environment = {
+      ...pluginExecutionEnvironment(
+        python,
+        withoutCodexHome(
+          selectedScanEnvironment(runtime.environment, auth, modelProvider),
+        ),
+      ),
+      ...(externalProvider === null
+        ? {}
+        : { [externalProvider.env_key]: apiKey! }),
+      CODEX_HOME: runtime.codexHome,
+      ...runtimePaths,
+    };
+    const sdkCodexConfig = { ...sessionConfig };
+    // Projects and permissions already live in generated TOML files; the SDK
+    // cannot safely encode their path and selector keys as dotted overrides.
+    delete sdkCodexConfig["projects"];
+    delete sdkCodexConfig["permissions"];
+    const configuredResponsesMetadata = isRecord(
+      sdkCodexConfig["responses_api_metadata"],
+    )
+      ? sdkCodexConfig["responses_api_metadata"]
+      : {};
+    const codexPathOverride =
+      environmentValue(this.#dependencies.environment, "CODEX_CLI_PATH") ===
+      undefined
+        ? undefined
+        : this.#codexCommand().command;
+    const codex = this.#dependencies.createCodex({
+      ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
+      ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      env: definedEnvironment(selectedScanEnvironment(environment, "chatgpt")),
+      config: {
+        ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
+        responses_api_metadata: {
+          ...configuredResponsesMetadata,
+          codex_security_surface: this.#surface,
+        },
+      },
+    });
+    return { codex, environment };
+  }
+
+  async #prepareSession(
+    {
+      protectedRoot,
+      stateDirectory,
+    }: { protectedRoot: string; stateDirectory: string },
+    options: Pick<
+      ScanOptions,
+      | "auth"
+      | "expectedPluginVersion"
+      | "onAuthentication"
+      | "onWarning"
+      | "onObserverError"
+    >,
+    signal: AbortSignal,
+    temporaryRoot?: string,
+    keepCredentialLock = false,
+  ): Promise<PreparedSession> {
+    let releaseCredentialHome: (() => Promise<void>) | null = null;
+    const checkOpen = (): void => {
+      this.#requireOpen();
+      throwIfAborted(signal);
+    };
+    try {
+      const requestedConfig = await mergedCodexConfig(this.config);
+      const modelProvider = scanModelProvider(requestedConfig);
+      const externalProvider = isExternalModelProvider(modelProvider)
+        ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+        : null;
+      let authentication = scanAuthentication(
+        this.#dependencies.environment,
+        options.auth,
+        modelProvider,
+      );
+      const apiKey =
+        authentication.method === "api_key"
+          ? environmentApiKey(this.#dependencies.environment, modelProvider)
+          : null;
+      if (externalProvider !== null && apiKey === null) {
+        throw new AuthenticationRequiredError(
+          `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
+        );
+      }
+      const scanEnvironment = selectedScanEnvironment(
+        this.#dependencies.environment,
+        options.auth,
+        modelProvider,
+      );
+      if (this.#dependencies.prepareRuntime === undefined) {
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          scanEnvironment,
+          (path) =>
+            requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+        );
+        releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
+          credentialHome,
+          signal,
+        );
+      }
+      const previousRuntime = this.#runtime;
+      const runtime = await this.#ensureRuntime(
+        signal,
+        temporaryRoot,
+        (path) =>
+          requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+        options.auth,
+        requestedConfig,
+      );
+      if (
+        runtime === previousRuntime &&
+        this.#dependencies.prepareRuntime === undefined
+      ) {
+        await this.#refreshPersistentRuntime(
+          runtime,
+          scanEnvironment,
+          signal,
+          requestedConfig,
+        );
+      }
+      const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
+      const approvalPolicy = scanApprovalPolicy(effectiveConfig);
+      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
+      if (runtime.configPath !== undefined) {
+        await writeCodexConfig(runtime.configPath, preflightConfig);
+      }
+      const runtimeHome = await realpath(runtime.codexHome);
+      requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      const sessionConfig = scanRuntimeCodexConfig(
+        effectiveConfig,
+        stateDirectory,
+        runtimeHome,
+      );
+      if (
+        options.expectedPluginVersion !== undefined &&
+        runtime.plugin.version !== options.expectedPluginVersion
+      ) {
+        throw new CodexSecurityError(
+          `The original scan used plugin version ${options.expectedPluginVersion}, but the installed version is ${runtime.plugin.version}.`,
+        );
+      }
+      checkOpen();
+      if (
+        authentication.method === "stored_credentials" &&
+        this.#runtimeCredentialSource === "api_key"
+      ) {
+        const ambientHome =
+          environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
+          join(homedir(), ".codex");
+        runtime.credentialsAvailable = await importAmbientAuth(
+          ambientHome,
+          runtime.codexHome,
+        );
+        this.#runtimeCredentialSource = runtime.credentialsAvailable
+          ? "stored_credentials"
+          : null;
+      }
+      if (!keepCredentialLock || runtime.deepScanConfigPath !== undefined) {
+        await releaseCredentialHome?.();
+        releaseCredentialHome = null;
+      }
+      if (externalProvider === null && apiKey !== null) {
+        this.#runtimeCredentialSource = "api_key";
+      }
+      if (
+        !runtime.credentialsAvailable &&
+        authentication.method === "stored_credentials"
+      ) {
+        const status = await accountStatus(
+          this.#codexCommand(),
+          runtime.environment,
+          signal,
+        );
+        runtime.credentialsAvailable = status.authenticated;
+        this.#runtimeCredentialSource = status.authenticated
+          ? "stored_credentials"
+          : null;
+      }
+      if (
+        !runtime.credentialsAvailable &&
+        apiKey === null &&
+        authentication.method !== "aws_credentials"
+      ) {
+        throw new AuthenticationRequiredError(
+          "No credentials were found. Run 'codex-security login', use " +
+            "'codex-security login --device-auth' on a remote or headless machine, or set " +
+            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
+        );
+      }
+      authentication = await runtimeScanAuthentication(
+        this.#dependencies.environment,
+        runtime.codexHome,
+        options.auth,
+        modelProvider,
+      );
+      notifyObserver(
+        "onAuthentication",
+        options.onAuthentication,
+        options.onObserverError,
+        authentication,
+      );
+      const python = await (
+        this.#dependencies.resolvePluginPython ?? resolvePluginPython
+      )({
+        configuredPath: this.config.pythonPath,
+        environment: scanEnvironment,
+        protectedRoot,
+        signal,
+      });
+      checkOpen();
+      return {
+        runtime,
+        runtimeHome,
+        effectiveConfig,
+        preflightConfig,
+        sessionConfig,
+        modelProvider,
+        externalProvider,
+        apiKey,
+        scanEnvironment,
+        authentication,
+        approvalPolicy,
+        python,
+        releaseCredentialHome,
+      };
+    } catch (error) {
+      try {
+        await releaseCredentialHome?.();
+      } catch (cleanupError) {
+        warnCleanupFailed(options, cleanupError, "runtime preparation");
+      }
+      throw error;
+    }
+  }
+
   async #ensureRuntime(
     signal?: AbortSignal,
     temporaryRoot?: string,
@@ -2072,6 +2177,7 @@ export async function initialCredentialsAvailable(
 function warnCleanupFailed(
   options: Pick<ScanOptions, "onWarning" | "onObserverError">,
   reason: unknown,
+  operation = "scan",
 ): void {
   // This runs where a throw would replace the scan result, so every step is inside the
   // guard: reading the reason, coercing it, and reading the observers off the options can
@@ -2083,7 +2189,7 @@ function warnCleanupFailed(
       "onWarning",
       options.onWarning,
       options.onObserverError,
-      `Could not clean up after the Codex Security scan: ${message}`,
+      `Could not clean up after the Codex Security ${operation}: ${message}`,
     );
   } catch {}
 }
@@ -2129,110 +2235,83 @@ interface ScanEventRunOptions {
 export async function runScanEvents(
   options: ScanEventRunOptions,
 ): Promise<ScanResult> {
-  let threadId = options.thread.id;
   let scanStarted = false;
-  let status = "in_progress";
-  let finalResponse = "";
-  let usage: unknown = null;
-  let lastStreamError: string | null = null;
   let tacStatusReported = false;
   try {
-    for await (const event of scanEventsWithOptionalUsage(options.events)) {
-      if (!tacStatusReported) {
-        const tacStatus = trustedAccessStatusFromEvent(event);
-        if (tacStatus !== null) {
-          tacStatusReported = true;
-          notifyObserver(
-            "onTrustedAccessStatus",
-            options.onTrustedAccessStatus,
-            options.onObserverError,
-            tacStatus,
-          );
-          if (tacStatus !== "granted") {
+    const turn = await readCodexTurn({
+      thread: options.thread,
+      events: options.events,
+      onEvent: async (event) => {
+        if (!tacStatusReported) {
+          const tacStatus = trustedAccessStatusFromEvent(event);
+          if (tacStatus !== null) {
+            tacStatusReported = true;
             notifyObserver(
-              "onWarning",
-              options.onWarning,
+              "onTrustedAccessStatus",
+              options.onTrustedAccessStatus,
               options.onObserverError,
-              trustedAccessWarning(tacStatus, options.authentication),
+              tacStatus,
+            );
+            if (tacStatus !== "granted") {
+              notifyObserver(
+                "onWarning",
+                options.onWarning,
+                options.onObserverError,
+                trustedAccessWarning(tacStatus, options.authentication),
+              );
+            }
+          }
+        }
+        for (const activity of scanActivitiesFromEvent(
+          event,
+          options.expectation.repository,
+        )) {
+          notifyObserver(
+            "onActivity",
+            options.onActivity,
+            options.onObserverError,
+            activity,
+          );
+        }
+        for (const progress of scanProgressUpdatesFromEvent(event)) {
+          if (
+            options.expectedFilesTotal !== undefined &&
+            progress.filesTotal !== options.expectedFilesTotal
+          ) {
+            continue;
+          }
+          notifyObserver(
+            "onProgress",
+            options.onProgress,
+            options.onObserverError,
+            progress,
+          );
+        }
+        const workerStatus = workerStatusFromEvent(event);
+        if (workerStatus !== null) {
+          notifyObserver(
+            "onWorkerStatus",
+            options.onWorkerStatus,
+            options.onObserverError,
+            workerStatus,
+          );
+        }
+        if (event.type === "thread.started") {
+          const startedThreadId = event["thread_id"];
+          if (typeof startedThreadId === "string") {
+            await options.onThreadStarted?.(startedThreadId);
+          }
+          if (!scanStarted) {
+            scanStarted = true;
+            notifyObserver(
+              "onScanStarted",
+              options.onScanStarted,
+              options.onObserverError,
             );
           }
         }
-      }
-      for (const activity of scanActivitiesFromEvent(
-        event,
-        options.expectation.repository,
-      )) {
-        notifyObserver(
-          "onActivity",
-          options.onActivity,
-          options.onObserverError,
-          activity,
-        );
-      }
-      for (const progress of scanProgressUpdatesFromEvent(event)) {
-        if (
-          options.expectedFilesTotal !== undefined &&
-          progress.filesTotal !== options.expectedFilesTotal
-        ) {
-          continue;
-        }
-        notifyObserver(
-          "onProgress",
-          options.onProgress,
-          options.onObserverError,
-          progress,
-        );
-      }
-      const workerStatus = workerStatusFromEvent(event);
-      if (workerStatus !== null) {
-        notifyObserver(
-          "onWorkerStatus",
-          options.onWorkerStatus,
-          options.onObserverError,
-          workerStatus,
-        );
-      }
-      if (event.type === "thread.started") {
-        const startedThreadId = event["thread_id"];
-        if (typeof startedThreadId === "string") {
-          threadId = startedThreadId;
-          await options.onThreadStarted?.(startedThreadId);
-        }
-        if (!scanStarted) {
-          scanStarted = true;
-          notifyObserver(
-            "onScanStarted",
-            options.onScanStarted,
-            options.onObserverError,
-          );
-        }
-      } else if (
-        event.type === "item.completed" &&
-        isRecord(event["item"]) &&
-        event["item"]["type"] === "agent_message" &&
-        typeof event["item"]["text"] === "string"
-      ) {
-        finalResponse = event["item"]["text"];
-      } else if (event.type === "turn.completed") {
-        status = "completed";
-        usage = event["usage"];
-      } else if (event.type === "turn.failed") {
-        throw new CodexSecurityError(turnFailureMessage(event["error"]));
-      } else if (
-        event.type === "error" &&
-        typeof event["message"] === "string"
-      ) {
-        const message = event["message"];
-        const classification = classifyConnectionFailure(message);
-        if (
-          classification === "unauthorized" ||
-          classification === "forbidden"
-        ) {
-          throw new CodexSecurityError(message);
-        }
-        const reconnect = reconnectAttempt(message);
-        if (reconnect === null) throw new CodexSecurityError(message);
-        lastStreamError = message;
+      },
+      onReconnect: (message, reconnect) => {
         notifyObserver(
           "onReconnect",
           options.onReconnect,
@@ -2240,8 +2319,10 @@ export async function runScanEvents(
           ...reconnect,
           reconnectDetails(message),
         );
-      }
-    }
+      },
+    });
+    const { status, threadId, finalResponse, lastStreamError } = turn;
+    let { usage } = turn;
     if (options.signal.aborted) {
       throw new ScanInterruptedError(
         `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
@@ -2298,7 +2379,58 @@ export async function runScanEvents(
   }
 }
 
-async function* scanEventsWithOptionalUsage(
+async function readCodexTurn(options: {
+  thread: CodexThreadLike;
+  events: AsyncGenerator<ScanEvent>;
+  onEvent?: (event: ScanEvent) => Promise<void> | void;
+  onReconnect?: (message: string, attempts: [number, number]) => void;
+}): Promise<{
+  threadId: string | null;
+  status: "in_progress" | "completed";
+  finalResponse: string;
+  usage: unknown;
+  lastStreamError: string | null;
+}> {
+  let threadId = options.thread.id;
+  let status: "in_progress" | "completed" = "in_progress";
+  let finalResponse = "";
+  let usage: unknown = null;
+  let lastStreamError: string | null = null;
+  for await (const event of eventsWithOptionalUsage(options.events)) {
+    await options.onEvent?.(event);
+    if (
+      event.type === "thread.started" &&
+      typeof event["thread_id"] === "string"
+    ) {
+      threadId = event["thread_id"];
+    } else if (
+      event.type === "item.completed" &&
+      isRecord(event["item"]) &&
+      event["item"]["type"] === "agent_message" &&
+      typeof event["item"]["text"] === "string"
+    ) {
+      finalResponse = event["item"]["text"];
+    } else if (event.type === "turn.completed") {
+      status = "completed";
+      usage = event["usage"];
+    } else if (event.type === "turn.failed") {
+      throw new CodexSecurityError(turnFailureMessage(event["error"]));
+    } else if (event.type === "error" && typeof event["message"] === "string") {
+      const message = event["message"];
+      const classification = classifyConnectionFailure(message);
+      if (classification === "unauthorized" || classification === "forbidden") {
+        throw new CodexSecurityError(message);
+      }
+      const reconnect = reconnectAttempt(message);
+      if (reconnect === null) throw new CodexSecurityError(message);
+      lastStreamError = message;
+      options.onReconnect?.(message, reconnect);
+    }
+  }
+  return { threadId, status, finalResponse, usage, lastStreamError };
+}
+
+async function* eventsWithOptionalUsage(
   events: AsyncGenerator<ScanEvent>,
 ): AsyncGenerator<ScanEvent> {
   try {
