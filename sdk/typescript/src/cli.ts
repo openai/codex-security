@@ -581,11 +581,14 @@ async function readPromptFiles(
   const [scanPrompt, postScanPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
-      : readRegularInputFile(resolve(directory, scanPromptFile), repository),
+      : readRegularInputFile(
+          resolveCliPath(directory, scanPromptFile),
+          repository,
+        ),
     postScanPromptFile === undefined
       ? undefined
       : readRegularInputFile(
-          resolve(directory, postScanPromptFile),
+          resolveCliPath(directory, postScanPromptFile),
           repository,
         ),
   ]);
@@ -639,6 +642,10 @@ async function readRegularInputFile(
   } finally {
     await file.close();
   }
+}
+
+export function resolveCliPath(directory: string, value: string): string {
+  return resolve(directory, expandHome(value));
 }
 
 interface ScanArguments extends DeepScanOptions {
@@ -891,7 +898,9 @@ export async function runCodexSkillCommand(
     if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
   }
   if (configuredHome?.trim()) {
-    environment["CODEX_HOME"] = resolve(expandHome(configuredHome));
+    environment["CODEX_HOME"] = resolve(
+      expandHome(configuredHome, processEnvironment),
+    );
   }
   const invocation = spawn(command.command, [...args], {
     env: environment,
@@ -1271,7 +1280,7 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const repository = resolve(
+      const repository = resolveCliPath(
         dependencies.currentDirectory(),
         args.repository ?? ".",
       );
@@ -1320,26 +1329,25 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         const directory = dependencies.currentDirectory();
-        const repository =
-          options.scanRoot !== undefined && args.repository === undefined
+        const scanRoot =
+          options.scanRoot === undefined
             ? undefined
-            : resolve(directory, args.repository ?? directory);
+            : resolveCliPath(directory, options.scanRoot);
+        const repository =
+          scanRoot !== undefined && args.repository === undefined
+            ? undefined
+            : resolveCliPath(directory, args.repository ?? directory);
         return presentHistory(
           await history([
             "list-scans",
             ...(repository === undefined ? [] : ["--repository", repository]),
-            ...(options.scanRoot === undefined
-              ? []
-              : ["--scan-root", resolve(directory, options.scanRoot)]),
+            ...(scanRoot === undefined ? [] : ["--scan-root", scanRoot]),
           ]),
           "list",
           format,
           {
             repository,
-            scanRoot:
-              options.scanRoot === undefined
-                ? undefined
-                : resolve(directory, options.scanRoot),
+            scanRoot,
           },
         );
       },
@@ -2158,7 +2166,10 @@ export async function main(
             "git",
             [
               "-C",
-              resolve(dependencies.currentDirectory(), args.repository ?? "."),
+              resolveCliPath(
+                dependencies.currentDirectory(),
+                args.repository ?? ".",
+              ),
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
@@ -2336,8 +2347,8 @@ export async function main(
                 "--output-dir is required with a repository CSV.",
               );
             }
-            inputPath = resolve(currentDirectory, args.input);
-            outputDir = resolve(currentDirectory, options.outputDir);
+            inputPath = resolveCliPath(currentDirectory, args.input);
+            outputDir = resolveCliPath(currentDirectory, options.outputDir);
           }
           const result = await runMultiscan({
             inputPath,
@@ -2433,12 +2444,12 @@ export async function main(
         if (scanDir === undefined) return;
         exitCode = await runExport(
           {
-            scanDir: resolve(currentDirectory, scanDir),
+            scanDir: resolveCliPath(currentDirectory, scanDir),
             format: options.exportFormat,
             output:
               options.output === "-"
                 ? "-"
-                : resolve(
+                : resolveCliPath(
                     currentDirectory,
                     options.output ??
                       EXPORT_DEFAULT_OUTPUTS[options.exportFormat],
@@ -2446,7 +2457,7 @@ export async function main(
             sourceRoot:
               options.sourceRoot === undefined
                 ? undefined
-                : resolve(currentDirectory, options.sourceRoot),
+                : resolveCliPath(currentDirectory, options.sourceRoot),
             pythonPath: options.python,
           },
           output,
@@ -3262,7 +3273,7 @@ async function runSkill(
         !staysWithinWindowsDeviceRoot(input, rawDeviceRoot) ||
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
-      const path = resolve(directory, input);
+      const path = resolveCliPath(directory, input);
       const metadata = await lstat(path).catch((error: unknown) => {
         if (
           typeof error === "object" &&

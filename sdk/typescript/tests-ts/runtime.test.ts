@@ -17,7 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   delimiter,
   dirname,
@@ -1807,6 +1807,16 @@ describe("plugin runtime preparation", () => {
     expect(
       resolveCodexCommand({ CODEX_CLI_PATH: `./bin/${executable}` }),
     ).toEqual({ command: join(process.cwd(), "bin", executable) });
+    expect(
+      resolveCodexCommand({ CODEX_CLI_PATH: `~/bin/${executable}` }),
+    ).toEqual({
+      command: join(homedir(), "bin", executable),
+    });
+    expect(
+      resolveCodexCommand({ CODEX_CLI_PATH: `~\\bin\\${executable}` }),
+    ).toEqual({
+      command: join(homedir(), "bin", executable),
+    });
     expect(resolveCodexCommand({ Codex_Cli_Path: configured })).toEqual({
       command: configured,
     });
@@ -3660,7 +3670,14 @@ describe("runtime directories and plugin Python boundary", () => {
     };
     expect(payload.user_config_path).toBe(configPath);
     expect(payload.config_paths).toEqual([
-      join("/", "etc", "codex", "config.toml"),
+      process.platform === "win32"
+        ? join(
+            process.env["ProgramData"] ?? "C:\\ProgramData",
+            "OpenAI",
+            "Codex",
+            "config.toml",
+          )
+        : join("/", "etc", "codex", "config.toml"),
       configPath,
     ]);
     expect(
@@ -3669,6 +3686,69 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ).toMatchObject({ actual: 8, source: configPath });
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "loads machine-wide Windows settings during preflight discovery",
+    async () => {
+      const root = await temporaryDirectory();
+      const codexHome = join(root, "codex-home");
+      const programData = join(root, "ProgramData");
+      const systemConfig = join(programData, "OpenAI", "Codex", "config.toml");
+      const repository = join(root, "repository");
+      await mkdir(dirname(systemConfig), { recursive: true });
+      await mkdir(codexHome);
+      await mkdir(repository);
+      await writeFile(systemConfig, "[agents]\nmax_threads = 8\n");
+
+      const python =
+        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          "--profile",
+          "security_scan",
+          "--cwd",
+          repository,
+          "--runtime-check",
+          "delegation_available=true",
+          "--multi-agent-runtime-owner",
+          "native",
+          "--multi-agent-runtime-version",
+          "v1",
+          "--multi-agent-runtime-provenance",
+          "app-server",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_HOME: codexHome,
+            ProgramData: programData,
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      const payload = JSON.parse(result.stdout) as {
+        config_paths: string[];
+        results: { capability: string; actual: number; source: string }[];
+      };
+      expect(payload.config_paths).toEqual([
+        systemConfig,
+        join(codexHome, "config.toml"),
+      ]);
+      expect(
+        payload.results.find(
+          (result) => result.capability === "usable_worker_slots_6",
+        ),
+      ).toMatchObject({ actual: 8, source: systemConfig });
+    },
+  );
 
   test("continues when optional preflight capabilities are unknown", async () => {
     const root = await temporaryDirectory();

@@ -293,6 +293,31 @@ describe("bulk scan repository discovery", () => {
     expect(csv).not.toContain("unrelated");
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "expands a backslash home-relative output directory",
+    async () => {
+      const home = await temporaryDirectory();
+      const currentDirectory = join(home, "current");
+      await mkdir(currentDirectory);
+      const { dependencies, prompt } = discoveryDependencies(currentDirectory);
+      prompt.confirms = [true];
+      prompt.inputs = ["~\\bulk-results"];
+      const previousUserProfile = process.env["USERPROFILE"];
+      process.env["USERPROFILE"] = home;
+      try {
+        const result = await runBulkScanWizard(dependencies);
+
+        expect(result?.outputDir).toBe(join(home, "bulk-results"));
+      } finally {
+        if (previousUserProfile === undefined) {
+          delete process.env["USERPROFILE"];
+        } else {
+          process.env["USERPROFILE"] = previousUserProfile;
+        }
+      }
+    },
+  );
+
   test("includes public repositories and excludes archived, forked, and empty repositories", async () => {
     const root = await temporaryDirectory();
     const { dependencies, prompt } = discoveryDependencies(root, {
