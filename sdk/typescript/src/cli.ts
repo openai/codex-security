@@ -7,7 +7,7 @@ import {
   existsSync,
   lstatSync,
   realpathSync,
-  type Stats,
+  type BigIntStats,
   writeSync,
 } from "node:fs";
 import {
@@ -598,9 +598,9 @@ async function readPromptFiles(
 async function readRegularInputFile(
   path: string,
   repository: string,
-  metadata?: Pick<Stats, "isFile" | "dev" | "ino">,
+  metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
-  const selected = metadata ?? (await lstat(path));
+  const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
@@ -627,7 +627,7 @@ async function readRegularInputFile(
       (constants.O_NONBLOCK ?? 0),
   );
   try {
-    const opened = await file.stat();
+    const opened = await file.stat({ bigint: true });
     if (
       !opened.isFile() ||
       opened.dev !== selected.dev ||
@@ -3244,22 +3244,24 @@ async function runSkill(
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
       const path = resolve(directory, input);
-      const metadata = await lstat(path).catch((error: unknown) => {
-        if (
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          (error.code === "ENOENT" ||
-            error.code === "ENOTDIR" ||
-            error.code === "ENAMETOOLONG" ||
-            error.code === "EINVAL")
-        ) {
-          return undefined;
-        }
-        throw new CodexSecurityError(
-          "Could not read the finding or issue input.",
-        );
-      });
+      const metadata = await lstat(path, { bigint: true }).catch(
+        (error: unknown) => {
+          if (
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            (error.code === "ENOENT" ||
+              error.code === "ENOTDIR" ||
+              error.code === "ENAMETOOLONG" ||
+              error.code === "EINVAL")
+          ) {
+            return undefined;
+          }
+          throw new CodexSecurityError(
+            "Could not read the finding or issue input.",
+          );
+        },
+      );
       if (metadata !== undefined) {
         if (!metadata.isFile()) {
           throw new CodexSecurityError(
