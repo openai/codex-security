@@ -305,7 +305,13 @@ export class ScanCostTracker {
         });
       }
       if (worker !== undefined) {
-        this.#reportWorkerActivities(session, worker);
+        for (const activity of session.activities.splice(0)) {
+          this.#options.onActivity?.({
+            ...activity,
+            id: `${threadId}:${activity.id}`,
+            worker,
+          });
+        }
         this.#reportWorkerProgress(session);
       }
       if (session.usage !== null) {
@@ -316,19 +322,6 @@ export class ScanCostTracker {
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
     this.#reportCost(cost);
-  }
-
-  #reportWorkerActivities(session: SessionUsage, worker: number): void {
-    if (this.#options.onActivity === undefined || session.threadId === null) {
-      return;
-    }
-    for (const activity of session.activities.splice(0)) {
-      this.#options.onActivity({
-        ...activity,
-        id: `${session.threadId}:${activity.id}`,
-        worker,
-      });
-    }
   }
 
   #reportWorkerProgress(session: SessionUsage): void {

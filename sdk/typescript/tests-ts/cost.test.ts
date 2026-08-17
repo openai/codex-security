@@ -501,80 +501,6 @@ describe("live scan cost tracking", () => {
     expect(events).toHaveLength(6);
   });
 
-  test.each([false, true])(
-    "shares worker labels with session events when activity is enabled: %s",
-    async (withActivity) => {
-      const home = await codexHome();
-      const scanDirectory = join(home, "scan");
-      const usage = { input_tokens: 10, output_tokens: 1 };
-      await writeSession(
-        home,
-        "scan-thread",
-        usage,
-        undefined,
-        scanDirectory,
-        "2026-07-26T12:00:00Z",
-      );
-      const worker = await writeSession(
-        home,
-        "worker-thread",
-        usage,
-        undefined,
-        join(
-          scanDirectory,
-          "artifacts",
-          "deep_discovery",
-          "workers",
-          "one",
-          "output",
-        ),
-        "2026-07-26T12:01:00Z",
-      );
-      await appendSessionItem(worker, {
-        id: "worker-message",
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Worker output." }],
-      });
-      const events: ScanSessionEvent[] = [];
-      const activities: ScanActivity[] = [];
-      const tracker = new ScanCostTracker({
-        codexHome: home,
-        repository: home,
-        scanDirectory,
-        model: "gpt-5.6-sol",
-        onSessionEvent: (event) => events.push(event),
-        onActivity: withActivity
-          ? (activity) => activities.push(activity)
-          : undefined,
-      });
-      tracker.start("scan-thread");
-      await tracker.stop();
-
-      expect(
-        events
-          .filter((event) => event.threadId === "scan-thread")
-          .map((event) => event.worker),
-      ).toEqual([undefined, undefined]);
-      expect(
-        new Set(
-          events
-            .filter((event) => event.threadId === "worker-thread")
-            .map((event) => event.worker),
-        ),
-      ).toEqual(new Set([1]));
-      if (withActivity) {
-        expect(
-          activities.find(
-            (activity) => activity.description === "Worker output.",
-          )?.worker,
-        ).toBe(1);
-      } else {
-        expect(activities).toEqual([]);
-      }
-    },
-  );
-
   test.each(["parent", "main"] as const)(
     "replays early worker events when the %s session arrives later",
     async (missing) => {
@@ -732,10 +658,12 @@ describe("live scan cost tracking", () => {
       join(scanDirectory, "nested", "artifacts"),
       "2026-07-26T12:03:00Z",
     );
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
       scanDirectory,
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
 
@@ -743,6 +671,21 @@ describe("live scan cost tracking", () => {
       input_tokens: 1_425,
       output_tokens: 14,
     });
+    const labels = new Map(
+      events.map(({ threadId, worker }) => [threadId, worker]),
+    );
+    expect(new Set(labels.keys())).toEqual(
+      new Set([
+        "scan-thread",
+        "deep-worker",
+        "deep-reducer",
+        "deep-worker-child",
+      ]),
+    );
+    expect(labels.get("scan-thread")).toBeUndefined();
+    expect(
+      [...labels.values()].filter((worker) => worker !== undefined).sort(),
+    ).toEqual([1, 2, 3]);
   });
 
   test("ignores replayed parent history in forked worker sessions", async () => {
@@ -956,11 +899,13 @@ describe("live scan cost tracking", () => {
     }
 
     const activities: ScanActivity[] = [];
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
       repository: "/code/juice-shop",
       onActivity: (activity) => activities.push(activity),
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
     await tracker.stop();
@@ -983,6 +928,14 @@ describe("live scan cost tracking", () => {
         worker: 1,
       },
     ]);
+    expect(
+      new Map(events.map(({ threadId, worker }) => [threadId, worker])),
+    ).toEqual(
+      new Map([
+        ["scan-thread", undefined],
+        ["worker-thread", 1],
+      ]),
+    );
   });
 
   test("forwards genuine worker reasoning and transcript text", async () => {
