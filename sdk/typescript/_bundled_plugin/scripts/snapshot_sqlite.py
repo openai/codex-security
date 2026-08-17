@@ -16,6 +16,8 @@ def main() -> None:
     source = args.source.expanduser().resolve(strict=True)
     destination = args.destination.expanduser().absolute()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and source.samefile(destination):
+        parser.error("source and destination must refer to different database files")
     with sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True) as source_connection:
         with sqlite3.connect(destination) as destination_connection:
             source_connection.backup(destination_connection)
