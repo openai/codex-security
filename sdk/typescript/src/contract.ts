@@ -173,6 +173,13 @@ export async function loadContract(
   return { manifest, findings, coverage };
 }
 
+export async function requireCanonicalScanDirectory(
+  scanDirectory: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (await requireScanRoot(scanDirectory, signal)).path;
+}
+
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,

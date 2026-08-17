@@ -1,5 +1,8 @@
-import { resolve } from "node:path";
-import { loadContract, type LoadedContract } from "./contract.js";
+import {
+  loadContract,
+  requireCanonicalScanDirectory,
+  type LoadedContract,
+} from "./contract.js";
 import type {
   Finding,
   FindingCodeEvidence,
@@ -50,7 +53,9 @@ export async function prepareScanPublication(
   scanDirectory: string,
   options: PrepareScanPublicationOptions,
 ): Promise<PreparedScanPublication> {
-  const contract = await loadContract(scanDirectory, {
+  const canonicalScanDirectory =
+    await requireCanonicalScanDirectory(scanDirectory);
+  const contract = await loadContract(canonicalScanDirectory, {
     pluginRoot: await bundledPluginRoot(),
   });
   const uploadedAt = options.uploadedAt ?? new Date().toISOString();
@@ -59,7 +64,7 @@ export async function prepareScanPublication(
   return {
     scanId,
     uploadId: scanId,
-    scanDirectory: resolve(scanDirectory),
+    scanDirectory: canonicalScanDirectory,
     destination: {
       type: options.destination,
       teamId: options.teamId,
