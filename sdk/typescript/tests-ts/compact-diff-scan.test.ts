@@ -474,10 +474,11 @@ describe("compact diff scan", () => {
         claimToken: handoffClaimToken,
         threadId: owner,
       });
-      await call("get_codex_security_scan_context", {
+      const scanContext = await call("get_codex_security_scan_context", {
         scanId,
         handoffClaimToken,
       });
+      const scanDir = (scanContext["scan"] as JsonObject)["scanDir"] as string;
 
       const inventory = await call("prepare_codex_security_review_items", {
         scanId,
@@ -539,6 +540,42 @@ describe("compact diff scan", () => {
         findings: [
           {
             ...finding,
+            identity: {
+              anchor: "candidate-duplicate-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-duplicate-instance",
+              reportId: "DSS-147-A",
+            },
+          },
+        ],
+        coverage: {
+          completeness: "complete",
+          surfaces: [{ label: "Changed files", disposition: "rejected" }],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      expect(
+        (
+          JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
+            findings: JsonObject[];
+          }
+        ).findings.map((draftFinding) => draftFinding["identity"]),
+      ).toEqual([
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+      ]);
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [
+          {
+            ...finding,
             extensions: {
               candidateId: "candidate-singleton",
               reportId: "DSS-144-A",
@@ -589,7 +626,7 @@ describe("compact diff scan", () => {
             ...finding,
             extensions: {
               candidateId: "candidate-authored-instance",
-              reportId: "DSS-147-A",
+              reportId: "DSS-147-B",
             },
           },
           {
@@ -645,7 +682,7 @@ describe("compact diff scan", () => {
         { anchor: "candidate-authored-instance", instance: "dss-147-a" },
         {
           anchor: "candidate-authored-instance",
-          instance: "dss-147-a-2",
+          instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
       ]);
