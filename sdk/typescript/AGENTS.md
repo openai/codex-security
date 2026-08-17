@@ -44,3 +44,9 @@ pnpm run types
 pnpm run format
 pnpm run test
 ```
+
+After the implementation is verified, keep the test in the final change only
+when it provides meaningful, durable regression coverage. If it is merely
+disposable implementation scaffolding, duplicates existing coverage, or would
+add brittle or low-value maintenance burden, remove it before committing or
+opening a PR and do not include it in the submitted change.
