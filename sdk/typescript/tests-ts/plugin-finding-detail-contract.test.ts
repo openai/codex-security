@@ -370,6 +370,22 @@ describe("bundled plugin finding detail contracts", () => {
     );
   });
 
+  test("projects the top-level attack-path summary as reachability", () => {
+    const report = projectFindingDetails({
+      attackPath: {
+        summary: "An authenticated uploader can trigger archive extraction.",
+      },
+    });
+
+    const reachability = report
+      .split("#### Reachability", 2)[1]!
+      .split("#### Severity", 1)[0]!;
+    expect(reachability).toContain(
+      "An authenticated uploader can trigger archive extraction.",
+    );
+    expect(reachability).not.toContain("Reachability was not recorded");
+  });
+
   test("merges root-cause aliases in generated reports", () => {
     const report = projectFindingDetails({
       rootCause: { summary: "" },

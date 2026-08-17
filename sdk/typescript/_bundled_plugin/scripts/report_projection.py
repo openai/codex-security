@@ -561,7 +561,10 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     )
     reachability_summary = _text(
         reachability.get("summary"),
-        "Reachability was not recorded beyond the canonical finding summary and affected locations.",
+        _text(
+            attack_path.get("summary"),
+            "Reachability was not recorded beyond the canonical finding summary and affected locations.",
+        ),
     )
     severity_rationale = _text(
         severity.get("rationale"),
