@@ -378,7 +378,7 @@ describe("bundled plugin finding detail contracts", () => {
         code: "destination.write_bytes(payload)",
         language: "python",
       },
-    });
+    }).replaceAll("\r\n", "\n");
 
     expect(report).toContain(
       "The destination is not contained before the write.",
