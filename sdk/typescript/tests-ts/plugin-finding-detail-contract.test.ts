@@ -404,6 +404,49 @@ describe("bundled plugin finding detail contracts", () => {
     expect(dataflow).toContain("- Trigger automatic extraction.");
   });
 
+  test("projects typed assessments and validation outcomes", () => {
+    const report = projectFindingDetails({
+      validation: {
+        status: "validated",
+        disposition: "reported",
+        result: "The traversal write was confirmed.",
+      },
+      attackPath: {
+        impact: {
+          level: "high",
+          rationale: "The write can overwrite application files.",
+          why: "The destination escapes the extraction root.",
+        },
+        likelihood: "Likely for authenticated uploaders.",
+        reachability: {
+          source: "Attacker-controlled archive entry.",
+          sink: "Unchecked filesystem write.",
+        },
+      },
+    });
+
+    expect(report).toContain("- **Status:** validated");
+    expect(report).toContain("- **Disposition:** reported");
+    expect(report).toContain(
+      "- **Result:** The traversal write was confirmed.",
+    );
+    expect(report).toContain(
+      "- **Source:** Attacker-controlled archive entry.",
+    );
+    expect(report).toContain("- **Sink:** Unchecked filesystem write.");
+    expect(report).toContain("Impact assessment:");
+    expect(report).toContain("- **Level:** high");
+    expect(report).toContain(
+      "- **Rationale:** The write can overwrite application files.",
+    );
+    expect(report).toContain(
+      "- **Why:** The destination escapes the extraction root.",
+    );
+    expect(report).toContain(
+      "**Likelihood assessment:** Likely for authenticated uploaders.",
+    );
+  });
+
   test("merges root-cause aliases in generated reports", () => {
     const report = projectFindingDetails({
       rootCause: { summary: "" },

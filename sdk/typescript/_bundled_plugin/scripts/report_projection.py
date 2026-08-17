@@ -539,9 +539,20 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         else {}
     )
     severity = finding["severity"]
+    validation_outcomes = [
+        (label, text)
+        for label, key in (
+            ("Status", "status"),
+            ("Disposition", "disposition"),
+            ("Result", "result"),
+        )
+        if (text := _text(validation.get(key), ""))
+    ]
     validation_summary = _text(
         validation.get("summary"),
-        f"{finding['confidence']['rationale']} Validation details were not recorded separately.",
+        "Validation outcomes are recorded below."
+        if validation_outcomes
+        else f"{finding['confidence']['rationale']} Validation details were not recorded separately.",
     )
     validation_evidence = _strings(validation.get("evidence"))
     validation_assertions = _strings(validation.get("assertions"))
@@ -605,6 +616,10 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     lines.extend(["", "#### Validation", "", validation_summary])
     if validation.get("method"):
         lines.extend(["", f"Validation method: {_text(validation['method'], 'not recorded')}"])
+    if validation_outcomes:
+        lines.extend(
+            ["", *(f"- **{label}:** {value}" for label, value in validation_outcomes)]
+        )
     lines.extend(_code_evidence_lines(validation_code_evidence))
     if validation_assertions:
         lines.extend(["", "Assertions:", *_bullets(validation_assertions, "None recorded.")])
@@ -634,6 +649,8 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
     for label, key in (
         ("Attacker", "attacker"),
         ("Entry point", "entrypoint"),
+        ("Source", "source"),
+        ("Sink", "sink"),
         ("Outcome", "outcome"),
     ):
         if reachability.get(key):
@@ -657,6 +674,32 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             f"**{severity['level'].capitalize()}** — {severity_rationale}",
             "",
             severity_change,
+        ]
+    )
+    for label, key in (("Impact", "impact"), ("Likelihood", "likelihood")):
+        assessment = attack_path.get(key)
+        if isinstance(assessment, str):
+            rendered = _text(assessment, "")
+            if rendered:
+                lines.extend(["", f"**{label} assessment:** {rendered}"])
+            continue
+        if not isinstance(assessment, dict):
+            continue
+        details = [
+            (detail_label, text)
+            for detail_label, detail_key in (
+                ("Level", "level"),
+                ("Rationale", "rationale"),
+                ("Why", "why"),
+            )
+            if (text := _text(assessment.get(detail_key), ""))
+        ]
+        if details:
+            lines.extend(
+                ["", f"{label} assessment:", *(f"- **{name}:** {value}" for name, value in details)]
+            )
+    lines.extend(
+        [
             "",
             "#### Remediation",
             "",
