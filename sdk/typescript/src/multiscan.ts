@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -367,8 +368,18 @@ async function ensureOutputDirectory(path: string): Promise<string> {
   if (metadata?.isSymbolicLink()) {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
-  await mkdir(path, { recursive: true, mode: 0o700 });
-  const canonical = await realpath(path);
+  if (metadata !== undefined && !metadata.isDirectory()) {
+    throw new Error("Multiscan output paths must be directories.");
+  }
+  let prepared = path;
+  if (metadata === undefined) {
+    prepared =
+      process.platform === "win32"
+        ? await canonicalWindowsCreationPath(path)
+        : path;
+    await mkdir(prepared, { recursive: true, mode: 0o700 });
+  }
+  const canonical = await realpath(prepared);
   const directory = await lstat(canonical);
   if (
     metadata !== undefined &&
@@ -389,6 +400,20 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     );
   }
   return canonical;
+}
+
+async function canonicalWindowsCreationPath(path: string): Promise<string> {
+  let ancestor = dirname(path);
+  for (;;) {
+    try {
+      return resolve(await realpath(ancestor), relative(ancestor, path));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      ancestor = parent;
+    }
+  }
 }
 
 async function appendReceipt(path: string, receipt: string): Promise<void> {
@@ -762,7 +787,15 @@ function normalizeRepository(repository: string, directory: string): string {
     );
   }
   if (/^[^@\s/:]+@[^:\s/]+:.+$/u.test(repository)) return repository;
-  if (!repository.includes("://")) return resolve(directory, repository);
+  if (!repository.includes("://")) {
+    const path = resolve(directory, repository);
+    if (process.platform !== "win32") return path;
+    try {
+      return realpathSync.native(path);
+    } catch {
+      return path;
+    }
+  }
   let url: URL;
   try {
     url = new URL(repository);

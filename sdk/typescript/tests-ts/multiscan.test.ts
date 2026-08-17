@@ -1539,6 +1539,31 @@ describe("multiscan", () => {
     expect(calls).toBe(2);
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "resumes campaigns across Windows repository path aliases",
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "resume-alias");
+      const inventory = (repositoryPath: string) =>
+        `id,repository,revision\nresume,${repositoryPath},${source.revision}\n`;
+      let calls = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        calls += 1;
+        return await completedScan(scanOptions.outputDir!);
+      });
+
+      await writeFile(paths.input, inventory(source.path));
+      await runMultiscan(options(paths, security));
+      await writeFile(paths.input, inventory(source.path.toUpperCase()));
+
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(calls).toBe(1);
+    },
+  );
+
   test("ignores repository-local Git shims while preserving credential configuration", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "private");
