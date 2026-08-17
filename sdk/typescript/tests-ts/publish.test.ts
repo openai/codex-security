@@ -157,7 +157,8 @@ function linearApiClient(
     ) => Promise<void> | void;
   } = {},
 ): NonNullable<PublishScanDependencies["linearClient"]> {
-  return ({ apiKey, signal }) => {
+  return ({ apiKey, signal, redirect }) => {
+    expect(redirect).toBe("error");
     options.configured?.(apiKey ?? "");
     return {
       users: async () => ({ nodes: [{ id: "assignee-from-email" }] }),
