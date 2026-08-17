@@ -328,15 +328,15 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
         for field in ("evidenceRefs", "evidence_refs")
         if field in detail
     ]
-    evidence_lists = [item for item in evidence_values if isinstance(item, list)]
-    if evidence_lists:
+    if evidence_values:
         merged["evidenceRefs"] = list(
             dict.fromkeys(
-                item for evidence in evidence_lists for item in evidence if isinstance(item, str)
+                item
+                for evidence in evidence_values
+                for item in (evidence if isinstance(evidence, list) else [evidence])
+                if isinstance(item, str)
             )
         )
-    elif evidence_values:
-        merged["evidenceRefs"] = evidence_values[0]
 
     code = merged.get("code")
     matching_details = (

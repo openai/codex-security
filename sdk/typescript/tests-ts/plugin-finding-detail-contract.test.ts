@@ -499,6 +499,23 @@ describe("bundled plugin finding detail contracts", () => {
     );
   });
 
+  test("merges scalar and list root-cause evidence references", () => {
+    const report = projectFindingDetails({
+      rootCause: {
+        evidenceRefs: ["canonical-root-source"],
+        summary: "The source reaches the write.",
+      },
+      root_cause: { evidence_refs: "legacy-root-source" },
+      codeEvidence: [
+        { id: "canonical-root-source", code: "canonical_source()" },
+      ],
+      code_evidence: [{ id: "legacy-root-source", code: "legacy_source()" }],
+    });
+
+    expect(report).toContain("canonical_source()");
+    expect(report).toContain("legacy_source()");
+  });
+
   test("treats whitespace root-cause fields as unpopulated", () => {
     const report = projectFindingDetails({
       rootCause: { summary: "   ", code: "\t", language: "text" },
