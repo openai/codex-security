@@ -9,12 +9,17 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { LinearClient } from "@linear/sdk";
+import type { LinearClient } from "@linear/sdk";
 import {
   CodexSecurityError,
   ConfigurationError,
   safeErrorMessage,
 } from "./errors.js";
+import {
+  createLinearClient,
+  resolveLinearApiKey,
+  type LinearClientFactory,
+} from "./linear.js";
 import {
   prepareScanPublication,
   type LinearPublicationDestination,
@@ -95,9 +100,7 @@ export interface PublicationCodexResult {
 
 export interface PublishScanDependencies {
   environment?: NodeJS.ProcessEnv;
-  linearClient?: (
-    options: ConstructorParameters<typeof LinearClient>[0],
-  ) => Pick<LinearClient, "users" | "createIssue">;
+  linearClient?: LinearClientFactory<"users" | "createIssue">;
   prepare?: typeof prepareScanPublication;
   resolveCodex?: (environment: NodeJS.ProcessEnv) => CodexCommand;
   runCodex?: (
@@ -142,10 +145,7 @@ export async function publishScanInternal(
   }
 
   const environment = dependencies.environment ?? process.env;
-  const linearApiKey =
-    options.linearApiKey?.trim() ||
-    environment["CODEX_SECURITY_LINEAR_API_KEY"]?.trim() ||
-    undefined;
+  const linearApiKey = resolveLinearApiKey(environment, options.linearApiKey);
   if (options.assigneeId !== undefined && linearApiKey === undefined) {
     throw new ConfigurationError(
       "A Linear API key is required to select a publication assignee.",
@@ -182,14 +182,13 @@ export async function publishScanInternal(
   const linearClient =
     linearApiKey === undefined
       ? undefined
-      : (
-          dependencies.linearClient ??
-          ((configuration) => new LinearClient(configuration))
-        )({
-          apiKey: linearApiKey,
-          redirect: "error",
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
-        });
+      : createLinearClient(
+          {
+            apiKey: linearApiKey,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          },
+          dependencies.linearClient,
+        );
   let assigneeId = options.assigneeId;
   if (linearClient !== undefined && assigneeId?.includes("@")) {
     const users = await linearClient.users({
