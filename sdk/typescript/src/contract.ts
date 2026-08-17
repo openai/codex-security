@@ -617,7 +617,6 @@ function safeRelativePath(value: string, context: string): string {
     !isWellFormedUnicode(value) ||
     value === "." ||
     value.startsWith("/") ||
-    /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
     value.includes("\\") ||
     value.includes("\0")

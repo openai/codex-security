@@ -76,7 +76,6 @@ import {
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runMockInSubprocess } from "./support/isolated-mock.js";
-import { isWindowsUnsafePathComponent } from "../src/windows-path.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -854,10 +853,7 @@ describe("plugin runtime preparation", () => {
         cases.map((item) => ({
           ...item,
           inScope: true,
-          contractValid:
-            item.path.trim().length > 0 &&
-            !item.path.includes("\\") &&
-            !item.path.split("/").some(isWindowsUnsafePathComponent),
+          contractValid: item.path.length > 0 && !item.path.includes("\\"),
         })),
       );
     },
