@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
 from workbench_validation import bounded_output_text
+from windows_paths import filesystem_path
 
 
 def list_global_findings(
@@ -210,7 +211,7 @@ def list_repositories(
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
     repositories = [
         {
-            "checkoutAvailable": Path(target["current_path"]).is_dir(),
+            "checkoutAvailable": filesystem_path(Path(target["current_path"])).is_dir(),
             "displayName": target["display_name"],
             "latestScan": latest_scan,
             "openFindingsCount": open_findings_by_target.get(target_id, 0),

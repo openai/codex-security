@@ -10,6 +10,10 @@ import stat
 import sys
 from pathlib import Path
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import extended_path, filesystem_path, portable_path
+
 MAX_SECURITY_MD_BYTES = 1024 * 1024
 
 
@@ -19,14 +23,14 @@ class ResolutionError(ValueError):
 
 def _inside(path: Path, root: Path, label: str) -> Path:
     try:
-        return path.relative_to(root)
+        return portable_path(path).relative_to(portable_path(root))
     except ValueError as exc:
         raise ResolutionError(f"{label} is outside the scan root: {path}") from exc
 
 
 def _resolve_root(repo: Path) -> Path:
     try:
-        root = repo.expanduser().resolve(strict=True)
+        root = filesystem_path(repo.expanduser()).resolve(strict=True)
     except OSError as exc:
         raise ResolutionError(f"scan root does not exist: {repo}") from exc
     if not root.is_dir():
@@ -36,7 +40,7 @@ def _resolve_root(repo: Path) -> Path:
 
 def list_security_md(repo: Path) -> list[str]:
     """Return a stable, safely framed inventory without traversing Git metadata."""
-    root = _resolve_root(repo)
+    root = extended_path(_resolve_root(repo))
 
     def raise_walk_error(error: OSError) -> None:
         raise error
@@ -49,7 +53,7 @@ def list_security_md(repo: Path) -> list[str]:
         for name in sorted(subdirectories):
             if name == ".git":
                 continue
-            directory_stat = (Path(directory) / name).stat(follow_symlinks=False)
+            directory_stat = filesystem_path(Path(directory) / name).stat(follow_symlinks=False)
             if not stat.S_ISDIR(directory_stat.st_mode):
                 continue
             reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
@@ -59,9 +63,9 @@ def list_security_md(repo: Path) -> list[str]:
         subdirectories[:] = safe_subdirectories
         if "SECURITY.md" not in filenames:
             continue
-        policy = Path(directory) / "SECURITY.md"
+        policy = filesystem_path(Path(directory) / "SECURITY.md")
         if policy.is_file() or policy.is_symlink():
-            policies.append(policy.relative_to(root).as_posix())
+            policies.append(_inside(policy, root, "SECURITY.md").as_posix())
     return sorted(policies)
 
 
@@ -73,7 +77,7 @@ def resolve_security_md(repo: Path, scope: Path) -> str:
     if not requested_scope.is_absolute():
         requested_scope = root / requested_scope
     try:
-        resolved_scope = requested_scope.resolve(strict=True)
+        resolved_scope = filesystem_path(requested_scope).resolve(strict=True)
     except OSError as exc:
         raise ResolutionError(f"scan scope does not exist: {requested_scope}") from exc
     _inside(resolved_scope, root, "scan scope")
@@ -83,15 +87,15 @@ def resolve_security_md(repo: Path, scope: Path) -> str:
     directories = [root]
     current = root
     for part in relative_directory.parts:
-        current /= part
+        current = filesystem_path(current / part)
         directories.append(current)
 
     sections: list[str] = []
     for directory in directories:
-        policy = directory / "SECURITY.md"
+        policy = filesystem_path(directory / "SECURITY.md")
         if not policy.is_file():
             continue
-        resolved_policy = policy.resolve(strict=True)
+        resolved_policy = filesystem_path(policy).resolve(strict=True)
         _inside(resolved_policy, root, "SECURITY.md")
         try:
             with resolved_policy.open("rb") as policy_file:
@@ -104,7 +108,7 @@ def resolve_security_md(repo: Path, scope: Path) -> str:
         if not content.strip():
             continue
 
-        source = policy.relative_to(root).as_posix()
+        source = _inside(policy, root, "SECURITY.md").as_posix()
         section = f"## SECURITY.md source: {json.dumps(source)}\n\n{content}"
         if not section.endswith("\n"):
             section += "\n"
@@ -146,8 +150,9 @@ def main() -> int:
         if args.out == Path("-"):
             sys.stdout.buffer.write(guidance.encode("utf-8"))
         else:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(guidance, encoding="utf-8")
+            output = filesystem_path(args.out.expanduser())
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(guidance, encoding="utf-8")
     except (OSError, ResolutionError) as exc:
         print(f"resolve_security_md.py: error: {exc}", file=sys.stderr)
         return 2

@@ -10,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import extended_path, filesystem_path, portable_path
+
 
 class InventoryError(ValueError):
     """Raised when the repository, scope, or inventory cannot be used safely."""
@@ -18,7 +22,7 @@ class InventoryError(ValueError):
 def resolve_repository(value: str) -> Path:
     """Resolve the repository once so every scope is bound to its real root."""
     try:
-        repository = Path(value).expanduser().resolve(strict=True)
+        repository = filesystem_path(Path(value).expanduser()).resolve(strict=True)
     except (OSError, ValueError) as error:
         raise InventoryError(f"--repo: cannot resolve repository: {value}") from error
     if not repository.is_dir():
@@ -34,12 +38,12 @@ def resolve_scope(repository: Path, value: str) -> str:
     requested = Path(value).expanduser()
     scope = requested if requested.is_absolute() else repository / requested
     try:
-        resolved = scope.resolve(strict=True)
+        resolved = filesystem_path(scope).resolve(strict=True)
     except (OSError, ValueError) as error:
         raise InventoryError(f"--scope: path does not exist: {value}") from error
 
     try:
-        relative = resolved.relative_to(repository)
+        relative = portable_path(resolved).relative_to(portable_path(repository))
     except ValueError as error:
         raise InventoryError(f"--scope: path must remain inside --repo: {value}") from error
 
@@ -55,7 +59,7 @@ def resolve_output(value: str) -> Path:
     """Reject direct symlink outputs without constraining the artifact root."""
     if not value or "\0" in value:
         raise InventoryError("--out: expected an inventory file path")
-    requested = Path(value).expanduser()
+    requested = filesystem_path(Path(value).expanduser())
     if requested.is_symlink():
         raise InventoryError("--out: refusing to replace a symbolic link")
     try:
@@ -69,6 +73,8 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
+    absolute_search = os.name == "nt" and str(repository).startswith("\\\\?\\")
+    search_path = str(repository / scope) if absolute_search else scope
     command = [
         "rg",
         "--files",
@@ -79,13 +85,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--glob",
         "!.git/**",
         "--",
-        scope,
+        search_path,
     ]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(
                 command,
-                cwd=repository,
+                cwd=None if absolute_search else repository,
                 stdout=inventory,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -101,7 +107,22 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(message)
 
         inventory.seek(0)
-        rows = sorted(inventory)
+        if absolute_search:
+            rows = []
+            for raw_line in inventory:
+                candidate = Path(os.fsdecode(raw_line.rstrip(b"\r\n")))
+                try:
+                    relative = candidate.relative_to(repository).as_posix()
+                except ValueError as error:
+                    raise InventoryError(
+                        f"ripgrep returned a path outside --repo: {candidate}"
+                    ) from error
+                if scope in (".", "./"):
+                    relative = "./" + relative
+                rows.append(os.fsencode(relative) + b"\n")
+            rows.sort()
+        else:
+            rows = sorted(inventory)
 
     return write_inventory(output, rows)
 
@@ -146,7 +167,6 @@ def generate_diff_in_scope_files(
     output: Path,
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from generate_rank_input import git_changed_paths, path_is_excluded
     from rank_preview import (
         DEFAULT_PREVIEW_BYTES,
@@ -166,11 +186,13 @@ def generate_diff_in_scope_files(
         eligible = [
             (path, status)
             for path, status in changed
-            if not path_is_excluded(path.relative_to(repository))
+            if not path_is_excluded(
+                portable_path(path).relative_to(portable_path(repository))
+            )
             and path.suffix.lower() in TEXT_CODE_EXTENSIONS
         ]
         revision_paths = [
-            path.relative_to(repository)
+            portable_path(path).relative_to(portable_path(repository))
             for path, status in eligible
             if mode == "revisions" and status != "D"
         ]
@@ -185,7 +207,7 @@ def generate_diff_in_scope_files(
         )
 
         for path, status in eligible:
-            relative = path.relative_to(repository)
+            relative = portable_path(path).relative_to(portable_path(repository))
             if status != "D":
                 if mode == "revisions":
                     contents = revision_blobs[relative]
@@ -195,12 +217,14 @@ def generate_diff_in_scope_files(
                         )
                     if is_binary_sample(contents):
                         continue
-                elif (
-                    path.is_symlink()
-                    or not path.is_file()
-                    or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
-                ):
-                    continue
+                else:
+                    path = filesystem_path(path)
+                    if (
+                        path.is_symlink()
+                        or not path.is_file()
+                        or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
+                    ):
+                        continue
             relative_path = relative.as_posix()
             if "\n" in relative_path or "\r" in relative_path:
                 raise InventoryError(
@@ -224,7 +248,7 @@ def write_inventory(output: Path, rows: list[bytes]) -> int:
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
-            dir=output.parent,
+            dir=extended_path(output.parent),
             prefix=f".{output.name}.",
             suffix=".tmp",
             delete=False,

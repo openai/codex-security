@@ -52,6 +52,7 @@
     "scripts/snapshot_sqlite.py",
     "scripts/validate_scan_contract.py",
     "scripts/validate_tracking_source.py",
+    "scripts/windows_paths.py",
     "scripts/windows_scan_local_files.py",
     "scripts/workbench/__init__.py",
     "scripts/workbench/handoff.py",
