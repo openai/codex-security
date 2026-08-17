@@ -854,7 +854,8 @@ describe("plugin runtime preparation", () => {
           ...item,
           inScope: true,
           contractValid:
-            item.path.length > 0 &&
+            item.path.trim().length > 0 &&
+            !/^[A-Za-z]:/.test(item.path) &&
             !item.path.includes("\\") &&
             !/[\u0000-\u001f]/u.test(item.path),
         })),

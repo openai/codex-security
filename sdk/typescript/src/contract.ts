@@ -613,10 +613,11 @@ async function verifyScanRoot(
 function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
-    value.length === 0 ||
+    value.trim().length === 0 ||
     !isWellFormedUnicode(value) ||
     value === "." ||
     value.startsWith("/") ||
+    /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
     value.includes("\\") ||
     /[\u0000-\u001f]/u.test(value)
