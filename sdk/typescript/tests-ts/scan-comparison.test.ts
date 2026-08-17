@@ -267,23 +267,14 @@ describe("semantic scan comparison", () => {
       const ambientHome = join(root, "ambient-codex-home");
       await mkdir(ambientHome);
       await writeFile(join(ambientHome, "auth.json"), "{}");
-      const previousUserProfile = process.env["USERPROFILE"];
-      process.env["USERPROFILE"] = root;
-      try {
-        const environment = await comparisonEnvironment({
-          CODEX_HOME: "~\\ambient-codex-home",
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "",
-        });
+      const environment = await comparisonEnvironment({
+        CODEX_HOME: "~\\ambient-codex-home",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "",
+        USERPROFILE: root,
+      });
 
-        expect(environment["OPENAI_API_KEY"]).toBeUndefined();
-      } finally {
-        if (previousUserProfile === undefined) {
-          delete process.env["USERPROFILE"];
-        } else {
-          process.env["USERPROFILE"] = previousUserProfile;
-        }
-      }
+      expect(environment["OPENAI_API_KEY"]).toBeUndefined();
     },
   );
 

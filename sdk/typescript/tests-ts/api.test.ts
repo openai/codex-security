@@ -2227,45 +2227,38 @@ describe("CodexSecurity orchestration", () => {
         join(ambientHome, "codex-security", "config.toml"),
         "[deep_scan]\nworkers = 5\n",
       );
-      const previousUserProfile = process.env["USERPROFILE"];
-      process.env["USERPROFILE"] = root;
-      try {
-        const client = new TestClient(
-          {},
-          {
-            environment: { CODEX_HOME: "~\\ambient-home" },
-            prepareRuntime: async () => preparedRuntime(codexHome),
-            resolvePluginPython: async () => "/managed/python",
-            prepareOutputDir: async () => scanDir,
-            repositoryRevision: async () => "deadbeef",
-            createCodex: () => ({
-              startThread: () => ({
-                id: null,
-                async runStreamed() {
-                  throw new Error("deep scan settings captured");
-                },
-              }),
-            }),
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_HOME: "~\\ambient-home",
+            USERPROFILE: root,
           },
-        );
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
+          }),
+        },
+      );
 
-        await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-          "deep scan settings captured",
-        );
-        expect(
-          await readFile(
-            join(codexHome, "codex-security", "config.toml"),
-            "utf8",
-          ),
-        ).toContain("workers = 5");
-        await client.close();
-      } finally {
-        if (previousUserProfile === undefined) {
-          delete process.env["USERPROFILE"];
-        } else {
-          process.env["USERPROFILE"] = previousUserProfile;
-        }
-      }
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      expect(
+        await readFile(
+          join(codexHome, "codex-security", "config.toml"),
+          "utf8",
+        ),
+      ).toContain("workers = 5");
+      await client.close();
     },
   );
 
