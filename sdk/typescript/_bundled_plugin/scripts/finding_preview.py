@@ -112,9 +112,12 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ),
         ),
     ):
-        key = next((alias for alias in aliases if alias in value), None)
+        if aliases == ("rootCause", "root_cause"):
+            key, section = merged_root_cause(value)
+        else:
+            key = next((alias for alias in aliases if alias in value), None)
+            section = value[key] if key is not None else None
         if key is not None:
-            section = value[key]
             if key == "attackPath" and isinstance(section, dict):
                 section = dict(section)
                 for assessment in ("impact", "likelihood"):
@@ -256,6 +259,67 @@ def merged_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
     if catalogs:
         return evidence_keys[0], [item for catalog in catalogs for item in catalog]
     return evidence_keys[0], value[evidence_keys[0]]
+
+
+def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
+    keys = [key for key in ("rootCause", "root_cause") if key in value]
+    if not keys:
+        return None, None
+    if len(keys) == 1:
+        return keys[0], value[keys[0]]
+    details: list[dict[str, Any]] = []
+    for key in keys:
+        detail = value[key]
+        if isinstance(detail, str):
+            details.append({"summary": detail})
+        elif isinstance(detail, dict):
+            details.append(detail)
+        elif detail is not None:
+            return keys[0], value[keys[0]]
+    if not details:
+        return keys[0], None
+
+    merged: dict[str, Any] = {}
+    for detail in details:
+        for field, item in detail.items():
+            if field in ("evidenceRefs", "evidence_refs", "language"):
+                continue
+            if field not in merged or merged[field] in (None, "", [], {}):
+                merged[field] = item
+
+    evidence_values = [
+        detail[field]
+        for detail in details
+        for field in ("evidenceRefs", "evidence_refs")
+        if field in detail
+    ]
+    evidence_lists = [item for item in evidence_values if isinstance(item, list)]
+    if evidence_lists:
+        merged["evidenceRefs"] = list(
+            dict.fromkeys(
+                item for evidence in evidence_lists for item in evidence if isinstance(item, str)
+            )
+        )
+    elif evidence_values:
+        merged["evidenceRefs"] = evidence_values[0]
+
+    code = merged.get("code")
+    matching_details = (
+        details
+        if not isinstance(code, str) or not code.strip()
+        else [detail for detail in details if detail.get("code") == code]
+    )
+    language = next(
+        (
+            detail["language"]
+            for detail in matching_details
+            if isinstance(detail.get("language"), str) and detail["language"].strip()
+        ),
+        None,
+    )
+    if language is not None:
+        merged["language"] = language
+    return keys[0], merged
 
 
 def bounded_code_evidence(value: Any) -> Any:

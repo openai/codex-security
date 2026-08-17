@@ -53,6 +53,15 @@ describe("bundled finding previews", () => {
         code_evidence: [{ id: "legacy", code: "legacy_source()" }],
         rootCause: { summary: "Synthetic root cause." },
       },
+      bothRootCauseAliases: {
+        rootCause: { code: "SELECT * FROM users" },
+        root_cause: {
+          code: "os.system(user_input)",
+          evidence_refs: ["legacy-source"],
+          language: "python",
+          summary: "The destination is not contained.",
+        },
+      },
     };
     expect(projectFindingDetails(original)).toEqual({
       projected: {
@@ -71,6 +80,13 @@ describe("bundled finding previews", () => {
             { id: "legacy", code: "legacy_source()" },
           ],
           rootCause: { summary: "Synthetic root cause." },
+        },
+        bothRootCauseAliases: {
+          rootCause: {
+            code: "SELECT * FROM users",
+            evidenceRefs: ["legacy-source"],
+            summary: "The destination is not contained.",
+          },
         },
       },
       original,
