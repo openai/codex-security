@@ -7,7 +7,7 @@ import {
   existsSync,
   lstatSync,
   realpathSync,
-  type Stats,
+  type BigIntStats,
   writeSync,
 } from "node:fs";
 import {
@@ -126,7 +126,12 @@ import type {
   ScanWorkerPhase,
   ScanWorkerStatus,
 } from "./worker-progress.js";
-import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
+import {
+  abortable,
+  DiffTarget,
+  type ScanMode,
+  type ScanTarget,
+} from "./targets.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -142,7 +147,7 @@ const PROGRESS_REFRESH_MILLISECONDS = 1_000;
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
-const SCAN_HISTORY_OUTPUT_OPTION =
+const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
@@ -582,11 +587,14 @@ async function readPromptFiles(
   const [scanPrompt, postScanPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
-      : readRegularInputFile(resolve(directory, scanPromptFile), repository),
+      : readRegularInputFile(
+          resolveCliPath(directory, scanPromptFile),
+          repository,
+        ),
     postScanPromptFile === undefined
       ? undefined
       : readRegularInputFile(
-          resolve(directory, postScanPromptFile),
+          resolveCliPath(directory, postScanPromptFile),
           repository,
         ),
   ]);
@@ -599,9 +607,9 @@ async function readPromptFiles(
 async function readRegularInputFile(
   path: string,
   repository: string,
-  metadata?: Pick<Stats, "isFile" | "dev" | "ino">,
+  metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
-  const selected = metadata ?? (await lstat(path));
+  const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
@@ -628,7 +636,7 @@ async function readRegularInputFile(
       (constants.O_NONBLOCK ?? 0),
   );
   try {
-    const opened = await file.stat();
+    const opened = await file.stat({ bigint: true });
     if (
       !opened.isFile() ||
       opened.dev !== selected.dev ||
@@ -640,6 +648,10 @@ async function readRegularInputFile(
   } finally {
     await file.close();
   }
+}
+
+export function resolveCliPath(directory: string, value: string): string {
+  return resolve(directory, expandHome(value));
 }
 
 interface ScanArguments extends DeepScanOptions {
@@ -715,7 +727,7 @@ interface CliDependencies {
   prepareAuthenticationHome?: (
     environment: NodeJS.ProcessEnv,
   ) => Promise<string>;
-  hasStoredChatGPTSignIn?: () => Promise<boolean>;
+  hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishScan?: typeof publishScan;
@@ -750,7 +762,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
-  hasStoredChatGPTSignIn: async () => {
+  hasStoredChatGPTSignIn: async (signal) => {
+    signal?.throwIfAborted();
     const environment = Object.fromEntries(
       Object.entries(process.env).filter(
         ([name]) =>
@@ -760,10 +773,14 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     );
     const command = resolveCodexCommand(environment);
     if (existsSync(codexSecurityCredentialHome(process.env))) {
-      const dedicatedStatus = await accountStatus(command, {
-        ...environment,
-        CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
-      });
+      const dedicatedStatus = await accountStatus(
+        command,
+        {
+          ...environment,
+          CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
+        },
+        signal,
+      );
       if (
         dedicatedStatus.authenticated &&
         /\bchatgpt\b/iu.test(dedicatedStatus.details)
@@ -771,7 +788,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         return true;
       }
     }
-    const ambientStatus = await accountStatus(command, environment);
+    const ambientStatus = await accountStatus(command, environment, signal);
     return (
       ambientStatus.authenticated && /\bchatgpt\b/iu.test(ambientStatus.details)
     );
@@ -892,7 +909,9 @@ export async function runCodexSkillCommand(
     if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
   }
   if (configuredHome?.trim()) {
-    environment["CODEX_HOME"] = resolve(expandHome(configuredHome));
+    environment["CODEX_HOME"] = resolve(
+      expandHome(configuredHome, processEnvironment),
+    );
   }
   const invocation = spawn(command.command, [...args], {
     env: environment,
@@ -1208,7 +1227,7 @@ export async function main(
       result === undefined ||
       format !== "toon" ||
       output.isTTY !== true ||
-      argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+      argv.some((argument) => OUTPUT_OPTION.test(argument))
     ) {
       return result;
     }
@@ -1272,7 +1291,7 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const repository = resolve(
+      const repository = resolveCliPath(
         dependencies.currentDirectory(),
         args.repository ?? ".",
       );
@@ -1326,13 +1345,13 @@ export async function main(
             ? undefined
             : process.platform === "win32"
               ? await canonicalizeModelSafePath(
-                  resolve(directory, options.scanRoot),
+                  resolveCliPath(directory, options.scanRoot),
                 )
-              : resolve(directory, options.scanRoot);
+              : resolveCliPath(directory, options.scanRoot);
         const repository =
-          options.scanRoot !== undefined && args.repository === undefined
+          scanRoot !== undefined && args.repository === undefined
             ? undefined
-            : resolve(directory, args.repository ?? directory);
+            : resolveCliPath(directory, args.repository ?? directory);
         return presentHistory(
           await history([
             "list-scans",
@@ -1867,7 +1886,7 @@ export async function main(
           format === "toon" &&
           !formatExplicit &&
           !options.dryRun &&
-          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
           renderedPublication = renderPublicationSummary(
             result,
@@ -2127,7 +2146,7 @@ export async function main(
         if (
           !options.dryRun &&
           format === "toon" &&
-          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
           return;
         }
@@ -2162,7 +2181,10 @@ export async function main(
             "git",
             [
               "-C",
-              resolve(dependencies.currentDirectory(), args.repository ?? "."),
+              resolveCliPath(
+                dependencies.currentDirectory(),
+                args.repository ?? ".",
+              ),
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
@@ -2340,8 +2362,8 @@ export async function main(
                 "--output-dir is required with a repository CSV.",
               );
             }
-            inputPath = resolve(currentDirectory, args.input);
-            outputDir = resolve(currentDirectory, options.outputDir);
+            inputPath = resolveCliPath(currentDirectory, args.input);
+            outputDir = resolveCliPath(currentDirectory, options.outputDir);
           }
           const result = await runMultiscan({
             inputPath,
@@ -2437,12 +2459,12 @@ export async function main(
         if (scanDir === undefined) return;
         exitCode = await runExport(
           {
-            scanDir: resolve(currentDirectory, scanDir),
+            scanDir: resolveCliPath(currentDirectory, scanDir),
             format: options.exportFormat,
             output:
               options.output === "-"
                 ? "-"
-                : resolve(
+                : resolveCliPath(
                     currentDirectory,
                     options.output ??
                       EXPORT_DEFAULT_OUTPUTS[options.exportFormat],
@@ -2450,7 +2472,7 @@ export async function main(
             sourceRoot:
               options.sourceRoot === undefined
                 ? undefined
-                : resolve(currentDirectory, options.sourceRoot),
+                : resolveCliPath(currentDirectory, options.sourceRoot),
             pythonPath: options.python,
           },
           output,
@@ -3266,23 +3288,25 @@ async function runSkill(
         !staysWithinWindowsDeviceRoot(input, rawDeviceRoot) ||
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
-      const path = resolve(directory, input);
-      const metadata = await lstat(path).catch((error: unknown) => {
-        if (
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          (error.code === "ENOENT" ||
-            error.code === "ENOTDIR" ||
-            error.code === "ENAMETOOLONG" ||
-            error.code === "EINVAL")
-        ) {
-          return undefined;
-        }
-        throw new CodexSecurityError(
-          "Could not read the finding or issue input.",
-        );
-      });
+      const path = resolveCliPath(directory, input);
+      const metadata = await lstat(path, { bigint: true }).catch(
+        (error: unknown) => {
+          if (
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            (error.code === "ENOENT" ||
+              error.code === "ENOTDIR" ||
+              error.code === "ENAMETOOLONG" ||
+              error.code === "EINVAL")
+          ) {
+            return undefined;
+          }
+          throw new CodexSecurityError(
+            "Could not read the finding or issue input.",
+          );
+        },
+      );
       if (metadata !== undefined) {
         if (!metadata.isFile()) {
           throw new CodexSecurityError(
@@ -3640,12 +3664,81 @@ function diagnosticValue(value: unknown): string {
   );
 }
 
+async function chooseInteractiveAuthentication(
+  options: {
+    auth: ScanAuthMode | undefined;
+    provider: unknown;
+    command: "scan" | "policy";
+    signal: AbortSignal;
+  },
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+): Promise<ScanAuthMode | undefined> {
+  const { auth, provider, signal } = options;
+  if (
+    errorOutput.isTTY !== true ||
+    isExternalModelProvider(provider) ||
+    (auth !== undefined && auth !== "auto")
+  )
+    return auth;
+  const authentication = scanAuthentication(
+    dependencies.environment,
+    auth,
+    provider,
+  );
+  if (authentication.method !== "api_key") return auth;
+  const prompt =
+    dependencies.scanAuthenticationPrompt ??
+    createBulkScanDiscoveryDependencies({
+      output: errorOutput,
+      now: dependencies.now,
+      currentDirectory: dependencies.currentDirectory,
+    }).prompt;
+  const hasStoredSignIn = dependencies.hasStoredChatGPTSignIn;
+  if (
+    !prompt.isInteractive() ||
+    hasStoredSignIn === undefined ||
+    !(await abortable(() => hasStoredSignIn(signal), signal))
+  )
+    return auth;
+  const source = authentication.source;
+  try {
+    errorOutput.write(
+      `Both a ChatGPT sign-in and an API key from ${source} are available.\n`,
+    );
+  } catch {}
+  return await abortable(
+    () =>
+      prompt.select<ScanAuthMode>(
+        options.command === "scan"
+          ? "How would you like to authenticate this scan?"
+          : "How would you like to authenticate policy generation?",
+        [
+          { label: "ChatGPT subscription", value: "chatgpt" },
+          { label: `API key from ${source}`, value: "api-key" },
+        ],
+        undefined,
+        signal,
+      ),
+    signal,
+  );
+}
+
 async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
+  return await withTerminalErrorsHandled(errorOutput, () =>
+    executeScan(arguments_, errorOutput, dependencies, interactive),
+  );
+}
+
+async function withTerminalErrorsHandled<T>(
+  errorOutput: Writable,
+  operation: () => Promise<T>,
+): Promise<T> {
   const observeTerminalErrors =
     typeof errorOutput.on === "function" &&
     typeof errorOutput.off === "function";
@@ -3654,12 +3747,7 @@ async function runScan(
     errorOutput.on?.("error", ignoreTerminalError);
   }
   try {
-    return await executeScan(
-      arguments_,
-      errorOutput,
-      dependencies,
-      interactive,
-    );
+    return await operation();
   } finally {
     if (observeTerminalErrors) {
       try {
@@ -3806,50 +3894,25 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
-    let auth = arguments_.auth;
     const provider = scanModelProvider(effectiveConfiguration);
+    const auth =
+      !arguments_.dryRun && interactive
+        ? await chooseInteractiveAuthentication(
+            {
+              auth: arguments_.auth,
+              provider,
+              command: "scan",
+              signal: preparationAbortController.signal,
+            },
+            errorOutput,
+            dependencies,
+          )
+        : arguments_.auth;
     selectedAuthentication = scanAuthentication(
       dependencies.environment,
       auth,
       provider,
     );
-    if (
-      !isExternalModelProvider(provider) &&
-      (auth === undefined || auth === "auto") &&
-      !arguments_.dryRun &&
-      interactive &&
-      errorOutput.isTTY === true &&
-      selectedAuthentication.method === "api_key"
-    ) {
-      const prompt =
-        dependencies.scanAuthenticationPrompt ??
-        createBulkScanDiscoveryDependencies({
-          output: errorOutput,
-          now: dependencies.now,
-          currentDirectory: dependencies.currentDirectory,
-        }).prompt;
-      if (
-        prompt.isInteractive() &&
-        (await dependencies.hasStoredChatGPTSignIn?.()) === true
-      ) {
-        const source = selectedAuthentication.source;
-        errorOutput.write(
-          `Both a ChatGPT sign-in and an API key from ${source} are available.\n`,
-        );
-        auth = await prompt.select<ScanAuthMode>(
-          "How would you like to authenticate this scan?",
-          [
-            { label: "ChatGPT subscription", value: "chatgpt" },
-            { label: `API key from ${source}`, value: "api-key" },
-          ],
-        );
-        selectedAuthentication = scanAuthentication(
-          dependencies.environment,
-          auth,
-          provider,
-        );
-      }
-    }
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -4103,6 +4166,10 @@ async function executeScan(
           dashboard.setStage("inspecting repository files");
         }
       },
+      onSessionEvent:
+        process.stdin.isTTY === true
+          ? dashboard?.recordDetails.bind(dashboard)
+          : undefined,
       onProgress: (update) => {
         const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
         if (key === lastProgressUpdate) return;
