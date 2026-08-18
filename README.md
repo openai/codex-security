@@ -30,6 +30,13 @@ Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
 any positive number of hours, including fractional hours, up to 96. Completed
 findings are preserved and returned when the limit is reached.
 
+The CLI's USD cost display and `--max-cost` use observed token usage and model
+pricing to estimate API-equivalent model cost. With ChatGPT authentication,
+that estimate is not a measurement of your ChatGPT plan allowance, does not
+show the remaining allowance, and `--max-cost` does not cap plan allowance.
+The estimate updates only when new usage data is observed, so an active model
+request may not yet be reflected in the displayed amount.
+
 To use another inference provider, set its API key and select a model:
 
 ```bash
