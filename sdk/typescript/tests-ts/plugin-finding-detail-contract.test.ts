@@ -10,10 +10,20 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 type JsonObject = Record<string, unknown>;
 
 const invalidFindingDetails: Array<{
-  section: "attackPath" | "root_cause" | "validation";
+  section: "attackPath" | "rootCause" | "root_cause" | "validation";
   detail: JsonObject;
 }> = [
+  {
+    section: "rootCause",
+    detail: { summary: "Root cause.", code: ["not a string"] },
+  },
+  {
+    section: "rootCause",
+    detail: { summary: "Root cause.", language: 42 },
+  },
   { section: "root_cause", detail: { summary: ["not a string"] } },
+  { section: "root_cause", detail: { code: ["not a string"] } },
+  { section: "root_cause", detail: { language: 42 } },
   { section: "attackPath", detail: { steps: "upload, then extract" } },
   { section: "attackPath", detail: { preconditions: "upload access" } },
   {
