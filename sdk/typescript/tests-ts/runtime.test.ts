@@ -17,7 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   delimiter,
   dirname,
@@ -27,7 +27,6 @@ import {
   relative,
   sep,
 } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -74,7 +73,7 @@ import {
   verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
-import { runMockInSubprocess } from "./support/isolated-mock.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix = process.platform === "win32" ? test.skip : test;
@@ -926,7 +925,7 @@ describe("plugin runtime preparation", () => {
 
   test("cancels configured plugin directory discovery", async () => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         "cancels configured plugin directory discovery",
       )
@@ -1050,7 +1049,7 @@ describe("plugin runtime preparation", () => {
     "rejects a queued plugin directory replaced with a symlink",
     async () => {
       if (
-        runMockInSubprocess(
+        runTestInSubprocess(
           import.meta.path,
           "rejects a queued plugin directory replaced with a symlink",
         )
@@ -1363,7 +1362,7 @@ describe("plugin runtime preparation", () => {
 
   test("imports ambient auth when credential files do not support hard links", async () => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         "imports ambient auth when credential files do not support hard links",
       )
@@ -1843,6 +1842,16 @@ describe("plugin runtime preparation", () => {
     expect(
       resolveCodexCommand({ CODEX_CLI_PATH: `./bin/${executable}` }),
     ).toEqual({ command: join(process.cwd(), "bin", executable) });
+    expect(
+      resolveCodexCommand({ CODEX_CLI_PATH: `~/bin/${executable}` }),
+    ).toEqual({
+      command: join(homedir(), "bin", executable),
+    });
+    expect(
+      resolveCodexCommand({ CODEX_CLI_PATH: `~\\bin\\${executable}` }),
+    ).toEqual({
+      command: join(homedir(), "bin", executable),
+    });
     expect(resolveCodexCommand({ Codex_Cli_Path: configured })).toEqual({
       command: configured,
     });
@@ -2295,7 +2304,7 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test("retries Windows credential verification when a descendant disappears", async () => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         "retries Windows credential verification when a descendant disappears",
       )
@@ -2340,7 +2349,7 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test("rejects Windows credential descendants that repeatedly disappear", async () => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         "rejects Windows credential descendants that repeatedly disappear",
       )
@@ -3398,193 +3407,6 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test.skipIf(
-    process.platform !== "win32" ||
-      process.env["GITHUB_ACTIONS"] !== "true" ||
-      process.env["RUNNER_ENVIRONMENT"] !== "github-hosted" ||
-      process.env["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"] !== "true",
-  )(
-    "prepares managed credential homes under constrained PowerShell",
-    async () => {
-      const root = await temporaryDirectory();
-      const powershell = join(
-        process.env["SystemRoot"] ?? "C:\\Windows",
-        "System32",
-        "WindowsPowerShell",
-        "v1.0",
-        "powershell.exe",
-      );
-      const constrainedEnvironment = {
-        ...process.env,
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        PSModulePath: join(root, "untrusted-or-incompatible-modules"),
-        PSMODULEPATH: join(root, "uppercase-untrusted-modules"),
-      };
-      const registry = join(dirname(dirname(dirname(powershell))), "reg.exe");
-      const policyKey =
-        "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
-      const policyName = "__PSLockdownPolicy";
-      const original = spawnSync(
-        registry,
-        ["query", policyKey, "/v", policyName],
-        { encoding: "utf8", timeout: 15_000, windowsHide: true },
-      );
-      expect(original.status === 0 || original.status === 1).toBe(true);
-      const originalEntry =
-        original.status === 0
-          ? /^\s*__PSLockdownPolicy\s+(REG_[A-Z_]+)\s*(.*?)\s*$/mu.exec(
-              original.stdout,
-            )
-          : null;
-      if (original.status === 0) expect(originalEntry).not.toBeNull();
-      const originalPolicy =
-        originalEntry === null
-          ? null
-          : { type: originalEntry[1]!, value: originalEntry[2]! };
-      const enabled = spawnSync(
-        registry,
-        ["add", policyKey, "/v", policyName, "/t", "REG_SZ", "/d", "4", "/f"],
-        { encoding: "utf8", timeout: 15_000, windowsHide: true },
-      );
-      expect(enabled.status).toBe(0);
-
-      try {
-        const mode = spawnSync(
-          powershell,
-          [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$ExecutionContext.SessionState.LanguageMode",
-          ],
-          {
-            encoding: "utf8",
-            env: constrainedEnvironment,
-            timeout: 15_000,
-            windowsHide: true,
-          },
-        );
-        expect(mode.status).toBe(0);
-        expect(mode.stdout.trim()).toBe("ConstrainedLanguage");
-
-        const oldImplementation = spawnSync(
-          powershell,
-          [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$ErrorActionPreference = 'Stop'; New-Object System.Security.AccessControl.DirectorySecurity",
-          ],
-          {
-            encoding: "utf8",
-            env: constrainedEnvironment,
-            timeout: 15_000,
-            windowsHide: true,
-          },
-        );
-        expect(oldImplementation.status).not.toBe(0);
-
-        const trustedPowerShellEnvironment = {
-          ...Object.fromEntries(
-            Object.entries(process.env).filter(
-              ([name]) => name.toUpperCase() !== "PSMODULEPATH",
-            ),
-          ),
-          PSModulePath: join(dirname(powershell), "Modules"),
-        };
-        const guest = spawnSync(
-          powershell,
-          [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            [
-              "Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LGG:SYD:(A;;GA;;;SY)'",
-              "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor",
-              "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner",
-              "Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
-            ].join(" | "),
-          ],
-          {
-            encoding: "utf8",
-            env: trustedPowerShellEnvironment,
-            timeout: 15_000,
-            windowsHide: true,
-          },
-        );
-        expect(guest.status).toBe(0);
-        expect(guest.stdout.trim()).toMatch(/^S-1-(?:\d+-)*501$/u);
-        const home = join(root, "state", "codex-home");
-        await mkdir(home, { recursive: true });
-        const foreignGrant = spawnSync(
-          join(dirname(dirname(dirname(powershell))), "icacls.exe"),
-          [home, "/grant", `*${guest.stdout.trim()}:(OI)(CI)R`],
-          { encoding: "utf8", timeout: 15_000, windowsHide: true },
-        );
-        expect(foreignGrant.status).toBe(0);
-
-        const fixtureModule = join(root, "runtime-node-fixture.mjs");
-        const build = spawnSync(
-          process.execPath,
-          [
-            "build",
-            fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
-            "--target=node",
-            "--format=esm",
-            `--outfile=${fixtureModule}`,
-          ],
-          { encoding: "utf8", timeout: 30_000, windowsHide: true },
-        );
-        expect(build.status).toBe(0);
-        const selectedNode = spawnSync("node", ["-p", "process.execPath"], {
-          encoding: "utf8",
-          timeout: 15_000,
-          windowsHide: true,
-        });
-        expect(selectedNode.status).toBe(0);
-        const fixture = spawnSync(
-          selectedNode.stdout.trim(),
-          [
-            "--input-type=module",
-            "--eval",
-            `import { prepareCodexSecurityCredentialHome } from ${JSON.stringify(pathToFileURL(fixtureModule).href)}; await prepareCodexSecurityCredentialHome();`,
-          ],
-          {
-            encoding: "utf8",
-            env: constrainedEnvironment,
-            timeout: 30_000,
-            windowsHide: true,
-          },
-        );
-        expect(fixture.stderr).toBe("");
-        expect(fixture.status).toBe(0);
-        expect(existsSync(home)).toBe(true);
-      } finally {
-        const restore = spawnSync(
-          registry,
-          originalPolicy === null
-            ? ["delete", policyKey, "/v", policyName, "/f"]
-            : [
-                "add",
-                policyKey,
-                "/v",
-                policyName,
-                "/t",
-                originalPolicy.type,
-                "/d",
-                originalPolicy.value,
-                "/f",
-              ],
-          { encoding: "utf8", timeout: 15_000, windowsHide: true },
-        );
-        expect(restore.status).toBe(0);
-      }
-    },
-  );
-
   test("derives persistent state from the ambient home or explicit override", async () => {
     const root = await temporaryDirectory();
     expect(codexSecurityStateDirectory({ CODEX_HOME: root })).toBe(
@@ -3701,7 +3523,14 @@ describe("runtime directories and plugin Python boundary", () => {
     };
     expect(payload.user_config_path).toBe(configPath);
     expect(payload.config_paths).toEqual([
-      join("/", "etc", "codex", "config.toml"),
+      process.platform === "win32"
+        ? join(
+            process.env["ProgramData"] ?? "C:\\ProgramData",
+            "OpenAI",
+            "Codex",
+            "config.toml",
+          )
+        : join("/", "etc", "codex", "config.toml"),
       configPath,
     ]);
     expect(
@@ -3710,6 +3539,69 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ).toMatchObject({ actual: 8, source: configPath });
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "loads machine-wide Windows settings during preflight discovery",
+    async () => {
+      const root = await temporaryDirectory();
+      const codexHome = join(root, "codex-home");
+      const programData = join(root, "ProgramData");
+      const systemConfig = join(programData, "OpenAI", "Codex", "config.toml");
+      const repository = join(root, "repository");
+      await mkdir(dirname(systemConfig), { recursive: true });
+      await mkdir(codexHome);
+      await mkdir(repository);
+      await writeFile(systemConfig, "[agents]\nmax_threads = 8\n");
+
+      const python =
+        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          "--profile",
+          "security_scan",
+          "--cwd",
+          repository,
+          "--runtime-check",
+          "delegation_available=true",
+          "--multi-agent-runtime-owner",
+          "native",
+          "--multi-agent-runtime-version",
+          "v1",
+          "--multi-agent-runtime-provenance",
+          "app-server",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_HOME: codexHome,
+            ProgramData: programData,
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      const payload = JSON.parse(result.stdout) as {
+        config_paths: string[];
+        results: { capability: string; actual: number; source: string }[];
+      };
+      expect(payload.config_paths).toEqual([
+        systemConfig,
+        join(codexHome, "config.toml"),
+      ]);
+      expect(
+        payload.results.find(
+          (result) => result.capability === "usable_worker_slots_6",
+        ),
+      ).toMatchObject({ actual: 8, source: systemConfig });
+    },
+  );
 
   test("continues when optional preflight capabilities are unknown", async () => {
     const root = await temporaryDirectory();

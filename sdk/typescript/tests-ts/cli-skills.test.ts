@@ -13,7 +13,7 @@ import {
 } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { runMockInSubprocess } from "./support/isolated-mock.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 function linearIssue(identifier: string) {
   return {
@@ -462,7 +462,7 @@ describe("CLI skill commands", () => {
 
   test("rejects input replacements whose numeric file IDs collide", async () => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         "rejects input replacements whose numeric file IDs collide",
       )
@@ -549,7 +549,7 @@ describe("CLI skill commands", () => {
       : ["symbolic link", "FIFO"],
   )("rejects finding files replaced with a %s", async (replacement) => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         `rejects finding files replaced with a ${replacement}`,
       )
