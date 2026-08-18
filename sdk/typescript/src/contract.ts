@@ -218,7 +218,6 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
     }
 
     for (const [sectionName, listFields] of [
-      ["rootCause", ["evidenceRefs", "evidence_refs"]],
       ["root_cause", ["evidenceRefs", "evidence_refs"]],
       [
         "validation",
@@ -249,17 +248,6 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
       normalizeLegacyStringLists(section, listFields);
     }
 
-    const rootCause = finding["rootCause"];
-    if (isJsonRecord(rootCause)) {
-      if (
-        typeof rootCause["summary"] !== "string" ||
-        rootCause["summary"].length === 0
-      ) {
-        delete finding["rootCause"];
-      } else {
-        removeUnsupportedLegacyStrings(rootCause, ["code", "language"]);
-      }
-    }
     const legacyRootCause = finding["root_cause"];
     if (isJsonRecord(legacyRootCause)) {
       removeUnsupportedLegacyStrings(legacyRootCause, [

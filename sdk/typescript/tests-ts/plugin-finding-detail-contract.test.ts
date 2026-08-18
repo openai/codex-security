@@ -704,7 +704,7 @@ describe("bundled plugin finding detail contracts", () => {
       "    {'id': 'legacy-duplicate', 'code': 'second_legacy_source()'},",
       "]",
       "findings['findings'][0]['validation'] = {'evidence_refs': ['legacy-validation-evidence'], 'counterEvidence': None, 'limitations': '', 'method': [], 'status': '', 'summary': {}, 'disposition': '', 'result': ''}",
-      "findings['findings'][0]['rootCause'] = {'summary': '', 'code': None, 'language': None}",
+      "findings['findings'][0]['rootCause'] = {'summary': 'Canonical root cause.', 'code': 'canonical_root()', 'language': 'python'}",
       "findings['findings'][0]['attackPath'] = {'evidence_refs': ['legacy-attack-evidence'], 'dataFlow': '', 'dataflow': {'summary': '', 'source': None, 'sink': None, 'outcome': None, 'evidenceRefs': ['legacy-missing-evidence']}, 'impact': {'level': '', 'rationale': None, 'why': None}, 'likelihood': {'level': None, 'rationale': None, 'why': None}, 'reachability': None, 'summary': ''}",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
@@ -731,7 +731,7 @@ describe("bundled plugin finding detail contracts", () => {
       compatibleHasLimitations: false,
       compatibleHasMethod: false,
       compatibleHasResult: false,
-      compatibleHasRootCause: false,
+      compatibleHasRootCause: true,
       compatibleHasStatus: false,
       compatibleHasSummary: false,
       originalAttack: ["legacy-attack-evidence"],
@@ -744,7 +744,7 @@ describe("bundled plugin finding detail contracts", () => {
       originalDataFlow: "",
       originalNested: ["legacy-missing-evidence"],
       originalReachability: null,
-      originalRootCauseSummary: "",
+      originalRootCauseSummary: "Canonical root cause.",
       originalSummary: {},
       originalValidation: ["legacy-validation-evidence"],
     });
@@ -783,6 +783,34 @@ describe("bundled plugin finding detail contracts", () => {
       },
       compatibleAttackPath: {},
     });
+  });
+
+  test("rejects malformed canonical root causes during sealed validation", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
+      "findings['findings'][0]['rootCause'] = {'summary': []}",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
+      "try:",
+      "    finalizer['validate_against_schema'](compatible, plugin / 'schemas' / 'findings.schema.json')",
+      "except finalizer['ContractError'] as error:",
+      "    print(error)",
+      "else:",
+      "    print('accepted')",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(new TextDecoder().decode(result.stdout)).toContain(
+      "rootCause.summary",
+    );
   });
 
   test("ranks legacy code evidence during interrupted recovery", () => {

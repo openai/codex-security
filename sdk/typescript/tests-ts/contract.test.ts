@@ -324,6 +324,20 @@ describe("canonical scan contract", () => {
     expect(await readJson(findingsPath)).toEqual(findings);
   });
 
+  test("rejects malformed canonical root-cause details", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["rootCause"] = { summary: [] };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("findings.json");
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
   test("loads an empty legacy root cause without changing the artifact", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");

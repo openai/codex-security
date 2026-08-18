@@ -1586,7 +1586,6 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             and evidence["id"]
         }
         for section_name, list_fields in (
-            ("rootCause", ("evidenceRefs", "evidence_refs")),
             ("root_cause", ("evidenceRefs", "evidence_refs")),
             (
                 "validation",
@@ -1618,15 +1617,6 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
                 continue
             _normalize_legacy_string_list_fields(section, list_fields)
             _filter_unknown_legacy_evidence_refs(section, evidence_ids)
-        root_cause = finding.get("rootCause")
-        if isinstance(root_cause, dict):
-            summary = root_cause.get("summary")
-            if not isinstance(summary, str) or summary == "":
-                finding.pop("rootCause")
-            else:
-                _remove_unsupported_legacy_scalar_fields(
-                    root_cause, ("code", "language")
-                )
         legacy_root_cause = finding.get("root_cause")
         if isinstance(legacy_root_cause, dict):
             _remove_unsupported_legacy_scalar_fields(
