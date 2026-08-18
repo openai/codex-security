@@ -800,11 +800,12 @@ describe("bundled plugin finding detail contracts", () => {
       "second = copy.deepcopy(first)",
       "second['summary'] = 'SECOND'",
       "second['code_evidence'] = [{'id': 'legacy-source', 'code': 'legacy_source()'}]",
+      "second['root_cause'] = None",
       "findings = {'scanId': manifest['scan']['id'], 'findings': [first, second]}",
       "warnings = []",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
-      "print(json.dumps({'summary': findings['findings'][0]['summary'], 'evidence': findings['findings'][0].get('code_evidence'), 'warnings': warnings}))",
+      "print(json.dumps({'summary': findings['findings'][0]['summary'], 'evidence': findings['findings'][0].get('code_evidence'), 'rootCause': findings['findings'][0].get('root_cause'), 'warnings': warnings}))",
     ].join("\n");
     const result = Bun.spawnSync(
       [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
@@ -815,9 +816,56 @@ describe("bundled plugin finding detail contracts", () => {
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
       summary: "SECOND",
       evidence: [{ id: "legacy-source", code: "legacy_source()" }],
+      rootCause: null,
       warnings: [
         "Recovered finding 2: retained stronger duplicate logical finding.",
       ],
+    });
+  });
+
+  test("ranks embedded root-cause evidence during interrupted recovery", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import copy, json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "examples = plugin / 'examples' / 'completed-scan'",
+      "manifest = json.loads((examples / 'scan-manifest.json').read_text())",
+      "example = json.loads((examples / 'findings.json').read_text())['findings'][0]",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "results = {}",
+      "for name, detail in {'embedded': {'codeEvidence': [{'id': 'embedded-root', 'code': 'embedded_root()'}]}, 'legacy-code': {'code': 'legacy_root()'}}.items():",
+      "    first = copy.deepcopy(example)",
+      "    first.pop('codeEvidence', None)",
+      "    first['summary'] = 'FIRST'",
+      "    second = copy.deepcopy(first)",
+      "    second['summary'] = 'SECOND'",
+      "    second['rootCause'] = {'summary': 'Richer root cause', **detail}",
+      "    findings = {'scanId': manifest['scan']['id'], 'findings': [first, second]}",
+      "    warnings = []",
+      "    finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
+      "    results[name] = {'summary': findings['findings'][0]['summary'], 'warnings': warnings}",
+      "print(json.dumps(results))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      embedded: {
+        summary: "SECOND",
+        warnings: [
+          "Recovered finding 2: retained stronger duplicate logical finding.",
+        ],
+      },
+      "legacy-code": {
+        summary: "SECOND",
+        warnings: [
+          "Recovered finding 2: retained stronger duplicate logical finding.",
+        ],
+      },
     });
   });
 

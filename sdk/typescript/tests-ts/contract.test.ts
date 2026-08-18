@@ -232,16 +232,38 @@ describe("canonical scan contract", () => {
     const legacyAttackPath = { steps: { first: "upload" } };
     findings["findings"][0]["validation"] = legacyValidation;
     findings["findings"][0]["attackPath"] = legacyAttackPath;
+    findings["findings"][0]["root_cause"] = null;
+    findings["findings"][0]["code_evidence"] = [
+      { id: "legacy-source", code: "legacy_source()" },
+    ];
     await writeJson(findingsPath, findings);
     await reseal(scanDir);
 
     const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.findings.findings[0]?.code_evidence?.[0]?.id).toBe(
+      "legacy-source",
+    );
     const loadedFinding = loaded.findings.findings[0] as unknown as Record<
       string,
       unknown
     >;
     expect(loadedFinding["validation"]).toEqual(legacyValidation);
     expect(loadedFinding["attackPath"]).toEqual(legacyAttackPath);
+    expect(loadedFinding["root_cause"]).toBeNull();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("loads an empty legacy root cause without changing the artifact", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["root_cause"] = "";
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.root_cause).toBe("");
     expect(await readJson(findingsPath)).toEqual(findings);
   });
 

@@ -271,6 +271,12 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
         "code",
         "language",
       ]);
+    } else if (
+      "root_cause" in finding &&
+      legacyRootCause !== null &&
+      (typeof legacyRootCause !== "string" || legacyRootCause.length === 0)
+    ) {
+      delete finding["root_cause"];
     }
 
     const validation = finding["validation"];

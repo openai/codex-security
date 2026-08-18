@@ -74,6 +74,14 @@ describe("bundled finding previews", () => {
           },
         ],
       },
+      malformedCanonicalRootCause: {
+        rootCause: { summary: 42 },
+        root_cause: {
+          summary: "The valid legacy root cause.",
+          evidence_refs: ["legacy-root"],
+        },
+        code_evidence: [{ id: "legacy-root", code: "legacy_root()" }],
+      },
     };
     expect(projectFindingDetails(original)).toEqual({
       projected: {
@@ -102,6 +110,13 @@ describe("bundled finding previews", () => {
         },
         invalidLegacyEvidenceFields: {
           code_evidence: [{ id: "legacy-source", code: "dangerous_call()" }],
+        },
+        malformedCanonicalRootCause: {
+          rootCause: {
+            summary: "The valid legacy root cause.",
+            evidenceRefs: ["legacy-root"],
+          },
+          code_evidence: [{ id: "legacy-root", code: "legacy_root()" }],
         },
       },
       original,

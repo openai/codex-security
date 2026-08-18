@@ -694,7 +694,7 @@ def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
     return (
         ("informational", "low", "medium", "high", "critical").index(finding["severity"]["level"]),
         ("low", "medium", "high").index(finding["confidence"]["level"]),
-        len(_merged_code_evidence(finding)),
+        _finding_evidence_strength(finding),
     )
 
 
@@ -1632,6 +1632,12 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             _remove_unsupported_legacy_scalar_fields(
                 legacy_root_cause, ("summary", "code", "language")
             )
+        elif (
+            "root_cause" in finding
+            and legacy_root_cause is not None
+            and (not isinstance(legacy_root_cause, str) or legacy_root_cause == "")
+        ):
+            finding.pop("root_cause")
         validation = finding.get("validation")
         if isinstance(validation, dict):
             _remove_unsupported_legacy_scalar_fields(
@@ -1833,6 +1839,45 @@ def _merged_code_evidence(finding: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(evidence_id, str) and evidence_id:
                 catalog.setdefault(evidence_id, evidence)
     return list(catalog.values())
+
+
+def _finding_evidence_strength(finding: dict[str, Any]) -> int:
+    evidence = _merged_code_evidence(finding)
+    seen_ids = {
+        item["id"] for item in evidence if isinstance(item.get("id"), str) and item["id"].strip()
+    }
+    seen_codes = {
+        item["code"]
+        for item in evidence
+        if isinstance(item.get("code"), str) and item["code"].strip()
+    }
+    strength = len(evidence)
+    for section_name in ("rootCause", "root_cause"):
+        section = finding.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for evidence_name in ("codeEvidence", "code_evidence"):
+            embedded = section.get(evidence_name)
+            if not isinstance(embedded, list):
+                continue
+            for item in embedded:
+                if not isinstance(item, dict):
+                    continue
+                code = item.get("code")
+                if not isinstance(code, str) or not code.strip() or code in seen_codes:
+                    continue
+                evidence_id = item.get("id")
+                if isinstance(evidence_id, str) and evidence_id.strip():
+                    if evidence_id in seen_ids:
+                        continue
+                    seen_ids.add(evidence_id)
+                seen_codes.add(code)
+                strength += 1
+        code = section.get("code")
+        if isinstance(code, str) and code.strip() and code not in seen_codes:
+            seen_codes.add(code)
+            strength += 1
+    return strength
 
 
 def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:

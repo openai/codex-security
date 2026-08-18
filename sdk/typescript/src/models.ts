@@ -130,6 +130,13 @@ export interface FindingsDocument {
       explanation: string;
       [k: string]: unknown;
     }[];
+    code_evidence?:
+      | {
+          id: string;
+          code: string;
+          [k: string]: unknown;
+        }[]
+      | null;
     rootCause?:
       | {
           summary: string;
@@ -148,7 +155,8 @@ export interface FindingsDocument {
           language?: string;
           [k: string]: unknown;
         }
-      | string;
+      | string
+      | null;
     remediation: string;
     validation?: {
       assertions?: string[];

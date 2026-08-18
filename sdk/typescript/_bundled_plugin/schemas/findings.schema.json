@@ -263,6 +263,29 @@
               }
             }
           },
+          "code_evidence": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "code"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "code": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
           "rootCause": {
             "type": [
               "object",
@@ -296,7 +319,8 @@
           "root_cause": {
             "type": [
               "object",
-              "string"
+              "string",
+              "null"
             ],
             "properties": {
               "summary": {

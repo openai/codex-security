@@ -298,7 +298,8 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
     if not keys:
         return None, None
     if len(keys) == 1:
-        return keys[0], value[keys[0]]
+        detail = value[keys[0]]
+        return keys[0], detail if isinstance(detail, (str, dict)) else None
     details: list[dict[str, Any]] = []
     for key in keys:
         detail = value[key]
@@ -307,11 +308,21 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
         elif isinstance(detail, dict):
             details.append(detail)
         elif detail is not None:
-            return keys[0], value[keys[0]]
+            continue
     if not details:
         return keys[0], None
 
     merged: dict[str, Any] = {}
+    text_fields = {
+        "cause",
+        "code",
+        "description",
+        "detail",
+        "explanation",
+        "rationale",
+        "summary",
+        "why",
+    }
     for detail in details:
         for field, item in detail.items():
             if field in (
@@ -320,6 +331,10 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
                 "codeEvidence",
                 "code_evidence",
                 "language",
+            ):
+                continue
+            if field in text_fields and (
+                not isinstance(item, str) or not item.strip()
             ):
                 continue
             current = merged.get(field)
