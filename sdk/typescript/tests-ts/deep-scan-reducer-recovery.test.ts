@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { expect, test } from "bun:test";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -13,6 +14,218 @@ function bundledFunction(runtime: string, name: string): string {
   if (!source) throw new Error(`Missing bundled runtime function: ${name}.`);
   return source;
 }
+
+test("retains accepted findings, coverage completeness, and threat models", async () => {
+  const runtime = await loadBundledRuntime();
+  type Finding = {
+    ruleId: string;
+    identity: { anchor: string };
+    locations: Array<{ path: string; startLine: number; role: string }>;
+    severity?: { level: string };
+  };
+  const finding = (anchor: string, role = "sink"): Finding => ({
+    ruleId:
+      role === "root_control" ? "synthetic.shared" : `synthetic.${anchor}`,
+    identity: { anchor },
+    locations: [
+      {
+        path: `src/${role === "root_control" ? "shared" : anchor}.ts`,
+        startLine: 10,
+        role,
+      },
+    ],
+  });
+  const draft = (
+    findings: Finding[],
+    completeness: "complete" | "partial" | "unknown" = "complete",
+    threatModel?: { summary: string; assets?: string[] },
+  ) => ({
+    findings,
+    coverage: { completeness },
+    ...(threatModel === undefined ? {} : { threatModel }),
+  });
+  const validate = new Function(
+    "findingIdentity",
+    "import_node_util",
+    `${bundledFunction(runtime, "validateRetainedFindings")}\nreturn validateRetainedFindings;`,
+  )((value: Finding) => value.identity.anchor, { isDeepStrictEqual }) as (
+    result: ReturnType<typeof draft>,
+    sources: Array<ReturnType<typeof draft>>,
+    previous?: ReturnType<typeof draft>,
+  ) => void;
+  const first = finding("first");
+  const second = finding("second");
+  const threatModel = {
+    summary: "Administrator boundary.",
+    assets: ["accounts"],
+  };
+  const firstSurface = {
+    id: "shared",
+    disposition: "reviewed",
+    label: "Authentication",
+  };
+  const secondSurface = { ...firstSurface, label: "Authorization" };
+  const withSurfaces = (surfaces: Array<typeof firstSurface>) => ({
+    ...draft([first]),
+    coverage: { completeness: "complete" as const, surfaces },
+  });
+
+  for (const fixture of [
+    {
+      result: draft([first]),
+      sources: [draft([first, second])],
+      error: "omitted",
+    },
+    {
+      result: draft([first, second]),
+      sources: [draft([first])],
+      error: "unsupported",
+    },
+    {
+      result: draft([first, first]),
+      sources: [draft([first])],
+      error: "duplicate",
+    },
+    {
+      result: draft([{ ...first, severity: { level: "low" } }]),
+      sources: [draft([{ ...first, severity: { level: "high" } }])],
+      error: "changed an accepted",
+    },
+    {
+      result: draft([first]),
+      sources: [draft([first], "partial")],
+      error: "partial",
+    },
+    {
+      result: draft([first]),
+      sources: [draft([first], "unknown")],
+      error: "unknown",
+    },
+    {
+      result: draft([first, second]),
+      sources: [draft([second])],
+      previous: draft([first], "partial"),
+      error: "partial",
+    },
+    {
+      result: draft([first]),
+      sources: [draft([first], "complete", threatModel)],
+      error: "threat model",
+    },
+    {
+      result: draft([first], "complete", {
+        summary: "Different boundary.",
+        assets: ["accounts"],
+      }),
+      sources: [draft([first], "complete", threatModel)],
+      error: "threatModel summary",
+    },
+    {
+      result: draft([first], "complete", { summary: "Invented boundary." }),
+      sources: [draft([first])],
+      error: "unsupported Standard scan threat model",
+    },
+    {
+      result: withSurfaces([]),
+      sources: [withSurfaces([firstSurface])],
+      error: "coverage surfaces",
+    },
+    {
+      result: withSurfaces([firstSurface]),
+      sources: [withSurfaces([firstSurface, secondSurface])],
+      error: "coverage surfaces",
+    },
+    {
+      result: withSurfaces([{ ...firstSurface, label: "Documentation" }]),
+      sources: [withSurfaces([firstSurface])],
+      error: "coverage surfaces",
+    },
+    {
+      result: { ...draft([first]), scope: { limitations: [] } },
+      sources: [
+        { ...draft([first]), scope: { limitations: ["No runtime access."] } },
+      ],
+      error: "scope limitations",
+    },
+    {
+      result: { ...draft([first]), scope: { summary: "Invented review." } },
+      sources: [{ ...draft([first]), scope: { summary: "Accepted review." } }],
+      error: "scope summary",
+    },
+    {
+      result: draft([first, second], "complete", {
+        summary: "Administrator boundary.\n\nWorker boundary.\n\nInvented.",
+        assets: ["accounts", "workers"],
+      }),
+      sources: [
+        draft([first], "complete", threatModel),
+        draft([second], "complete", {
+          summary: "Worker boundary.",
+          assets: ["workers"],
+        }),
+      ],
+      error: "threatModel summary",
+    },
+  ]) {
+    expect(() =>
+      validate(fixture.result, fixture.sources, fixture.previous),
+    ).toThrow(fixture.error);
+  }
+
+  const firstRoot = finding("first-root", "root_control");
+  const secondRoot = finding("second-root", "root_control");
+  expect(() =>
+    validate(draft([firstRoot]), [draft([firstRoot]), draft([secondRoot])]),
+  ).toThrow("omitted");
+  expect(() =>
+    validate(draft([first, second], "partial", threatModel), [
+      draft([first], "partial", threatModel),
+      draft([second]),
+    ]),
+  ).not.toThrow();
+});
+
+test("revalidates original workers when recovering a Deep reduction", async () => {
+  const runtime = await loadBundledRuntime();
+  const source =
+    /async function validateReducerArtifacts\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
+      runtime,
+    )?.[0];
+  expect(source).toBeDefined();
+  const worker = {
+    scanId: "scan",
+    findings: [{ identity: { anchor: "first" } }],
+  };
+  let validatedSources: unknown[] = [];
+  const validate = new Function(
+    "requireRegularFile",
+    "parseStoredScanDraft",
+    "readJsonObject",
+    "validateRetainedFindings",
+    "findingIdentity",
+    `${source}\nreturn validateReducerArtifacts;`,
+  )(
+    async () => {},
+    (value: unknown) => value,
+    async () => worker,
+    (_result: unknown, sources: unknown[]) => {
+      validatedSources = sources;
+    },
+    (value: { identity: { anchor: string } }) => value.identity.anchor,
+  ) as (input: Record<string, unknown>, scanId: string) => Promise<unknown>;
+
+  await validate(
+    {
+      artifacts: { workersRoot: "workers", dedupRoot: "reducers" },
+      artifactDir: "reducer",
+      resultPath: "result.json",
+      reducerId: "reducer",
+      sourceDiscoveries: [{ id: "first", resultPath: "worker.json" }],
+    },
+    "scan",
+  );
+  expect(validatedSources).toEqual([worker]);
+});
 
 test("keeps every advertised Deep worker tool within Codex's name limit", async () => {
   const runtime = await loadBundledRuntime();
