@@ -13,7 +13,7 @@ import {
 } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { runMockInSubprocess } from "./support/isolated-mock.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 function linearIssue(identifier: string) {
   return {
@@ -326,6 +326,10 @@ describe("CLI skill commands", () => {
         "Patch requires an issue, --linear-issue, or --linear-project.",
       ],
       [
+        ["patch", "--scan", "scan-1", "--linear-issue", "SEC-123"],
+        "Saved findings cannot be combined with Linear issues or projects.",
+      ],
+      [
         ["patch", "--linear-issue", "SEC-123"],
         "Linear access requires CODEX_SECURITY_LINEAR_API_KEY, LINEAR_API_KEY, or LINEAR_ACCESS_TOKEN.",
         {},
@@ -462,7 +466,7 @@ describe("CLI skill commands", () => {
 
   test("rejects input replacements whose numeric file IDs collide", async () => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         "rejects input replacements whose numeric file IDs collide",
       )
@@ -549,7 +553,7 @@ describe("CLI skill commands", () => {
       : ["symbolic link", "FIFO"],
   )("rejects finding files replaced with a %s", async (replacement) => {
     if (
-      runMockInSubprocess(
+      runTestInSubprocess(
         import.meta.path,
         `rejects finding files replaced with a ${replacement}`,
       )

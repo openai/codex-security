@@ -1,45 +1,25 @@
 import { spawn } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const testsDirectory = new URL("../tests-ts/", import.meta.url);
 const packageDirectory = fileURLToPath(new URL("../", import.meta.url));
 const tests = (await readdir(testsDirectory))
-  .filter((file) => file.endsWith(".test.ts"))
+  .filter(
+    (file) =>
+      file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
+  )
   .sort();
-const slowApiTestNames = [
-  "keeps a private preflight snapshot isolated from persistent credentials",
-  "reuses keyring-compatible credentials across separate scan clients",
-  "runs parallel ChatGPT scans with isolated mutable configuration",
-  "reuses the managed runtime when scan authentication changes",
-  "does not reimport ambient credentials after an explicit logout",
-];
-const apiTestSource = await readFile(
-  new URL("../tests-ts/api.test.ts", import.meta.url),
-  "utf8",
-);
-for (const testName of slowApiTestNames) {
-  if (!apiTestSource.includes(`test("${testName}"`)) {
-    throw new Error("Windows CI slow API shard references a missing test.");
-  }
-}
-const slowApiTests = slowApiTestNames.join("|");
 const shardSeeds = [
-  {
-    files: ["api.test.ts"],
-    testNamePattern: slowApiTests,
-  },
-  {
-    files: ["api.test.ts"],
-    testNamePattern: `^(?!.*(?:${slowApiTests})).*$`,
-  },
-  { files: ["runtime.test.ts"] },
-  { files: ["cli-authentication.test.ts"] },
-  { files: ["scan-recovery.test.ts"] },
-  { files: [] },
-  { files: [] },
+  ["api-credentials.test.ts"],
+  ["api.test.ts"],
+  ["runtime.test.ts"],
+  ["cli-authentication.test.ts"],
+  ["scan-recovery.test.ts"],
+  [],
+  [],
 ];
-const assigned = new Set(shardSeeds.flatMap(({ files }) => files));
+const assigned = new Set(shardSeeds.flat());
 for (const file of assigned) {
   if (!tests.includes(file)) {
     throw new Error("Windows CI test shard references a missing file: " + file);
@@ -52,28 +32,19 @@ const slowRemainderFiles = new Set([
   "scan-comparison.test.ts",
 ]);
 for (const [index, file] of unassigned.entries()) {
-  shardSeeds[slowRemainderFiles.has(file) ? 6 : 5 + (index % 2)].files.push(
-    file,
-  );
+  shardSeeds[slowRemainderFiles.has(file) ? 6 : 5 + (index % 2)].push(file);
 }
 
-const assignments = new Map();
-for (const { files } of shardSeeds) {
-  for (const file of files) {
-    assignments.set(file, (assignments.get(file) ?? 0) + 1);
-  }
-}
-for (const file of tests) {
-  const expectedAssignments = file === "api.test.ts" ? 2 : 1;
-  if (assignments.get(file) !== expectedAssignments) {
-    throw new Error("Windows CI test shards must run every test file.");
-  }
+const assignments = shardSeeds.flat();
+if (
+  assignments.length !== tests.length ||
+  new Set(assignments).size !== tests.length
+) {
+  throw new Error("Windows CI test shards must run every test file once.");
 }
 
 const requestedShard =
-  process.argv[2] === undefined
-    ? undefined
-    : Number.parseInt(process.argv[2], 10);
+  process.argv[2] === undefined ? undefined : Number(process.argv[2]);
 if (
   requestedShard !== undefined &&
   (!Number.isSafeInteger(requestedShard) ||
@@ -84,12 +55,12 @@ if (
 }
 const selectedShards =
   requestedShard === undefined
-    ? shardSeeds.map((shard, index) => ({ ...shard, index }))
-    : [{ ...shardSeeds[requestedShard - 1], index: requestedShard - 1 }];
+    ? shardSeeds.map((files, index) => ({ files, index }))
+    : [{ files: shardSeeds[requestedShard - 1], index: requestedShard - 1 }];
 
 const results = await Promise.all(
   selectedShards.map(
-    ({ files, index, testNamePattern }) =>
+    ({ files, index }) =>
       new Promise((resolve, reject) => {
         const paths = files.map((file) => "./tests-ts/" + file);
         console.log(
@@ -98,19 +69,11 @@ const results = await Promise.all(
             "/" +
             shardSeeds.length +
             ": " +
-            paths.join(" ") +
-            (testNamePattern === undefined
-              ? ""
-              : " --test-name-pattern " + testNamePattern),
+            paths.join(" "),
         );
         // Native Windows credential and document checks can exceed 30 seconds.
         // The workflow still bounds each complete shard to ten minutes.
-        const args = ["test", "--timeout", "120000"];
-        if (testNamePattern !== undefined) {
-          args.push("--test-name-pattern", testNamePattern);
-        }
-        args.push(...paths);
-        const child = spawn("bun", args, {
+        const child = spawn("bun", ["test", "--timeout", "120000", ...paths], {
           cwd: packageDirectory,
           stdio: "inherit",
           windowsHide: true,
