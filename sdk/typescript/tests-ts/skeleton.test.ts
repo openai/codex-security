@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
+import { parse } from "smol-toml";
 import {
   type AttackPathDataflow,
   type AttackPathReachability,
@@ -84,7 +85,7 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("uses the default test timeout consistently across CI platforms", async () => {
+  test("randomizes tests with the default timeout across CI platforms", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -92,10 +93,14 @@ describe("TypeScript package skeleton", () => {
       new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
       "utf8",
     );
+    const bunConfig = parse(
+      await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
+    );
 
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
+    expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(ciWorkflow).toContain(
       "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
     );

@@ -30,6 +30,7 @@ export {
   IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,

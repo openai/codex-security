@@ -4507,7 +4507,7 @@ describe("CodexSecurity orchestration", () => {
 
     try {
       const results = await Promise.allSettled(
-        clients.map((client) => client.run(repository)),
+        clients.map((client) => client.run(repository).finally(releaseScans)),
       );
       for (const result of results) {
         expect(result).toMatchObject({
@@ -4519,6 +4519,7 @@ describe("CodexSecurity orchestration", () => {
       }
       expect(scansStarted).toBe(2);
     } finally {
+      releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
@@ -4610,7 +4611,9 @@ describe("CodexSecurity orchestration", () => {
     try {
       const results = await Promise.allSettled(
         clients.map((client, index) =>
-          client.run(repository, { mode: "deep", workers: index + 2 }),
+          client
+            .run(repository, { mode: "deep", workers: index + 2 })
+            .finally(releaseScans),
         ),
       );
       for (const result of results) {
@@ -4633,6 +4636,7 @@ describe("CodexSecurity orchestration", () => {
         ),
       ).toBe(true);
     } finally {
+      releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
@@ -6521,20 +6525,17 @@ setInterval(() => {}, 1000);
     );
     const login = client.loginApiKey("secret-key");
     void login.catch(() => undefined);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const started = await import("node:fs/promises").then(({ stat }) =>
-        stat(ready).catch(() => null),
-      );
-      if (started !== null) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(ready) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(existsSync(ready), "the fake login process started").toBe(true);
+      await client.close();
+      await expect(login).rejects.toThrow();
+      await expect(stat(codexHome)).resolves.toBeDefined();
+    } finally {
+      await client.close();
     }
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(ready)),
-    ).resolves.toBeDefined();
-    await client.close();
-    await expect(login).rejects.toThrow();
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(codexHome)),
-    ).resolves.toBeDefined();
-  });
+  }, 30_000);
 });

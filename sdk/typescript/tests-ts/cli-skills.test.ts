@@ -13,6 +13,7 @@ import {
 } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 function linearIssue(identifier: string) {
   return {
@@ -459,11 +460,102 @@ describe("CLI skill commands", () => {
     }
   });
 
+  test("rejects input replacements whose numeric file IDs collide", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "rejects input replacements whose numeric file IDs collide",
+      )
+    ) {
+      return;
+    }
+    const root = await mkdtemp(join(tmpdir(), "codex-security-file-identity-"));
+    const selected = join(root, "finding.txt");
+    const replacement = join(root, "replacement.txt");
+    const selectedInode = 2n ** 60n;
+    const replacementInode = selectedInode + 1n;
+    expect(Number(selectedInode)).toBe(Number(replacementInode));
+    await writeFile(selected, "ordinary finding\n");
+    await writeFile(replacement, "SYNTHETIC_REPLACEMENT_FINDING\n");
+    const canonicalSelected = await filesystem.realpath(selected);
+    const originalLstat = filesystem.lstat;
+    const originalOpen = filesystem.open;
+    let restoreOpenedStat: (() => void) | undefined;
+    let replaced = false;
+    const reading = spyOn(filesystem, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof filesystem.lstat>
+    ) => {
+      const metadata = await originalLstat(...args);
+      if (String(args[0]) === selected) {
+        metadata.ino =
+          typeof metadata.ino === "bigint"
+            ? selectedInode
+            : Number(selectedInode);
+      }
+      return metadata;
+    }) as typeof filesystem.lstat);
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) !== canonicalSelected) {
+          return await originalOpen(...args);
+        }
+        replaced = true;
+        const file = await originalOpen(replacement, args[1], args[2]);
+        const originalStat = file.stat.bind(file);
+        const openedStat = spyOn(file, "stat").mockImplementation((async (
+          ...statArgs: Parameters<typeof file.stat>
+        ) => {
+          const metadata = await originalStat(...statArgs);
+          metadata.ino =
+            typeof metadata.ino === "bigint"
+              ? replacementInode
+              : Number(replacementInode);
+          return metadata;
+        }) as typeof file.stat);
+        restoreOpenedStat = () => openedStat.mockRestore();
+        return file;
+      },
+    );
+    try {
+      let started = false;
+      const stderr = capture();
+      const status = await main(
+        ["validate", "finding.txt"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: root,
+          onCodex: () => {
+            started = true;
+            return 0;
+          },
+        }),
+      );
+      expect(replaced).toBe(true);
+      expect(status).toBe(2);
+      expect(stderr.text()).not.toContain("SYNTHETIC_REPLACEMENT_FINDING");
+      expect(started).toBe(false);
+    } finally {
+      restoreOpenedStat?.();
+      opening.mockRestore();
+      reading.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test.each(
     process.platform === "win32"
       ? ["symbolic link"]
       : ["symbolic link", "FIFO"],
   )("rejects finding files replaced with a %s", async (replacement) => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        `rejects finding files replaced with a ${replacement}`,
+      )
+    ) {
+      return;
+    }
     const root = await mkdtemp(join(tmpdir(), "codex-security-skill-inputs-"));
     try {
       const repository = join(root, "repository");
@@ -475,6 +567,7 @@ describe("CLI skill commands", () => {
       const canonicalSelected = await filesystem.realpath(selected);
 
       const originalOpen = filesystem.open;
+      let replaced = false;
       const opening = spyOn(filesystem, "open").mockImplementation(
         async (...args: Parameters<typeof filesystem.open>) => {
           if (String(args[0]) === canonicalSelected) {
@@ -482,6 +575,7 @@ describe("CLI skill commands", () => {
             await rm(selected);
             if (replacement === "FIFO") execFileSync("mkfifo", [selected]);
             else await symlink(external, selected);
+            replaced = true;
           }
           return await originalOpen(...args);
         },
@@ -490,20 +584,20 @@ describe("CLI skill commands", () => {
       try {
         let started = false;
         const stderr = capture();
-        expect(
-          await main(
-            ["validate", "finding.txt"],
-            capture().stream,
-            stderr.stream,
-            dependencies({
-              currentDirectory: repository,
-              onCodex: () => {
-                started = true;
-                return 0;
-              },
-            }),
-          ),
-        ).toBe(2);
+        const status = await main(
+          ["validate", "finding.txt"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: repository,
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          }),
+        );
+        expect(replaced, "the file-open replacement hook ran").toBe(true);
+        expect(status).toBe(2);
         expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
         expect(started).toBe(false);
       } finally {

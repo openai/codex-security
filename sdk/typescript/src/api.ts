@@ -32,6 +32,11 @@ import {
   type AccountStatus,
 } from "./auth.js";
 import {
+  jsonForPrompt,
+  pluginPythonCommand,
+  shellEnvironmentReference,
+} from "./codex-prompt.js";
+import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
@@ -58,8 +63,6 @@ import {
   CodexSecurityError,
   IncompleteScanError,
   OutputDirectoryError,
-  OutputInsideProtectedRootError,
-  type ProtectedScanPathKind,
   errorMessage,
   safeErrorMessage,
   ScanCostLimitExceededError,
@@ -103,8 +106,9 @@ import {
   pluginExecutionEnvironment,
   planOutputArchive,
   prepareOutputDir,
-  preparePersistentScanRoot,
+  preparePersistentOutputRoot,
   requireModelSafeOutputDir,
+  requireOutputOutsideRepository,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -548,7 +552,11 @@ export class CodexSecurity {
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
-          ? await preparePersistentScanRoot(stateDirectory, basename(repo))
+          ? await preparePersistentOutputRoot(
+              stateDirectory,
+              "scans",
+              basename(repo),
+            )
           : temporaryRoot;
       if (scanOutputRoot !== undefined) {
         requireOutputOutsideRepository(
@@ -937,12 +945,7 @@ export class CodexSecurity {
         approvalPolicy,
       });
       const serializedPaths =
-        normalized.kind === "paths"
-          ? JSON.stringify(normalized.paths)
-              .replaceAll("\u0085", "\\u0085")
-              .replaceAll("\u2028", "\\u2028")
-              .replaceAll("\u2029", "\\u2029")
-          : null;
+        normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
       checkOpen();
       if (serializedPaths !== null && targetPathsFile !== null) {
         await writeFile(targetPathsFile, `${serializedPaths}\n`, {
@@ -2232,6 +2235,7 @@ interface ScanEventRunOptions {
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
 
+/** @internal */
 export async function runScanEvents(
   options: ScanEventRunOptions,
 ): Promise<ScanResult> {
@@ -2542,7 +2546,7 @@ function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
 ): string {
-  const python = `${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")}`;
+  const python = pluginPythonCommand();
   return [
     `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
     "Run this Codex Security scan non-interactively.",
@@ -2617,11 +2621,6 @@ function scanPrompt(
       ? ["Additional scan instructions:", additionalPrompt]
       : []),
   ].join("\n");
-}
-
-function shellEnvironmentReference(name: string, suffix = ""): string {
-  const prefix = process.platform === "win32" ? "$env:" : "$";
-  return `"${prefix}${name}${suffix}"`;
 }
 
 function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
@@ -3201,31 +3200,6 @@ async function pluginSupportsIsolatedDeepScanConfig(
     Array.isArray(environment) &&
     environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
   );
-}
-
-function requireOutputOutsideRepository(
-  repository: string,
-  outputDirectory: string,
-  pathKind: ProtectedScanPathKind = "output",
-): void {
-  const outputRelative = relative(repository, outputDirectory);
-  const repositoryRelative = relative(outputDirectory, repository);
-  if (
-    outputRelative === "" ||
-    (outputRelative !== ".." &&
-      !outputRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(outputRelative)) ||
-    (pathKind === "output" &&
-      repositoryRelative !== ".." &&
-      !repositoryRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(repositoryRelative))
-  ) {
-    throw new OutputInsideProtectedRootError(
-      outputDirectory,
-      repository,
-      pathKind,
-    );
-  }
 }
 
 function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
