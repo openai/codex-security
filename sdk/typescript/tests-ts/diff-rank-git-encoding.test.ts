@@ -34,8 +34,8 @@ committed = module.run_git_changed_paths(repository, ["base..head"])
 working = module.git_changed_paths(repository, "base", "HEAD", "local-patch")
 print(json.dumps({
     "calls": len(calls),
-    "committed": [[str(path), status] for path, status in committed],
-    "working": [[str(path), status] for path, status in working],
+    "committed": [[path.as_posix(), status] for path, status in committed],
+    "working": [[path.as_posix(), status] for path, status in working],
 }, ensure_ascii=False))
 `;
 
