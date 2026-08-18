@@ -266,6 +266,20 @@ export async function normalizeTarget(
         cause: error,
       });
     }
+    let metadata;
+    try {
+      metadata = await abortable(() => stat(canonical), signal);
+    } catch (error) {
+      throwIfAborted(signal);
+      throw new InvalidTargetError(`Path target does not exist: ${value}`, {
+        cause: error,
+      });
+    }
+    if (!metadata.isFile() && !metadata.isDirectory()) {
+      throw new InvalidTargetError(
+        `Path target must be a regular file or directory: ${value}`,
+      );
+    }
     const relativePath = relative(root, canonical);
     if (
       relativePath === ".." ||
