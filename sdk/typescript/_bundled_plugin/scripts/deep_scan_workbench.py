@@ -160,6 +160,12 @@ def now() -> str:
     return dependencies().now()
 
 
+def _parse_timestamp(value: str) -> datetime:
+    if isinstance(value, str) and value.endswith(("Z", "z")):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
+
+
 def state_dir() -> Path:
     return dependencies().state_dir()
 
@@ -219,7 +225,7 @@ def require_deep_scan_run(connection: sqlite3.Connection, scan_id: str) -> sqlit
 
 
 def deep_scan_deadline_reached(run: sqlite3.Row) -> bool:
-    elapsed = datetime.fromisoformat(now()) - datetime.fromisoformat(str(run["created_at"]))
+    elapsed = _parse_timestamp(now()) - _parse_timestamp(str(run["created_at"]))
     return elapsed.total_seconds() / 3600 >= run["max_time_hours"]
 
 
@@ -880,12 +886,12 @@ def coordinator_lease_is_live(
             """,
             (run["scan_id"],),
         ).fetchone()
-        return active_worker is not None and datetime.fromisoformat(
+        return active_worker is not None and _parse_timestamp(
             str(run["updated_at"])
-        ) > datetime.fromisoformat(timestamp) - timedelta(
+        ) > _parse_timestamp(timestamp) - timedelta(
             seconds=DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS
         )
-    heartbeat_time = datetime.fromisoformat(str(run["updated_at"]))
+    heartbeat_time = _parse_timestamp(str(run["updated_at"]))
     heartbeat_path = (
         Path(scan["scan_dir"])
         / "artifacts"
@@ -895,10 +901,10 @@ def coordinator_lease_is_live(
     try:
         heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
         if heartbeat["coordinatorGeneration"] == run["coordinator_generation"]:
-            heartbeat_time = max(heartbeat_time, datetime.fromisoformat(heartbeat["updatedAt"]))
+            heartbeat_time = max(heartbeat_time, _parse_timestamp(heartbeat["updatedAt"]))
     except (OSError, KeyError, TypeError, ValueError):
         pass
-    current_time = datetime.fromisoformat(timestamp)
+    current_time = _parse_timestamp(timestamp)
     return heartbeat_time > current_time - timedelta(seconds=DEEP_SCAN_COORDINATOR_LEASE_SECONDS)
 
 

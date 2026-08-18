@@ -419,7 +419,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
       await rm(stale, { recursive: true, force: true });
     }
   }
-  const createdLock = await lstat(path);
+  const createdLock = await lstat(path, { bigint: true });
   const owner = `${JSON.stringify({
     pid: process.pid,
     ownerId: randomUUID(),
@@ -429,7 +429,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   try {
     await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
   } catch (error) {
-    const currentLock = await lstat(path).catch(
+    const currentLock = await lstat(path, { bigint: true }).catch(
       (cleanup: NodeJS.ErrnoException) => {
         if (cleanup.code !== "ENOENT") throw cleanup;
         return undefined;
