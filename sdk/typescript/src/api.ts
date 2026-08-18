@@ -460,6 +460,14 @@ export class CodexSecurity {
     ]);
     let scanDir = "";
     let archivedScanDir: string | null = null;
+    const archiveRecovery: {
+      pending: {
+        scanDir: string;
+        archivedScanDir: string;
+        previousScanId: string | null;
+        options: WorkbenchCommandOptions;
+      } | null;
+    } = { pending: null };
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
@@ -549,6 +557,52 @@ export class CodexSecurity {
         );
       }
       checkOpen();
+      const workbenchOptions: WorkbenchCommandOptions = {
+        python,
+        pluginRoot: runtime.plugin.pluginRoot,
+        environment: {
+          ...selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            modelProvider,
+          ),
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+        signal,
+        failureMessage: "Could not save the Codex Security scan",
+      };
+      let previousOutput: { scanId: string | null } | null = null;
+      if (requestedOutput !== null && options.archiveExisting === true) {
+        const history = await workbench(
+          {
+            ...workbenchOptions,
+            failureMessage:
+              "Could not inspect the previous Codex Security scan",
+          },
+          ["list-scans", "--scan-root", requestedOutput],
+        );
+        const scans = history["scans"];
+        const previous = Array.isArray(scans)
+          ? scans.filter(
+              (scan): scan is JsonObject =>
+                isRecord(scan) && scan["scanDir"] === requestedOutput,
+            )
+          : null;
+        const previousScanId = previous?.[0]?.["scanId"];
+        if (
+          previous === null ||
+          previous.length > 1 ||
+          (previous.length === 1 &&
+            (typeof previousScanId !== "string" || previousScanId.length === 0))
+        ) {
+          throw new CodexSecurityError(
+            "The Codex Security workbench returned invalid previous scan history.",
+          );
+        }
+        previousOutput = {
+          scanId: typeof previousScanId === "string" ? previousScanId : null,
+        };
+      }
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
@@ -573,6 +627,14 @@ export class CodexSecurity {
         options.archiveExisting,
         (archiveDir) => {
           archivedScanDir = archiveDir;
+          if (requestedOutput !== null && previousOutput !== null) {
+            archiveRecovery.pending = {
+              scanDir: requestedOutput,
+              archivedScanDir: archiveDir,
+              previousScanId: previousOutput.scanId,
+              options: workbenchOptions,
+            };
+          }
           notifyObserver(
             "onOutputArchived",
             options.onOutputArchived,
@@ -735,20 +797,6 @@ export class CodexSecurity {
         options.maxCostUsd,
         deepScanOptions(options),
       );
-      const workbenchOptions: WorkbenchCommandOptions = {
-        python,
-        pluginRoot: runtime.plugin.pluginRoot,
-        environment: {
-          ...selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-          ),
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-        signal,
-        failureMessage: "Could not save the Codex Security scan",
-      };
       const registration = await workbench(workbenchOptions, [
         "register-cli-scan",
         "--repository",
@@ -765,6 +813,7 @@ export class CodexSecurity {
           ? []
           : ["--parent-scan-id", options.parentScanId]),
       ]);
+      archiveRecovery.pending = null;
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
       const contract = registration["contract"];
@@ -1169,9 +1218,7 @@ export class CodexSecurity {
             scanId,
             repository: repo,
             previousFindings: previousFindings.filter(
-              (finding) =>
-                finding["scanId"] !== scanId &&
-                finding["targetId"] === targetId,
+              (finding) => finding["scanId"] !== scanId,
             ),
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
@@ -1209,6 +1256,47 @@ export class CodexSecurity {
         signal.reason instanceof ScanCostLimitExceededError
           ? signal.reason
           : error;
+      if (archiveRecovery.pending !== null) {
+        const archive = archiveRecovery.pending;
+        archiveRecovery.pending = null;
+        try {
+          const recovery = await workbench(
+            {
+              ...archive.options,
+              signal: undefined,
+              failureMessage:
+                "Could not restore the previous Codex Security scan",
+            },
+            [
+              "restore-cli-scan-archive",
+              "--scan-dir",
+              archive.scanDir,
+              "--archived-scan-dir",
+              archive.archivedScanDir,
+              ...(archive.previousScanId === null
+                ? ["--previous-scan-absent"]
+                : ["--previous-scan-id", archive.previousScanId]),
+            ],
+          );
+          if (
+            recovery["scanDir"] !== archive.scanDir ||
+            recovery["archivedScanDir"] !== archive.archivedScanDir ||
+            (recovery["disposition"] !== "restored" &&
+              recovery["disposition"] !== "already-recorded")
+          ) {
+            throw new CodexSecurityError(
+              `Previous scan output remains archived at ${archive.archivedScanDir}; its ownership could not be reconciled.`,
+            );
+          }
+        } catch (recoveryError) {
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not restore previous scan output: ${errorMessage(recoveryError)}`,
+          );
+        }
+      }
       if (
         failure instanceof ScanCostLimitExceededError &&
         budgetRecovery !== null &&
@@ -2050,20 +2138,28 @@ export class CodexSecurity {
 
 export async function listRepositoryFindings(
   workbench: (args: readonly string[]) => Promise<JsonObject>,
-  targetId: string,
+  target: string | { repository: string },
   status: "open" | "all" = "open",
 ): Promise<JsonObject[] | undefined> {
   const findings: JsonObject[] = [];
+  const selector =
+    typeof target === "string"
+      ? ["--target-id", target]
+      : ["--repository", target.repository];
   let offset: number | undefined;
   do {
     const page = await workbench([
       "list-global-findings",
-      "--target-id",
-      targetId,
+      ...selector,
       ...(status === "open" ? ["--status", "open"] : []),
       ...(offset === undefined ? [] : ["--offset", String(offset)]),
     ]);
-    if (!Array.isArray(page["findings"])) return undefined;
+    if (
+      page["projectionAvailable"] === false ||
+      !Array.isArray(page["findings"])
+    ) {
+      return undefined;
+    }
     findings.push(...(page["findings"] as JsonObject[]));
     offset =
       typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;

@@ -148,6 +148,57 @@ def archive_scan(
         )
 
 
+def restore_cli_scan_archive(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    canonical_directory: Callable[[Path], Path],
+) -> dict[str, str]:
+    supplied_scan_dir = Path(args.scan_dir).expanduser().absolute()
+    supplied_archive = Path(args.archived_scan_dir).expanduser().absolute()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        scan_dir = supplied_scan_dir.resolve()
+        archived_scan_dir = supplied_archive.resolve()
+        archived_owner = connection.execute(
+            "SELECT id FROM scans WHERE scan_dir = ?", (str(archived_scan_dir),)
+        ).fetchone()
+        previous_scan = connection.execute(
+            "SELECT id FROM scans WHERE scan_dir = ?", (str(scan_dir),)
+        ).fetchone()
+        previous_scan_id = previous_scan["id"] if previous_scan is not None else None
+        if archived_owner is not None:
+            disposition = "already-recorded"
+        elif previous_scan_id != args.previous_scan_id:
+            disposition = "ownership-changed"
+        else:
+            archived_scan_dir = canonical_directory(supplied_archive)
+            if (
+                os.path.normcase(supplied_scan_dir) != os.path.normcase(scan_dir)
+                or archived_scan_dir.parent != scan_dir.parent
+                or not archived_scan_dir.name.startswith(f"{scan_dir.name}.previous-")
+            ):
+                raise SystemExit(
+                    "The archived scan must be a previous sibling of the scan directory."
+                )
+            try:
+                supplied_scan_dir.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                canonical_directory(supplied_scan_dir).rmdir()
+            archived_scan_dir.rename(scan_dir)
+            disposition = "restored"
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return {
+        "disposition": disposition,
+        "scanDir": str(scan_dir),
+        "archivedScanDir": str(archived_scan_dir),
+    }
+
+
 def insert_running_scan(
     connection: sqlite3.Connection,
     *,
@@ -157,6 +208,7 @@ def insert_running_scan(
     scope: str,
     diff_target: dict[str, str] | None,
     target_identity: tuple[str, str | None, int | str, int | str],
+    repository_generation: str | None,
     target_root: Path,
     target_summary: str | None,
     scope_file_count: int,
@@ -179,18 +231,20 @@ def insert_running_scan(
     connection.execute(
         """
         INSERT INTO scans (
-            id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
+            id, workspace_id, target_id, repository_generation, target_path,
+            target_revision, target_snapshot_digest,
             target_device, target_inode, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?)
         """,
         (
             scan_id,
             workspace["id"],
             workspace["target_id"],
+            repository_generation,
             str(target),
             *target_identity,
             scope,

@@ -445,7 +445,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | `CODEX_SECURITY_LINEAR_API_KEY`                                             | Patch Linear issues or publish directly with a personal API key.                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Select the history database, artifact directory, and dedicated Codex credential home.         |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
 | `CODEX_CLI_PATH`                                                            | Use another Codex executable for authentication, plugin setup, scans, and nested workers.     |
 | `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
@@ -670,11 +670,27 @@ const directPublication = await publishScan("/path/to/completed-scan", {
 
 ### Scan history and reruns
 
-`scans` or `scans list` lists scans for the current repository. Pass a repository
-path to inspect another checkout, or `--scan-root DIR` to list scans whose
-artifacts are under a particular root. `scans show` opens the latest completed
-scan for the current repository. Pass `SCAN_ID` to inspect another scan. Scan
-details include the configuration, results, coverage, and artifact locations. Add
+`scans` or `scans list` lists scans for the current repository. Linked Git
+worktrees are discovered automatically when their scans record the same Git
+generation in the selected state database. The generation identifies the shared
+Git and primary object-store directory instances; it is not a repository UUID.
+History written without that scan-level evidence stays attached to its original
+target and scan IDs. Older clients' history is not retroactively shared across
+worktrees. Ordinary database opens do not retry unrelated unscanned targets;
+eligible targets are bound when explicitly registered. On older Git, primary
+`.git` files also need a repository-side `core.worktree` record identifying the
+checkout. Layouts without that reverse record retain target-local history.
+Explicit comparisons between independently verified copies of the same
+repository remain available without joining their finding histories. Findings
+indicate whether they were confirmed in the repository's latest completed scan
+across those linked worktrees. Finding confirmation and
+automatic matching use the order in which completed scans become visible in the
+workbench; sealed report timestamps are unchanged. Pass a repository path to
+inspect another checkout. `--scan-root DIR` only filters scans already recorded
+in that database by their artifact directory; it never imports scan results from
+another state directory. `scans show` opens the latest completed scan for the
+current repository. Pass `SCAN_ID` to inspect another scan. Scan details include
+the configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
 `scans logs` shows session events from the latest scan, including an active scan.
@@ -688,9 +704,27 @@ least eight characters.
 Scan history uses `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3` when
 `CODEX_SECURITY_STATE_DIR` is set. Otherwise, it uses
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`; `CODEX_HOME`
-defaults to `~/.codex`. Scan credentials are never stored in the scan
-configuration. Recorded failure summaries and bulk-scan receipts omit messages
-that contain recognizable credentials.
+defaults to `~/.codex`. Saved findings use the same selected database.
+Changing or unsetting `CODEX_SECURITY_STATE_DIR` selects separate scan history
+and an isolated Codex credential home and sign-in scope; scans from the
+previous state remain hidden until you select that state again. Keep the
+setting stable across linked worktrees to share scans and findings
+automatically.
+
+```bash
+# Inspect shared history from another linked Git worktree:
+npx @openai/codex-security scans list
+npx @openai/codex-security findings list
+
+# Reopen an existing state directory and its sign-in:
+export CODEX_SECURITY_STATE_DIR=/path/to/existing/codex-security-state
+npx @openai/codex-security scans list
+npx @openai/codex-security findings list
+```
+
+Scan credentials are never stored in the scan configuration. Recorded failure
+summaries and bulk-scan receipts omit messages that contain recognizable
+credentials.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the
@@ -709,9 +743,12 @@ the same reason still applies.
 Pass `SCAN_ID` to rerun another scan.
 
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
-cause; `scans match --all` matches all completed scans of the current repository,
-including other worktrees and clones. Saved matches appear in `scans show` and
-are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
+cause. `scans match --all` matches eligible completed scans in the current
+repository generation, including linked worktrees; legacy history without a
+saved generation stays target-local. Explicit comparisons between separately
+verified clones remain available without sharing their history. Saved matches
+appear in `scans show` and are reused unless `--force` is passed. Scans without
+sealed artifacts are skipped.
 
 `scans compare` compares the two latest completed scans. Pass one scan ID to
 compare it with the latest completed scan, or two IDs to select both scans. It

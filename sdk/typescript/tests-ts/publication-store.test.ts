@@ -168,9 +168,11 @@ describe("persisted finding publication associations", () => {
   test("upgrades existing scan history and verifies every completed finding before publication", async () => {
     const fixture = await publicationFixture();
     databaseRows(fixture, "DROP TABLE finding_publications");
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
-      29,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version IN (?, ?)",
+      [29, 30],
+    );
 
     await expect(
       preparePublicationStore(fixture.publication, fixture.environment),
@@ -179,8 +181,8 @@ describe("persisted finding publication associations", () => {
     expect(
       databaseRows(
         fixture,
-        "SELECT version, name FROM schema_migrations WHERE version >= ? ORDER BY version",
-        [29],
+        "SELECT version, name FROM schema_migrations WHERE version IN (?, ?) ORDER BY version",
+        [29, 30],
       ),
     ).toEqual([
       { version: 29, name: "persist finding publication associations" },

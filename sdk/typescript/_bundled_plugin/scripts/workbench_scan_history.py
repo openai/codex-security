@@ -8,71 +8,62 @@ import sqlite3
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_target import git_output
+from workbench_target_state import (
+    RepositoryIdentityCache,
+    _timestamp_ns,
+    scan_repository_generation,
+    scan_repository_group,
+    supports_repository_identity,
+)
 
 
 def _same_repository(
+    connection: sqlite3.Connection,
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
+    identities: RepositoryIdentityCache | None = None,
 ) -> bool:
-    if before["target_id"] == after["target_id"]:
+    before_stored = scan_repository_generation(before)
+    after_stored = scan_repository_generation(after)
+    if before_stored is not None and before_stored == after_stored:
         return True
-    before_target = Path(before["target_path"])
-    after_target = Path(after["target_path"])
-    before_git_dir = git_output(
-        before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
-    )
-    after_git_dir = (
-        git_output(after_target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        if after_identity is None
-        else after_identity[0]
-    )
+    if before["target_id"] and before["target_id"] == after["target_id"]:
+        return before_stored is None or after_stored is None
+    identities = identities or RepositoryIdentityCache(connection)
+    before_state = identities.for_row(before)
+    after_state = identities.for_row(after)
     if (
-        before_git_dir is not None
-        and after_git_dir is not None
-        and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
+        not before_state.ownership_matches or not after_state.ownership_matches
+        or before_stored is not None and before_stored != before_state.live_identity
+        or after_stored is not None and after_stored != after_state.live_identity
     ):
+        return False
+    if (
+        before_state.resolved_path is not None
+        and before_state.resolved_path == after_state.resolved_path
+    ):
+        return before_stored is None or after_stored is None
+    if before_state.repository is None or after_state.repository is None:
+        return False
+    before_identity = before_state.live_identity
+    after_identity = after_state.live_identity
+    if before_identity is not None and before_identity == after_identity:
         return True
-    before_origin = _repository_origin(before_target)
-    return before_origin is not None and before_origin == (
-        _repository_origin(after_target) if after_identity is None else after_identity[1]
+    if before_identity is None or after_identity is None:
+        return False
+    after_origin = identities.origin(after_state)
+    return (
+        after_origin is not None
+        and identities.origin(before_state) == after_origin
+        and before_state.repository.relative_path == after_state.repository.relative_path
     )
-
-
-def _repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
-    if remote is None:
-        return None
-    if "://" in remote:
-        try:
-            parsed = urlsplit(remote)
-            port = parsed.port
-        except ValueError:
-            return None
-        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
-            return None
-        if parsed.query or parsed.fragment:
-            return None
-        host = parsed.hostname
-        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
-            host = f"{host}:{port}"
-        path = parsed.path
-    else:
-        authority, separator, path = remote.partition(":")
-        if not separator or "?" in path or "#" in path:
-            return None
-        host = authority.rsplit("@", 1)[-1]
-    path = path.strip("/").removesuffix(".git")
-    return (host.lower(), path) if host and path else None
 
 
 def list_scans(
@@ -82,31 +73,12 @@ def list_scans(
     values: list[Any] = []
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
-        requested_repository = connection.execute(
-            """
-            SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-                ? AS target_path
-            """,
-            (str(repository), str(repository)),
-        ).fetchone()
-        requested_identity = (
-            git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            _repository_origin(repository),
+        identities = RepositoryIdentityCache(connection)
+        clause, scope_values = identities.scope_for_path(str(repository)).sql(
+            supports_generation=identities.supports_generation
         )
-        related_target_ids = [
-            target["target_id"]
-            for target in connection.execute(
-                "SELECT id AS target_id, current_path AS target_path FROM security_targets"
-            )
-            if _same_repository(target, requested_repository, after_identity=requested_identity)
-        ]
-        repository_clauses = ["scans.target_path = ?"]
-        values.append(str(repository))
-        if related_target_ids:
-            placeholders = ", ".join("?" for _ in related_target_ids)
-            repository_clauses.append(f"scans.target_id IN ({placeholders})")
-            values.extend(related_target_ids)
-        clauses.append(f"({' OR '.join(repository_clauses)})")
+        clauses.append(clause)
+        values.extend(scope_values)
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -219,6 +191,17 @@ def list_scans(
     return result
 
 
+def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, int, str]:
+    sequence = scan["completion_sequence"] if "completion_sequence" in scan.keys() else None
+    if sequence is not None:
+        return (1, sequence, scan["id"])
+    completed_at = scan["completed_at"] if "completed_at" in scan.keys() else None
+    timestamp = _timestamp_ns(completed_at)
+    if timestamp is None:
+        timestamp = _timestamp_ns(scan["started_at"])
+    return (0, timestamp if timestamp is not None else 0, scan["id"])
+
+
 def list_unmatched_scan_pairs(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
@@ -227,20 +210,17 @@ def list_unmatched_scan_pairs(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
-    requested = connection.execute(
-        """
-        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-            ? AS target_path
-        """,
-        (str(repository), str(repository)),
-    ).fetchone()
-    selected = [
-        scan
-        for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
-        )
-        if Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested)
-    ]
+    identities = RepositoryIdentityCache(connection)
+    requested = identities.for_path(str(repository))
+    if identities.supports_identity:
+        requested.require_owner()
+    clause, values = identities.scope_for_path(str(repository)).sql(
+        supports_generation=identities.supports_generation
+    )
+    selected = connection.execute(
+        "SELECT * FROM scans WHERE status = 'complete' "
+        f"AND {clause} ORDER BY started_at, id", values
+    ).fetchall()
 
     available = []
     for scan in selected:
@@ -251,19 +231,30 @@ def list_unmatched_scan_pairs(
         available.append(scan)
 
     saved_pairs = {
-        (row["before_scan_id"], row["after_scan_id"])
+        frozenset((row["before_scan_id"], row["after_scan_id"]))
         for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
     }
+    focus_scan_id = getattr(args, "after_scan_id", None)
+    if focus_scan_id is not None and not any(scan["id"] == focus_scan_id for scan in selected):
+        raise SystemExit("The scan to match is not a completed scan in this repository.")
+    if focus_scan_id is not None:
+        available.sort(key=_scan_completion_order)
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     for index, after in enumerate(available):
+        if focus_scan_id is not None and after["id"] != focus_scan_id:
+            continue
+        candidates = [
+            before for before in available[:index]
+            if scan_repository_group(before) == scan_repository_group(after)
+        ]
         previous = [
             before
-            for before in available[:index]
-            if args.force or (before["id"], after["id"]) not in saved_pairs
+            for before in candidates
+            if args.force or frozenset((before["id"], after["id"])) not in saved_pairs
         ]
-        skipped += index - len(previous)
+        skipped += len(candidates) - len(previous)
         if not previous:
             continue
         for scan in (*previous, after):
@@ -305,13 +296,17 @@ def compare_scans(
     include_matching_inputs: bool = False,
     require_matches: bool = False,
 ) -> dict[str, Any]:
-    before = require_scan(connection, args.before_scan_id)
-    after = require_scan(connection, args.after_scan_id)
+    before = _scan_with_repository_identity(
+        connection, require_scan(connection, args.before_scan_id)
+    )
+    after = _scan_with_repository_identity(
+        connection, require_scan(connection, args.after_scan_id)
+    )
     if before["id"] == after["id"]:
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     cached = connection.execute(
         "SELECT result_json FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
@@ -445,13 +440,17 @@ def save_scan_comparison(
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    before = require_scan(connection, args.before_scan_id)
-    after = require_scan(connection, args.after_scan_id)
+    before = _scan_with_repository_identity(
+        connection, require_scan(connection, args.before_scan_id)
+    )
+    after = _scan_with_repository_identity(
+        connection, require_scan(connection, args.after_scan_id)
+    )
     if before["id"] == after["id"]:
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
@@ -526,6 +525,25 @@ def save_scan_comparison(
             ),
         )
     return compare_scans(connection, args, require_scan=require_scan, read_coverage=read_coverage)
+
+
+def _scan_with_repository_identity(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> sqlite3.Row:
+    if "repository_identity" in scan.keys():
+        return scan
+    if not supports_repository_identity(connection):
+        return scan
+    enriched = connection.execute(
+        """
+        SELECT scans.*, targets.repository_identity
+        FROM scans
+        LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
+        WHERE scans.id = ?
+        """,
+        (scan["id"],),
+    ).fetchone()
+    return enriched if enriched is not None else scan
 
 
 def finding_matches(

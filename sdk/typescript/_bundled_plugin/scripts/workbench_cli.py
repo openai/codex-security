@@ -137,6 +137,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     list_unmatched_scan_pairs = subparsers.add_parser("list-unmatched-scan-pairs")
     list_unmatched_scan_pairs.add_argument("--repository", required=True)
+    list_unmatched_scan_pairs.add_argument("--after-scan-id")
     list_unmatched_scan_pairs.add_argument("--force", action="store_true")
 
     register_cli_scan = subparsers.add_parser("register-cli-scan")
@@ -146,6 +147,13 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--parent-scan-id")
     register_cli_scan.add_argument("--archive-existing", action="store_true")
     register_cli_scan.add_argument("--archived-scan-dir")
+
+    restore_cli_scan_archive = subparsers.add_parser("restore-cli-scan-archive")
+    restore_cli_scan_archive.add_argument("--scan-dir", required=True)
+    restore_cli_scan_archive.add_argument("--archived-scan-dir", required=True)
+    previous_scan = restore_cli_scan_archive.add_mutually_exclusive_group(required=True)
+    previous_scan.add_argument("--previous-scan-id")
+    previous_scan.add_argument("--previous-scan-absent", action="store_true")
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
     set_scan_thread.add_argument("--scan-id", required=True)
@@ -169,7 +177,9 @@ def parse_args(description: str) -> argparse.Namespace:
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
-    list_global_findings.add_argument("--target-id")
+    finding_repository = list_global_findings.add_mutually_exclusive_group()
+    finding_repository.add_argument("--target-id")
+    finding_repository.add_argument("--repository")
     list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
     list_repositories = subparsers.add_parser("list-repositories")

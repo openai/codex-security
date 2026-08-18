@@ -49,7 +49,8 @@ container credentials, and the default AWS credential chain.
 
 Local sign-in honors Codex's configured credential backend, including a system
 keyring required by a managed device. Codex Security keeps login and scan
-credentials in the same private, persistent state directory.
+sign-in scoped to a dedicated Codex home in the same private, persistent state
+directory.
 
 If both a ChatGPT sign-in and an API key are available, interactive scans ask
 which credential to use. CI and other noninteractive scans keep the existing
@@ -67,12 +68,26 @@ keys:
 unset OPENAI_API_KEY CODEX_API_KEY
 ```
 
-Scan history is stored in the Codex Security workbench state directory. If that
-directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
-directory outside the repository.
+Scan history and saved findings are stored in one Codex Security state database.
+Linked Git worktrees are discovered automatically and grouped when they use the
+same state directory. Leave `CODEX_SECURITY_STATE_DIR` unset, or select one
+stable, writable directory outside the repository. Changing or unsetting it
+selects separate history and an isolated Codex credential home and sign-in
+scope; restore the previous value to reopen its existing scans and sign-in.
+
+```bash
+# Run from another linked Git worktree:
+npx @openai/codex-security scans list
+npx @openai/codex-security findings list
+
+# Reopen an existing, separately selected state directory:
+export CODEX_SECURITY_STATE_DIR=/path/to/existing/codex-security-state
+npx @openai/codex-security scans list
+```
 
 `findings list [repository]` shows open findings across a repository's scans
-and identifies findings not confirmed in its latest scan.
+and identifies findings not confirmed in its latest completed scan across
+linked worktrees.
 
 Use `patch --linear-issue SEC-123` to import and fix a Linear issue, or
 `patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'`

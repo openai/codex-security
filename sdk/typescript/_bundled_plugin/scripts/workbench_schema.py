@@ -683,6 +683,51 @@ MIGRATIONS = (
         WHERE project_id IS NULL;
         """,
     ),
+    (
+        31,
+        "persist repository identities",
+        """
+        ALTER TABLE security_targets
+        ADD COLUMN repository_identity TEXT;
+
+        CREATE INDEX security_targets_by_repository_identity
+        ON security_targets(repository_identity);
+
+        ALTER TABLE scans
+        ADD COLUMN repository_generation TEXT;
+
+        CREATE INDEX scans_by_repository_generation
+        ON scans(repository_generation);
+
+        ALTER TABLE scans
+        ADD COLUMN completion_sequence INTEGER CHECK (completion_sequence >= 1);
+
+        CREATE UNIQUE INDEX scans_completion_sequence
+        ON scans(completion_sequence);
+
+        CREATE TRIGGER scans_assign_inserted_completion_sequence
+        AFTER INSERT ON scans
+        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL
+        BEGIN
+            UPDATE scans
+            SET completion_sequence = (
+                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans
+            )
+            WHERE id = NEW.id AND completion_sequence IS NULL;
+        END;
+
+        CREATE TRIGGER scans_assign_updated_completion_sequence
+        AFTER UPDATE OF status ON scans
+        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL
+        BEGIN
+            UPDATE scans
+            SET completion_sequence = (
+                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans
+            )
+            WHERE id = NEW.id AND completion_sequence IS NULL;
+        END;
+        """,
+    ),
 )
 
 
@@ -744,11 +789,19 @@ def apply_migrations(
                         "max_time_hours",
                         "REAL NOT NULL DEFAULT 96",
                     )
+                elif version == 31:
+                    should_backfill_targets = (
+                        repair_repository_identity_migration(connection)
+                        or should_backfill_targets
+                    )
                 continue
             if version == 6:
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
+            elif version == 31:
+                repair_repository_identity_migration(connection)
+                should_backfill_targets = True
             else:
                 for statement in sql_statements(sql):
                     connection.execute(statement)
@@ -883,6 +936,18 @@ def normalize_pre_release_execution_profile_migrations(
 
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
+    repository_identity_migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 30"
+    ).fetchone()
+    if (
+        repository_identity_migration is not None
+        and repository_identity_migration["name"] == "persist repository identities"
+    ):
+        connection.execute(
+            "UPDATE schema_migrations SET version = 31 WHERE version = 30 AND name = ?",
+            ("persist repository identities",),
+        )
+
     completion_warning_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 25"
     ).fetchone()
@@ -1194,40 +1259,130 @@ def repair_stable_targets_migration(connection: sqlite3.Connection) -> bool:
         and "target_id" in scan_columns
         and existing_objects == {"security_targets", "scans_by_target"}
     ):
-        return False
+        needs_backfill = bool(
+            connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM workspaces AS workspace
+                    WHERE (workspace.target_id IS NULL AND workspace.target_path IS NOT NULL)
+                        OR (
+                            workspace.target_id IS NOT NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM security_targets
+                                WHERE security_targets.id = workspace.target_id
+                            )
+                        )
+                ) OR EXISTS (
+                    SELECT 1 FROM scans AS scan
+                    WHERE scan.target_id IS NULL
+                        OR NOT EXISTS (
+                            SELECT 1 FROM security_targets
+                            WHERE security_targets.id = scan.target_id
+                        )
+                )
+                """
+            ).fetchone()[0]
+        )
+        if not needs_backfill:
+            return False
+    else:
+        migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 16)
+        for statement in sql_statements(migration_sql):
+            if statement.startswith("ALTER TABLE workspaces"):
+                add_column_if_missing(
+                    connection,
+                    "workspaces",
+                    "target_id",
+                    "TEXT REFERENCES security_targets(id)",
+                )
+                continue
+            if statement.startswith("ALTER TABLE scans"):
+                add_column_if_missing(
+                    connection,
+                    "scans",
+                    "target_id",
+                    "TEXT REFERENCES security_targets(id)",
+                )
+                continue
+            statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+            statement = statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+            connection.execute(statement)
 
-    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 16)
+    for table in ("workspaces", "scans"):
+        connection.execute(
+            f"""
+            UPDATE {table}
+            SET target_id = NULL
+            WHERE target_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM security_targets
+                    WHERE security_targets.id = {table}.target_id
+                )
+            """
+        )
+    return True
+
+
+def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool:
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")
+    }
+    index_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'security_targets_by_repository_identity'"
+    ).fetchone()
+    identity_changed = "repository_identity" not in columns or index_exists is None
+    if (
+        "repository_identity" in columns
+        and connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = 31 AND name = ?",
+            ("persist repository identities",),
+        ).fetchone() is not None
+        and not any(
+            row["name"] == "repository_generation"
+            for row in connection.execute("PRAGMA table_info(scans)")
+        )
+    ):
+        from workbench_target_state import normalize_pre_release_repository_identities
+
+        normalize_pre_release_repository_identities(connection)
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 31)
     for statement in sql_statements(migration_sql):
-        if statement.startswith("ALTER TABLE workspaces"):
-            add_column_if_missing(
-                connection,
-                "workspaces",
-                "target_id",
-                "TEXT REFERENCES security_targets(id)",
-            )
+        if statement.startswith("ALTER TABLE security_targets"):
+            add_column_if_missing(connection, "security_targets", "repository_identity", "TEXT")
             continue
         if statement.startswith("ALTER TABLE scans"):
-            add_column_if_missing(
-                connection,
-                "scans",
-                "target_id",
-                "TEXT REFERENCES security_targets(id)",
-            )
+            if "ADD COLUMN repository_generation " in statement:
+                add_column_if_missing(connection, "scans", "repository_generation", "TEXT")
+            else:
+                add_column_if_missing(
+                    connection, "scans", "completion_sequence",
+                    "INTEGER CHECK (completion_sequence >= 1)",
+                )
             continue
-        statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
-        statement = statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+        for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TRIGGER "):
+            if statement.startswith(prefix):
+                statement = statement.replace(prefix, f"{prefix}IF NOT EXISTS ", 1)
+                break
         connection.execute(statement)
-    connection.execute(
-        """
-        UPDATE scans
-        SET target_id = NULL
-        WHERE target_id IS NOT NULL
-            AND NOT EXISTS (
-                SELECT 1 FROM security_targets WHERE security_targets.id = scans.target_id
-            )
-        """
-    )
-    return True
+
+    from workbench_scan_history import _scan_completion_order
+
+    sequence = connection.execute(
+        "SELECT COALESCE(MAX(completion_sequence), 0) FROM scans"
+    ).fetchone()[0]
+    unsequenced = connection.execute(
+        "SELECT id, started_at, completed_at FROM scans "
+        "WHERE status = 'complete' AND completion_sequence IS NULL"
+    ).fetchall()
+    for scan in sorted(unsequenced, key=_scan_completion_order):
+        sequence += 1
+        connection.execute(
+            "UPDATE scans SET completion_sequence = ? "
+            "WHERE id = ? AND completion_sequence IS NULL",
+            (sequence, scan["id"]),
+        )
+    return identity_changed
 
 
 def add_column_if_missing(

@@ -1133,12 +1133,16 @@ export async function main(
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
   const history = async (
-    args: readonly string[],
+    args: readonly string[] | (() => Promise<JsonObject>),
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
   ): Promise<JsonObject | undefined> => {
     try {
-      return await select(await dependencies.runWorkbench(args));
+      return await select(
+        await (typeof args === "function"
+          ? args()
+          : dependencies.runWorkbench(args)),
+      );
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
@@ -1286,22 +1290,18 @@ export async function main(
         args.repository ?? ".",
       );
       return presentHistory(
-        await history(
-          ["list-repositories"],
-          async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
-              (entry) => entry["targetPath"] === repository,
+        await history(async () => {
+          const findings = await listRepositoryFindings(
+            dependencies.runWorkbench,
+            { repository },
+          );
+          if (findings === undefined) {
+            throw new CodexSecurityError(
+              "Repository findings are unavailable for the requested checkout.",
             );
-            const findings =
-              target === undefined
-                ? []
-                : await listRepositoryFindings(
-                    dependencies.runWorkbench,
-                    target["targetId"] as string,
-                  );
-            return { repository, findings: findings ?? [] };
-          },
-        ),
+          }
+          return { repository, findings };
+        }),
         "findings",
         format,
         { repository },
@@ -1467,6 +1467,9 @@ export async function main(
             scanId,
           ]);
           scanArguments = scanArgumentsFromRecipe(recipe, scanId);
+          if (args.scanId === undefined) {
+            scanArguments.repository = dependencies.currentDirectory();
+          }
           scanArguments.verbose = options.verbose;
         } catch (error) {
           const message = errorMessage(error);
@@ -4549,7 +4552,7 @@ function printScanSummary(
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
   const findingSummary = repositoryFindings?.length
-    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    ? `${confirmedCount} confirmed in latest repository scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
     : severitySummary;
   const findingColor =
     findingCount === 0
