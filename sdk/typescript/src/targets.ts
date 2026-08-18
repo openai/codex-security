@@ -266,6 +266,16 @@ export async function normalizeTarget(
         cause: error,
       });
     }
+    const relativePath = relative(root, canonical);
+    if (
+      relativePath === ".." ||
+      relativePath.startsWith(`..${sep}`) ||
+      isAbsolute(relativePath)
+    ) {
+      throw new InvalidTargetError(
+        `Path target is outside the repository: ${value}`,
+      );
+    }
     let metadata;
     try {
       metadata = await abortable(() => stat(canonical), signal);
@@ -278,16 +288,6 @@ export async function normalizeTarget(
     if (!metadata.isFile() && !metadata.isDirectory()) {
       throw new InvalidTargetError(
         `Path target must be a regular file or directory: ${value}`,
-      );
-    }
-    const relativePath = relative(root, canonical);
-    if (
-      relativePath === ".." ||
-      relativePath.startsWith(`..${sep}`) ||
-      isAbsolute(relativePath)
-    ) {
-      throw new InvalidTargetError(
-        `Path target is outside the repository: ${value}`,
       );
     }
     const normalized = relativePath.split(sep).join("/") || ".";
