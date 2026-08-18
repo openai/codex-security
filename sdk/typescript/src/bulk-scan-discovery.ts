@@ -167,13 +167,18 @@ export async function runBulkScanWizard(
   }
 
   prompt.write(`\nFound ${discovered.length} repositories.\n`);
-  const repositories = await selectGitHubRepositories(discovered, prompt);
+  const repositories = await selectGitHubRepositories(
+    discovered,
+    prompt,
+    signal,
+  );
 
   const outputDir = resolve(
     dependencies.currentDirectory(),
     await prompt.input(
       "Where should scan results be saved?",
       "./security-scans",
+      signal,
     ),
   );
   const inputPath = join(outputDir, "repositories.csv");
@@ -182,7 +187,7 @@ export async function runBulkScanWizard(
     `\nReady to scan ${repositories.length} repositories?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
-  if (!(await prompt.confirm("Start scanning?"))) {
+  if (!(await prompt.confirm("Start scanning?", false, signal))) {
     prompt.write("\nScan canceled.\n");
     return null;
   }
@@ -230,6 +235,8 @@ async function selectGitHubOwner(
     return await prompt.select(
       "Which account or organization should we scan?",
       owners.map((owner) => ({ label: owner, value: owner })),
+      undefined,
+      signal,
     );
   }
   prompt.write(`\nFinding repositories in ${personal}.\n`);
@@ -239,6 +246,7 @@ async function selectGitHubOwner(
 async function selectGitHubRepositories(
   repositories: GitHubRepository[],
   prompt: BulkScanPrompt,
+  signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
   const selected = new Set<string>();
   while (selected.size < repositories.length) {
@@ -255,6 +263,8 @@ async function selectGitHubRepositories(
           .filter(({ fullName }) => !selected.has(fullName))
           .map(({ fullName }) => ({ label: fullName, value: fullName })),
       ],
+      undefined,
+      signal,
     );
     if (!choice) break;
     selected.add(choice);
