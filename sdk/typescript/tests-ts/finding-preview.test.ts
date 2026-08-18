@@ -159,4 +159,25 @@ describe("bundled finding previews", () => {
     );
     expect(result.original).toEqual(original);
   });
+
+  test("filters malformed evidence before applying the preview limit", () => {
+    const original = {
+      finding: {
+        code_evidence: [
+          null,
+          "junk",
+          {},
+          { id: "empty", code: "" },
+          { id: "valid", code: "valid_source()" },
+        ],
+      },
+    };
+
+    const result = projectFindingDetails(original);
+
+    expect(result.projected.finding.code_evidence).toEqual([
+      { id: "valid", code: "valid_source()" },
+    ]);
+    expect(result.original).toEqual(original);
+  });
 });

@@ -262,24 +262,36 @@ def merged_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
         seen_ids: set[str] = set()
         for catalog in catalogs:
             for item in catalog:
-                evidence_id = item.get("id") if isinstance(item, dict) else None
-                if isinstance(evidence_id, str) and evidence_id:
-                    if evidence_id in seen_ids:
-                        continue
-                    seen_ids.add(evidence_id)
+                if not _is_valid_code_evidence(item):
+                    continue
+                evidence_id = item["id"]
+                if evidence_id in seen_ids:
+                    continue
+                seen_ids.add(evidence_id)
                 merged.append(item)
         return evidence_keys[0], merged
     return evidence_keys[0], value[evidence_keys[0]]
+
+
+def _is_valid_code_evidence(item: Any) -> bool:
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and bool(item["id"].strip())
+        and isinstance(item.get("code"), str)
+        and bool(item["code"].strip())
+    )
 
 
 def bounded_code_evidence(value: Any) -> Any:
     if not isinstance(value, list):
         return value
     bounded = []
-    for item in value[:FINDING_CODE_EVIDENCE_LIMIT]:
-        if not isinstance(item, dict):
-            bounded.append(item)
+    for item in value:
+        if not _is_valid_code_evidence(item):
             continue
+        if len(bounded) >= FINDING_CODE_EVIDENCE_LIMIT:
+            break
         evidence = dict(item)
         for field in ("explanation", "label", "language", "path"):
             if field in evidence and not isinstance(evidence[field], str):

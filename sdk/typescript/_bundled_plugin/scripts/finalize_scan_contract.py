@@ -694,7 +694,7 @@ def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
     return (
         ("informational", "low", "medium", "high", "critical").index(finding["severity"]["level"]),
         ("low", "medium", "high").index(finding["confidence"]["level"]),
-        len(finding.get("codeEvidence") or []),
+        len(_merged_code_evidence(finding)),
     )
 
 
@@ -735,6 +735,12 @@ def _recover_unsealed_findings(
         try:
             if not isinstance(finding, dict):
                 raise ContractError(f"{context}: expected an object")
+            compatible_findings = _legacy_sealed_findings_for_validation(
+                {"findings": [finding]}
+            )["findings"]
+            compatible_finding = compatible_findings[0]
+            normalized_legacy_details = compatible_finding != finding
+            finding = compatible_finding
             identity = _require_dict(finding, "identity", context)
             fields: list[tuple[dict[str, Any], str, str, str]] = [
                 (finding, "ruleId", context, "rule identifier"),
@@ -742,7 +748,9 @@ def _recover_unsealed_findings(
             ]
             if "instance" in identity:
                 fields.append((identity, "instance", f"{context}.identity", "instance"))
-            normalized_fields = []
+            normalized_fields = (
+                ["legacy finding details"] if normalized_legacy_details else []
+            )
             for parent, field, field_context, label in fields:
                 value = _require_str(parent, field, field_context)
                 if SLUG_RE.fullmatch(value):
@@ -1495,20 +1503,23 @@ def _filter_unknown_legacy_evidence_refs(
             ]
 
 
-def _wrap_nonempty_legacy_list_scalars(
+def _normalize_legacy_string_list_fields(
     section: dict[str, Any], fields: tuple[str, ...]
 ) -> None:
     for field in fields:
         if field not in section:
             continue
         value = section[field]
-        if value is None:
-            section.pop(field)
-            continue
-        if not isinstance(value, str):
-            continue
-        if value.strip():
-            section[field] = [value]
+        if isinstance(value, str):
+            normalized = [value] if value.strip() else []
+        elif isinstance(value, list):
+            normalized = [
+                item for item in value if isinstance(item, str) and item.strip()
+            ]
+        else:
+            normalized = []
+        if normalized:
+            section[field] = normalized
         else:
             section.pop(field)
 
@@ -1605,7 +1616,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             section = finding.get(section_name)
             if not isinstance(section, dict):
                 continue
-            _wrap_nonempty_legacy_list_scalars(section, list_fields)
+            _normalize_legacy_string_list_fields(section, list_fields)
             _filter_unknown_legacy_evidence_refs(section, evidence_ids)
         root_cause = finding.get("rootCause")
         if isinstance(root_cause, dict):
@@ -1616,6 +1627,11 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
                 _remove_unsupported_legacy_scalar_fields(
                     root_cause, ("code", "language")
                 )
+        legacy_root_cause = finding.get("root_cause")
+        if isinstance(legacy_root_cause, dict):
+            _remove_unsupported_legacy_scalar_fields(
+                legacy_root_cause, ("summary", "code", "language")
+            )
         validation = finding.get("validation")
         if isinstance(validation, dict):
             _remove_unsupported_legacy_scalar_fields(
@@ -1643,12 +1659,12 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             if field == "reachability":
                 detail_scalar_fields += ("attacker", "entrypoint")
             _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
-            _wrap_nonempty_legacy_list_scalars(
+            _normalize_legacy_string_list_fields(
                 detail, ("evidenceRefs", "evidence_refs", "transformations")
             )
             _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
             if field == "reachability":
-                _wrap_nonempty_legacy_list_scalars(detail, ("preconditions",))
+                _normalize_legacy_string_list_fields(detail, ("preconditions",))
         for field in ("impact", "likelihood"):
             detail = attack_path.get(field)
             if isinstance(detail, dict):

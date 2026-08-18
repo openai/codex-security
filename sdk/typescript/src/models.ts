@@ -139,6 +139,16 @@ export interface FindingsDocument {
           [k: string]: unknown;
         }
       | string;
+    root_cause?:
+      | {
+          summary?: string;
+          evidenceRefs?: string[];
+          evidence_refs?: string[];
+          code?: string;
+          language?: string;
+          [k: string]: unknown;
+        }
+      | string;
     remediation: string;
     validation?: {
       assertions?: string[];

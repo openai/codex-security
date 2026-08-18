@@ -221,6 +221,30 @@ describe("canonical scan contract", () => {
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
+  test("loads pre-typed sealed finding details without changing the artifact", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const legacyValidation = {
+      evidence: { kind: "trace" },
+      counterEvidence: [null, "The mitigation was checked."],
+    };
+    const legacyAttackPath = { steps: { first: "upload" } };
+    findings["findings"][0]["validation"] = legacyValidation;
+    findings["findings"][0]["attackPath"] = legacyAttackPath;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    const loadedFinding = loaded.findings.findings[0] as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(loadedFinding["validation"]).toEqual(legacyValidation);
+    expect(loadedFinding["attackPath"]).toEqual(legacyAttackPath);
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
   test("honors cancellation during contract validation", async () => {
     const scanDir = await copyExample();
     const controller = new AbortController();

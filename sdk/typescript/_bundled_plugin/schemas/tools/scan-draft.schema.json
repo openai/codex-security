@@ -508,6 +508,28 @@
             }
           ]
         },
+        "root_cause": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "$ref": "#/$defs/text"
+                },
+                "evidenceRefs": {
+                  "$ref": "#/$defs/textList"
+                },
+                "evidence_refs": {
+                  "$ref": "#/$defs/textList"
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
         "remediation": {
           "$ref": "#/$defs/text"
         },

@@ -314,7 +314,13 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
     merged: dict[str, Any] = {}
     for detail in details:
         for field, item in detail.items():
-            if field in ("evidenceRefs", "evidence_refs", "language"):
+            if field in (
+                "evidenceRefs",
+                "evidence_refs",
+                "codeEvidence",
+                "code_evidence",
+                "language",
+            ):
                 continue
             current = merged.get(field)
             if field not in merged or current in (None, "", [], {}) or (
@@ -337,6 +343,17 @@ def merged_root_cause(value: dict[str, Any]) -> tuple[str | None, Any]:
                 if isinstance(item, str)
             )
         )
+
+    embedded_evidence = [
+        item
+        for detail in details
+        for field in ("codeEvidence", "code_evidence")
+        for item in (
+            detail.get(field, []) if isinstance(detail.get(field), list) else []
+        )
+    ]
+    if embedded_evidence:
+        merged["codeEvidence"] = embedded_evidence
 
     code = merged.get("code")
     matching_details = (

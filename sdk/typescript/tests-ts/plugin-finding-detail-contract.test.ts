@@ -10,9 +10,10 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 type JsonObject = Record<string, unknown>;
 
 const invalidFindingDetails: Array<{
-  section: "attackPath" | "validation";
+  section: "attackPath" | "root_cause" | "validation";
   detail: JsonObject;
 }> = [
+  { section: "root_cause", detail: { summary: ["not a string"] } },
   { section: "attackPath", detail: { steps: "upload, then extract" } },
   { section: "attackPath", detail: { preconditions: "upload access" } },
   {
@@ -516,6 +517,21 @@ describe("bundled plugin finding detail contracts", () => {
     expect(report).toContain("legacy_source()");
   });
 
+  test("merges embedded evidence across root-cause aliases", () => {
+    const report = projectFindingDetails({
+      rootCause: {
+        summary: "The canonical root cause.",
+        codeEvidence: [{ id: "canonical-root", code: "canonical_evidence()" }],
+      },
+      root_cause: {
+        codeEvidence: [{ id: "legacy-root", code: "legacy_evidence()" }],
+      },
+    });
+
+    expect(report).toContain("canonical_evidence()");
+    expect(report).toContain("legacy_evidence()");
+  });
+
   test("treats whitespace root-cause fields as unpopulated", () => {
     const report = projectFindingDetails({
       rootCause: { summary: "   ", code: "\t", language: "text" },
@@ -731,6 +747,77 @@ describe("bundled plugin finding detail contracts", () => {
       originalRootCauseSummary: "",
       originalSummary: {},
       originalValidation: ["legacy-validation-evidence"],
+    });
+  });
+
+  test("normalizes formerly free-form sealed details for validation", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
+      "finding = findings['findings'][0]",
+      "finding['validation'] = {'evidence': {'kind': 'trace'}, 'counterEvidence': [None, 'The mitigation was checked.']}",
+      "finding['attackPath'] = {'steps': {'first': 'upload'}}",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
+      "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
+      "finalizer['validate_against_schema'](compatible, plugin / 'schemas' / 'findings.schema.json')",
+      "print(json.dumps({'originalValidation': finding['validation'], 'originalAttackPath': finding['attackPath'], 'compatibleValidation': compatible['findings'][0]['validation'], 'compatibleAttackPath': compatible['findings'][0]['attackPath']}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      originalValidation: {
+        evidence: { kind: "trace" },
+        counterEvidence: [null, "The mitigation was checked."],
+      },
+      originalAttackPath: { steps: { first: "upload" } },
+      compatibleValidation: {
+        counterEvidence: ["The mitigation was checked."],
+      },
+      compatibleAttackPath: {},
+    });
+  });
+
+  test("ranks legacy code evidence during interrupted recovery", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import copy, json, pathlib, runpy, sys",
+      "plugin = pathlib.Path(sys.argv[1])",
+      "examples = plugin / 'examples' / 'completed-scan'",
+      "manifest = json.loads((examples / 'scan-manifest.json').read_text())",
+      "example = json.loads((examples / 'findings.json').read_text())['findings'][0]",
+      "first = copy.deepcopy(example)",
+      "first.pop('codeEvidence', None)",
+      "first['summary'] = 'FIRST'",
+      "second = copy.deepcopy(first)",
+      "second['summary'] = 'SECOND'",
+      "second['code_evidence'] = [{'id': 'legacy-source', 'code': 'legacy_source()'}]",
+      "findings = {'scanId': manifest['scan']['id'], 'findings': [first, second]}",
+      "warnings = []",
+      "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
+      "finalizer['_recover_unsealed_findings'](manifest, findings, plugin / 'schemas', examples, warnings)",
+      "print(json.dumps({'summary': findings['findings'][0]['summary'], 'evidence': findings['findings'][0].get('code_evidence'), 'warnings': warnings}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      summary: "SECOND",
+      evidence: [{ id: "legacy-source", code: "legacy_source()" }],
+      warnings: [
+        "Recovered finding 2: retained stronger duplicate logical finding.",
+      ],
     });
   });
 

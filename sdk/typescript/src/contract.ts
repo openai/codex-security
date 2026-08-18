@@ -112,7 +112,10 @@ export async function loadContract(
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
     }
-    const payload = payloads[filename as keyof typeof payloads];
+    const payload =
+      filename === "findings.json"
+        ? legacySealedFindingsForValidation(payloads["findings.json"])
+        : payloads[filename as keyof typeof payloads];
     let valid: boolean;
     try {
       const result = validate(payload);
@@ -171,6 +174,219 @@ export async function loadContract(
   }
   await verifyScanRoot(scanRoot, options.signal);
   return { manifest, findings, coverage };
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function legacySealedFindingsForValidation(payload: unknown): unknown {
+  const compatible = structuredClone(payload);
+  if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
+    return compatible;
+  }
+  for (const finding of compatible["findings"]) {
+    if (!isJsonRecord(finding)) continue;
+    const canonicalEvidence = Array.isArray(finding["codeEvidence"])
+      ? finding["codeEvidence"]
+      : [];
+    const evidenceIds = new Set(
+      canonicalEvidence.flatMap((evidence) => {
+        if (!isJsonRecord(evidence)) return [];
+        const id = evidence["id"];
+        return typeof id === "string" && id.length > 0 ? [id] : [];
+      }),
+    );
+    const legacyEvidence = finding["code_evidence"];
+    if (Array.isArray(legacyEvidence)) {
+      const compatibleEvidence: JsonRecord[] = [];
+      for (const evidence of legacyEvidence) {
+        if (!isJsonRecord(evidence)) continue;
+        const id = evidence["id"];
+        const code = evidence["code"];
+        if (
+          typeof id !== "string" ||
+          id.trim().length === 0 ||
+          typeof code !== "string" ||
+          code.trim().length === 0 ||
+          evidenceIds.has(id)
+        ) {
+          continue;
+        }
+        evidenceIds.add(id);
+        compatibleEvidence.push(evidence);
+      }
+      finding["code_evidence"] = compatibleEvidence;
+    } else if ("code_evidence" in finding) {
+      delete finding["code_evidence"];
+    }
+
+    for (const [sectionName, listFields] of [
+      ["rootCause", ["evidenceRefs", "evidence_refs"]],
+      ["root_cause", ["evidenceRefs", "evidence_refs"]],
+      [
+        "validation",
+        [
+          "assertions",
+          "counterEvidence",
+          "evidence",
+          "evidenceRefs",
+          "evidence_refs",
+          "limitations",
+        ],
+      ],
+      [
+        "attackPath",
+        [
+          "assumptions",
+          "blindspots",
+          "controls",
+          "evidenceRefs",
+          "evidence_refs",
+          "limitations",
+          "preconditions",
+          "steps",
+        ],
+      ],
+    ] satisfies Array<[string, string[]]>) {
+      const section = finding[sectionName];
+      if (!isJsonRecord(section)) continue;
+      normalizeLegacyStringLists(section, listFields);
+      filterLegacyEvidenceRefs(section, evidenceIds);
+    }
+
+    const rootCause = finding["rootCause"];
+    if (isJsonRecord(rootCause)) {
+      if (
+        typeof rootCause["summary"] !== "string" ||
+        rootCause["summary"].length === 0
+      ) {
+        delete finding["rootCause"];
+      } else {
+        removeUnsupportedLegacyStrings(rootCause, ["code", "language"]);
+      }
+    }
+    const legacyRootCause = finding["root_cause"];
+    if (isJsonRecord(legacyRootCause)) {
+      removeUnsupportedLegacyStrings(legacyRootCause, [
+        "summary",
+        "code",
+        "language",
+      ]);
+    }
+
+    const validation = finding["validation"];
+    if (isJsonRecord(validation)) {
+      removeUnsupportedLegacyStrings(validation, [
+        "method",
+        "status",
+        "summary",
+        "disposition",
+        "result",
+      ]);
+    }
+
+    const attackPath = finding["attackPath"];
+    if (!isJsonRecord(attackPath)) continue;
+    removeUnsupportedLegacyStrings(attackPath, ["summary"]);
+    for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
+      const detail = attackPath[field];
+      if (detail === null) {
+        delete attackPath[field];
+        continue;
+      }
+      if (typeof detail === "string") {
+        if (detail.length === 0) delete attackPath[field];
+        continue;
+      }
+      if (!isJsonRecord(detail)) {
+        if (field in attackPath) delete attackPath[field];
+        continue;
+      }
+      removeUnsupportedLegacyStrings(detail, [
+        "summary",
+        "source",
+        "sink",
+        "outcome",
+        ...(field === "reachability" ? ["attacker", "entrypoint"] : []),
+      ]);
+      normalizeLegacyStringLists(detail, [
+        "evidenceRefs",
+        "evidence_refs",
+        "transformations",
+        ...(field === "reachability" ? ["preconditions"] : []),
+      ]);
+      filterLegacyEvidenceRefs(detail, evidenceIds);
+    }
+    for (const field of ["impact", "likelihood"]) {
+      const detail = attackPath[field];
+      if (isJsonRecord(detail)) {
+        removeUnsupportedLegacyStrings(detail, ["level", "rationale", "why"]);
+      } else if (
+        detail !== undefined &&
+        detail !== null &&
+        (typeof detail !== "string" || detail.length === 0)
+      ) {
+        delete attackPath[field];
+      }
+    }
+  }
+  return compatible;
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeLegacyStringLists(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (!(field in section)) continue;
+    const value = section[field];
+    const normalized =
+      typeof value === "string"
+        ? value.trim().length > 0
+          ? [value]
+          : []
+        : Array.isArray(value)
+          ? value.filter(
+              (item): item is string =>
+                typeof item === "string" && item.trim().length > 0,
+            )
+          : [];
+    if (normalized.length > 0) section[field] = normalized;
+    else delete section[field];
+  }
+}
+
+function filterLegacyEvidenceRefs(
+  section: JsonRecord,
+  evidenceIds: Set<string>,
+): void {
+  for (const field of ["evidenceRefs", "evidence_refs"]) {
+    const refs = section[field];
+    if (!Array.isArray(refs)) continue;
+    section[field] = refs.filter(
+      (ref): ref is string =>
+        typeof ref === "string" &&
+        ref.trim().length > 0 &&
+        evidenceIds.has(ref),
+    );
+  }
+}
+
+function removeUnsupportedLegacyStrings(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (
+      field in section &&
+      (typeof section[field] !== "string" || section[field].length === 0)
+    ) {
+      delete section[field];
+    }
+  }
 }
 
 function validateCanonicalContract(
