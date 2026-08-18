@@ -460,7 +460,8 @@ shims such as `codex.cmd` automatically use the bundled Codex executable
 instead.
 
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
-the managed Codex runtime, and finally `python3` or `python` from `PATH`.
+the managed Codex runtime, and finally `python3` or `python` from `PATH` (`py`
+is also supported on Windows).
 `CODEX_SECURITY_STATE_DIR` takes precedence over `CODEX_HOME`; keep both
 state and result paths outside the scanned repository.
 

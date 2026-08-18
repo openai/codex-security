@@ -4810,6 +4810,77 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "uses a configured Windows Python path without the executable suffix",
+    async () => {
+      const discovered = Bun.which("python3") ?? Bun.which("python");
+      expect(discovered).not.toBeNull();
+      if (discovered === null) return;
+      const python = await realpath(discovered);
+      const extensionless = python.replace(/\.exe$/iu, "");
+      expect(extensionless).not.toBe(python);
+
+      await expect(
+        resolvePluginPython({
+          configuredPath: extensionless,
+          environment: {
+            PATH: "",
+            ...(process.env["SystemRoot"] === undefined
+              ? {}
+              : { SystemRoot: process.env["SystemRoot"] }),
+          },
+        }),
+      ).resolves.toBe(python);
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "discovers Python through the standard Windows py launcher",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const installedPython = process.env["PYTHON"] ?? Bun.which("python");
+      expect(installedPython).not.toBeNull();
+      if (installedPython === null) return;
+      await mkdir(repository);
+      const launcher = join(root, "py.exe");
+      await copyFile(installedPython, launcher);
+      const installation = dirname(installedPython);
+      for (const entry of await readdir(installation, {
+        withFileTypes: true,
+      })) {
+        if (entry.isFile() && entry.name.toLowerCase().endsWith(".dll")) {
+          await copyFile(
+            join(installation, entry.name),
+            join(root, entry.name),
+          );
+        }
+      }
+      await writeFile(
+        join(root, "pyvenv.cfg"),
+        `home = ${installation}\ninclude-system-site-packages = false\n`,
+      );
+
+      await expect(
+        resolvePluginPython({
+          environment: {
+            PATH: root,
+            PATHEXT: ".EXE",
+            ...(process.env["SystemRoot"] === undefined
+              ? {}
+              : { SystemRoot: process.env["SystemRoot"] }),
+            ...(process.env["WINDIR"] === undefined
+              ? {}
+              : { WINDIR: process.env["WINDIR"] }),
+          },
+          homeDirectory: root,
+          managedRuntimeRoots: [],
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(await realpath(launcher));
+    },
+  );
+
   testPosix(
     "does not load repository-controlled Python startup code",
     async () => {

@@ -225,6 +225,35 @@ describe("trusted executable resolution", () => {
     ).toBeNull();
   });
 
+  test("resolves extensionless explicit Windows executable paths", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const trusted = join(root, "trusted");
+    await Promise.all([mkdir(repository), mkdir(trusted)]);
+    await Promise.all([
+      writeFile(join(trusted, "python.exe"), "python executable"),
+      writeFile(join(trusted, "python.cmd"), "batch"),
+    ]);
+
+    expect(
+      await resolveWindowsExecutable(
+        join(trusted, "python"),
+        trusted,
+        repository,
+      ),
+    ).toEqual({
+      executable: await realpath(join(trusted, "python.exe")),
+      environment: { KEEP: "ok", PATH: trusted },
+    });
+    expect(
+      await resolveWindowsExecutable(
+        join(trusted, "python.cmd"),
+        trusted,
+        repository,
+      ),
+    ).toBeNull();
+  });
+
   test("removes PATH entries containing repository-linked Windows shims", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -292,6 +321,32 @@ describe("trusted executable resolution", () => {
           KEEP: "ok",
           PATH: trusted,
         },
+      });
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "resolves executables from quoted Windows PATH entries",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const unsafe = join(repository, "tools");
+      const trusted = join(root, "trusted tools");
+      await Promise.all([mkdir(unsafe, { recursive: true }), mkdir(trusted)]);
+      await Promise.all([
+        writeFile(join(unsafe, "git.exe"), "untrusted executable"),
+        writeFile(join(trusted, "git.exe"), "executable"),
+      ]);
+
+      await expect(
+        resolveTrustedExecutable(
+          "git",
+          { Path: [`"${unsafe}"`, `"${trusted}"`].join(delimiter), KEEP: "ok" },
+          repository,
+        ),
+      ).resolves.toEqual({
+        executable: join(trusted, "git.exe"),
+        environment: { KEEP: "ok", PATH: trusted },
       });
     },
   );

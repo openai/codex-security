@@ -2207,7 +2207,7 @@ export async function resolvePluginPython(
   }
 
   for (const candidate of process.platform === "win32"
-    ? ["python", "python3"]
+    ? ["python", "python3", "py"]
     : ["python3", "python"]) {
     const resolved = await usablePython(
       candidate,
@@ -2219,7 +2219,7 @@ export async function resolvePluginPython(
   }
   throw new PluginPythonUnavailableError(
     "The bundled Codex Security plugin requires Python 3.10 or later (Python 3.10 also requires tomli), but no usable interpreter was found. " +
-      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python to PATH.",
+      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python (py on Windows) to PATH.",
   );
 }
 
