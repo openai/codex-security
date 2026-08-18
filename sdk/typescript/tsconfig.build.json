@@ -7,6 +7,7 @@
     "outDir": "dist",
     "declaration": true,
     "declarationMap": true,
+    "stripInternal": true,
     "sourceMap": true,
     "inlineSources": true,
     "noEmit": false,

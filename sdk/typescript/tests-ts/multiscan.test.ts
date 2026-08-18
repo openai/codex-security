@@ -18,6 +18,7 @@ import {
 import * as filesystem from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
@@ -25,6 +26,7 @@ import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
@@ -1540,6 +1542,13 @@ describe("multiscan", () => {
   });
 
   test("ignores repository-local Git shims while preserving credential configuration", async () => {
+    if (
+      runTestInSubprocess(
+        fileURLToPath(import.meta.url),
+        "ignores repository-local Git shims while preserving credential configuration",
+      )
+    )
+      return;
     const paths = await fixture();
     const source = await repository(paths.root, "private");
     await writeFile(

@@ -20,6 +20,7 @@ import {
 import {
   capture,
   dependencies as cliDependencies,
+  FakeSignals,
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
@@ -503,6 +504,47 @@ describe("CLI authentication", () => {
         "Both a ChatGPT sign-in and an API key from OPENAI_API_KEY are available.",
       );
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+    }
+  });
+
+  test("cancels sign-in discovery and authentication prompts before starting a scan", async () => {
+    for (const stage of ["status", "prompt"] as const) {
+      const signals = new FakeSignals();
+      const signalName = stage === "status" ? "SIGTERM" : "SIGINT";
+      let observedSignal: AbortSignal | undefined;
+      let initialized = false;
+      const deps = dependencies({
+        signals,
+        environment: { OPENAI_API_KEY: "synthetic-private-key" },
+      });
+      deps.createSecurity = () => {
+        initialized = true;
+        throw new Error("must not initialize a cancelled scan");
+      };
+      const interrupt = <Value>(signal?: AbortSignal): Promise<Value> => {
+        observedSignal = signal;
+        signals.emit(signalName);
+        return new Promise(() => {});
+      };
+      deps.hasStoredChatGPTSignIn = (signal) =>
+        stage === "status" ? interrupt<boolean>(signal) : Promise.resolve(true);
+      deps.scanAuthenticationPrompt = {
+        isInteractive: () => true,
+        select: <Value extends string>(
+          _message: string,
+          _options: readonly { label: string; value: Value }[],
+          _presentation?: { header?: string },
+          signal?: AbortSignal,
+        ) => interrupt<Value>(signal),
+      };
+
+      expect(
+        await main(["scan"], capture().stream, capture(true).stream, deps),
+      ).toBe(signalName === "SIGTERM" ? 143 : 130);
+      expect(observedSignal?.aborted).toBe(true);
+      expect(initialized).toBe(false);
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
     }
   });
 

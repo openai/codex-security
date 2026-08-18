@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
+import { parse } from "smol-toml";
 import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
 import { main } from "../src/cli.js";
 
@@ -62,7 +63,7 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("uses the default test timeout consistently across CI platforms", async () => {
+  test("randomizes tests and keeps the default and Windows CI timeouts", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -70,12 +71,19 @@ describe("TypeScript package skeleton", () => {
       new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
       "utf8",
     );
+    const bunConfig = parse(
+      await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
+    );
 
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
+    expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(ciWorkflow).toContain(
       "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+    );
+    expect(ciWorkflow).toContain(
+      "run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
     );
     expect(ciWorkflow).toContain(
       "name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
