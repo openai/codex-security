@@ -109,7 +109,6 @@ function preflightStatus(
 ): ScanWorkerStatus | null {
   if (
     item["status"] === "failed" ||
-    (typeof item["exit_code"] === "number" && item["exit_code"] !== 0) ||
     typeof item["command"] !== "string" ||
     !PREFLIGHT_COMMAND.test(item["command"]) ||
     typeof item["aggregated_output"] !== "string"
@@ -129,6 +128,23 @@ function preflightStatus(
     !Array.isArray(payload["results"])
   ) {
     return null;
+  }
+  const exitCode = item["exit_code"];
+  if (typeof exitCode === "number") {
+    const expectedExitCode =
+      payload["status"] === "blocked"
+        ? 1
+        : payload["status"] === "incomplete"
+          ? 2
+          : payload["status"] === "ready"
+            ? 0
+            : null;
+    if (
+      (expectedExitCode !== null && exitCode !== expectedExitCode) ||
+      (expectedExitCode === null && exitCode !== 0)
+    ) {
+      return null;
+    }
   }
   const results = payload["results"];
   const delegated = results.filter(
