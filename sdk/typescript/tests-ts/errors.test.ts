@@ -18,6 +18,7 @@ describe("error messages", () => {
       "request failed: token=SYNTHETIC_TOKEN",
       "Authorization: Bearer sk-proj-SYNTHETIC_KEY_123",
       "Linear failed for lin_api_SYNTHETIC_SECRET",
+      "Fireworks failed for fw_SYNTHETIC_SECRET",
       'upstream failed: {"clientSecret":"correct horse battery staple"}',
       JSON.stringify(JSON.stringify({ clientSecret: "SYNTHETIC_SECRET" })),
       "authorizationHeaderValue=SYNTHETIC_SECRET",
