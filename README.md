@@ -89,7 +89,8 @@ and identifies findings not confirmed in its latest scan.
 Use `patch OCCURRENCE_ID` to fix one saved finding, or
 `patch --scan SCAN_ID --severity high` to fix selected findings from a saved
 scan. Add `--json` for structured results or `--create-pr` to open a GitHub pull
-request after verification.
+request after verification. If publication fails, use the printed
+`patch --resume-pr BRANCH` command to retry without running Codex again.
 
 Use `patch --linear-issue SEC-123` to import and fix a Linear issue, or
 `patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'`

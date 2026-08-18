@@ -256,6 +256,7 @@ npx @openai/codex-security patch "Missing authorization check" --effort high
 npx @openai/codex-security patch OCCURRENCE_ID
 npx @openai/codex-security patch --scan SCAN_ID --severity high --json
 npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
+npx @openai/codex-security patch --resume-pr codex-security/patch-SCAN_ID
 npx @openai/codex-security patch --scan latest --severity medium
 npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
 npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
@@ -352,7 +353,10 @@ edit instructions for the focused finding, `1`–`4` to select by severity, and
 patch or `q` to keep the checkout unchanged. Each selected finding runs in its
 own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
 saved-finding `patch` command to commit only verified patch files and open a
-pull request with `gh`. JSON scan results include `patchSeverity`. Scan and
+pull request with `gh`. If the push or pull request fails, run the printed
+`patch --resume-pr BRANCH` command from the same repository. It uses the saved
+commit without running Codex again and refuses to publish if the branch changed.
+JSON scan results include `patchSeverity`. Scan and
 saved-finding results include one `patches` entry per selected finding with
 status `verified`, `no_change`, `blocked`, or `failed`, plus `pullRequest` when
 one is created. When `--fail-on-severity` is also set, verified and already-fixed

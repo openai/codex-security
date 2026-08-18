@@ -2,10 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+
+const CURRENT_REPOSITORY = resolve("/current/repository");
+const SAVED_REPOSITORY = resolve("/saved/repository");
+const STATE_DIRECTORY = resolve("/tmp/codex-security-state");
 
 function resultWithFindings(severities: readonly SeverityLevel[]) {
   const result = fakeResult(severities);
@@ -30,7 +34,7 @@ function savedScan(
   return {
     scan: {
       scanId,
-      targetPath: "/saved/repository",
+      targetPath: SAVED_REPOSITORY,
       findings: result.findings.findings as unknown as JsonObject[],
     },
   };
@@ -70,6 +74,7 @@ async function runWorkflow(
   const stdout = capture();
   const stderr = capture(options.interactive);
   const current = dependencies({
+    currentDirectory: CURRENT_REPOSITORY,
     onCodex: (args, output) => {
       completePatches(args, output);
       return 0;
@@ -132,7 +137,9 @@ describe("scan and patch workflow", () => {
     expect(invocations).toHaveLength(2);
     for (const invocation of invocations) {
       expect(invocation.args[0]).toBe("app-server");
-      expect(invocation.directory).toBe("/current/other/repository");
+      expect(invocation.directory).toBe(
+        resolve(CURRENT_REPOSITORY, "../other/repository"),
+      );
       expect(invocation.prompt).toContain("Return exactly one JSON object");
     }
     expect(JSON.parse(outcome.stdout)).toMatchObject({
@@ -199,7 +206,7 @@ describe("scan and patch workflow", () => {
         result,
         environment: {
           OPENAI_API_KEY: "sk-proj-SYNTHETIC_KEY_123",
-          CODEX_SECURITY_STATE_DIR: "/tmp/codex-security-state",
+          CODEX_SECURITY_STATE_DIR: STATE_DIRECTORY,
         },
         onCodex: (args, output, selectedEnvironment) => {
           invocation = args;
@@ -215,7 +222,7 @@ describe("scan and patch workflow", () => {
     expect(environment).not.toHaveProperty("OPENAI_API_KEY");
     expect(environment).toHaveProperty(
       "CODEX_HOME",
-      "/tmp/codex-security-state/codex-home",
+      join(STATE_DIRECTORY, "codex-home"),
     );
 
     const provider = await runWorkflow(
@@ -296,6 +303,7 @@ describe("scan and patch workflow", () => {
           onRepositoryCommand: (command, args, workingDirectory) => {
             expect(workingDirectory).toBe(repository);
             if (command === "git") return git(...args);
+            if (args[1] === "list") return "";
             pullRequestArguments = args;
             return url;
           },
@@ -330,6 +338,176 @@ describe("scan and patch workflow", () => {
       });
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["push", "create"])(
+    "resumes publication after %s fails without patching again",
+    async (failure) => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "codex-security-pr-retry-"),
+      );
+      const repository = join(directory, "repository");
+      const remote = join(directory, "remote.git");
+      const branch = "codex-security/patch-scan-1";
+      const url = "https://github.example.test/example/repository/pull/16";
+      const result = resultWithFindings(["high"]);
+      let modelCalls = 0;
+      let pushCalls = 0;
+      let created = 0;
+      let failOnce = true;
+      let publishedUrl = "";
+      await mkdir(join(repository, "src"), { recursive: true });
+      const git = (...args: string[]) =>
+        execFileSync("git", args, {
+          cwd: repository,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
+
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(join(repository, "src", "finding-1.ts"), "unsafe\n");
+        await writeFile(join(repository, "unrelated.ts"), "original\n");
+        git("add", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+
+        const fixtures: Parameters<typeof dependencies>[0] = {
+          currentDirectory: repository,
+          onWorkbench: () => ({
+            scan: {
+              scanId: "scan-1",
+              targetPath: repository,
+              findings: result.findings.findings as unknown as JsonObject[],
+            },
+          }),
+          onCodex: async (args, output) => {
+            modelCalls += 1;
+            await writeFile(join(repository, "src", "finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (command, args) => {
+            if (command === "git") {
+              if (args[0] === "push") {
+                pushCalls += 1;
+                if (failure === "push" && failOnce) {
+                  failOnce = false;
+                  throw new Error("Synthetic push failure");
+                }
+              }
+              return git(...args);
+            }
+            if (args[1] === "list") return publishedUrl;
+            expect(args[1]).toBe("create");
+            if (failure === "create" && failOnce) {
+              failOnce = false;
+              throw new Error("Synthetic PR service failure");
+            }
+            created += 1;
+            publishedUrl = url;
+            return url;
+          },
+        };
+
+        const first = await runWorkflow(
+          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          fixtures,
+        );
+        expect(first.exitCode).toBe(2);
+        expect(first.stderr).toContain(`patch --resume-pr ${branch}`);
+        const commit = git("rev-parse", "HEAD");
+        expect(
+          git("config", "--get", `branch.${branch}.codexSecurityPatchCommit`),
+        ).toBe(commit);
+        if (failure === "create") {
+          expect(git("rev-parse", `origin/${branch}`)).toBe(commit);
+        }
+        await writeFile(join(repository, "unrelated.ts"), "later local work\n");
+
+        const retry = await runWorkflow(
+          ["patch", "--resume-pr", branch, "--json"],
+          fixtures,
+        );
+        expect(retry.exitCode).toBe(0);
+        expect(JSON.parse(retry.stdout)).toEqual({
+          pullRequest: { branch, url },
+        });
+        expect(modelCalls).toBe(1);
+        expect(created).toBe(1);
+        expect(git("rev-parse", "HEAD")).toBe(commit);
+        expect(git("rev-parse", `origin/${branch}`)).toBe(commit);
+        expect(git("diff", "--name-only")).toBe("unrelated.ts");
+
+        const pushes = pushCalls;
+        const repeated = await runWorkflow(
+          ["patch", "--resume-pr", branch],
+          fixtures,
+        );
+        expect(repeated.exitCode).toBe(0);
+        expect(created).toBe(1);
+        expect(pushCalls).toBe(pushes);
+        expect(modelCalls).toBe(1);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("refuses to resume a missing or changed patch commit", async () => {
+    for (const saved of ["", "saved-commit"]) {
+      let modelCalls = 0;
+      const outcome = await runWorkflow(
+        ["patch", "--resume-pr", "codex-security/patch-scan-1"],
+        {
+          onCodex: () => {
+            modelCalls += 1;
+            return 0;
+          },
+          onRepositoryCommand: (command, args) => {
+            expect(command).toBe("git");
+            return args[0] === "config" ? saved : "changed-commit";
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(
+        saved ? "changed since verification" : "No verified patch commit",
+      );
+      expect(modelCalls).toBe(0);
+    }
+  });
+
+  test("rejects new patch inputs when resuming publication", async () => {
+    for (const input of [
+      ["--scan", "scan-1"],
+      ["--linear-issue", "SEC-123"],
+      ["--create-pr"],
+      ["occ_1"],
+    ]) {
+      let commandStarted = false;
+      const outcome = await runWorkflow(
+        ["patch", "--resume-pr", "codex-security/patch-scan-1", ...input],
+        {
+          onCodex: () => {
+            commandStarted = true;
+            return 0;
+          },
+          onRepositoryCommand: () => {
+            commandStarted = true;
+            return "";
+          },
+        },
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("--resume-pr cannot be combined");
+      expect(commandStarted).toBe(false);
     }
   });
 
@@ -487,7 +665,7 @@ describe("scan and patch workflow", () => {
           interactive: true,
           configure: (value) => {
             value.patchEditor = async (repository, candidates) => {
-              expect(repository).toBe("/current/repository");
+              expect(repository).toBe(CURRENT_REPOSITORY);
               reviewed = candidates;
               return selection === null
                 ? null
@@ -668,9 +846,9 @@ describe("scan and patch workflow", () => {
       ["scan"],
       {
         result: resultWithFindings(["high"]),
-        onRepositoryCommand: (command) => {
-          published ||= command === "gh";
-          return command === "gh" ? url : "";
+        onRepositoryCommand: (command, args) => {
+          published ||= command === "gh" && args[1] === "create";
+          return command === "gh" && args[1] === "create" ? url : "";
         },
       },
       {
@@ -709,11 +887,11 @@ describe("scan and patch workflow", () => {
       },
     );
     expect(outcome.exitCode).toBe(0);
-    expect(workingDirectory).toBe("/saved/repository");
+    expect(workingDirectory).toBe(SAVED_REPOSITORY);
     expect(patched.map(({ occurrenceId }) => occurrenceId)).toEqual(["occ_1"]);
     expect(JSON.parse(outcome.stdout)).toMatchObject({
       scanId: "scan-1",
-      repository: "/saved/repository",
+      repository: SAVED_REPOSITORY,
       patches: [{ occurrenceId: "occ_1", status: "verified" }],
     });
   });
@@ -726,15 +904,15 @@ describe("scan and patch workflow", () => {
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
       {
         onWorkbench: () => savedScan(result),
-        onRepositoryCommand: (command, _args, target) => {
+        onRepositoryCommand: (command, args, target) => {
           repository = target;
-          return command === "gh" ? url : "";
+          return command === "gh" && args[1] === "create" ? url : "";
         },
       },
     );
 
     expect(outcome.exitCode).toBe(0);
-    expect(repository).toBe("/saved/repository");
+    expect(repository).toBe(SAVED_REPOSITORY);
     expect(JSON.parse(outcome.stdout)).toMatchObject({
       scanId: "scan-1",
       pullRequest: { branch: "codex-security/patch-scan-1", url },
@@ -792,7 +970,7 @@ describe("scan and patch workflow", () => {
     const result = resultWithFindings(["high"]);
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "latest"], {
-      currentDirectory: "/saved/repository",
+      currentDirectory: SAVED_REPOSITORY,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "list-scans") {
@@ -803,13 +981,7 @@ describe("scan and patch workflow", () => {
     });
     expect(outcome.exitCode).toBe(0);
     expect(calls).toEqual([
-      [
-        "list-scans",
-        "--repository",
-        "/saved/repository",
-        "--status",
-        "complete",
-      ],
+      ["list-scans", "--repository", SAVED_REPOSITORY, "--status", "complete"],
       ["get-scan", "--scan-id", "scan-complete"],
     ]);
   });
@@ -825,7 +997,7 @@ describe("scan and patch workflow", () => {
           return {
             scan: {
               scanId: "scan-1",
-              targetPath: "/saved/repository",
+              targetPath: SAVED_REPOSITORY,
               findings: [],
               findingsTruncated: true,
             },

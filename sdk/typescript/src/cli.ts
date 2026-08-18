@@ -227,6 +227,7 @@ const VALUE_OPTIONS = new Set([
   "--linear-filter",
   "--fail-on-severity",
   "--patch-severity",
+  "--resume-pr",
   "--scan",
   "--severity",
   "--max-cost",
@@ -2627,6 +2628,11 @@ export async function main(
           .describe("JSON Linear issue filter for --linear-project."),
         linearApiKey: linearApiKeyOption(),
         createPr: CREATE_PR_OPTION,
+        resumePr: optionValue("--resume-pr")
+          .optional()
+          .describe(
+            "Resume publication of a saved patch branch without patching again.",
+          ),
         codex: z
           .array(optionValue("--codex"))
           .default([])
@@ -2639,6 +2645,33 @@ export async function main(
         try {
           const linear =
             options.linearIssue.length > 0 || !!options.linearProject;
+          if (options.resumePr !== undefined) {
+            if (
+              positionals.length > 0 ||
+              options.scan !== undefined ||
+              options.severity !== undefined ||
+              options.createPr ||
+              linear ||
+              options.linearFilter !== undefined ||
+              options.linearApiKey !== undefined ||
+              options.effort !== undefined ||
+              options.codex.length > 0
+            ) {
+              throw new CodexSecurityError(
+                "--resume-pr cannot be combined with patch inputs or options.",
+              );
+            }
+            const pullRequest = await resumePatchPullRequest(
+              dependencies.currentDirectory(),
+              options.resumePr,
+              errorOutput,
+              dependencies,
+            );
+            if (format === "json" || format === "jsonl") {
+              return { pullRequest };
+            }
+            return;
+          }
           if (options.linearIssue.length > 0 && options.linearProject) {
             throw new CodexSecurityError(
               "Use either --linear-issue or --linear-project, not both.",
@@ -3536,6 +3569,87 @@ function patchExitCode(patches: readonly FindingPatch[]): number {
   return patches.some(({ status }) => status === "blocked") ? 1 : 0;
 }
 
+const PATCH_PR_TITLE = "fix: patch verified security findings";
+const PATCH_PR_BODY = "Applies verified security fixes from a completed scan.";
+
+function patchCommitKey(branch: string): string {
+  return `branch.${branch}.codexSecurityPatchCommit`;
+}
+
+async function publishPatchBranch(
+  repository: string,
+  branch: string,
+  stderr: Writable,
+  dependencies: CliDependencies,
+): Promise<{ branch: string; url: string }> {
+  const run = (command: "git" | "gh", args: string[]) =>
+    dependencies.runRepositoryCommand(command, args, repository);
+  try {
+    let url = await run("gh", [
+      "pr",
+      "list",
+      "--head",
+      branch,
+      "--state",
+      "all",
+      "--json",
+      "url",
+      "--jq",
+      ".[0].url // empty",
+    ]);
+    if (!url) {
+      await run("git", ["push", "--set-upstream", "origin", branch]);
+      url = await run("gh", [
+        "pr",
+        "create",
+        "--head",
+        branch,
+        "--title",
+        PATCH_PR_TITLE,
+        "--body",
+        PATCH_PR_BODY,
+      ]);
+    }
+    stderr.write(`Pull request: ${safePatchText(url)}\n`);
+    return { branch, url };
+  } catch (error) {
+    stderr.write(
+      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}\n`,
+    );
+    throw error;
+  }
+}
+
+async function resumePatchPullRequest(
+  repository: string,
+  branch: string,
+  stderr: Writable,
+  dependencies: CliDependencies,
+): Promise<{ branch: string; url: string }> {
+  const run = (args: string[]) =>
+    dependencies.runRepositoryCommand("git", args, repository);
+  const commit = await run([
+    "config",
+    "--local",
+    "--get",
+    "--default",
+    "",
+    patchCommitKey(branch),
+  ]);
+  if (!commit) {
+    throw new CodexSecurityError(
+      "No verified patch commit is saved for this branch.",
+    );
+  }
+  const current = await run(["rev-parse", "--verify", `refs/heads/${branch}`]);
+  if (current !== commit) {
+    throw new CodexSecurityError(
+      "The patch branch has changed since verification. Review it before publishing.",
+    );
+  }
+  return publishPatchBranch(repository, branch, stderr, dependencies);
+}
+
 async function createPatchPullRequest(
   selected: SelectedFindings,
   patches: readonly FindingPatch[],
@@ -3566,7 +3680,6 @@ async function createPatchPullRequest(
   }
 
   const branch = `codex-security/patch-${selected.scanId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
-  const title = "fix: patch verified security findings";
   const run = (command: "git" | "gh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, selected.repository);
   stderr.write("Creating a GitHub pull request for verified patches...\n");
@@ -3577,23 +3690,13 @@ async function createPatchPullRequest(
     "commit",
     "--only",
     "-m",
-    title,
+    PATCH_PR_TITLE,
     "--",
     ...files,
   ]);
-  await run("git", ["push", "--set-upstream", "origin", branch]);
-  const url = await run("gh", [
-    "pr",
-    "create",
-    "--head",
-    branch,
-    "--title",
-    title,
-    "--body",
-    "Applies verified security fixes from a completed scan.",
-  ]);
-  stderr.write(`Pull request: ${safePatchText(url)}\n`);
-  return { branch, url };
+  const commit = await run("git", ["rev-parse", "HEAD"]);
+  await run("git", ["config", "--local", patchCommitKey(branch), commit]);
+  return publishPatchBranch(selected.repository, branch, stderr, dependencies);
 }
 
 function safePatchText(value: string): string {
