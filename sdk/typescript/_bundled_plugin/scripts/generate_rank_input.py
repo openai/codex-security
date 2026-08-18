@@ -622,6 +622,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     fields = result.stdout.split("\0")
     if fields and not fields[-1]:
@@ -650,6 +651,7 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
             ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=True,
         )
         combined = dict(staged)
