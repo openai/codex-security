@@ -83,10 +83,13 @@ function runWorker(
   });
 }
 
-test("settles completed bundled Deep Scan workers during coordinator cancellation", async () => {
+test("drains completed bundled Deep Scan workers during coordinator cancellation", async () => {
   const parentController = new AbortController();
+  const draining = Promise.withResolvers<void>();
+  const releaseDrain = Promise.withResolvers<void>();
   let workerSignal: AbortSignal | undefined;
   let iteratorClosed = false;
+  let settled = false;
   const WorkerExecutor = await bundledWorkerExecutor(async function* (
     signal: AbortSignal,
   ) {
@@ -98,32 +101,54 @@ test("settles completed bundled Deep Scan workers during coordinator cancellatio
         item: { type: "agent_message", text: "worker completed" },
       };
       yield { type: "turn.completed" };
-      await new Promise<void>(() => {});
+      draining.resolve();
+      await releaseDrain.promise;
     } finally {
       iteratorClosed = true;
-      parentController.abort(
-        "coordinator canceled its remaining workers during cleanup",
-      );
     }
   });
-  const timeout = setTimeout(() => {
-    parentController.abort("completed bundled worker remained pending");
-  }, 1_000);
+  const outcome = runWorker(WorkerExecutor, parentController.signal).finally(
+    () => {
+      settled = true;
+    },
+  );
 
   try {
-    const result = await runWorker(WorkerExecutor, parentController.signal);
-
-    expect(result).toEqual({
+    await Promise.race([
+      draining.promise,
+      outcome.then(() => {
+        throw new Error("Worker settled before its SDK stream drained.");
+      }),
+    ]);
+    expect(settled).toBe(false);
+    expect(iteratorClosed).toBe(false);
+    parentController.abort(
+      "coordinator canceled its remaining workers during cleanup",
+    );
+    expect(workerSignal).not.toBe(parentController.signal);
+    expect(workerSignal?.aborted).toBe(false);
+    releaseDrain.resolve();
+    expect(await outcome).toEqual({
       finalResponse: "worker completed",
       threadId: "fixture-worker-thread",
     });
     expect(iteratorClosed).toBe(true);
     expect(parentController.signal.aborted).toBe(true);
-    expect(workerSignal).not.toBe(parentController.signal);
-    expect(workerSignal?.aborted).toBe(false);
   } finally {
-    clearTimeout(timeout);
+    releaseDrain.resolve();
+    await outcome.catch(() => {});
   }
+});
+
+test("propagates bundled Deep Scan worker shutdown failures", async () => {
+  const WorkerExecutor = await bundledWorkerExecutor(async function* () {
+    yield { type: "turn.completed" };
+    throw new Error("Synthetic worker shutdown failure");
+  });
+
+  await expect(
+    runWorker(WorkerExecutor, new AbortController().signal),
+  ).rejects.toThrow("Synthetic worker shutdown failure");
 });
 
 test("forwards coordinator cancellation to active bundled Deep Scan workers", async () => {

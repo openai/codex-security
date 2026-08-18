@@ -471,8 +471,9 @@ def _read_rollout_usage(
             if timestamp is None or snapshot is None:
                 warnings.add("token_record_invalid")
                 continue
+            reset = snapshot["totalTokens"] < previous["totalTokens"]
             delta = {
-                key: value - previous[key] if value >= previous[key] else value
+                key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
             }
             previous = snapshot
@@ -482,6 +483,7 @@ def _read_rollout_usage(
                 continue
             if delta["totalTokens"] <= 0:
                 continue
+            delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
             _add_token_usage(total, delta)
 
     if not boundary_reached:
