@@ -353,9 +353,31 @@ function sessionCallArguments(
   }
 }
 
+function repositoryPathPrefix(repository: string): {
+  prefix: string;
+  caseInsensitive: boolean;
+} {
+  const normalized = repository.replaceAll("\\", "/").replace(/\/$/u, "");
+  return {
+    prefix: `${normalized}/`,
+    caseInsensitive:
+      /^[A-Za-z]:\//u.test(normalized) || normalized.startsWith("//"),
+  };
+}
+
+function startsWithPathPrefix(
+  value: string,
+  prefix: string,
+  caseInsensitive: boolean,
+): boolean {
+  return caseInsensitive
+    ? value.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()
+    : value.startsWith(prefix);
+}
+
 function commandRepositoryPaths(command: string, repository: string): string[] {
   const paths = new Set<string>();
-  const repositoryPrefix = repository.replaceAll("\\", "/").replace(/\/$/u, "");
+  const repositoryPrefix = repositoryPathPrefix(repository);
   for (const token of command.match(SHELL_TOKEN) ?? []) {
     let value = token;
     if (
@@ -365,12 +387,12 @@ function commandRepositoryPaths(command: string, repository: string): string[] {
       value = value.slice(1, -1);
     }
     value = value.replaceAll('\\"', '"').replaceAll("\\", "/");
-    for (const prefix of [
-      "$CODEX_SECURITY_REPOSITORY/",
-      "${CODEX_SECURITY_REPOSITORY}/",
-      `${repositoryPrefix}/`,
+    for (const { prefix, caseInsensitive } of [
+      { prefix: "$CODEX_SECURITY_REPOSITORY/", caseInsensitive: false },
+      { prefix: "${CODEX_SECURITY_REPOSITORY}/", caseInsensitive: false },
+      repositoryPrefix,
     ]) {
-      if (!value.startsWith(prefix)) continue;
+      if (!startsWithPathPrefix(value, prefix, caseInsensitive)) continue;
       const path = value
         .slice(prefix.length)
         .replace(/["'\r\n].*$/u, "")
@@ -394,11 +416,11 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
   if (!isRecord(value)) return [];
   const candidates = [value["path"], value["file_path"], value["paths"]].flat();
   const paths = new Set<string>();
-  const prefix = `${repository.replaceAll("\\", "/").replace(/\/$/u, "")}/`;
+  const { prefix, caseInsensitive } = repositoryPathPrefix(repository);
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
     const normalized = candidate.replaceAll("\\", "/");
-    if (normalized.startsWith(prefix)) {
+    if (startsWithPathPrefix(normalized, prefix, caseInsensitive)) {
       const path = normalized.slice(prefix.length);
       if (!path.split("/").includes("..")) paths.add(path);
     }
