@@ -13,6 +13,7 @@ export const BUNDLED_PLUGIN_VERSION = "0.1.20" as const;
 const PACKAGE_NAME = "@openai/codex-security";
 const VERSION_PATTERN =
   /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
+const NUMERIC_PRERELEASE_IDENTIFIER = /^\d+$/u;
 
 export interface UpdateNotice {
   readonly currentVersion: string;
@@ -159,12 +160,36 @@ function isNewerVersion(latest: string, current: string): boolean {
   if (candidate[4] === installed[4]) return false;
   if (candidate[4] === undefined) return true;
   if (installed[4] === undefined) return false;
-  return (
-    new Intl.Collator("en", { numeric: true }).compare(
-      candidate[4],
-      installed[4],
-    ) > 0
+  return comparePrerelease(candidate[4], installed[4]) > 0;
+}
+
+function comparePrerelease(candidate: string, installed: string): number {
+  const candidateIdentifiers = candidate.split(".");
+  const installedIdentifiers = installed.split(".");
+  const sharedLength = Math.min(
+    candidateIdentifiers.length,
+    installedIdentifiers.length,
   );
+
+  for (let index = 0; index < sharedLength; index += 1) {
+    const left = candidateIdentifiers[index]!;
+    const right = installedIdentifiers[index]!;
+    if (left === right) continue;
+
+    const leftNumeric = NUMERIC_PRERELEASE_IDENTIFIER.test(left);
+    const rightNumeric = NUMERIC_PRERELEASE_IDENTIFIER.test(right);
+    if (leftNumeric && rightNumeric) {
+      const leftValue = BigInt(left);
+      const rightValue = BigInt(right);
+      if (leftValue !== rightValue) return leftValue > rightValue ? 1 : -1;
+      continue;
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return left > right ? 1 : -1;
+  }
+
+  if (candidateIdentifiers.length === installedIdentifiers.length) return 0;
+  return candidateIdentifiers.length > installedIdentifiers.length ? 1 : -1;
 }
 
 function packageVersions(url: URL): {
