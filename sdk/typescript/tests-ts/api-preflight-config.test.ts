@@ -87,6 +87,55 @@ function runPreflight(
 }
 
 describe("CodexSecurity preflight configuration", () => {
+  test.skipIf(process.platform !== "win32")(
+    "loads trusted project config through a Windows path alias",
+    async () => {
+      const root = await temporaryDirectory();
+      const codexHome = join(root, "codex-home");
+      const repository = join(root, "Repository");
+      const projectConfig = join(repository, ".codex", "config.toml");
+      await mkdir(join(repository, ".git"), { recursive: true });
+      await mkdir(join(repository, ".codex"), { recursive: true });
+      await mkdir(codexHome);
+      await writeFile(projectConfig, "[features]\ngoals = true\n");
+      await writeCodexConfig(join(codexHome, "config.toml"), {
+        projects: {
+          [repository.toUpperCase()]: { trust_level: "trusted" },
+        },
+      });
+
+      const interpreter =
+        process.env["PYTHON"] ??
+        Bun.which("python3") ??
+        Bun.which("python") ??
+        Bun.which("py");
+      expect(interpreter).not.toBeNull();
+      const result = spawnSync(
+        interpreter!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          "--profile",
+          "security_scan",
+          "--cwd",
+          repository,
+        ],
+        {
+          encoding: "utf8",
+          env: { PATH: process.env["PATH"], CODEX_HOME: codexHome },
+        },
+      );
+      expect(result.error).toBeUndefined();
+      const payload = JSON.parse(result.stdout) as Record<string, unknown>;
+      expect(payload["config_resolution"]).toBe("cwd-discovery");
+      expect(payload["config_discovery"]).toMatchObject({
+        project_layers_loaded: true,
+      });
+      expect(payload["config_paths"]).toContain(projectConfig);
+    },
+  );
+
   test("ignores unrelated runtime settings for profiles without parent-runtime requirements", async () => {
     const root = await temporaryDirectory();
     const config = join(root, "empty.toml");

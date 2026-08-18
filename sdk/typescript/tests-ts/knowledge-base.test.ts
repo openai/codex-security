@@ -200,8 +200,10 @@ describe("scan knowledge bases", () => {
     const documents = join(home, "docs");
     await mkdir(documents, { recursive: true });
     await writeFile(join(documents, "scope.md"), "Review the payment service.");
-    const realHomeDirectory = os.homedir();
-    const homeSpy = spyOn(os, "homedir").mockImplementation(() => home);
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    process.env["HOME"] = home;
+    process.env["USERPROFILE"] = home;
     try {
       const expanded = await prepareKnowledgeBase(["~/docs"]);
       temporaryDirectories.push(expanded.path);
@@ -217,9 +219,11 @@ describe("scan knowledge bases", () => {
 
       expect(expandHome("~other/docs")).toBe("~other/docs");
     } finally {
-      homeSpy.mockRestore();
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
     }
-    expect(os.homedir()).toBe(realHomeDirectory);
   });
 
   test("extracts searchable text from PDFs and DOCX documents", async () => {

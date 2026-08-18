@@ -28,7 +28,16 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -39,8 +48,11 @@ import { parse } from "smol-toml";
 import {
   CodexSecurityError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
+  OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  type ProtectedScanPathKind,
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -118,10 +130,17 @@ export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
   const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
-  if (configured !== undefined) return resolve(expandHome(configured));
+  if (configured !== undefined) {
+    return resolve(expandHome(configured, environment));
+  }
   const codexHome =
     environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
-  return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
+  return resolve(
+    expandHome(codexHome, environment),
+    "state",
+    "plugins",
+    "codex-security",
+  );
 }
 
 export function codexSecurityCredentialHome(
@@ -1276,18 +1295,53 @@ export async function preserveCodexSecurityPluginRegistration(
   };
 }
 
-export async function preparePersistentScanRoot(
+export function requireOutputOutsideRepository(
+  repository: string,
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  const outputRelative = relative(repository, outputDirectory);
+  const repositoryRelative = relative(outputDirectory, repository);
+  if (
+    outputRelative === "" ||
+    (outputRelative !== ".." &&
+      !outputRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(outputRelative)) ||
+    (pathKind === "output" &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(repositoryRelative))
+  ) {
+    throw new OutputInsideProtectedRootError(
+      outputDirectory,
+      repository,
+      pathKind,
+    );
+  }
+}
+
+export function requireOutputOutsideRepositories(
+  repositories: readonly string[],
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  for (const repository of repositories)
+    requireOutputOutsideRepository(repository, outputDirectory, pathKind);
+}
+
+export async function preparePersistentOutputRoot(
   stateDirectory: string,
+  category: "scans" | "policies",
   repositoryName: string,
 ): Promise<string> {
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   let root = await realpath(stateDirectory);
-  for (const directory of ["scans", safePrefix(repositoryName)]) {
+  for (const directory of [category, safePrefix(repositoryName)]) {
     root = join(root, directory);
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (!(await lstat(root)).isDirectory()) {
       throw new OutputDirectoryError(
-        `Persistent scan output must use real directories: ${root}`,
+        `Persistent ${category === "scans" ? "scan" : "policy"} output must use real directories: ${root}`,
       );
     }
   }
@@ -1406,9 +1460,7 @@ export async function validateOutputDir(
         );
       }
       if (!archiveExisting && (await readdir(path)).length !== 0) {
-        throw new OutputDirectoryError(
-          `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
-        );
+        throw new OutputDirectoryNotEmptyError(path);
       }
       requirePrivateOutputDirectory(metadata, path);
       await requireSecureOutputAncestry(path);
@@ -1986,11 +2038,13 @@ export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  const expanded =
+    configured === undefined ? undefined : expandHome(configured, environment);
   if (
-    configured &&
-    (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(configured))
+    expanded &&
+    (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
-    return { command: resolve(configured) };
+    return { command: resolve(expanded) };
   }
 
   const platform = process.platform === "android" ? "linux" : process.platform;
@@ -2215,7 +2269,7 @@ export async function resolvePluginPython(
   }
 
   for (const candidate of process.platform === "win32"
-    ? ["python", "python3"]
+    ? ["python", "python3", "py"]
     : ["python3", "python"]) {
     const resolved = await usablePython(
       candidate,
@@ -2227,7 +2281,7 @@ export async function resolvePluginPython(
   }
   throw new PluginPythonUnavailableError(
     "The bundled Codex Security plugin requires Python 3.10 or later (Python 3.10 also requires tomli), but no usable interpreter was found. " +
-      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python to PATH.",
+      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python (py on Windows) to PATH.",
   );
 }
 
@@ -2445,7 +2499,9 @@ async function usablePython(
   signal?: AbortSignal,
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
-    isPythonPathCandidate(candidate) ? expandHome(candidate) : candidate,
+    isPythonPathCandidate(candidate)
+      ? expandHome(candidate, environment)
+      : candidate,
     environment,
     protectedRoot,
   );
@@ -2512,10 +2568,20 @@ async function sameFile(left: string, right: string): Promise<boolean> {
   }
 }
 
-export function expandHome(value: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return join(homedir(), value.slice(2));
+export function expandHome(
+  value: string,
+  environment: ProcessEnvironment = process.env,
+): string {
+  const home =
+    (process.platform === "win32"
+      ? environmentValue(environment, "USERPROFILE") ??
+        environmentValue(environment, "HOME")
+      : environmentValue(environment, "HOME") ??
+        environmentValue(environment, "USERPROFILE")) ?? homedir();
+  if (value === "~") return home;
+  if (value.startsWith("~/")) return join(home, value.slice(2));
+  if (value.startsWith("~\\")) {
+    return join(home, ...value.slice(2).split("\\"));
   }
   return value;
 }

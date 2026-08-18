@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
@@ -91,6 +98,62 @@ describe("semantic scan comparison", () => {
     expect(await comparisonEnvironment(provider, account)).toEqual(provider);
     expect(statusProbed).toBe(false);
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "recognizes provider scan variables regardless of Windows casing",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const stateDirectory = join(root, "state");
+      const providerHome = join(root, "provider-home");
+      await mkdir(join(stateDirectory, "codex-home"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      let statusProbed = false;
+      const provider = {
+        codex_security_scan_id: "scan",
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        codex_home: providerHome,
+        FIREWORKS_API_KEY: "synthetic-provider-key",
+      };
+
+      const environment = await comparisonEnvironment(provider, async () => {
+        statusProbed = true;
+        return { authenticated: true, details: "Logged in using ChatGPT" };
+      });
+
+      expect(environment).toEqual(provider);
+      expect(statusProbed).toBe(false);
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "replaces differently cased Windows CODEX_HOME variables",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const stateDirectory = join(root, "state");
+      const credentialHome = join(stateDirectory, "codex-home");
+      await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+
+      const environment = await comparisonEnvironment(
+        {
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          codex_home: join(root, "ambient-home"),
+        },
+        async () => ({
+          authenticated: true,
+          details: "Logged in using ChatGPT",
+        }),
+        undefined,
+        async () => await realpath(credentialHome),
+      );
+
+      expect(environment["CODEX_HOME"]).toBe(await realpath(credentialHome));
+      expect(environment["codex_home"]).toBeUndefined();
+    },
+  );
 
   test("reuses managed keyring credentials when no environment key is present", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
@@ -195,6 +258,25 @@ describe("semantic scan comparison", () => {
     expect(environment["OPENAI_API_KEY"]).toBe("synthetic-comparison-key");
     expect(environment["CODEX_HOME"]).toBe(ambientHome);
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "recognizes stored credentials under a backslash home-relative path",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const ambientHome = join(root, "ambient-codex-home");
+      await mkdir(ambientHome);
+      await writeFile(join(ambientHome, "auth.json"), "{}");
+      const environment = await comparisonEnvironment({
+        CODEX_HOME: "~\\ambient-codex-home",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "",
+        USERPROFILE: root,
+      });
+
+      expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+    },
+  );
 
   test("compares all findings with one restricted structured-output turn", async () => {
     const input: ScanComparisonInput = {

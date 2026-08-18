@@ -139,11 +139,13 @@ npx @openai/codex-security scan . --verbose
 `LOG_LEVEL=debug` is its fallback. JSON results remain on stdout.
 
 Verbose diagnostics may contain sensitive data. Review local logs before
-sharing them. Saved failure summaries, bulk-scan receipts, and the interactive
-dashboard omit messages that contain recognizable credentials.
+sharing them. Saved failure summaries, bulk-scan receipts, and the normal
+activity feed omit messages that contain recognizable credentials.
 
 Use `npx @openai/codex-security scans logs SCAN_ID` to inspect saved session
-events from a scan and its workers.
+events from a scan and its workers. Press `d` during a scan to inspect
+unredacted details; `a`, `m`, and `1`–`9` select all, main, or worker
+sessions. These events can contain credentials.
 
 ## TypeScript SDK
 
