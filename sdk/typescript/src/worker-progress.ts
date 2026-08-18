@@ -108,6 +108,8 @@ function preflightStatus(
   item: Readonly<Record<string, unknown>>,
 ): ScanWorkerStatus | null {
   if (
+    item["status"] === "failed" ||
+    (typeof item["exit_code"] === "number" && item["exit_code"] !== 0) ||
     typeof item["command"] !== "string" ||
     !PREFLIGHT_COMMAND.test(item["command"]) ||
     typeof item["aggregated_output"] !== "string"
