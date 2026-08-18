@@ -221,7 +221,76 @@ describe("canonical scan contract", () => {
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
-  test("loads pre-typed sealed finding details without changing the artifact", async () => {
+  test("preserves schema-valid sealed finding details", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const validation = {
+      evidence: "single proof",
+      counterEvidence: [],
+      status: null,
+      disposition: null,
+      result: null,
+    };
+    findings["findings"][0]["validation"] = validation;
+    findings["findings"][0]["code_evidence"] = null;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation).toEqual(validation);
+    expect(loaded.findings.findings[0]?.code_evidence).toBeNull();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("preserves valid details while normalizing malformed legacy siblings", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const validation = {
+      evidence: "single proof",
+      counterEvidence: [],
+      status: null,
+      disposition: null,
+      result: null,
+    };
+    findings["findings"][0]["validation"] = validation;
+    const codeEvidence = [{ id: " ", code: " " }];
+    findings["findings"][0]["code_evidence"] = codeEvidence;
+    findings["findings"][0]["attackPath"] = {
+      steps: { first: "upload" },
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation).toEqual(validation);
+    expect(loaded.findings.findings[0]?.code_evidence).toEqual(codeEvidence);
+    expect(loaded.findings.findings[0]?.attackPath?.steps).toBeUndefined();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("preserves empty union lists while normalizing malformed siblings", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["validation"] = { evidence: [] };
+    findings["findings"][0]["attackPath"] = {
+      steps: { first: "upload" },
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation?.evidence).toEqual([]);
+    expect(loaded.findings.findings[0]?.attackPath?.steps).toBeUndefined();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("normalizes pre-typed sealed finding details without changing the artifact", async () => {
     const scanDir = await copyExample();
     const findingsPath = join(scanDir, "findings.json");
     const findings = await readJson(findingsPath);
@@ -243,13 +312,15 @@ describe("canonical scan contract", () => {
     expect(loaded.findings.findings[0]?.code_evidence?.[0]?.id).toBe(
       "legacy-source",
     );
-    const loadedFinding = loaded.findings.findings[0] as unknown as Record<
-      string,
-      unknown
-    >;
-    expect(loadedFinding["validation"]).toEqual(legacyValidation);
-    expect(loadedFinding["attackPath"]).toEqual(legacyAttackPath);
-    expect(loadedFinding["root_cause"]).toBeNull();
+    const loadedFinding = loaded.findings.findings[0];
+    expect(loadedFinding?.validation?.evidence).toBeUndefined();
+    expect(
+      loadedFinding?.validation?.counterEvidence?.map((item) =>
+        item.toUpperCase(),
+      ),
+    ).toEqual(["THE MITIGATION WAS CHECKED."]);
+    expect(loadedFinding?.attackPath?.steps).toBeUndefined();
+    expect(loadedFinding?.root_cause).toBeNull();
     expect(await readJson(findingsPath)).toEqual(findings);
   });
 

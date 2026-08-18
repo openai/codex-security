@@ -99,6 +99,7 @@ export async function loadContract(
     ),
   };
   throwIfAborted(options.signal);
+  let findingsPayload: unknown = payloads["findings.json"];
 
   const ajv = createValidator();
   for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
@@ -112,9 +113,9 @@ export async function loadContract(
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
     }
-    const payload =
+    let payload: unknown =
       filename === "findings.json"
-        ? legacySealedFindingsForValidation(payloads["findings.json"])
+        ? findingsPayload
         : payloads[filename as keyof typeof payloads];
     let valid: boolean;
     try {
@@ -123,16 +124,25 @@ export async function loadContract(
         throw new Error("asynchronous JSON Schema validation is unsupported");
       }
       valid = result;
+      if (!valid && filename === "findings.json") {
+        payload = legacySealedFindingsForValidation(payload);
+        const compatibleResult = validate(payload);
+        if (typeof compatibleResult !== "boolean") {
+          throw new Error("asynchronous JSON Schema validation is unsupported");
+        }
+        valid = compatibleResult;
+      }
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
     }
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
     }
+    if (filename === "findings.json") findingsPayload = payload;
     throwIfAborted(options.signal);
   }
   const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
-  const findings = payloads["findings.json"] as unknown as FindingsDocument;
+  const findings = findingsPayload as FindingsDocument;
   const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
   if (
     findings.scanId !== manifest.scan.id ||
@@ -185,16 +195,6 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
   }
   for (const finding of compatible["findings"]) {
     if (!isJsonRecord(finding)) continue;
-    const canonicalEvidence = Array.isArray(finding["codeEvidence"])
-      ? finding["codeEvidence"]
-      : [];
-    const evidenceIds = new Set(
-      canonicalEvidence.flatMap((evidence) => {
-        if (!isJsonRecord(evidence)) return [];
-        const id = evidence["id"];
-        return typeof id === "string" && id.length > 0 ? [id] : [];
-      }),
-    );
     const legacyEvidence = finding["code_evidence"];
     if (Array.isArray(legacyEvidence)) {
       const compatibleEvidence: JsonRecord[] = [];
@@ -204,18 +204,16 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
         const code = evidence["code"];
         if (
           typeof id !== "string" ||
-          id.trim().length === 0 ||
+          id.length === 0 ||
           typeof code !== "string" ||
-          code.trim().length === 0 ||
-          evidenceIds.has(id)
+          code.length === 0
         ) {
           continue;
         }
-        evidenceIds.add(id);
         compatibleEvidence.push(evidence);
       }
       finding["code_evidence"] = compatibleEvidence;
-    } else if ("code_evidence" in finding) {
+    } else if ("code_evidence" in finding && legacyEvidence !== null) {
       delete finding["code_evidence"];
     }
 
@@ -227,7 +225,6 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
         [
           "assertions",
           "counterEvidence",
-          "evidence",
           "evidenceRefs",
           "evidence_refs",
           "limitations",
@@ -250,7 +247,6 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
       const section = finding[sectionName];
       if (!isJsonRecord(section)) continue;
       normalizeLegacyStringLists(section, listFields);
-      filterLegacyEvidenceRefs(section, evidenceIds);
     }
 
     const rootCause = finding["rootCause"];
@@ -274,17 +270,17 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
     } else if (
       "root_cause" in finding &&
       legacyRootCause !== null &&
-      (typeof legacyRootCause !== "string" || legacyRootCause.length === 0)
+      typeof legacyRootCause !== "string"
     ) {
       delete finding["root_cause"];
     }
 
     const validation = finding["validation"];
     if (isJsonRecord(validation)) {
-      removeUnsupportedLegacyStrings(validation, [
-        "method",
+      normalizeLegacyStringOrList(validation, "evidence");
+      removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
+      removeUnsupportedLegacyNullableStrings(validation, [
         "status",
-        "summary",
         "disposition",
         "result",
       ]);
@@ -320,7 +316,6 @@ function legacySealedFindingsForValidation(payload: unknown): unknown {
         "transformations",
         ...(field === "reachability" ? ["preconditions"] : []),
       ]);
-      filterLegacyEvidenceRefs(detail, evidenceIds);
     }
     for (const field of ["impact", "likelihood"]) {
       const detail = attackPath[field];
@@ -349,36 +344,33 @@ function normalizeLegacyStringLists(
   for (const field of fields) {
     if (!(field in section)) continue;
     const value = section[field];
-    const normalized =
-      typeof value === "string"
-        ? value.trim().length > 0
-          ? [value]
-          : []
-        : Array.isArray(value)
-          ? value.filter(
-              (item): item is string =>
-                typeof item === "string" && item.trim().length > 0,
-            )
-          : [];
-    if (normalized.length > 0) section[field] = normalized;
-    else delete section[field];
+    if (Array.isArray(value)) {
+      section[field] = value.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+      );
+    } else if (typeof value === "string" && value.length > 0) {
+      section[field] = [value];
+    } else {
+      delete section[field];
+    }
   }
 }
 
-function filterLegacyEvidenceRefs(
-  section: JsonRecord,
-  evidenceIds: Set<string>,
-): void {
-  for (const field of ["evidenceRefs", "evidence_refs"]) {
-    const refs = section[field];
-    if (!Array.isArray(refs)) continue;
-    section[field] = refs.filter(
-      (ref): ref is string =>
-        typeof ref === "string" &&
-        ref.trim().length > 0 &&
-        evidenceIds.has(ref),
-    );
+function normalizeLegacyStringOrList(section: JsonRecord, field: string): void {
+  if (!(field in section)) return;
+  const value = section[field];
+  if (typeof value === "string") {
+    if (value.length === 0) delete section[field];
+    return;
   }
+  if (!Array.isArray(value)) {
+    delete section[field];
+    return;
+  }
+  const normalized = value.filter(
+    (item): item is string => typeof item === "string" && item.length > 0,
+  );
+  section[field] = normalized;
 }
 
 function removeUnsupportedLegacyStrings(
@@ -388,6 +380,21 @@ function removeUnsupportedLegacyStrings(
   for (const field of fields) {
     if (
       field in section &&
+      (typeof section[field] !== "string" || section[field].length === 0)
+    ) {
+      delete section[field];
+    }
+  }
+}
+
+function removeUnsupportedLegacyNullableStrings(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (
+      field in section &&
+      section[field] !== null &&
       (typeof section[field] !== "string" || section[field].length === 0)
     ) {
       delete section[field];
