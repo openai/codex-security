@@ -51,6 +51,13 @@ SARIF_LEVELS = {
     "low": "note",
     "informational": "note",
 }
+SARIF_SECURITY_SCORES = {
+    "critical": 9.5,
+    "high": 8.0,
+    "medium": 5.0,
+    "low": 2.0,
+    "informational": 0.0,
+}
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
@@ -1701,13 +1708,65 @@ def _validate_contract_refs(scan: dict[str, Any]) -> None:
             raise ContractError(f"manifest.scan.{field}: expected {expected!r}")
 
 
-def _sarif_rule(rule_id: str) -> dict[str, Any]:
+def _sarif_label(value: str) -> str:
+    words = re.sub(r"[-_./]+", " ", value).split()
+    acronyms = {"api", "csrf", "html", "http", "id", "rce", "sql", "ssrf", "url", "xml", "xss"}
+    label = " ".join(word.upper() if word.lower() in acronyms else word for word in words)
+    return label[:1].upper() + label[1:]
+
+
+def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    name = ": ".join(_sarif_label(part) for part in rule_id.split("."))
+    categories = sorted({finding["taxonomy"]["category"] for finding in findings})
+    cwes = sorted({cwe for finding in findings for cwe in finding["taxonomy"]["cwe"]})
+    tags = {"security", *categories}
+    for cwe in cwes:
+        match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
+        if match and int(match[1]) > 0:
+            tags.add(f"external/cwe/cwe-{int(match[1]):03d}")
+    description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
+    if cwes:
+        description += f" Weaknesses: {', '.join(cwes)}."
+    remediation = "\n\n".join(sorted({finding["remediation"] for finding in findings}))
+    properties: dict[str, Any] = {"tags": sorted(tags)}
+    # GitHub assigns security severity to the shared rule, not each result.
+    score = max(
+        finding["severity"].get("score", SARIF_SECURITY_SCORES[finding["severity"]["level"]])
+        for finding in findings
+    )
+    if score > 0:
+        properties["security-severity"] = str(score)
     return {
         "id": rule_id,
-        "name": rule_id,
-        "shortDescription": {"text": rule_id},
-        "properties": {"tags": ["security"]},
+        "name": name,
+        "shortDescription": {"text": name},
+        "fullDescription": {"text": description},
+        "help": {
+            "text": f"{description}\n\nRemediation:\n\n{remediation}",
+            "markdown": f"{description}\n\n## Remediation\n\n{remediation}",
+        },
+        "properties": properties,
     }
+
+
+def _sarif_finding_message(finding: dict[str, Any]) -> str:
+    taxonomy = finding["taxonomy"]
+    details = [
+        finding["title"],
+        finding["summary"],
+        f"Severity: {finding['severity']['level']}",
+        f"Category: {_sarif_label(taxonomy['category'])}",
+    ]
+    if taxonomy["cwe"]:
+        details.append(f"Weaknesses: {', '.join(taxonomy['cwe'])}")
+    details.append(f"Remediation:\n{finding['remediation']}")
+    for key, label in (
+        ("remediationTests", "Remediation tests"),
+        ("preventiveControls", "Preventive controls"),
+    ):
+        if finding.get(key):
+            details.append(f"{label}:\n" + "\n".join(f"- {item}" for item in finding[key]))
+    return "\n\n".join(details)
 
 
 def _utf16_code_units(value: str) -> Iterator[int]:
@@ -2013,7 +2072,7 @@ def _sarif_result(
         "ruleId": finding["ruleId"],
         "ruleIndex": rule_index,
         "level": SARIF_LEVELS[finding["severity"]["level"]],
-        "message": {"text": finding["summary"]},
+        "message": {"text": _sarif_finding_message(finding)},
         "locations": [_sarif_location(location) for location in _sarif_locations(finding)],
         "partialFingerprints": partial_fingerprints,
         "properties": properties,
@@ -2038,7 +2097,9 @@ def build_sarif(
             "driver": {
                 "name": "Codex Security",
                 "version": scan["producer"]["version"],
-                "rules": [_sarif_rule(rule_id) for rule_id in ordered_rule_ids],
+                "rules": [
+                    _sarif_rule(rule_id, findings_by_rule[rule_id]) for rule_id in ordered_rule_ids
+                ],
             }
         },
         "automationDetails": {"id": scan["id"]},
