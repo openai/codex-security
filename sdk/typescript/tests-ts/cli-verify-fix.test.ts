@@ -39,6 +39,9 @@ describe("read-only finding verification", () => {
             }) as ReturnType<LinearClientFactory>,
           onCodex: (args, output, processEnvironment) => {
             expect(args[0]).toBe("app-server");
+            expect(args).toContain('approval_policy="on-request"');
+            expect(args).toContain('approvals_reviewer="auto_review"');
+            expect(args).not.toContain('approval_policy="never"');
             expect(output?.command).toBe("verify-fix");
             expect(output?.appServer?.sandbox).toBe("read-only");
             prompt = output!.appServer!.prompt;

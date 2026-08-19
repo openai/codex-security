@@ -1181,7 +1181,7 @@ lines.on("line", (line) => {
   }
   if (request.method === "thread/start") {
     assert.deepEqual(request.params, {
-      approvalPolicy: "never",
+      approvalPolicy: "on-request",
       sandbox: "read-only",
       config: { mcp_servers: { repository: { enabled: false } } },
     });

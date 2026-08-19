@@ -4363,7 +4363,8 @@ async function runSkill(
         ],
       ),
       "--config",
-      'approval_policy="never"',
+      verify ? 'approval_policy="on-request"' : 'approval_policy="never"',
+      ...(verify ? ["--config", 'approvals_reviewer="auto_review"'] : []),
       "--config",
       'responses_api_metadata.codex_security_surface="cli"',
       ...(appServer
@@ -4429,7 +4430,8 @@ export async function readSkillCommandOutput(
       // An explicit cwd makes Codex persist trust for a new project.
       // Inherit the child process cwd and preserve the user's decision.
       params: {
-        approvalPolicy: "never",
+        approvalPolicy:
+          appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
         ...(config === undefined ? {} : { config }),
       },
