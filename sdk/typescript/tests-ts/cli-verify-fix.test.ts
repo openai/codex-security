@@ -23,7 +23,7 @@ describe("read-only finding verification", () => {
 
     expect(
       await main(
-        ["verify", "--linear-issue", "SEC-123", "--json"],
+        ["verify-fix", "--linear-issue", "SEC-123", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({
@@ -38,7 +38,7 @@ describe("read-only finding verification", () => {
             }) as ReturnType<LinearClientFactory>,
           onCodex: (args, output, processEnvironment) => {
             expect(args[0]).toBe("app-server");
-            expect(output?.command).toBe("verify");
+            expect(output?.command).toBe("verify-fix");
             expect(output?.appServer?.sandbox).toBe("read-only");
             prompt = output!.appServer!.prompt;
             environment = processEnvironment;
@@ -86,7 +86,7 @@ describe("read-only finding verification", () => {
 
     expect(
       await main(
-        ["verify", "A previously reported authorization bypass", "--json"],
+        ["verify-fix", "A previously reported authorization bypass", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({
@@ -149,7 +149,7 @@ describe("read-only finding verification", () => {
     ).toBe(0);
 
     const activity = stripVTControlCharacters(stderr.text());
-    expect(activity).toContain("VERIFY");
+    expect(activity).toContain("VERIFY-FIX");
     expect(activity).toContain("rg authorization src/guard.ts");
     expect(activity).toContain("Checking the original authorization guard.");
     expect(activity).toContain("read_file");
@@ -170,7 +170,11 @@ describe("read-only finding verification", () => {
 
       expect(
         await main(
-          ["verify", "A previously reported authorization bypass", "--json"],
+          [
+            "verify-fix",
+            "A previously reported authorization bypass",
+            "--json",
+          ],
           stdout.stream,
           stderr.stream,
           dependencies({
@@ -223,7 +227,7 @@ describe("read-only finding verification", () => {
     expect(
       await main(
         [
-          "verify",
+          "verify-fix",
           "--linear-issue",
           "SEC-123",
           "--linear-issue",
@@ -290,7 +294,7 @@ describe("read-only finding verification", () => {
 
     expect(
       await main(
-        ["verify", "--scan", "scan-1", "--severity", "high", "--json"],
+        ["verify-fix", "--scan", "scan-1", "--severity", "high", "--json"],
         stdout.stream,
         capture().stream,
         dependencies({
@@ -342,7 +346,7 @@ describe("read-only finding verification", () => {
     const stdout = capture();
     expect(
       await main(
-        ["verify", "A previously reported authorization bypass"],
+        ["verify-fix", "A previously reported authorization bypass"],
         stdout.stream,
         capture().stream,
         dependencies({
@@ -374,7 +378,7 @@ describe("read-only finding verification", () => {
 
     expect(
       await main(
-        ["verify", "A previously reported authorization bypass"],
+        ["verify-fix", "A previously reported authorization bypass"],
         stdout.stream,
         capture().stream,
         dependencies({
@@ -428,7 +432,7 @@ describe("read-only finding verification", () => {
 
       expect(
         await main(
-          ["verify", "--linear-issue", "SEC-123", "--json"],
+          ["verify-fix", "--linear-issue", "SEC-123", "--json"],
           stdout.stream,
           stderr.stream,
           dependencies({
@@ -453,9 +457,9 @@ describe("read-only finding verification", () => {
   );
 
   test.each([
-    [["verify"], "Verify requires a finding"],
+    [["verify-fix"], "Verify-fix requires a finding"],
     [
-      ["verify", "--scan", "scan-1", "--linear-issue", "SEC-123"],
+      ["verify-fix", "--scan", "scan-1", "--linear-issue", "SEC-123"],
       "Saved findings cannot be combined with Linear issues or projects",
     ],
   ] as const)(

@@ -251,9 +251,9 @@ npx @openai/codex-security publish scan /path/outside/repository/results --to li
 npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
-npx @openai/codex-security verify --linear-issue SEC-123 --json
-npx @openai/codex-security verify --linear-project "Security backlog" --linear-filter '{"state":{"type":{"eq":"completed"}}}' --json
-npx @openai/codex-security verify --scan SCAN_ID --severity high --json
+npx @openai/codex-security verify-fix --linear-issue SEC-123 --json
+npx @openai/codex-security verify-fix --linear-project "Security backlog" --linear-filter '{"state":{"type":{"eq":"completed"}}}' --json
+npx @openai/codex-security verify-fix --scan SCAN_ID --severity high --json
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
 npx @openai/codex-security patch OCCURRENCE_ID
@@ -818,7 +818,7 @@ history. Imported content is always literal, and issue URLs must match the
 selected workspace. Linear access is read-only, and its credentials are not
 passed to the patch subprocess.
 
-Use `verify` to check whether an existing security fix actually closes its
+Use `verify-fix` to check whether an existing security fix actually closes its
 original vulnerability without modifying the repository. Pass a finding
 description, a saved finding identifier, `--scan SCAN_ID`, `--linear-issue ISSUE`,
 or `--linear-project "PROJECT"`. Linear intake uses the same credentials and

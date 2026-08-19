@@ -884,7 +884,7 @@ type MatchingPlan = JsonObject & {
 };
 
 interface SkillCommandOutput {
-  readonly command: "validate" | "patch" | "verify";
+  readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
   readonly stderr: Writable;
   readonly appServer?: {
@@ -2161,7 +2161,7 @@ export async function main(
   });
   const cli = Cli.create("codex-security", {
     description:
-      "Run, validate, patch, verify, export, and publish Codex Security findings.",
+      "Run, validate, patch, verify fixes, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -2778,7 +2778,7 @@ export async function main(
         }
       },
     })
-    .command("verify", {
+    .command("verify-fix", {
       description:
         "Verify existing security fixes without changing the repository.",
       destructive: false,
@@ -2852,7 +2852,7 @@ export async function main(
           }
           if (positionals.length === 0 && !linear && !savedFindings) {
             throw new CodexSecurityError(
-              "Verify requires a finding, --scan, --linear-issue, or --linear-project.",
+              "Verify-fix requires a finding, --scan, --linear-issue, or --linear-project.",
             );
           }
 
@@ -3571,7 +3571,7 @@ function validateCliArguments(
       "export",
       "publish",
       "validate",
-      "verify",
+      "verify-fix",
       "patch",
       "login",
       "logout",
@@ -3700,7 +3700,7 @@ function validateCliArguments(
   }
   if (
     command !== "validate" &&
-    command !== "verify" &&
+    command !== "verify-fix" &&
     command !== "patch" &&
     positionals.length >
       (command === "logout" || command === "info"
@@ -4365,7 +4365,7 @@ async function runSkill(
           ]),
     ],
     {
-      command: verify ? "verify" : patch ? "patch" : "validate",
+      command: verify ? "verify-fix" : patch ? "patch" : "validate",
       stdout,
       stderr,
       ...(patch
@@ -4555,7 +4555,7 @@ export async function readSkillCommandOutput(
 }
 
 export function skillCommandFailure(
-  command: "validate" | "patch" | "verify",
+  command: "validate" | "patch" | "verify-fix",
   status: number,
   detail: string,
 ): string {

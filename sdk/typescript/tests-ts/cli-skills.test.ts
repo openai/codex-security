@@ -1205,7 +1205,7 @@ lines.on("line", (line) => {
       runCodexSkillCommand(
         ["-e", source],
         {
-          command: "verify",
+          command: "verify-fix",
           stdout: stdout.stream,
           stderr: stderr.stream,
           appServer: {
