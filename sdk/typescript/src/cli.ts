@@ -730,10 +730,14 @@ type MatchingPlan = JsonObject & {
 };
 
 interface SkillCommandOutput {
-  readonly command: "validate" | "patch";
+  readonly command: "validate" | "patch" | "verify";
   readonly stdout: Writable;
   readonly stderr: Writable;
-  readonly appServer?: { readonly directory: string; readonly prompt: string };
+  readonly appServer?: {
+    readonly directory: string;
+    readonly prompt: string;
+    readonly sandbox?: "read-only" | "workspace-write";
+  };
 }
 
 const findingPatchSchema = z.object({
@@ -746,10 +750,19 @@ const findingPatchSchema = z.object({
 
 type FindingPatch = z.infer<typeof findingPatchSchema>;
 
+const findingVerificationSchema = z.object({
+  id: z.string(),
+  status: z.enum(["fixed", "still_vulnerable", "inconclusive"]),
+  evidence: z.string().trim().min(1),
+});
+
+type FindingVerification = z.infer<typeof findingVerificationSchema>;
+
 interface SkillRunOptions {
   directory?: string;
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
+  verificationIds?: readonly string[];
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
@@ -1036,6 +1049,7 @@ export async function runCodexSkillCommand(
                 : {
                     prompt: output.appServer.prompt,
                     input: invocation.stdin!,
+                    sandbox: output.appServer.sandbox,
                   },
             ),
             new Promise<undefined>((resolve) => {
@@ -1990,7 +2004,7 @@ export async function main(
   });
   const cli = Cli.create("codex-security", {
     description:
-      "Run, validate, patch, export, and publish Codex Security findings.",
+      "Run, validate, patch, verify, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -2607,6 +2621,207 @@ export async function main(
         }
       },
     })
+    .command("verify", {
+      description:
+        "Verify existing security fixes without changing the repository.",
+      destructive: false,
+      mcp: false,
+      args: z.object({
+        "findings...": z
+          .string()
+          .min(1, "A finding must not be empty.")
+          .optional()
+          .describe("Finding text, a file, or a saved finding identifier."),
+      }),
+      options: z.object({
+        effort: effortOption(),
+        scan: optionValue("--scan")
+          .optional()
+          .describe("Verify open findings from a saved scan."),
+        severity: z
+          .enum(REPORTABLE_SEVERITIES)
+          .optional()
+          .describe("Verify saved findings at or above LEVEL."),
+        linearIssue: z
+          .array(optionValue("--linear-issue"))
+          .default([])
+          .describe("Linear issue identifier or URL; repeat for more issues."),
+        linearProject: optionValue("--linear-project")
+          .optional()
+          .describe("Verify issues in this Linear project."),
+        linearFilter: optionValue("--linear-filter")
+          .optional()
+          .describe("JSON Linear issue filter for --linear-project."),
+        linearApiKey: linearApiKeyOption(),
+        codex: z
+          .array(optionValue("--codex"))
+          .default([])
+          .describe(
+            'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
+          ),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ format, options }) {
+        try {
+          const linear =
+            options.linearIssue.length > 0 || !!options.linearProject;
+          if (options.linearIssue.length > 0 && options.linearProject) {
+            throw new CodexSecurityError(
+              "Use either --linear-issue or --linear-project, not both.",
+            );
+          }
+          if (options.linearFilter && !options.linearProject) {
+            throw new CodexSecurityError(
+              "--linear-filter requires --linear-project.",
+            );
+          }
+          if (options.linearApiKey !== undefined && !linear) {
+            throw new CodexSecurityError(
+              "--linear-api-key requires --linear-issue or --linear-project.",
+            );
+          }
+          const savedFindings =
+            options.scan !== undefined ||
+            (positionals.length > 0 && positionals.every(isFindingIdentifier));
+          if (savedFindings && linear) {
+            throw new CodexSecurityError(
+              "Saved findings cannot be combined with Linear issues or projects.",
+            );
+          }
+          if (options.severity !== undefined && !savedFindings) {
+            throw new CodexSecurityError(
+              "--severity requires a saved finding identifier or --scan.",
+            );
+          }
+          if (positionals.length === 0 && !linear && !savedFindings) {
+            throw new CodexSecurityError(
+              "Verify requires a finding, --scan, --linear-issue, or --linear-project.",
+            );
+          }
+
+          const selected = savedFindings
+            ? await selectSavedFindings(
+                positionals,
+                options.scan,
+                options.severity,
+                dependencies,
+              )
+            : undefined;
+          const imports = linear
+            ? await importLinearIssues({
+                issues: options.linearIssue,
+                project: options.linearProject,
+                filter: options.linearFilter,
+                apiKey: options.linearApiKey,
+                environment: dependencies.environment,
+                linearClient: dependencies.linearClient,
+              })
+            : [];
+          const identifiers =
+            selected === undefined
+              ? [
+                  ...positionals.map(
+                    (_finding, index) => `finding-${index + 1}`,
+                  ),
+                  ...imports.map(({ id }) => id),
+                ]
+              : selected.findings.map(({ occurrenceId }) => occurrenceId);
+          if (new Set(identifiers).size !== identifiers.length) {
+            throw new CodexSecurityError(
+              "Verification inputs must have unique finding or issue identifiers.",
+            );
+          }
+          const repository =
+            selected?.repository ?? dependencies.currentDirectory();
+          let results: FindingVerification[] = [];
+          if (identifiers.length > 0) {
+            const environment =
+              imports.length === 0
+                ? undefined
+                : Object.fromEntries(
+                    Object.entries(dependencies.environment).filter(
+                      ([name]) =>
+                        !/^(?:CODEX_SECURITY_)?LINEAR_(?:API_KEY|ACCESS_TOKEN)$/iu.test(
+                          name,
+                        ),
+                    ),
+                  );
+            let response = "";
+            const verificationOutput: Writable = {
+              write(value: string | Uint8Array): boolean {
+                response += value.toString();
+                return true;
+              },
+            };
+            exitCode = await runSkill(
+              "fix-finding",
+              selected === undefined ? [...positionals, ...imports] : [],
+              options.codex,
+              options.effort,
+              verificationOutput,
+              errorOutput,
+              dependencies,
+              {
+                directory: repository,
+                ...(selected === undefined
+                  ? {}
+                  : { findings: selected.findings }),
+                verificationIds: identifiers,
+                environment,
+              },
+            );
+            if (exitCode !== 0) return undefined;
+
+            let reported: unknown;
+            try {
+              reported = JSON.parse(response);
+            } catch {
+              throw new CodexSecurityError(
+                "Verification results were not valid JSON.",
+              );
+            }
+            const parsed = z
+              .object({ results: z.array(findingVerificationSchema) })
+              .safeParse(reported);
+            if (
+              !parsed.success ||
+              parsed.data.results.length !== identifiers.length ||
+              parsed.data.results.some(
+                ({ id }, index) => id !== identifiers[index],
+              )
+            ) {
+              throw new CodexSecurityError(
+                "Codex did not return an evidence-backed verification result for every finding.",
+              );
+            }
+            results = parsed.data.results;
+            exitCode = results.some(({ status }) => status === "inconclusive")
+              ? 2
+              : results.some(({ status }) => status === "still_vulnerable")
+                ? 1
+                : 0;
+          }
+
+          if (format === "json" || format === "jsonl") {
+            return {
+              repository,
+              ...(selected === undefined ? {} : { scanId: selected.scanId }),
+              results,
+            };
+          }
+          for (const result of results) {
+            output.write(
+              `${result.status.toUpperCase()} ${safePatchText(result.id)}: ${safePatchText(result.evidence)}\n`,
+            );
+          }
+          return undefined;
+        } catch (error) {
+          exitCode = 2;
+          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+          return undefined;
+        }
+      },
+    })
     .command("patch", {
       description: "Patch one or more security issues.",
       destructive: true,
@@ -3186,6 +3401,7 @@ function validateCliArguments(
       "export",
       "publish",
       "validate",
+      "verify",
       "patch",
       "login",
       "logout",
@@ -3314,6 +3530,7 @@ function validateCliArguments(
   }
   if (
     command !== "validate" &&
+    command !== "verify" &&
     command !== "patch" &&
     positionals.length >
       (command === "logout" || command === "info"
@@ -3918,14 +4135,21 @@ async function runSkill(
     contents.push(contentsOrLiteral);
   }
   const plugin = await bundledPluginRoot();
-  const inputLabel = skill === "validation" ? "Findings" : "Issues";
+  const verify = options.verificationIds !== undefined;
+  const inputLabel = skill === "validation" || verify ? "Findings" : "Issues";
   const prompt = [
     `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
-    ...(options.findings === undefined
-      ? []
-      : [
-          'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"proof that the original issue is fixed and legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
-        ]),
+    ...(verify
+      ? [
+          "Operate in standalone verification-only mode. Do not create, modify, or delete repository files, apply patches, commit changes, or modify external issue trackers.",
+          `Expected result identifiers (JSON array): ${JSON.stringify(options.verificationIds)}`,
+          'Return exactly one JSON object with a "results" array in the same order. Include one object per supplied finding: {"id":"...","status":"fixed|still_vulnerable|inconclusive","evidence":"specific current source, exploit, test, or proof-gap evidence"}. Use "fixed" only after showing the original security boundary is closed and legitimate behavior remains intact. Use "still_vulnerable" only with a current vulnerable path; otherwise use "inconclusive".',
+        ]
+      : options.findings === undefined
+        ? []
+        : [
+            'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"proof that the original issue is fixed and legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
+          ]),
     ...(options.findingInstructions === undefined
       ? []
       : [
@@ -3971,10 +4195,18 @@ async function runSkill(
           ]),
     ],
     {
-      command: patch ? "patch" : "validate",
+      command: verify ? "verify" : patch ? "patch" : "validate",
       stdout,
       stderr,
-      ...(patch ? { appServer: { directory, prompt } } : {}),
+      ...(patch
+        ? {
+            appServer: {
+              directory,
+              prompt,
+              ...(verify ? { sandbox: "read-only" as const } : {}),
+            },
+          }
+        : {}),
     },
     options.environment,
   );
@@ -3985,6 +4217,7 @@ export async function readSkillCommandOutput(
   appServer?: {
     readonly prompt: string;
     readonly input: NodeJS.WritableStream;
+    readonly sandbox?: "read-only" | "workspace-write";
   },
 ): Promise<{
   message?: string;
@@ -4040,7 +4273,10 @@ export async function readSkillCommandOutput(
             method: "thread/start",
             // An explicit cwd makes Codex persist trust for a new project.
             // Inherit the child process cwd and preserve the user's decision.
-            params: { approvalPolicy: "never", sandbox: "workspace-write" },
+            params: {
+              approvalPolicy: "never",
+              sandbox: appServer.sandbox ?? "workspace-write",
+            },
           });
         } else if (value["id"] === 2) {
           threadId = (value["result"] as { thread: { id: string } }).thread.id;
@@ -4132,7 +4368,7 @@ export async function readSkillCommandOutput(
 }
 
 export function skillCommandFailure(
-  command: "validate" | "patch",
+  command: "validate" | "patch" | "verify",
   status: number,
   detail: string,
 ): string {

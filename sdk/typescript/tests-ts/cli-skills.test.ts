@@ -1161,6 +1161,54 @@ lines.on("line", (line) => {
     expect(stderr.text()).toBe("");
   });
 
+  test("starts verification app-server threads with a read-only sandbox", async () => {
+    const source = `
+const assert = require("node:assert/strict");
+const lines = require("node:readline").createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") send({ id: 1, result: {} });
+  if (request.method === "thread/start") {
+    assert.deepEqual(request.params, { approvalPolicy: "never", sandbox: "read-only" });
+    send({ id: 2, result: { thread: { id: "verification" } } });
+  }
+  if (request.method === "turn/start") {
+    send({ id: 3, result: { turn: { id: "verification-turn" } } });
+    send({ method: "item/completed", params: {
+      threadId: "verification", turnId: "verification-turn",
+      item: { type: "agentMessage", text: "Verified without modifying source" },
+    } });
+    send({ method: "turn/completed", params: {
+      threadId: "verification", turn: { id: "verification-turn", status: "completed" },
+    } });
+  }
+});
+`;
+    const stdout = capture();
+    const stderr = capture();
+
+    await expect(
+      runCodexSkillCommand(
+        ["-e", source],
+        {
+          command: "verify",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          appServer: {
+            directory: process.cwd(),
+            prompt:
+              "Verify the synthetic finding without editing the repository",
+            sandbox: "read-only",
+          },
+        },
+        { command: process.execPath },
+      ),
+    ).resolves.toBe(0);
+    expect(stdout.text()).toBe("Verified without modifying source\n");
+    expect(stderr.text()).toBe("");
+  });
+
   test.each([
     ["EOF after a final answer", "final_answer", false],
     ["EOF after commentary", "commentary", false],
