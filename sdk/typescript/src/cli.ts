@@ -1203,6 +1203,7 @@ export async function runCodexSkillCommand(
               output.appServer === undefined
                 ? undefined
                 : {
+                    directory: output.appServer.directory,
                     prompt: output.appServer.prompt,
                     input: invocation.stdin!,
                     sandbox: output.appServer.sandbox,
@@ -4388,6 +4389,7 @@ async function runSkill(
 export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
   appServer?: {
+    readonly directory?: string;
     readonly prompt: string;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
@@ -4407,6 +4409,19 @@ export async function readSkillCommandOutput(
   let completed = false;
   const send = (request: JsonObject): void => {
     appServer?.input.write(`${JSON.stringify(request)}\n`);
+  };
+  const startThread = (config?: JsonObject): void => {
+    send({
+      id: 2,
+      method: "thread/start",
+      // An explicit cwd makes Codex persist trust for a new project.
+      // Inherit the child process cwd and preserve the user's decision.
+      params: {
+        approvalPolicy: "never",
+        sandbox: appServer?.sandbox ?? "workspace-write",
+        ...(config === undefined ? {} : { config }),
+      },
+    });
   };
   if (appServer !== undefined) {
     send({
@@ -4455,16 +4470,83 @@ export async function readSkillCommandOutput(
           appServer.input.end();
         } else if (value["id"] === 1) {
           send({ method: "notifications/initialized" });
-          send({
-            id: 2,
-            method: "thread/start",
-            // An explicit cwd makes Codex persist trust for a new project.
-            // Inherit the child process cwd and preserve the user's decision.
-            params: {
-              approvalPolicy: "never",
-              sandbox: appServer.sandbox ?? "workspace-write",
-            },
-          });
+          if (appServer.sandbox === "read-only") {
+            if (appServer.directory === undefined) {
+              error =
+                "Codex did not receive the repository directory required for read-only verification.";
+              appServer.input.end();
+              continue;
+            }
+            send({
+              id: 4,
+              method: "config/read",
+              params: {
+                cwd: appServer.directory,
+                includeLayers: true,
+              },
+            });
+          } else {
+            startThread();
+          }
+        } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
+          const result = value["result"];
+          const layers =
+            typeof result === "object" && result !== null && "layers" in result
+              ? result.layers
+              : undefined;
+          if (!Array.isArray(layers)) {
+            error =
+              "Codex did not provide the configuration layers required for read-only verification.";
+            appServer.input.end();
+            continue;
+          }
+          const repositoryServers = new Set<string>();
+          const configuredServers = new Set<string>();
+          for (const layer of layers) {
+            if (typeof layer !== "object" || layer === null) continue;
+            const name = layer["name"];
+            const configuration = layer["config"];
+            if (
+              typeof name !== "object" ||
+              name === null ||
+              typeof configuration !== "object" ||
+              configuration === null
+            ) {
+              continue;
+            }
+            const servers = configuration["mcp_servers"];
+            if (typeof servers !== "object" || servers === null) continue;
+            if (name["type"] === "project") {
+              if (layer["disabledReason"] !== undefined) continue;
+              for (const server of Object.keys(servers)) {
+                repositoryServers.add(server);
+              }
+            } else {
+              for (const server of Object.keys(servers)) {
+                configuredServers.add(server);
+              }
+            }
+          }
+          const conflict = [...repositoryServers].find((server) =>
+            configuredServers.has(server),
+          );
+          if (conflict !== undefined) {
+            error = `Repository-local MCP server ${JSON.stringify(conflict)} overrides a configured integration; remove the repository override before verifying fixes.`;
+            appServer.input.end();
+            continue;
+          }
+          startThread(
+            repositoryServers.size === 0
+              ? undefined
+              : {
+                  mcp_servers: Object.fromEntries(
+                    [...repositoryServers].map((server) => [
+                      server,
+                      { enabled: false },
+                    ]),
+                  ),
+                },
+          );
         } else if (value["id"] === 2) {
           threadId = (value["result"] as { thread: { id: string } }).thread.id;
           send({

@@ -1169,8 +1169,22 @@ const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") send({ id: 1, result: {} });
+  if (request.method === "config/read") {
+    assert.deepEqual(request.params, {
+      cwd: ${JSON.stringify(process.cwd())},
+      includeLayers: true,
+    });
+    send({ id: 4, result: { layers: [
+      { name: { type: "project" }, config: { mcp_servers: { repository: { command: "untrusted" } } } },
+      { name: { type: "user" }, config: { mcp_servers: { trusted: { command: "trusted" } } } },
+    ] } });
+  }
   if (request.method === "thread/start") {
-    assert.deepEqual(request.params, { approvalPolicy: "never", sandbox: "read-only" });
+    assert.deepEqual(request.params, {
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      config: { mcp_servers: { repository: { enabled: false } } },
+    });
     send({ id: 2, result: { thread: { id: "verification" } } });
   }
   if (request.method === "turn/start") {
