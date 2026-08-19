@@ -114,7 +114,7 @@ if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
     git_host=${CODEX_SECURITY_GIT_HOST:-github.com}
 
     case "$git_host" in
-        ""|.*|*..*|*.|*[!A-Za-z0-9.-]*)
+        ""|-*|*-|.*|*..*|*.|*[!A-Za-z0-9.-]*)
             printf '%s\n' 'codex-security: CODEX_SECURITY_GIT_HOST must be a valid hostname.' >&2
             exit 2
             ;;
