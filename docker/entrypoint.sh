@@ -136,6 +136,18 @@ if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
     git_config_count=$((git_config_count + 1))
     export "GIT_CONFIG_KEY_${git_config_count}=url.https://${git_host}/.insteadOf"
     export "GIT_CONFIG_VALUE_${git_config_count}=git@${git_host}:"
+    git_config_count=$((git_config_count + 1))
+
+    # Prevent automatic submodule operations from leaking the credential
+    # token to repositories not explicitly listed in the scan inventory.
+    # A malicious .gitmodules inside a scanned repository could otherwise
+    # trigger fetches to attacker-controlled repos on the same host,
+    # causing the credential helper to hand out the token.
+    export "GIT_CONFIG_KEY_${git_config_count}=submodule.recurse"
+    export "GIT_CONFIG_VALUE_${git_config_count}=false"
+    git_config_count=$((git_config_count + 1))
+    export "GIT_CONFIG_KEY_${git_config_count}=fetch.recurseSubmodules"
+    export "GIT_CONFIG_VALUE_${git_config_count}=false"
     export GIT_CONFIG_COUNT=$((git_config_count + 1))
 fi
 

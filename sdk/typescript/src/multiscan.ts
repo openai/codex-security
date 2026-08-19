@@ -823,6 +823,8 @@ async function checkoutRevision(
       [
         "-c",
         "core.hooksPath=/dev/null",
+        "-c",
+        "submodule.recurse=false",
         ...buildGitHubCredentialArgs(githubHost),
         "-C",
         path,
