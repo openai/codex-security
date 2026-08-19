@@ -66,19 +66,10 @@ EXPORT_PATHS = {
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
-WINDOWS_INVALID_PATH_CHARACTERS = frozenset('<>:"|?*')
-WINDOWS_RESERVED_DEVICE_NAMES = {
-    "AUX",
-    "CON",
-    "CONIN$",
-    "CONOUT$",
-    "NUL",
-    "PRN",
-    *(f"COM{number}" for number in range(1, 10)),
-    *(f"LPT{number}" for number in range(1, 10)),
-    *(f"COM{number}" for number in "¹²³"),
-    *(f"LPT{number}" for number in "¹²³"),
-}
+WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
+    r'[<>:"|?*\x00-\x1f]|[ .]$|^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$',
+    re.IGNORECASE,
+)
 
 
 class ContractError(ValueError):
@@ -256,12 +247,7 @@ def _require_portable_relative_path(
 def _windows_unsafe_path_component(value: str) -> bool:
     if not value or value == ".":
         return False
-    return (
-        any(character in WINDOWS_INVALID_PATH_CHARACTERS for character in value)
-        or any(ord(character) < 32 for character in value)
-        or value.endswith((" ", "."))
-        or value.split(".", 1)[0].upper() in WINDOWS_RESERVED_DEVICE_NAMES
-    )
+    return WINDOWS_UNSAFE_PATH_COMPONENT_RE.search(value) is not None
 
 
 def _require_scan_directory(scan_dir: Path) -> Path:
