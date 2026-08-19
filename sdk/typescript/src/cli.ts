@@ -4311,17 +4311,18 @@ async function runSkill(
   const prompt = [
     ...(verify
       ? [
-          "Determine whether each previously reported security finding has been remediated in the current checkout.",
-          "Use the shared static finding assessment methodology below to trace the original source, control, sink, trust boundary, counterevidence, and proof gaps:",
+          "Use the bundled $codex-security:verify-fix skill. Its complete instructions and shared assessment reference are provided below; do not reread either file.",
+          await readFile(
+            join(plugin, "skills", "verify-fix", "SKILL.md"),
+            "utf8",
+          ),
+          "Shared static finding assessment reference:",
           await readFile(
             join(plugin, "references", "static-finding-assessment.md"),
             "utf8",
           ),
-          "Operate in standalone verification-only mode. Do not create, modify, or delete repository files, apply patches, commit changes, or modify external issue trackers.",
-          "Trace the original exploit path through current or moved code. Check plausible bypasses and preserved legitimate behavior. Run original reproducers and focused regression checks only when they do not write to the repository; otherwise report the exact proof gap.",
-          "Do not treat a removed line, renamed file, closed ticket, unrelated passing test, or absence of a new scan finding as proof that the original vulnerability was fixed.",
           `Expected result identifiers (JSON array): ${JSON.stringify(options.verificationIds)}`,
-          'Return exactly one JSON object with a "results" array in the same order. Include one object per supplied finding: {"id":"...","status":"fixed|still_vulnerable|inconclusive","evidence":"specific current source, exploit, test, or proof-gap evidence"}. Use "fixed" only after showing the original security boundary is closed and legitimate behavior remains intact. Use "still_vulnerable" only with a current vulnerable path; otherwise use "inconclusive".',
+          "Return exactly one evidence-backed result per expected identifier in the same order, following the skill's JSON result contract.",
         ]
       : [
           `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,

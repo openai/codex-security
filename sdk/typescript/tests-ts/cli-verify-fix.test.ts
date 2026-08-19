@@ -74,6 +74,16 @@ describe("read-only finding verification", () => {
     });
     expect(stderr.text()).not.toContain("lin_api_SYNTHETIC_SECRET");
     expect(prompt).toContain("standalone verification-only mode");
+    expect(prompt).toContain("$codex-security:verify-fix");
+    expect(prompt).toContain(
+      await readFile(
+        new URL(
+          "../_bundled_plugin/skills/verify-fix/SKILL.md",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
     expect(prompt).toContain(
       await readFile(
         new URL(

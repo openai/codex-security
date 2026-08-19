@@ -823,8 +823,8 @@ original vulnerability without modifying the repository. Pass a finding
 description, a saved finding identifier, `--scan SCAN_ID`, `--linear-issue ISSUE`,
 or `--linear-project "PROJECT"`. Linear intake uses the same credentials and
 `--linear-filter` options as `patch`; explicitly filter for completed issues when
-verifying a finished backlog. Verification uses a read-only Codex sandbox and
-reports `fixed`, `still_vulnerable`, or
+verifying a finished backlog. Verification runs the bundled `verify-fix` skill
+in a read-only Codex sandbox and reports `fixed`, `still_vulnerable`, or
 `inconclusive` with supporting evidence for every finding. Use `--json` for
 structured output. Exit code `0` means every finding is fixed, `1` means at
 least one finding remains vulnerable, and `2` means a result is inconclusive or
