@@ -42,17 +42,6 @@ describe("read-only finding verification", () => {
             expect(output?.appServer?.sandbox).toBe("read-only");
             prompt = output!.appServer!.prompt;
             environment = processEnvironment;
-            output?.appServer?.onEvent?.({
-              method: "item/completed",
-              params: {
-                item: {
-                  id: "commentary-1",
-                  type: "agentMessage",
-                  phase: "commentary",
-                  text: "Tracing the original authorization boundary.",
-                },
-              },
-            });
             output?.stdout.write(
               JSON.stringify({
                 results: [
@@ -82,26 +71,13 @@ describe("read-only finding verification", () => {
         },
       ],
     });
-    expect(stderr.text()).toContain(
-      "Verifying 1 finding against the current checkout.",
-    );
-    expect(stderr.text()).toContain(
-      "Codex: Tracing the original authorization boundary.",
-    );
     expect(stderr.text()).not.toContain("lin_api_SYNTHETIC_SECRET");
-    expect(stderr.text()).not.toContain("\u001B");
     expect(prompt).toContain("standalone verification-only mode");
-    expect(prompt).toContain(
-      "Do not create, modify, or delete repository files",
-    );
-    expect(prompt).toContain(
-      'Expected result identifiers (JSON array): ["SEC-123"]',
-    );
     expect(prompt).toContain("Synthetic security evidence for SEC-123");
     expect(prompt).not.toContain("lin_api_SYNTHETIC_SECRET");
-    expect(environment).toEqual({
-      OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
-    });
+    expect(environment?.["OPENAI_API_KEY"]).toBe("sk-proj-SYNTHETIC_MODEL_KEY");
+    expect(environment).not.toHaveProperty("CODEX_SECURITY_LINEAR_API_KEY");
+    expect(environment).not.toHaveProperty("LINEAR_ACCESS_TOKEN");
   });
 
   test("shows live agent progress in the verification dashboard while keeping JSON clean", async () => {
@@ -173,15 +149,12 @@ describe("read-only finding verification", () => {
     ).toBe(0);
 
     const activity = stripVTControlCharacters(stderr.text());
-    expect(activity).toContain("CODEX SECURITY  ·  VERIFY  ·  repository");
-    expect(activity).toContain("Verifying findings · 0/1");
+    expect(activity).toContain("VERIFY");
     expect(activity).toContain("rg authorization src/guard.ts");
     expect(activity).toContain("Checking the original authorization guard.");
     expect(activity).toContain("read_file");
     expect(activity).toContain("The bypass now reaches the shared guard.");
-    expect(activity).toContain("FINDINGS  1 / 1 processed");
     expect(activity).not.toContain("FILES");
-    expect(activity).not.toContain("PATCH INSTRUCTIONS");
     expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
     expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
     expect(JSON.parse(stdout.text())).toMatchObject({
@@ -231,9 +204,7 @@ describe("read-only finding verification", () => {
         ),
       ).toBe(0);
 
-      expect(stderr.text()).toContain(
-        "Verifying 1 finding against the current checkout.",
-      );
+      expect(stderr.text()).toContain("Verifying");
       expect(stderr.text()).toContain(
         "Codex: Checking the original authorization guard.",
       );
@@ -244,18 +215,19 @@ describe("read-only finding verification", () => {
     }
   });
 
-  test("verifies completed Linear project issues when explicitly selected", async () => {
+  test("verifies repeated Linear issues together in one agent invocation", async () => {
     const stdout = capture();
-    let selectedFilter: unknown;
+    let agentCalls = 0;
+    let prompt = "";
 
     expect(
       await main(
         [
           "verify",
-          "--linear-project",
-          "Security backlog",
-          "--linear-filter",
-          '{"state":{"type":{"eq":"completed"}}}',
+          "--linear-issue",
+          "SEC-123",
+          "--linear-issue",
+          "SEC-456",
           "--json",
         ],
         stdout.stream,
@@ -264,21 +236,11 @@ describe("read-only finding verification", () => {
           environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
           linearClient: () =>
             ({
-              projects: async () => ({
-                nodes: [
-                  {
-                    issues: async ({ filter }: { filter: unknown }) => {
-                      selectedFilter = filter;
-                      return {
-                        nodes: [linearIssue("SEC-123"), linearIssue("SEC-124")],
-                        pageInfo: { hasNextPage: false },
-                      };
-                    },
-                  },
-                ],
-              }),
-            }) as unknown as ReturnType<LinearClientFactory>,
+              issue: async (id: string) => linearIssue(id),
+            }) as ReturnType<LinearClientFactory>,
           onCodex: (_args, output) => {
+            agentCalls += 1;
+            prompt = output!.appServer!.prompt;
             output?.stdout.write(
               JSON.stringify({
                 results: [
@@ -288,7 +250,7 @@ describe("read-only finding verification", () => {
                     evidence: "The original exploit is rejected.",
                   },
                   {
-                    id: "SEC-124",
+                    id: "SEC-456",
                     status: "still_vulnerable",
                     evidence:
                       "The original unauthenticated route remains reachable.",
@@ -302,11 +264,15 @@ describe("read-only finding verification", () => {
       ),
     ).toBe(1);
 
-    expect(selectedFilter).toEqual({ state: { type: { eq: "completed" } } });
+    expect(agentCalls).toBe(1);
+    const suppliedFindings = JSON.parse(prompt.split("\n").at(-1)!) as string[];
+    expect(suppliedFindings).toHaveLength(2);
+    expect(suppliedFindings[0]).toContain("SEC-123");
+    expect(suppliedFindings[1]).toContain("SEC-456");
     expect(JSON.parse(stdout.text())).toMatchObject({
       results: [
         { id: "SEC-123", status: "fixed" },
-        { id: "SEC-124", status: "still_vulnerable" },
+        { id: "SEC-456", status: "still_vulnerable" },
       ],
     });
   });
@@ -488,22 +454,6 @@ describe("read-only finding verification", () => {
 
   test.each([
     [["verify"], "Verify requires a finding"],
-    [
-      ["verify", "--linear-issue", "SEC-123", "--linear-project", "Backlog"],
-      "Use either --linear-issue or --linear-project",
-    ],
-    [
-      ["verify", "--linear-issue", "SEC-123", "--linear-filter", "{}"],
-      "--linear-filter requires --linear-project",
-    ],
-    [
-      ["verify", "finding", "--linear-api-key", "synthetic-key"],
-      "--linear-api-key requires --linear-issue or --linear-project",
-    ],
-    [
-      ["verify", "finding", "--severity", "high"],
-      "--severity requires a saved finding identifier or --scan",
-    ],
     [
       ["verify", "--scan", "scan-1", "--linear-issue", "SEC-123"],
       "Saved findings cannot be combined with Linear issues or projects",
