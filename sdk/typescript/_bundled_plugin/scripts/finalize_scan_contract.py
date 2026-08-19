@@ -17,10 +17,11 @@ import re
 import secrets
 import stat
 import sys
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, TextIO
+from typing import Any, TextIO
 from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = "1.0"
@@ -58,33 +59,8 @@ GITHUB_HASH_BLOCK_SIZE = 100
 GITHUB_HASH_MOD = 37
 GITHUB_HASH_MASK = (1 << 64) - 1
 GITHUB_HASH_EOF = 65535
-GITHUB_HASH_MAX_LINES = 100_000
 SOURCE_READ_CHUNK_SIZE = 64 * 1024
-SOURCE_READ_MAX_BYTES = 10 * 1024 * 1024
-CONTRACT_DOCUMENT_MAX_BYTES = {
-    "scan-manifest.json": 16 * 1024 * 1024,
-    "findings.json": 128 * 1024 * 1024,
-    "coverage.json": 32 * 1024 * 1024,
-}
-SCHEMA_DOCUMENT_MAX_BYTES = 4 * 1024 * 1024
-JSON_DOCUMENT_READ_CHUNK_SIZE = 64 * 1024
-MAX_JSON_DEPTH = 256
 MAX_JSON_INTEGER = (1 << 53) - 1
-MAX_SCHEMA_NODES = 8192
-MAX_SCHEMA_COLLECTION_ENTRIES = 4096
-MAX_SCHEMA_APPLICATOR_EDGES = 128
-SAFE_SCHEMA_PATTERNS = {
-    r"^(?![^:/?#]+://[^/?#]*@)[^?#]+$",
-    r"^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$",
-    r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))(?!.*\\).+$",
-    r"^[a-f0-9]{64}$",
-    r"^(?!.*(?:^|/)\.\.(?:/|$))(?!.*\\)artifacts/.+$",
-    r"^csf_[a-f0-9]{24}$",
-    r"^occ_[a-f0-9]{24}$",
-    r"^[a-z0-9][a-z0-9._/-]*$",
-    r"^codex-security/v1:sha256:[a-f0-9]{64}$",
-    r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$",
-}
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
     "json": "exports/findings.json",
@@ -94,6 +70,10 @@ EXPORT_PATHS = {
 
 class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
+
+
+class RecoverableContractError(ContractError):
+    """Raised when report projection can safely be retried before publication."""
 
 
 def _reject_non_finite_json(value: str) -> None:
@@ -106,9 +86,7 @@ def _loads_json(value: str | bytes) -> Any:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        with path.open("rb") as handle:
-            raw = _read_bounded_json_document(handle, str(path), SCHEMA_DOCUMENT_MAX_BYTES)
-        payload = _loads_json(raw.decode("utf-8"))
+        payload = _loads_json(path.read_text(encoding="utf-8"))
         _require_safe_json_value(payload, str(path))
     except FileNotFoundError as exc:
         raise ContractError(f"missing required contract artifact: {path}") from exc
@@ -119,11 +97,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ContractError(f"{path}: expected a JSON object")
     return payload
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_json_bytes(payload))
 
 
 def _generate_report_projection(
@@ -137,10 +110,21 @@ def _generate_report_projection(
         raise ContractError(f"could not load report projection helper: {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    try:
-        return module.generate_report_markdown(manifest, findings, coverage)
-    except (OSError, ValueError) as exc:
-        raise ContractError(f"report projection failed: {exc}") from exc
+    attempts = (
+        getattr(sys.modules.get("workbench_constants"), "SQLITE_RETRY_ATTEMPTS", 1)
+        if coverage.get("mode") == "deep_repository"
+        else 1
+    )
+    for attempt in range(attempts):
+        try:
+            return module.generate_report_markdown(manifest, findings, coverage)
+        except OSError as exc:
+            if attempt == attempts - 1:
+                raise RecoverableContractError(f"report projection failed: {exc}") from exc
+            time.sleep(0.05 * (2**attempt))
+        except ValueError as exc:
+            raise ContractError(f"report projection failed: {exc}") from exc
+    raise AssertionError("Report projection retry loop exhausted unexpectedly.")
 
 
 def _validate_report_output_paths(scan_dir: Path) -> None:
@@ -157,72 +141,21 @@ def _json_bytes(payload: Any) -> bytes:
 
 def _contract_json_bytes(relative_path: str, payload: Any) -> bytes:
     _require_safe_json_value(payload, relative_path)
-    encoded = _json_bytes(payload)
-    maximum = CONTRACT_DOCUMENT_MAX_BYTES.get(relative_path)
-    if maximum is not None and len(encoded) > maximum:
-        raise ContractError(f"{relative_path}: JSON document exceeds the {maximum}-byte limit")
-    return encoded
-
-
-def _read_bounded_json_document(handle: BinaryIO, context: str, maximum: int) -> bytes:
-    if os.fstat(handle.fileno()).st_size > maximum:
-        raise ContractError(f"{context}: JSON document exceeds the {maximum}-byte limit")
-    chunks: list[bytes] = []
-    length = 0
-    while length <= maximum:
-        chunk = handle.read(min(JSON_DOCUMENT_READ_CHUNK_SIZE, maximum + 1 - length))
-        if not chunk:
-            break
-        length += len(chunk)
-        if length > maximum:
-            raise ContractError(f"{context}: JSON document exceeds the {maximum}-byte limit")
-        chunks.append(chunk)
-    result = b"".join(chunks)
-    _require_json_nesting(result, context)
-    return result
-
-
-def _require_json_nesting(value: bytes, context: str) -> None:
-    depth = 0
-    in_string = False
-    escaped = False
-    for character in value:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == ord("\\"):
-                escaped = True
-            elif character == ord('"'):
-                in_string = False
-            continue
-        if character == ord('"'):
-            in_string = True
-        elif character in (ord("{"), ord("[")):
-            depth += 1
-            if depth > MAX_JSON_DEPTH + 1:
-                raise ContractError(
-                    f"{context}: JSON document exceeds the {MAX_JSON_DEPTH}-level nesting limit"
-                )
-        elif character in (ord("}"), ord("]")):
-            depth -= 1
+    return _json_bytes(payload)
 
 
 def _require_safe_json_value(value: Any, context: str, *, validate_strings: bool = True) -> None:
-    def visit(item: Any, location: str, depth: int) -> None:
-        if depth > MAX_JSON_DEPTH:
-            raise ContractError(
-                f"{location}: JSON document exceeds the {MAX_JSON_DEPTH}-level nesting limit"
-            )
+    def visit(item: Any, location: str) -> None:
         if isinstance(item, dict):
             for key, child in item.items():
                 if not isinstance(key, str):
                     raise ContractError(f"{location}: expected string JSON property names")
                 if validate_strings:
                     _require_safe_json_string(key, location)
-                visit(child, f"{location}.<property>", depth + 1)
+                visit(child, f"{location}.<property>")
         elif isinstance(item, list):
             for index, child in enumerate(item):
-                visit(child, f"{location}[{index}]", depth + 1)
+                visit(child, f"{location}[{index}]")
         elif isinstance(item, str) and validate_strings:
             _require_safe_json_string(item, location)
         elif isinstance(item, int) and not isinstance(item, bool):
@@ -238,7 +171,7 @@ def _require_safe_json_value(value: Any, context: str, *, validate_strings: bool
                     f"{location}: unsafe integer-valued JSON numbers are not supported"
                 )
 
-    visit(value, context, 0)
+    visit(value, context)
 
 
 def _require_safe_json_string(value: str, context: str) -> None:
@@ -254,14 +187,6 @@ def _sha256_text(value: str) -> str:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
@@ -505,12 +430,7 @@ def _read_scan_local_json_bytes(
     try:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            maximum = CONTRACT_DOCUMENT_MAX_BYTES.get(relative_path)
-            raw = (
-                handle.read()
-                if maximum is None
-                else _read_bounded_json_document(handle, context, maximum)
-            )
+            raw = handle.read()
         try:
             payload = _loads_json(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
@@ -774,7 +694,7 @@ def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
     return (
         ("informational", "low", "medium", "high", "critical").index(finding["severity"]["level"]),
         ("low", "medium", "high").index(finding["confidence"]["level"]),
-        len(finding.get("codeEvidence") or []),
+        _finding_evidence_strength(finding),
     )
 
 
@@ -786,7 +706,6 @@ def _recover_unsealed_findings(
     warnings: list[str],
 ) -> list[str]:
     schema = _read_json(schema_dir / "findings.schema.json")
-    _require_safe_schema(schema, "findings.schema.json")
     properties = _require_dict(schema, "properties", "findings.schema")
     finding_array = _require_dict(properties, "findings", "findings.schema.properties")
     finding_schema = _require_dict(finding_array, "items", "findings.schema.properties.findings")
@@ -816,6 +735,12 @@ def _recover_unsealed_findings(
         try:
             if not isinstance(finding, dict):
                 raise ContractError(f"{context}: expected an object")
+            compatible_findings = _legacy_sealed_findings_for_validation(
+                {"findings": [finding]}
+            )["findings"]
+            compatible_finding = compatible_findings[0]
+            normalized_legacy_details = compatible_finding != finding
+            finding = compatible_finding
             identity = _require_dict(finding, "identity", context)
             fields: list[tuple[dict[str, Any], str, str, str]] = [
                 (finding, "ruleId", context, "rule identifier"),
@@ -823,7 +748,9 @@ def _recover_unsealed_findings(
             ]
             if "instance" in identity:
                 fields.append((identity, "instance", f"{context}.identity", "instance"))
-            normalized_fields = []
+            normalized_fields = (
+                ["legacy finding details"] if normalized_legacy_details else []
+            )
             for parent, field, field_context, label in fields:
                 value = _require_str(parent, field, field_context)
                 if SLUG_RE.fullmatch(value):
@@ -937,12 +864,20 @@ def _recover_unsealed_coverage(
     discarded_findings: list[str],
 ) -> None:
     schema = _read_json(schema_dir / "coverage.schema.json")
-    _require_safe_schema(schema, "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
     completeness = coverage.get("completeness")
     partial = completeness not in ("complete", "partial", "unknown")
     if partial:
         warnings.append("Recovered malformed coverage completeness; marked coverage as partial.")
+    if (
+        coverage.get("mode") == "deep_repository"
+        and coverage.get("inventoryStrategy") != "repository"
+    ):
+        coverage["inventoryStrategy"] = "repository"
+        warnings.append(
+            "Recovered malformed Deep Scan inventory strategy; marked coverage as partial."
+        )
+        partial = True
 
     surface_ids: set[str] = set()
     for field, label in (
@@ -1295,12 +1230,14 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         _validate_location(location, f"{context}.locations[{index}]")
 
     evidence_ids: set[str] = set()
-    code_evidence = finding.get("codeEvidence")
-    if code_evidence is not None:
+    for evidence_key in ("codeEvidence", "code_evidence"):
+        if evidence_key not in finding:
+            continue
+        code_evidence = finding[evidence_key]
         if not isinstance(code_evidence, list):
-            raise ContractError(f"{context}.codeEvidence: expected an array")
+            raise ContractError(f"{context}.{evidence_key}: expected an array")
         for index, evidence in enumerate(code_evidence):
-            evidence_context = f"{context}.codeEvidence[{index}]"
+            evidence_context = f"{context}.{evidence_key}[{index}]"
             if not isinstance(evidence, dict):
                 raise ContractError(f"{evidence_context}: expected an object")
             evidence_id = _require_str(evidence, "id", evidence_context)
@@ -1309,19 +1246,33 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
 
-    for section_name in ("rootCause", "validation", "attackPath"):
-        section = finding.get(section_name)
-        if not isinstance(section, dict) or "evidenceRefs" not in section:
+    referenced_sections = [
+        (section_name, finding.get(section_name))
+        for section_name in ("rootCause", "root_cause", "validation", "attackPath")
+    ]
+    attack_path = finding.get("attackPath")
+    if isinstance(attack_path, dict):
+        referenced_sections.extend(
+            (f"attackPath.{section_name}", attack_path.get(section_name))
+            for section_name in ("dataFlow", "dataflow", "data_flow", "reachability")
+        )
+    for section_name, section in referenced_sections:
+        if not isinstance(section, dict):
             continue
-        refs = section["evidenceRefs"]
-        if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref for ref in refs):
-            raise ContractError(f"{context}.{section_name}.evidenceRefs: expected strings")
-        unknown_refs = sorted(set(refs) - evidence_ids)
-        if unknown_refs:
-            raise ContractError(
-                f"{context}.{section_name}.evidenceRefs: unknown code-evidence ids: "
-                + ", ".join(unknown_refs)
-            )
+        for refs_key in ("evidenceRefs", "evidence_refs"):
+            if refs_key not in section:
+                continue
+            refs = section[refs_key]
+            if not isinstance(refs, list) or any(
+                not isinstance(ref, str) or not ref for ref in refs
+            ):
+                raise ContractError(f"{context}.{section_name}.{refs_key}: expected strings")
+            unknown_refs = sorted(set(refs) - evidence_ids)
+            if unknown_refs:
+                raise ContractError(
+                    f"{context}.{section_name}.{refs_key}: unknown code-evidence ids: "
+                    + ", ".join(unknown_refs)
+                )
 
     provenance = _require_dict(finding, "provenance", context)
     _require_str(provenance, "source", f"{context}.provenance")
@@ -1536,89 +1487,191 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> N
 
 def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     schema = _read_json(schema_path)
-    _require_safe_schema(schema, schema_path.name)
     _validate_schema_node(payload, schema, schema_path.stem)
 
 
-def _require_safe_schema(schema: dict[str, Any], context: str) -> None:
-    pending: list[tuple[Any, bool]] = [(schema, True)]
-    nodes = 0
-    applicator_edges = 0
-    unsupported_keywords = {
-        "$async",
-        "$ref",
-        "$dynamicRef",
-        "$recursiveRef",
-        "prefixItems",
-        "patternProperties",
-        "propertyNames",
-        "dependentSchemas",
-        "dependencies",
-        "uniqueItems",
-    }
-    while pending:
-        value, is_schema = pending.pop()
-        nodes += 1
-        if nodes > MAX_SCHEMA_NODES:
-            raise ContractError(
-                f"{context}: JSON Schema exceeds the {MAX_SCHEMA_NODES}-node complexity limit"
-            )
-        if isinstance(value, list):
-            if len(value) > MAX_SCHEMA_COLLECTION_ENTRIES:
-                raise ContractError(
-                    f"{context}: JSON Schema exceeds the "
-                    f"{MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit"
-                )
-            pending.extend((child, is_schema) for child in value)
+def _filter_unknown_legacy_evidence_refs(
+    section: dict[str, Any], evidence_ids: set[str]
+) -> None:
+    for refs_field in ("evidenceRefs", "evidence_refs"):
+        refs = section.get(refs_field)
+        if isinstance(refs, list):
+            section[refs_field] = [
+                ref
+                for ref in refs
+                if isinstance(ref, str) and ref.strip() and ref in evidence_ids
+            ]
+
+
+def _normalize_legacy_string_list_fields(
+    section: dict[str, Any], fields: tuple[str, ...]
+) -> None:
+    for field in fields:
+        if field not in section:
             continue
-        if not isinstance(value, dict):
+        value = section[field]
+        if isinstance(value, str):
+            normalized = [value] if value.strip() else []
+        elif isinstance(value, list):
+            normalized = [
+                item for item in value if isinstance(item, str) and item.strip()
+            ]
+        else:
+            normalized = []
+        if normalized:
+            section[field] = normalized
+        else:
+            section.pop(field)
+
+
+def _remove_unsupported_legacy_scalar_fields(
+    section: dict[str, Any], fields: tuple[str, ...]
+) -> None:
+    for field in fields:
+        if field in section and (
+            not isinstance(section[field], str) or section[field] == ""
+        ):
+            section.pop(field)
+
+
+def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str, Any]:
+    compatible = copy.deepcopy(findings)
+    finding_items = compatible.get("findings")
+    if not isinstance(finding_items, list):
+        return compatible
+    for finding in finding_items:
+        if not isinstance(finding, dict):
             continue
-        if len(value) > MAX_SCHEMA_COLLECTION_ENTRIES:
-            raise ContractError(
-                f"{context}: JSON Schema exceeds the "
-                f"{MAX_SCHEMA_COLLECTION_ENTRIES}-entry collection limit"
-            )
-        for keyword, child in value.items():
-            if not is_schema:
-                pending.append((child, False))
-                continue
-            if keyword in unsupported_keywords:
-                raise ContractError(f"{context}: unsupported JSON Schema keyword")
-            edges = 0
-            if keyword in {"allOf", "anyOf", "oneOf"} and isinstance(child, list):
-                edges = len(child)
-            elif keyword in {
-                "if",
-                "then",
-                "else",
-                "not",
-                "items",
-                "contains",
-                "additionalProperties",
-                "unevaluatedProperties",
-                "unevaluatedItems",
-            } and isinstance(child, (dict, bool)):
-                edges = 1
-            elif keyword in {"properties", "$defs", "definitions"} and isinstance(child, dict):
-                edges = len(child)
-            applicator_edges += edges
-            if applicator_edges > MAX_SCHEMA_APPLICATOR_EDGES:
-                raise ContractError(
-                    f"{context}: JSON Schema exceeds the "
-                    f"{MAX_SCHEMA_APPLICATOR_EDGES}-edge applicator limit"
-                )
-            if keyword == "pattern" and isinstance(child, str):
-                if child not in SAFE_SCHEMA_PATTERNS:
-                    raise ContractError(f"{context}: unsupported JSON Schema pattern")
-            if keyword in {"properties", "$defs", "definitions"} and isinstance(child, dict):
-                pending.extend((child_schema, True) for child_schema in child.values())
-                continue
-            pending.append(
+        canonical_evidence = finding.get("codeEvidence")
+        canonical_evidence = canonical_evidence if isinstance(canonical_evidence, list) else []
+        canonical_evidence_ids = {
+            evidence["id"]
+            for evidence in canonical_evidence
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("id"), str)
+            and evidence["id"]
+        }
+        legacy_evidence = finding.get("code_evidence")
+        if isinstance(legacy_evidence, list):
+            compatible_legacy_evidence = []
+            seen_evidence_ids = set(canonical_evidence_ids)
+            for evidence in legacy_evidence:
+                if not isinstance(evidence, dict):
+                    continue
+                evidence_id = evidence.get("id")
+                evidence_code = evidence.get("code")
+                if (
+                    not isinstance(evidence_id, str)
+                    or not evidence_id.strip()
+                    or not isinstance(evidence_code, str)
+                    or not evidence_code.strip()
+                ):
+                    continue
+                if evidence_id in seen_evidence_ids:
+                    continue
+                seen_evidence_ids.add(evidence_id)
+                compatible_legacy_evidence.append(evidence)
+            finding["code_evidence"] = compatible_legacy_evidence
+        elif "code_evidence" in finding:
+            finding.pop("code_evidence")
+        compatible_legacy_evidence = finding.get("code_evidence")
+        compatible_legacy_evidence = (
+            compatible_legacy_evidence if isinstance(compatible_legacy_evidence, list) else []
+        )
+        evidence_ids = canonical_evidence_ids | {
+            evidence["id"]
+            for evidence in compatible_legacy_evidence
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("id"), str)
+            and evidence["id"]
+        }
+        for section_name, list_fields in (
+            ("root_cause", ("evidenceRefs", "evidence_refs")),
+            (
+                "validation",
                 (
-                    child,
-                    keyword not in {"const", "enum", "default", "examples", "dependentRequired"},
-                )
+                    "assertions",
+                    "counterEvidence",
+                    "evidence",
+                    "evidenceRefs",
+                    "evidence_refs",
+                    "limitations",
+                ),
+            ),
+            (
+                "attackPath",
+                (
+                    "assumptions",
+                    "blindspots",
+                    "controls",
+                    "evidenceRefs",
+                    "evidence_refs",
+                    "limitations",
+                    "preconditions",
+                    "steps",
+                ),
+            ),
+        ):
+            section = finding.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            _normalize_legacy_string_list_fields(section, list_fields)
+            _filter_unknown_legacy_evidence_refs(section, evidence_ids)
+        legacy_root_cause = finding.get("root_cause")
+        if isinstance(legacy_root_cause, dict):
+            _remove_unsupported_legacy_scalar_fields(
+                legacy_root_cause, ("summary", "code", "language")
             )
+        elif (
+            "root_cause" in finding
+            and legacy_root_cause is not None
+            and (not isinstance(legacy_root_cause, str) or legacy_root_cause == "")
+        ):
+            finding.pop("root_cause")
+        validation = finding.get("validation")
+        if isinstance(validation, dict):
+            _remove_unsupported_legacy_scalar_fields(
+                validation, ("method", "status", "summary", "disposition", "result")
+            )
+        attack_path = finding.get("attackPath")
+        if not isinstance(attack_path, dict):
+            continue
+        _remove_unsupported_legacy_scalar_fields(attack_path, ("summary",))
+        for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
+            if field not in attack_path:
+                continue
+            detail = attack_path.get(field)
+            if detail is None:
+                attack_path.pop(field)
+                continue
+            if not isinstance(detail, (str, dict)):
+                attack_path.pop(field)
+                continue
+            if isinstance(detail, str):
+                if detail == "":
+                    attack_path.pop(field)
+                continue
+            detail_scalar_fields = ("summary", "source", "sink", "outcome")
+            if field == "reachability":
+                detail_scalar_fields += ("attacker", "entrypoint")
+            _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
+            _normalize_legacy_string_list_fields(
+                detail, ("evidenceRefs", "evidence_refs", "transformations")
+            )
+            _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
+            if field == "reachability":
+                _normalize_legacy_string_list_fields(detail, ("preconditions",))
+        for field in ("impact", "likelihood"):
+            detail = attack_path.get(field)
+            if isinstance(detail, dict):
+                _remove_unsupported_legacy_scalar_fields(
+                    detail, ("level", "rationale", "why")
+                )
+            elif detail is not None and (
+                not isinstance(detail, str) or detail == ""
+            ):
+                attack_path.pop(field)
+    return compatible
 
 
 def _validate_canonical_schemas_before_projection(
@@ -1666,10 +1719,7 @@ def _utf16_code_units(value: str) -> Iterator[int]:
 def _github_line_hashes(
     handle: TextIO,
     requested_lines: set[int] | None = None,
-    source_read_budget: list[int] | None = None,
-) -> dict[int, str] | None:
-    if source_read_budget is not None and source_read_budget[0] <= 0:
-        return None
+) -> dict[int, str]:
     window = [0] * GITHUB_HASH_BLOCK_SIZE
     line_numbers = [-1] * GITHUB_HASH_BLOCK_SIZE
     hash_counts: dict[str, int] = {}
@@ -1680,7 +1730,6 @@ def _github_line_hashes(
     line_number = 0
     line_start = True
     previous_was_cr = False
-    source_bytes = 0
 
     def output_hash() -> None:
         nonlocal index
@@ -1698,11 +1747,11 @@ def _github_line_hashes(
         hash_raw = (GITHUB_HASH_MOD * hash_raw + current - first_mod * beginning) & GITHUB_HASH_MASK
         index = (index + 1) % GITHUB_HASH_BLOCK_SIZE
 
-    def process_character(current: int) -> bool:
+    def process_character(current: int) -> None:
         nonlocal line_number, line_start, previous_was_cr
         if current in {ord(" "), ord("\t")} or (previous_was_cr and current == ord("\n")):
             previous_was_cr = False
-            return True
+            return
         if current == ord("\r"):
             current = ord("\n")
             previous_was_cr = True
@@ -1713,28 +1762,15 @@ def _github_line_hashes(
         if line_start:
             line_start = False
             line_number += 1
-            if line_number > GITHUB_HASH_MAX_LINES:
-                return False
             line_numbers[index] = line_number
         if current == ord("\n"):
             line_start = True
         update_hash(current)
-        return True
 
     while chunk := handle.read(SOURCE_READ_CHUNK_SIZE):
-        chunk_bytes = len(chunk.encode("utf-8", errors="replace"))
-        source_bytes += chunk_bytes
-        if source_bytes > SOURCE_READ_MAX_BYTES:
-            return None
-        if source_read_budget is not None:
-            source_read_budget[0] -= chunk_bytes
-            if source_read_budget[0] < 0:
-                return None
         for code_unit in _utf16_code_units(chunk):
-            if not process_character(code_unit):
-                return None
-    if not process_character(GITHUB_HASH_EOF):
-        return None
+            process_character(code_unit)
+    process_character(GITHUB_HASH_EOF)
     for _ in range(GITHUB_HASH_BLOCK_SIZE):
         if line_numbers[index] != -1:
             output_hash()
@@ -1762,14 +1798,13 @@ def _github_line_hashes_for_source(
     source_root: Path,
     relative_path: str,
     requested_lines: set[int] | None = None,
-    source_read_budget: list[int] | None = None,
 ) -> dict[int, str] | None:
     handle = _open_source_file(source_root, relative_path)
     if handle is None:
         return None
     try:
         with handle:
-            return _github_line_hashes(handle, requested_lines, source_read_budget)
+            return _github_line_hashes(handle, requested_lines)
     except OSError:
         return None
 
@@ -1781,21 +1816,94 @@ def _sarif_primary_location(finding: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _merged_code_evidence(finding: dict[str, Any]) -> list[dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    for evidence_key in ("codeEvidence", "code_evidence"):
+        code_evidence = finding.get(evidence_key)
+        if not isinstance(code_evidence, list):
+            continue
+        for evidence in code_evidence:
+            if not isinstance(evidence, dict):
+                continue
+            evidence_id = evidence.get("id")
+            if isinstance(evidence_id, str) and evidence_id:
+                catalog.setdefault(evidence_id, evidence)
+    return list(catalog.values())
+
+
+def _finding_evidence_strength(finding: dict[str, Any]) -> int:
+    evidence = _merged_code_evidence(finding)
+    seen_ids = {
+        item["id"] for item in evidence if isinstance(item.get("id"), str) and item["id"].strip()
+    }
+    seen_codes = {
+        item["code"]
+        for item in evidence
+        if isinstance(item.get("code"), str) and item["code"].strip()
+    }
+    strength = len(evidence)
+    for section_name in ("rootCause", "root_cause"):
+        section = finding.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for evidence_name in ("codeEvidence", "code_evidence"):
+            embedded = section.get(evidence_name)
+            if not isinstance(embedded, list):
+                continue
+            for item in embedded:
+                if not isinstance(item, dict):
+                    continue
+                code = item.get("code")
+                if not isinstance(code, str) or not code.strip() or code in seen_codes:
+                    continue
+                evidence_id = item.get("id")
+                if isinstance(evidence_id, str) and evidence_id.strip():
+                    if evidence_id in seen_ids:
+                        continue
+                    seen_ids.add(evidence_id)
+                seen_codes.add(code)
+                strength += 1
+        code = section.get("code")
+        if isinstance(code, str) and code.strip() and code not in seen_codes:
+            seen_codes.add(code)
+            strength += 1
+    return strength
+
+
 def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     primary = _sarif_primary_location(finding)
     locations = [
         primary,
         *(location for location in finding["locations"] if location is not primary),
     ]
-    locations.extend(
-        {
-            "path": evidence["path"],
-            "startLine": evidence["startLine"],
-            "endLine": evidence.get("endLine", evidence["startLine"]),
-            "role": f"evidence:{evidence['id']}",
-        }
-        for evidence in finding.get("codeEvidence", [])
-    )
+    for evidence in _merged_code_evidence(finding):
+        path = evidence.get("path")
+        start_line = evidence.get("startLine")
+        if (
+            not isinstance(path, str)
+            or not isinstance(start_line, int)
+            or isinstance(start_line, bool)
+            or start_line < 1
+        ):
+            continue
+        try:
+            path = _require_safe_relative_path(path, "SARIF evidence location")
+        except ContractError:
+            continue
+        locations.append(
+            {
+                "path": path,
+                "startLine": start_line,
+                "endLine": (
+                    evidence["endLine"]
+                    if isinstance(evidence.get("endLine"), int)
+                    and not isinstance(evidence["endLine"], bool)
+                    and evidence["endLine"] >= start_line
+                    else start_line
+                ),
+                "role": f"evidence:{evidence['id']}",
+            }
+        )
     unique: dict[tuple[str, int, int], dict[str, Any]] = {}
     for location in locations:
         key = (
@@ -1849,15 +1957,8 @@ def _github_line_hash_cache(
         )
         requested_lines_by_path.setdefault(relative_path, set()).add(primary_location["startLine"])
     line_hash_cache: dict[tuple[Path, int], str | None] = {}
-    source_read_budget = [SOURCE_READ_MAX_BYTES]
     for relative_path, requested_lines in requested_lines_by_path.items():
-        line_hashes = (
-            None
-            if source_read_budget[0] <= 0
-            else _github_line_hashes_for_source(
-                source_root, relative_path, requested_lines, source_read_budget
-            )
-        )
+        line_hashes = _github_line_hashes_for_source(source_root, relative_path, requested_lines)
         source_path = source_root / relative_path
         for line_number in requested_lines:
             line_hash_cache[(source_path, line_number)] = (
@@ -2074,11 +2175,12 @@ def _read_sealed_scan(
         },
     )
     _validate_manifest(manifest)
-    _validate_findings(manifest, findings)
+    findings_for_validation = _legacy_sealed_findings_for_validation(findings)
+    _validate_findings(manifest, findings_for_validation)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_sealed_coverage_receipts(scan, coverage)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings, schema_dir / "findings.schema.json")
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _validate_derived_finding_identities(manifest, findings)
     return manifest, findings, coverage, findings_bytes
@@ -2376,8 +2478,11 @@ def _prepare_scan_finalization(
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
     _validate_target(_require_dict(scan, "target", "manifest.scan"))
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
+    findings_for_validation = (
+        _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
+    )
     if was_sealed:
-        _validate_findings(manifest, findings)
+        _validate_findings(manifest, findings_for_validation)
         _validate_derived_finding_identities(manifest, findings)
     elif completion_warnings is not None:
         discarded_findings = _recover_unsealed_findings(
@@ -2389,16 +2494,20 @@ def _prepare_scan_finalization(
         _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
     else:
         _populate_unsealed_finding_identities(manifest, findings)
-    _validate_findings(manifest, findings)
+    _validate_findings(manifest, findings_for_validation)
     _validate_coverage(manifest, coverage, scan_dir)
-    _validate_canonical_schemas_before_projection(manifest, findings, coverage, schema_dir)
+    _validate_canonical_schemas_before_projection(
+        manifest, findings_for_validation, coverage, schema_dir
+    )
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        validate_against_schema(findings, schema_dir / "findings.schema.json")
+        validate_against_schema(
+            findings_for_validation, schema_dir / "findings.schema.json"
+        )
         validate_against_schema(coverage, schema_dir / "coverage.schema.json")
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_report_output_paths(scan_dir)

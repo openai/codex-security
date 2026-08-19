@@ -1,16 +1,28 @@
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   main,
   readSkillCommandOutput,
   runCodexSkillCommand,
   skillCommandFailure,
 } from "../src/cli.js";
-import { capture, dependencies } from "./support/cli.js";
+import type { LinearClientFactory } from "../src/linear.js";
+import { capture, dependencies } from "./cli-fixtures.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
+
+function linearIssue(identifier: string) {
+  return {
+    identifier,
+    title: `Fix ${identifier}`,
+    description: `Synthetic evidence for ${identifier}`,
+    url: `https://linear.app/example/issue/${identifier}`,
+  };
+}
 
 describe("CLI skill commands", () => {
   test("runs validation and patch skills with file and literal inputs", async () => {
@@ -23,6 +35,7 @@ describe("CLI skill commands", () => {
         const file = join(directory, `${command}.txt`);
         await writeFile(file, `${command} file contents\n`);
         let invocation: readonly string[] = [];
+        let prompt = "";
         const stdout = capture();
         const stderr = capture();
         expect(
@@ -38,22 +51,23 @@ describe("CLI skill commands", () => {
             stderr.stream,
             dependencies({
               currentDirectory: directory,
-              onCodex: (args) => {
+              onCodex: (args, output) => {
                 invocation = args;
+                prompt = output?.appServer?.prompt ?? args.at(-1)!;
                 return status;
               },
             }),
           ),
         ).toBe(status);
-        expect(invocation.slice(0, -1)).toEqual([
-          "exec",
-          "--ignore-user-config",
+        expect(invocation).toEqual([
+          ...(command === "patch"
+            ? ["app-server"]
+            : ["exec", "--ignore-user-config"]),
           "--disable",
           "plugins",
-          "--ephemeral",
-          "--color",
-          "never",
-          "--json",
+          ...(command === "patch"
+            ? []
+            : ["--ephemeral", "--color", "never", "--json"]),
           "--config",
           'model="gpt-5.6-sol"',
           "--config",
@@ -62,13 +76,17 @@ describe("CLI skill commands", () => {
           'approval_policy="never"',
           "--config",
           'responses_api_metadata.codex_security_surface="cli"',
-          "--sandbox",
-          "workspace-write",
-          "--skip-git-repo-check",
-          "--cd",
-          directory,
+          ...(command === "patch"
+            ? []
+            : [
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "--cd",
+                directory,
+                prompt,
+              ]),
         ]);
-        const prompt = invocation.at(-1)!;
         expect(prompt).toContain(
           JSON.stringify(join("skills", skill, "SKILL.md")).slice(1, -1),
         );
@@ -92,10 +110,10 @@ describe("CLI skill commands", () => {
           ),
         ).toBe(0);
         expect(help.text()).toContain(
-          `Usage: codex-security ${command} <${argument}>`,
+          `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
         );
         expect(help.text()).toContain(
-          "--effort <minimal|low|medium|high|xhigh>",
+          "--effort <minimal|low|medium|high|xhigh|max>",
         );
         expect(help.text()).toContain("--codex <array>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
@@ -104,6 +122,493 @@ describe("CLI skill commands", () => {
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("imports selected Linear issues without exposing its credential to Codex", async () => {
+    const requests: string[] = [];
+    let inputs: string[] = [];
+    let environment: NodeJS.ProcessEnv | undefined;
+
+    expect(
+      await main(
+        [
+          "patch",
+          "--linear-issue",
+          "SEC-123",
+          "--linear-issue",
+          "https://linear.app/example/issue/SEC-124/a-synthetic-finding",
+          "--linear-api-key",
+          "lin_api_SYNTHETIC_EXPLICIT",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          environment: {
+            CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
+            LINEAR_API_KEY: "lin_api_SYNTHETIC_FALLBACK",
+            LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN",
+            OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
+          },
+          linearClient: ({ apiKey, redirect }) => {
+            expect(apiKey).toBe("lin_api_SYNTHETIC_EXPLICIT");
+            expect(redirect).toBe("error");
+            return {
+              issue: async (id: string) => {
+                requests.push(id);
+                return linearIssue(id);
+              },
+            } as ReturnType<LinearClientFactory>;
+          },
+          onCodex: (_args, output, processEnvironment) => {
+            inputs = JSON.parse(output!.appServer!.prompt.split("\n").at(-1)!);
+            environment = processEnvironment;
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(requests).toEqual(["SEC-123", "SEC-124"]);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]).toContain("Issue: SEC-123");
+    expect(inputs[1]).toContain("Synthetic evidence for SEC-124");
+    expect(environment).toEqual({
+      OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
+    });
+    expect(JSON.stringify(inputs)).not.toContain("lin_api_SYNTHETIC_SECRET");
+    expect(JSON.stringify(inputs)).not.toContain("lin_api_SYNTHETIC_EXPLICIT");
+  });
+
+  test("keeps imported Unix and Windows paths literal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-linear-input-"));
+    try {
+      const repository = join(root, "repository");
+      const selected = join(repository, "selected.txt");
+      const external = join(root, "external.txt");
+      await mkdir(repository);
+      await writeFile(selected, "selected file contents");
+      await writeFile(external, "SYNTHETIC_EXTERNAL_FILE");
+
+      for (const [paths, target] of [
+        [posix, process.platform === "win32" ? "/synthetic.txt" : external],
+        [win32, process.platform === "win32" ? external : "C:\\synthetic.txt"],
+      ] as const) {
+        const issue = {
+          ...linearIssue("SEC-123"),
+          description:
+            paths.sep +
+            `..${paths.sep}`.repeat(32) +
+            paths.relative(paths.parse(target).root, target),
+        };
+        const expected = `Source: linear\nIssue: SEC-123\nURL: ${issue.url}\n\nTitle: ${issue.title}\n\n${issue.description}`;
+        const forbiddenPath = resolve(repository, expected);
+        const originalLstat = filesystem.lstat;
+        let probed = false;
+        let inputs: string[] = [];
+        const reading = spyOn(filesystem, "lstat").mockImplementation((async (
+          ...args: Parameters<typeof filesystem.lstat>
+        ) => {
+          if (String(args[0]) === forbiddenPath) probed = true;
+          return await originalLstat(...args);
+        }) as typeof filesystem.lstat);
+        try {
+          expect(
+            await main(
+              ["patch", selected, "--linear-issue", "SEC-123"],
+              capture().stream,
+              capture().stream,
+              dependencies({
+                currentDirectory: repository,
+                environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-key" },
+                linearClient: () =>
+                  ({
+                    issue: async () => issue,
+                  }) as unknown as ReturnType<LinearClientFactory>,
+                onCodex: (_args, output) => {
+                  inputs = JSON.parse(
+                    output!.appServer!.prompt.split("\n").at(-1)!,
+                  );
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(probed).toBe(false);
+          expect(inputs).toEqual(["selected file contents", expected]);
+          expect(inputs).not.toContain("SYNTHETIC_EXTERNAL_FILE");
+        } finally {
+          reading.mockRestore();
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("imports every matching open project issue across Linear pages", async () => {
+    let projectOptions: unknown;
+    let issueOptions: unknown;
+    let nextPages = 0;
+    let inputs: string[] = [];
+
+    expect(
+      await main(
+        [
+          "patch",
+          "--linear-project",
+          "Security backlog",
+          "--linear-filter",
+          '{"labels":{"name":{"eq":"security"}}}',
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
+          linearClient: ({ accessToken }) => {
+            expect(accessToken).toBe("SYNTHETIC_OAUTH_TOKEN");
+            const page = {
+              nodes: [linearIssue("SEC-123")],
+              pageInfo: { hasNextPage: true },
+              async fetchNext() {
+                nextPages++;
+                this.nodes.push(linearIssue("SEC-124"));
+                this.pageInfo.hasNextPage = false;
+                return this;
+              },
+            };
+            return {
+              projects: async (options: unknown) => {
+                projectOptions = options;
+                return {
+                  nodes: [
+                    {
+                      issues: async (options: unknown) => {
+                        issueOptions = options;
+                        return page;
+                      },
+                    },
+                  ],
+                };
+              },
+            } as unknown as ReturnType<LinearClientFactory>;
+          },
+          onCodex: (_args, output, environment) => {
+            inputs = JSON.parse(output!.appServer!.prompt.split("\n").at(-1)!);
+            expect(environment).toEqual({});
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    expect(projectOptions).toEqual({
+      filter: { name: { eqIgnoreCase: "Security backlog" } },
+      first: 2,
+    });
+    expect(issueOptions).toEqual({
+      first: 50,
+      filter: {
+        state: { type: { nin: ["completed", "canceled"] } },
+        labels: { name: { eq: "security" } },
+      },
+    });
+    expect(nextPages).toBe(1);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]).toContain("Issue: SEC-123");
+    expect(inputs[1]).toContain("Issue: SEC-124");
+  });
+
+  test("rejects invalid Linear selections before starting Codex", async () => {
+    const cases: [string[], string, NodeJS.ProcessEnv?][] = [
+      [
+        ["patch"],
+        "Patch requires an issue, --linear-issue, or --linear-project.",
+      ],
+      [
+        ["patch", "--scan", "scan-1", "--linear-issue", "SEC-123"],
+        "Saved findings cannot be combined with Linear issues or projects.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123"],
+        "Linear access requires CODEX_SECURITY_LINEAR_API_KEY, LINEAR_API_KEY, or LINEAR_ACCESS_TOKEN.",
+        {},
+      ],
+      [
+        ["patch", "--linear-project", "Backlog", "--linear-filter", "invalid"],
+        "--linear-filter must be a JSON Linear issue filter.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123", "--linear-filter", "{}"],
+        "--linear-filter requires --linear-project.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123", "--linear-project", "Backlog"],
+        "Use either --linear-issue or --linear-project, not both.",
+      ],
+      [
+        ["patch", "--linear-issue", "https://example.test/issue/SEC-123"],
+        "Linear issue URL is invalid.",
+      ],
+      [
+        ["patch", "ordinary issue", "--linear-api-key", "synthetic-key"],
+        "--linear-api-key requires --linear-issue or --linear-project.",
+      ],
+      [
+        ["patch", "--linear-issue", "SEC-123", "--linear-api-key", "   "],
+        "--linear-api-key must not be empty.",
+      ],
+    ];
+
+    for (const [args, message, environment] of cases) {
+      let started = false;
+      const stderr = capture();
+      expect(
+        await main(
+          args,
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            environment: environment ?? {
+              CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
+            },
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(message);
+      expect(stderr.text()).not.toContain("lin_api_SYNTHETIC_SECRET");
+      expect(started).toBe(false);
+    }
+  });
+
+  test("rejects linked findings while preserving selected external files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-skill-inputs-"));
+    try {
+      const repository = join(root, "repository");
+      const externalDirectory = join(root, "external");
+      const linkedDirectory = join(root, "external-alias");
+      const finding = join(externalDirectory, "finding.txt");
+      await mkdir(repository);
+      await mkdir(externalDirectory);
+      await writeFile(finding, "SYNTHETIC_EXTERNAL_FINDING\n");
+      await symlink(finding, join(repository, "linked-finding.txt"));
+      await symlink(
+        externalDirectory,
+        linkedDirectory,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await symlink(
+        externalDirectory,
+        join(repository, "linked-directory"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      for (const command of ["validate", "patch"] as const) {
+        let invocation: readonly string[] | undefined;
+        let prompt: string | undefined;
+        for (const input of [
+          "linked-finding.txt",
+          join("linked-directory", "finding.txt"),
+        ]) {
+          const stderr = capture();
+          expect(
+            await main(
+              [command, input],
+              capture().stream,
+              stderr.stream,
+              dependencies({
+                currentDirectory: repository,
+                onCodex: (args, output) => {
+                  invocation = args;
+                  prompt = output?.appServer?.prompt ?? args.at(-1);
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(2);
+          expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
+          expect(invocation).toBeUndefined();
+        }
+
+        for (const selected of [
+          finding,
+          join("..", "external", "finding.txt"),
+          join(linkedDirectory, "finding.txt"),
+        ]) {
+          expect(
+            await main(
+              [command, selected],
+              capture().stream,
+              capture().stream,
+              dependencies({
+                currentDirectory: repository,
+                onCodex: (args, output) => {
+                  invocation = args;
+                  prompt = output?.appServer?.prompt ?? args.at(-1);
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(JSON.parse(prompt!.split("\n").at(-1)!)).toEqual([
+            "SYNTHETIC_EXTERNAL_FINDING\n",
+          ]);
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects input replacements whose numeric file IDs collide", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "rejects input replacements whose numeric file IDs collide",
+      )
+    ) {
+      return;
+    }
+    const root = await mkdtemp(join(tmpdir(), "codex-security-file-identity-"));
+    const selected = join(root, "finding.txt");
+    const replacement = join(root, "replacement.txt");
+    const selectedInode = 2n ** 60n;
+    const replacementInode = selectedInode + 1n;
+    expect(Number(selectedInode)).toBe(Number(replacementInode));
+    await writeFile(selected, "ordinary finding\n");
+    await writeFile(replacement, "SYNTHETIC_REPLACEMENT_FINDING\n");
+    const canonicalSelected = await filesystem.realpath(selected);
+    const originalLstat = filesystem.lstat;
+    const originalOpen = filesystem.open;
+    let restoreOpenedStat: (() => void) | undefined;
+    let replaced = false;
+    const reading = spyOn(filesystem, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof filesystem.lstat>
+    ) => {
+      const metadata = await originalLstat(...args);
+      if (String(args[0]) === selected) {
+        metadata.ino =
+          typeof metadata.ino === "bigint"
+            ? selectedInode
+            : Number(selectedInode);
+      }
+      return metadata;
+    }) as typeof filesystem.lstat);
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) !== canonicalSelected) {
+          return await originalOpen(...args);
+        }
+        replaced = true;
+        const file = await originalOpen(replacement, args[1], args[2]);
+        const originalStat = file.stat.bind(file);
+        const openedStat = spyOn(file, "stat").mockImplementation((async (
+          ...statArgs: Parameters<typeof file.stat>
+        ) => {
+          const metadata = await originalStat(...statArgs);
+          metadata.ino =
+            typeof metadata.ino === "bigint"
+              ? replacementInode
+              : Number(replacementInode);
+          return metadata;
+        }) as typeof file.stat);
+        restoreOpenedStat = () => openedStat.mockRestore();
+        return file;
+      },
+    );
+    try {
+      let started = false;
+      const stderr = capture();
+      const status = await main(
+        ["validate", "finding.txt"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          currentDirectory: root,
+          onCodex: () => {
+            started = true;
+            return 0;
+          },
+        }),
+      );
+      expect(replaced).toBe(true);
+      expect(status).toBe(2);
+      expect(stderr.text()).not.toContain("SYNTHETIC_REPLACEMENT_FINDING");
+      expect(started).toBe(false);
+    } finally {
+      restoreOpenedStat?.();
+      opening.mockRestore();
+      reading.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(
+    process.platform === "win32"
+      ? ["symbolic link"]
+      : ["symbolic link", "FIFO"],
+  )("rejects finding files replaced with a %s", async (replacement) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `rejects finding files replaced with a ${replacement}`,
+      )
+    ) {
+      return;
+    }
+    const root = await mkdtemp(join(tmpdir(), "codex-security-skill-inputs-"));
+    try {
+      const repository = join(root, "repository");
+      const selected = join(repository, "finding.txt");
+      const external = join(root, "external.txt");
+      await mkdir(repository);
+      await writeFile(selected, "ordinary finding\n");
+      await writeFile(external, "SYNTHETIC_EXTERNAL_FINDING\n");
+      const canonicalSelected = await filesystem.realpath(selected);
+
+      const originalOpen = filesystem.open;
+      let replaced = false;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === canonicalSelected) {
+            opening.mockRestore();
+            await rm(selected);
+            if (replacement === "FIFO") execFileSync("mkfifo", [selected]);
+            else await symlink(external, selected);
+            replaced = true;
+          }
+          return await originalOpen(...args);
+        },
+      );
+
+      try {
+        let started = false;
+        const stderr = capture();
+        const status = await main(
+          ["validate", "finding.txt"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            currentDirectory: repository,
+            onCodex: () => {
+              started = true;
+              return 0;
+            },
+          }),
+        );
+        expect(replaced, "the file-open replacement hook ran").toBe(true);
+        expect(status).toBe(2);
+        expect(stderr.text()).not.toContain("SYNTHETIC_EXTERNAL_FINDING");
+        expect(started).toBe(false);
+      } finally {
+        opening.mockRestore();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -299,7 +804,7 @@ describe("CLI skill commands", () => {
             command,
             "a candidate finding",
             "--effort",
-            "high",
+            "max",
             "--codex",
             'model="gpt-5.6-terra"',
           ],
@@ -314,13 +819,13 @@ describe("CLI skill commands", () => {
         ),
       ).toBe(0);
       expect(invocation).toContain('model="gpt-5.6-terra"');
-      expect(invocation).toContain('model_reasoning_effort="high"');
+      expect(invocation).toContain('model_reasoning_effort="max"');
       expect(stderr.text()).toBe("");
 
       for (const [options, message] of [
         [
           ["--effort", "ultra"],
-          "--effort must be minimal, low, medium, high, or xhigh",
+          "--effort must be minimal, low, medium, high, xhigh, or max",
         ],
         [
           ["--effort", "high", "--codex", 'model_reasoning_effort="medium"'],
@@ -511,15 +1016,12 @@ describe("CLI skill commands", () => {
     const stderr = capture();
     await expect(
       runCodexSkillCommand(
-        [],
+        [
+          "-e",
+          'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(1024*1024+1)}})+"\\n")',
+        ],
         { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-        {
-          command: process.execPath,
-          prefixArgs: [
-            "-e",
-            'process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"x".repeat(1024*1024+1)}})+"\\n")',
-          ],
-        },
+        { command: process.execPath },
       ),
     ).resolves.toBe(0);
     expect(stdout.text()).toBe(`${"x".repeat(1024 * 1024 + 1)}\n`);
@@ -583,9 +1085,9 @@ describe("CLI skill commands", () => {
       const stderr = capture();
       expect(
         await runCodexSkillCommand(
-          [],
+          ["-e", scenario.source],
           { command: "validate", stdout: stdout.stream, stderr: stderr.stream },
-          { command: process.execPath, prefixArgs: ["-e", scenario.source] },
+          { command: process.execPath },
         ),
       ).toBe(scenario.status);
       expect(stdout.text()).toBe(scenario.stdout);
@@ -597,6 +1099,162 @@ describe("CLI skill commands", () => {
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
       expect(stderr.text()).not.toContain("/private");
     }
+  });
+
+  test("runs patching in a saved app-server thread", async () => {
+    const source = `
+const assert = require("node:assert/strict");
+const lines = require("node:readline").createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+const item = (threadId, turnId, text, phase = "final_answer") =>
+  send({ method: "item/completed", params: { threadId, turnId, item: { type: "agentMessage", text, phase } } });
+const complete = (threadId, id) =>
+  send({ method: "turn/completed", params: { threadId, turn: { id, status: "completed" } } });
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") {
+    send({ id: 1, method: "item/tool/requestUserInput", params: {} });
+  } else if (request.id === 1 && !request.method) {
+    assert.equal(request.error.code, -32601);
+    send({ id: 1, result: {} });
+  } else if (request.method === "thread/start") {
+    assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
+    assert.deepEqual(request.params, { approvalPolicy: "never", sandbox: "workspace-write" });
+    send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false } } });
+  } else if (request.method === "turn/start") {
+    assert.equal(request.params.threadId, "parent");
+    assert.equal(request.params.input[0].text, "Fix the synthetic finding");
+    send({ method: "turn/started", params: { threadId: "parent", turn: { id: "patch-turn" } } });
+    send({ id: 3, result: { turn: { id: "patch-turn" } } });
+    item("child", "child-turn", "Child answer");
+    complete("child", "child-turn");
+    item("parent", "other-turn", "Wrong turn");
+    complete("parent", "other-turn");
+    item("parent", "patch-turn", "Intermediate details", "commentary");
+    send({ id: 3, method: "item/tool/requestUserInput", params: {} });
+  } else if (request.id === 3 && !request.method) {
+    assert.equal(request.error.code, -32601);
+    item("parent", "patch-turn", "Patched finding");
+    complete("parent", "patch-turn");
+  }
+});
+`;
+    const stdout = capture();
+    const stderr = capture();
+
+    await expect(
+      runCodexSkillCommand(
+        ["-e", source],
+        {
+          command: "patch",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          appServer: {
+            directory: process.cwd(),
+            prompt: "Fix the synthetic finding",
+          },
+        },
+        { command: process.execPath },
+      ),
+    ).resolves.toBe(0);
+    expect(stdout.text()).toBe("Patched finding\n");
+    expect(stderr.text()).toBe("");
+  });
+
+  test.each([
+    ["EOF after a final answer", "final_answer", false],
+    ["EOF after commentary", "commentary", false],
+    ["completion without a final answer", "commentary", true],
+  ] as const)("rejects %s", async (_name, phase, completed) => {
+    const events = [
+      { id: 3, result: { turn: { id: "patch-turn" } } },
+      {
+        method: "item/completed",
+        params: {
+          threadId: "parent",
+          turnId: "patch-turn",
+          item: {
+            type: "agentMessage",
+            phase,
+            text: "Not a completed patch",
+          },
+        },
+      },
+      ...(completed
+        ? [
+            {
+              method: "turn/completed",
+              params: {
+                threadId: "parent",
+                turn: { id: "patch-turn", status: "completed" },
+              },
+            },
+          ]
+        : []),
+    ];
+    const source = `
+const lines = require("node:readline").createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") send({ id: 1, result: {} });
+  if (request.method === "thread/start") send({ id: 2, result: { thread: { id: "parent" } } });
+  if (request.method === "turn/start") process.stdout.write(${JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n")}, () => process.exit(0));
+});
+`;
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await runCodexSkillCommand(
+        ["-e", source],
+        {
+          command: "patch",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          appServer: {
+            directory: process.cwd(),
+            prompt: "Synthetic finding",
+          },
+        },
+        { command: process.execPath },
+      ),
+    ).toBe(2);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(
+      "did not return a completed patch response",
+    );
+  });
+
+  test("redacts app-server patch failures", async () => {
+    const source = [
+      'const readline=require("node:readline");',
+      "const lines=readline.createInterface({input:process.stdin});",
+      "lines.once('line',()=>process.stdout.write(JSON.stringify({",
+      'id:1,error:{code:-1,message:"401 sk-proj-SYNTHETIC_SECRET /private/repository"}',
+      '})+"\\n"));',
+    ].join("");
+    const stdout = capture();
+    const stderr = capture();
+
+    await expect(
+      runCodexSkillCommand(
+        ["-e", source],
+        {
+          command: "patch",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          appServer: {
+            directory: process.cwd(),
+            prompt: "Fix the synthetic finding",
+          },
+        },
+        { command: process.execPath },
+      ),
+    ).resolves.toBe(1);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Authentication failed");
+    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+    expect(stderr.text()).not.toContain("/private");
   });
 
   test.skipIf(process.platform === "win32")(
@@ -631,9 +1289,9 @@ setInterval(() => {}, 1000);
         `
 import { runCodexSkillCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
 const status = await runCodexSkillCommand(
-  [],
+  [${JSON.stringify(child)}],
   { command: "validate", stdout: process.stdout, stderr: process.stderr },
-  { command: process.execPath, prefixArgs: [${JSON.stringify(child)}] },
+  { command: process.execPath },
 );
 process.exit(status);
 `,

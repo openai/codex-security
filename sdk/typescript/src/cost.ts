@@ -1,5 +1,5 @@
 import { open, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import {
   scanActivityFromSessionEvent,
   type ScanActivity,
@@ -16,6 +16,13 @@ export interface ScanCost {
   cacheWriteInputTokens: number;
   outputTokens: number;
   estimatedUsd: number;
+}
+
+export interface ScanSessionEvent {
+  threadId: string;
+  parentThreadId: string | null;
+  worker?: number;
+  event: Record<string, unknown>;
 }
 
 type ModelPricing = readonly [
@@ -48,6 +55,7 @@ interface SessionUsage {
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
+  workingDirectory: string | null;
   startedAt: number | null;
   inheritedUsage: ScanTokenUsage | null;
   replaying: boolean;
@@ -60,17 +68,20 @@ interface SessionUsage {
   prose: Set<string>;
   reasoning: SessionReasoning | null;
   reasoningCount: number;
+  events?: Record<string, unknown>[];
 }
 
 interface ScanCostTrackerOptions {
   codexHome: string;
   model: string;
   repository?: string;
+  scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
+  onSessionEvent?: (event: ScanSessionEvent) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -88,6 +99,30 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
+
+function createSessionUsage(): SessionUsage {
+  return {
+    offset: 0,
+    pendingLine: [],
+    pendingLineBytes: 0,
+    unreadable: false,
+    threadId: null,
+    parentThreadId: null,
+    workingDirectory: null,
+    startedAt: null,
+    inheritedUsage: null,
+    replaying: false,
+    usage: null,
+    calls: new Map(),
+    activities: [],
+    progress: [],
+    filesCompleted: 0,
+    filesTotal: null,
+    prose: new Set(),
+    reasoning: null,
+    reasoningCount: 0,
+  };
+}
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
@@ -119,7 +154,8 @@ export class ScanCostTracker {
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
       this.#options.onActivity === undefined &&
-      this.#options.onProgress === undefined
+      this.#options.onProgress === undefined &&
+      this.#options.onSessionEvent === undefined
     ) {
       return;
     }
@@ -178,26 +214,7 @@ export class ScanCostTracker {
     )) {
       let session = this.#sessions.get(path);
       if (session === undefined) {
-        session = {
-          offset: 0,
-          pendingLine: [],
-          pendingLineBytes: 0,
-          unreadable: false,
-          threadId: null,
-          parentThreadId: null,
-          startedAt: null,
-          inheritedUsage: null,
-          replaying: false,
-          usage: null,
-          calls: new Map(),
-          activities: [],
-          progress: [],
-          filesCompleted: 0,
-          filesTotal: null,
-          prose: new Set(),
-          reasoning: null,
-          reasoningCount: 0,
-        };
+        session = createSessionUsage();
         this.#sessions.set(path, session);
       }
       try {
@@ -209,6 +226,37 @@ export class ScanCostTracker {
     }
 
     const included = new Set([this.#threadId]);
+    if (this.#options.scanDirectory !== undefined) {
+      const scanStartedAt =
+        [...this.#sessions.values()].find(
+          (session) => session.threadId === this.#threadId,
+        )?.startedAt ?? null;
+      for (const session of this.#sessions.values()) {
+        if (
+          session.threadId === null ||
+          session.workingDirectory === null ||
+          scanStartedAt === null ||
+          session.startedAt === null ||
+          session.startedAt < scanStartedAt
+        ) {
+          continue;
+        }
+        const artifactsDirectory = join(
+          this.#options.scanDirectory,
+          "artifacts",
+        );
+        const workerDirectory = relative(
+          join(artifactsDirectory, "deep_discovery", "workers"),
+          session.workingDirectory,
+        ).split(sep);
+        if (
+          session.workingDirectory === artifactsDirectory ||
+          (workerDirectory.length === 2 && workerDirectory[1] === "output")
+        ) {
+          included.add(session.threadId);
+        }
+      }
+    }
     let changed = true;
     while (changed) {
       changed = false;
@@ -229,39 +277,51 @@ export class ScanCostTracker {
     }
 
     let usage: ScanTokenUsage | null = null;
-    for (const session of this.#sessions.values()) {
-      if (session.threadId !== null && included.has(session.threadId)) {
-        if (session.threadId !== this.#threadId) {
-          this.#reportWorkerActivities(session);
-          this.#reportWorkerProgress(session);
+    for (const [path, tracked] of this.#sessions) {
+      const threadId = tracked.threadId;
+      if (threadId === null || !included.has(threadId)) continue;
+      let session = tracked;
+      if (
+        this.#options.onSessionEvent !== undefined &&
+        session.events === undefined
+      ) {
+        // Replay only newly associated sessions, including their early events.
+        session = createSessionUsage();
+        session.events = [];
+        await readSessionUsage(path, session, this.#options.repository);
+        this.#sessions.set(path, session);
+      }
+      let worker: number | undefined;
+      if (threadId !== this.#threadId) {
+        worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
+        this.#workers.set(threadId, worker);
+      }
+      for (const event of session.events?.splice(0) ?? []) {
+        this.#options.onSessionEvent?.({
+          threadId,
+          parentThreadId: session.parentThreadId,
+          worker,
+          event,
+        });
+      }
+      if (worker !== undefined) {
+        for (const activity of session.activities.splice(0)) {
+          this.#options.onActivity?.({
+            ...activity,
+            id: `${threadId}:${activity.id}`,
+            worker,
+          });
         }
-        if (session.usage !== null) {
-          usage = addTokenUsage(usage, session.usage);
-        }
+        this.#reportWorkerProgress(session);
+      }
+      if (session.usage !== null) {
+        usage = addTokenUsage(usage, session.usage);
       }
     }
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
     this.#reportCost(cost);
-  }
-
-  #reportWorkerActivities(session: SessionUsage): void {
-    if (this.#options.onActivity === undefined || session.threadId === null) {
-      return;
-    }
-    let worker = this.#workers.get(session.threadId);
-    if (worker === undefined) {
-      worker = this.#workers.size + 1;
-      this.#workers.set(session.threadId, worker);
-    }
-    for (const activity of session.activities.splice(0)) {
-      this.#options.onActivity({
-        ...activity,
-        id: `${session.threadId}:${activity.id}`,
-        worker,
-      });
-    }
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -420,10 +480,14 @@ function readSessionEvent(
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
+      if (!session.replaying) session.events?.push(event);
       return;
     }
     if (typeof payload["id"] === "string") {
       session.threadId = payload["id"];
+    }
+    if (typeof payload["cwd"] === "string") {
+      session.workingDirectory = payload["cwd"];
     }
     if (typeof payload["timestamp"] === "string") {
       session.startedAt = Math.floor(Date.parse(payload["timestamp"]) / 1_000);
@@ -435,6 +499,7 @@ function readSessionEvent(
       payload["parent_thread_id"] ??
       (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
     if (typeof parent === "string") session.parentThreadId = parent;
+    session.events?.push(event);
     return;
   }
   if (session.replaying) {
@@ -450,9 +515,11 @@ function readSessionEvent(
       payload["started_at"] >= session.startedAt
     ) {
       session.replaying = false;
+      session.events?.push(event);
     }
     return;
   }
+  session.events?.push(event);
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));
     if (repository === undefined) return;
@@ -718,8 +785,17 @@ function tokenUsage(value: unknown): ScanTokenUsage | null {
   if (!isRecord(value)) return null;
   const input = value["input_tokens"];
   const cached = value["cached_input_tokens"] ?? 0;
+  const canonicalCacheWrite = value["cache_write_input_tokens"];
+  const legacyCacheWrite = value["cache_write_tokens"];
   const cacheWrite =
-    value["cache_write_input_tokens"] ?? value["cache_write_tokens"] ?? 0;
+    canonicalCacheWrite === 0 &&
+    isTokenCount(input) &&
+    isTokenCount(cached) &&
+    isTokenCount(legacyCacheWrite) &&
+    legacyCacheWrite > 0 &&
+    cached + legacyCacheWrite <= input
+      ? legacyCacheWrite
+      : canonicalCacheWrite ?? legacyCacheWrite ?? 0;
   const output = value["output_tokens"];
   const reasoning = value["reasoning_output_tokens"] ?? 0;
   if (

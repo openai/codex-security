@@ -2,8 +2,9 @@ import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type { ScanModelConfiguration } from "./config.js";
-import { formatUsd, type ScanCost } from "./cost.js";
+import { formatUsd, type ScanCost, type ScanSessionEvent } from "./cost.js";
 import type { ScanActivity } from "./scan-activity.js";
+import type { ScanMode } from "./targets.js";
 import type { ScanProgress } from "./worker-progress.js";
 
 const HIDE_CURSOR = "\u001B[?25l";
@@ -18,7 +19,9 @@ const MAX_HISTORY_ENTRIES = 2_000;
 const FIXED_SCREEN_ROWS = 8;
 
 interface DashboardStream {
-  write(chunk: string): unknown;
+  write(chunk: string, callback?: (error?: Error | null) => void): unknown;
+  on?(event: "error", listener: (error: Error) => void): unknown;
+  off?(event: "error", listener: (error: Error) => void): unknown;
   readonly columns?: number;
   readonly rows?: number;
 }
@@ -41,6 +44,8 @@ interface DashboardInput {
 
 interface ScanDashboardOptions {
   repository: string;
+  presentation?: "scan" | "publication";
+  mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
   clock: DashboardClock;
@@ -61,6 +66,7 @@ interface DashboardActivityLine {
   kind: DashboardActivityKind | "path" | "code";
   links?: readonly DashboardActivityLink[];
   code?: readonly string[];
+  bold?: readonly string[];
 }
 
 interface DashboardActivityLink {
@@ -94,23 +100,49 @@ export class ScanDashboard {
   readonly #options: ScanDashboardOptions;
   readonly #startedAt: number;
   readonly #activities: TimedScanActivity[] = [];
+  readonly #details: (ScanSessionEvent & { recordedAt: number })[] = [];
+  #detailsCache: {
+    width: number;
+    source: "all" | "main" | number;
+    count: number;
+    lines: DashboardActivityLine[];
+    summaries: Map<string, Set<string>>;
+  } | null = null;
   #stage = "Preparing scan";
   #files: ScanProgress | null = null;
+  #publicationProgress: { completed: number; total: number } | null = null;
   #cost: Readonly<ScanCost> | null = null;
   #timer: NodeJS.Timeout | null = null;
   #scrollOffset = 0;
+  #view: "activity" | "details" = "activity";
+  #source: "all" | "main" | number = "all";
   #inputWasRaw = false;
   #noteCount = 0;
+  #observingStreamErrors = false;
+  readonly #onStreamError = (): void => {};
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
       typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
     let lines = 0;
     for (const key of input.match(
-      /[\u0003\u0004\u0015]|\u001B\[(?:[ABHF]|[1456]~)/gu,
+      /[\u0003\u0004\u0015dam1-9]|\u001B\[(?:[ABHF]|[1456]~)/gu,
     ) ?? []) {
       if (key === "\u0003") {
         if (lines !== 0) this.scroll(lines);
         this.#options.onInterrupt?.();
+        lines = 0;
+      } else if (/^[dam1-9]$/u.test(key)) {
+        if (this.#options.presentation === "publication") continue;
+        if (key !== "d" && this.#view !== "details") continue;
+        if (lines !== 0) this.scroll(lines);
+        if (key === "d") {
+          this.#view = this.#view === "activity" ? "details" : "activity";
+        } else {
+          this.#source =
+            key === "a" ? "all" : key === "m" ? "main" : Number(key);
+        }
+        this.#scrollOffset = 0;
+        this.#refresh();
         lines = 0;
       } else if (key === "\u001B[A") {
         lines += 1;
@@ -145,17 +177,36 @@ export class ScanDashboard {
 
   public start(): void {
     if (this.#timer !== null) return;
-    this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
     const input = this.#options.input;
     if (input?.isTTY === true) {
       this.#inputWasRaw = input.isRaw === true;
-      input.setRawMode?.(true);
-      input.resume?.();
-      input.on("data", this.#onInput);
-      this.#stream.write(ENABLE_ALTERNATE_SCROLL);
     }
-    this.#render();
-    this.#timer = this.#options.clock.setInterval(() => this.#render(), 1_000);
+    this.#timer = this.#options.clock.setInterval(() => this.#refresh(), 1_000);
+    try {
+      if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
+        this.#stream.on("error", this.#onStreamError);
+        this.#observingStreamErrors = true;
+      }
+      this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
+      if (input?.isTTY === true) {
+        input.setRawMode?.(true);
+        input.resume?.();
+        input.on("data", this.#onInput);
+        this.#stream.write(ENABLE_ALTERNATE_SCROLL);
+      }
+      this.#render();
+    } catch (error) {
+      try {
+        this.stop();
+      } catch {
+        try {
+          this.#stream.write(
+            `${DISABLE_ALTERNATE_SCROLL}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
+          );
+        } catch {}
+      }
+      throw error;
+    }
   }
 
   public stop(): void {
@@ -163,14 +214,32 @@ export class ScanDashboard {
     this.#options.clock.clearInterval(this.#timer);
     this.#timer = null;
     const input = this.#options.input;
-    if (input?.isTTY === true) {
-      input.off("data", this.#onInput);
-      input.setRawMode?.(this.#inputWasRaw);
-      input.pause?.();
+    try {
+      if (input?.isTTY === true) {
+        input.off("data", this.#onInput);
+        input.setRawMode?.(this.#inputWasRaw);
+        input.pause?.();
+      }
+      this.#stream.write(
+        `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
+      );
+    } finally {
+      if (this.#observingStreamErrors) {
+        try {
+          this.#stream.write("", () => {
+            queueMicrotask(() => {
+              if (this.#timer === null && this.#observingStreamErrors) {
+                this.#stream.off?.("error", this.#onStreamError);
+                this.#observingStreamErrors = false;
+              }
+            });
+          });
+        } catch {
+          this.#stream.off?.("error", this.#onStreamError);
+          this.#observingStreamErrors = false;
+        }
+      }
     }
-    this.#stream.write(
-      `${input?.isTTY === true ? DISABLE_ALTERNATE_SCROLL : ""}${SHOW_CURSOR}${EXIT_ALTERNATE_SCREEN}`,
-    );
   }
 
   public setStage(stage: string): void {
@@ -180,6 +249,11 @@ export class ScanDashboard {
 
   public setFiles(files: ScanProgress): void {
     this.#files = files;
+    this.#refresh();
+  }
+
+  public setPublicationProgress(completed: number, total: number): void {
+    this.#publicationProgress = { completed, total };
     this.#refresh();
   }
 
@@ -230,6 +304,38 @@ export class ScanDashboard {
     this.#refresh();
   }
 
+  public recordDetails(session: ScanSessionEvent): void {
+    const previousRows =
+      this.#view === "details" && this.#scrollOffset !== 0
+        ? this.#activityLines(this.#width()).length
+        : 0;
+    const timestamp = session.event["timestamp"];
+    const recordedAt =
+      typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+    const entry = {
+      ...session,
+      recordedAt: Number.isNaN(recordedAt)
+        ? this.#options.clock.now()
+        : recordedAt,
+    };
+    const index = this.#details.findLastIndex(
+      (event) => event.recordedAt <= entry.recordedAt,
+    );
+    this.#details.splice(index + 1, 0, entry);
+    if (index + 1 < (this.#detailsCache?.count ?? 0)) {
+      this.#detailsCache = null;
+    }
+    if (this.#view === "details") {
+      if (this.#scrollOffset !== 0) {
+        this.#scrollOffset += Math.max(
+          0,
+          this.#activityLines(this.#width()).length - previousRows,
+        );
+      }
+      this.#refresh();
+    }
+  }
+
   public scroll(lines: number): void {
     const maximum = Math.max(
       0,
@@ -243,10 +349,14 @@ export class ScanDashboard {
   }
 
   #refresh(): void {
-    if (this.#timer !== null) this.#render();
+    if (this.#timer === null) return;
+    try {
+      this.#render();
+    } catch {}
   }
 
   #render(): void {
+    const publication = this.#options.presentation === "publication";
     const width = this.#width();
     const activityRows = this.#activityRows();
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
@@ -280,28 +390,42 @@ export class ScanDashboard {
     const activity = history.slice(first, first + activityRows);
     if (activity.length === 0) {
       activity.push({
-        text: `  [${formatLocalTime(this.#options.clock.now())}] · Waiting for scan activity…`,
+        text: `  [${formatLocalTime(this.#options.clock.now())}] · Waiting for ${this.#view === "details" ? "session events" : publication ? "publication activity" : "scan activity"}…`,
         kind: "path",
       });
     }
     while (activity.length < activityRows) {
       activity.push({ text: "", kind: "path" });
     }
-    const scrollStatus =
+    let scrollStatus =
       this.#scrollOffset === 0
         ? "Ctrl+C to exit"
         : `${formatCount(this.#scrollOffset)} ${this.#scrollOffset === 1 ? "line" : "lines"} above live · Ctrl+C to exit`;
+    if (!publication && this.#options.input?.isTTY === true) {
+      scrollStatus =
+        this.#view === "details"
+          ? `d activity · a/m/1-9 source · ${scrollStatus}`
+          : `d details · ${scrollStatus}`;
+    }
     const model = this.#options.model;
 
     const lines = [
-      `  CODEX SECURITY  ·  ${basename(this.#options.repository)}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}`,
+      `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : ""}${basename(this.#options.repository)}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
       divider,
-      `  STAGE    ${this.#stage}`,
-      `  FILES    ${files}`,
-      `  TOKENS   ${tokens}`,
-      `  COST     ${cost}`,
+      ...(publication
+        ? [
+            `  STAGE     ${this.#stage}`,
+            `  FINDINGS  ${this.#publicationProgress === null ? "waiting for findings" : `${formatCount(this.#publicationProgress.completed)} / ${formatCount(this.#publicationProgress.total)} processed`}`,
+          ]
+        : [
+            ...(this.#options.mode === "deep"
+              ? []
+              : [`  STAGE    ${this.#stage}`, `  FILES    ${files}`]),
+            `  TOKENS   ${tokens}`,
+            `  COST     ${cost}`,
+          ]),
       `  TIME     ${time}  ·  ${scrollStatus}`,
     ];
 
@@ -311,7 +435,9 @@ export class ScanDashboard {
           .map((line, index) => {
             const text = typeof line === "string" ? line : line.text;
             const clean = fitLine(
-              this.#options.sanitize?.(text) ?? text,
+              typeof line !== "string" && this.#view === "details"
+                ? text
+                : this.#options.sanitize?.(text) ?? text,
               width,
             );
             const colored =
@@ -323,6 +449,7 @@ export class ScanDashboard {
                         ? "title"
                         : undefined
                       : line.kind,
+                    typeof line !== "string" && this.#view === "details",
                   )
                 : clean;
             const formatted =
@@ -330,7 +457,7 @@ export class ScanDashboard {
                 ? colored
                 : linkActivity(
                     this.#options.color === true
-                      ? styleInlineCode(colored, line.code, line.kind)
+                      ? styleInlineCode(colored, line)
                       : colored,
                     line.links,
                     this.#options.sanitize,
@@ -346,10 +473,109 @@ export class ScanDashboard {
   }
 
   #activityRows(): number {
-    return Math.max(1, (this.#stream.rows ?? 24) - FIXED_SCREEN_ROWS);
+    return Math.max(
+      1,
+      (this.#stream.rows ?? 24) -
+        FIXED_SCREEN_ROWS +
+        (this.#options.presentation === "publication"
+          ? 2
+          : this.#options.mode === "deep"
+            ? 2
+            : 0),
+    );
   }
 
   #activityLines(width: number): DashboardActivityLine[] {
+    if (this.#view === "details") {
+      let cache = this.#detailsCache;
+      if (
+        cache === null ||
+        cache.width !== width ||
+        cache.source !== this.#source
+      ) {
+        this.#detailsCache = cache = {
+          width,
+          source: this.#source,
+          count: 0,
+          lines: [],
+          summaries: new Map(),
+        };
+      }
+      if (cache.count === this.#details.length) return cache.lines;
+      const events = this.#details.slice(cache.count);
+      cache.count = this.#details.length;
+      for (const { threadId, worker, event, recordedAt } of events) {
+        if (this.#source !== "all" && this.#source !== (worker ?? "main")) {
+          continue;
+        }
+        let description = detailsDescription(event);
+        if (description === undefined) continue;
+
+        const payload = isRecord(event["payload"]) ? event["payload"] : {};
+        const itemType = payload["type"];
+        const prose =
+          typeof itemType === "string" &&
+          /^(?:message|agent_message|reasoning|agent_reasoning.*)$/u.test(
+            itemType,
+          );
+        if (prose) {
+          const seen = cache.summaries.get(threadId) ?? new Set<string>();
+          cache.summaries.set(threadId, seen);
+          if (itemType === "reasoning" && Array.isArray(payload["summary"])) {
+            const summary = payload["summary"].filter(
+              (part) => !isRecord(part) || !seen.has(String(part["text"])),
+            );
+            if (summary.length === 0) continue;
+            for (const part of summary) {
+              if (isRecord(part) && typeof part["text"] === "string") {
+                seen.add(part["text"]);
+              }
+            }
+            description = detailsDescription({
+              ...event,
+              payload: { ...payload, summary },
+            });
+          }
+          if (description === undefined || seen.has(description)) continue;
+          seen.add(description);
+          if (itemType === "agent_reasoning") {
+            seen.add(detailsText(payload["text"]));
+          }
+        } else {
+          cache.summaries.delete(threadId);
+        }
+
+        const source = worker === undefined ? "main" : `worker ${worker}`;
+        const prefix = `  [${formatLocalTime(recordedAt)}] ${source} · `;
+        const code: string[] = [];
+        const bold: string[] = [];
+        if (prose) {
+          description = description.replaceAll(
+            /`([^`\r\n]+)`|\*\*([^*\r\n]+)\*\*/gu,
+            (_match: string, inline: string, strong: string) => {
+              const text = inline ?? strong;
+              (inline === undefined ? bold : code).push(text);
+              return text;
+            },
+          );
+        }
+        const paragraphs = description.split(/\r?\n/u);
+        const lines =
+          paragraphs.length === 1
+            ? wrapActivity(prefix, description, width)
+            : paragraphs.flatMap((line, index) =>
+                wrapCode(
+                  index === 0 ? prefix : " ".repeat(prefix.length),
+                  line,
+                  width,
+                ),
+              );
+        for (const text of lines) {
+          cache.lines.push({ text, kind: "path", code, bold });
+        }
+      }
+      return cache.lines;
+    }
     const elapsed = Math.max(
       0,
       Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000),
@@ -433,15 +659,84 @@ export class ScanDashboard {
   }
 }
 
-function styleInlineCode(
-  value: string,
-  code: readonly string[] | undefined,
-  kind: DashboardActivityLine["kind"],
-): string {
-  for (const text of code ?? []) {
+function detailsDescription(
+  event: Record<string, unknown>,
+): string | undefined {
+  const type = typeof event["type"] === "string" ? event["type"] : "event";
+  const payload = event["payload"];
+  if (!isRecord(payload)) return type.replaceAll("_", " ");
+
+  if (type === "session_meta") {
+    const instructions = payload["base_instructions"];
+    const text = isRecord(instructions) ? instructions["text"] : instructions;
+    return typeof text === "string" ? `system: ${text}` : "session started";
+  }
+  if (type === "turn_context") {
+    const details = [
+      "model",
+      "effort",
+      "cwd",
+      "summary",
+      "developer_instructions",
+      "user_instructions",
+    ]
+      .map((field) => payload[field])
+      .filter((detail) => typeof detail === "string" && detail !== "");
+    return `context${details.length === 0 ? "" : `: ${details.join(" · ")}`}`;
+  }
+  const itemType = typeof payload["type"] === "string" ? payload["type"] : type;
+  if (itemType === "token_count") return undefined;
+  if (itemType === "message" || itemType === "agent_message") {
+    const role =
+      typeof payload["role"] === "string" ? payload["role"] : "assistant";
+    return `${role}: ${detailsText(payload["content"] ?? payload["message"])}`;
+  }
+  if (itemType === "reasoning" || itemType.startsWith("agent_reasoning")) {
+    const text = detailsText(
+      payload["summary"] ?? payload["text"] ?? payload["delta"],
+    );
+    return text.trim() === "" ? undefined : `reasoning: ${text}`;
+  }
+  if (itemType.endsWith("_call_output")) {
+    return `result${payload["status"] === "failed" ? " failed" : ""}: ${detailsText(payload["output"])}`;
+  }
+  if (itemType.endsWith("_call")) {
+    const name =
+      typeof payload["name"] === "string" ? payload["name"] : "shell";
+    const arguments_ = payload["arguments"] ?? payload["input"];
+    const text =
+      typeof arguments_ === "string"
+        ? arguments_
+        : arguments_ === undefined
+          ? ""
+          : JSON.stringify(arguments_);
+    return `tool ${name}${text === "" ? "" : `: ${text}`}`;
+  }
+  return itemType.replaceAll("_", " ");
+}
+
+function detailsText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .flatMap((item) =>
+      isRecord(item) && typeof item["text"] === "string" ? [item["text"]] : [],
+    )
+    .join("\n");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function styleInlineCode(value: string, line: DashboardActivityLine): string {
+  for (const text of line.bold ?? []) {
+    value = value.replace(text, `\u001B[1m${text}\u001B[22m`);
+  }
+  for (const text of line.code ?? []) {
     value = value.replace(
       text,
-      `\u001B[2m${text}\u001B[22m${kind === "message" ? "\u001B[1m" : ""}`,
+      `\u001B[2m${text}\u001B[22m${line.kind === "message" ? "\u001B[1m" : ""}`,
     );
   }
   return value;
@@ -554,7 +849,29 @@ function wrapCode(prefix: string, value: string, width: number): string[] {
 function styleLine(
   value: string,
   kind: DashboardActivityLine["kind"] | "title" | undefined,
+  details = false,
 ): string {
+  if (details) {
+    return value
+      .replace(
+        /^(\s*)(\[\d{2}:\d{2}:\d{2}\])(\s+)(main|worker \d+)/u,
+        "$1\u001B[2m$2\u001B[22m$3\u001B[36m$4\u001B[39m",
+      )
+      .replace(
+        /^(.*\u001B\[39m · )((reasoning|assistant|user|system|context|result(?: failed)?|tool(?: [^:]+)?):)/u,
+        (_match: string, prefix: string, label: string, type: string) => {
+          const color =
+            type === "reasoning"
+              ? "35"
+              : type === "result"
+                ? "32"
+                : /^(?:result failed|system|context)$/u.test(type)
+                  ? "33"
+                  : "36";
+          return `${prefix}\u001B[${color}m${label}\u001B[39m`;
+        },
+      );
+  }
   if (kind === undefined) return value;
   const style = LINE_STYLES[kind];
   if (

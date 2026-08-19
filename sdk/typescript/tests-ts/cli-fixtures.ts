@@ -1,5 +1,3 @@
-import { lstat, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { main } from "../src/cli.js";
 import type {
   CodexSecurity,
@@ -16,7 +14,7 @@ import type {
   ScanWorkerStatus,
   SeverityLevel,
 } from "../src/index.js";
-import { CodexSecurityError, ScanResult } from "../src/index.js";
+import { ScanResult } from "../src/index.js";
 import type { UpdateNotice } from "../src/version.js";
 
 type MainDependencies = NonNullable<Parameters<typeof main>[3]>;
@@ -192,11 +190,17 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (args: readonly string[]) => number;
+    onCodex?: (
+      ...arguments_: Parameters<MainDependencies["runCodex"]>
+    ) => number | Promise<number>;
+    linearClient?: MainDependencies["linearClient"];
+    onRepositoryCommand?: (
+      ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
+    ) => string | Promise<string>;
     bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
-    onUpdateCheck?: () => Promise<UpdateNotice | undefined>;
+    onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
     preflight?: ScanPreflight;
     environment?: NodeJS.ProcessEnv;
@@ -245,7 +249,7 @@ export function dependencies(
       return security;
     },
     environment: options.environment ?? {},
-    checkForUpdate: async () => await options.onUpdateCheck?.(),
+    checkForUpdate: async (signal) => await options.onUpdateCheck?.(signal),
     currentDirectory: () => options.currentDirectory ?? "/current/repository",
     now: () => 0,
     setInterval: () => ({}) as NodeJS.Timeout,
@@ -255,31 +259,24 @@ export function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (args) => options.onCodex?.(args) ?? 0,
+    runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
+    runRepositoryCommand: async (command, args, repository) =>
+      (await options.onRepositoryCommand?.(command, args, repository)) ?? "",
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
+    ...(options.linearClient === undefined
+      ? {}
+      : { linearClient: options.linearClient }),
     runWorkbench: async (args) =>
       (await options.onWorkbench?.(args)) ?? { scans: [] },
     matchFindings: async (input) =>
       (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
-    exportFindings: async (arguments_) => {
-      const contents = new TextEncoder().encode(
+    exportFindings: async (arguments_) =>
+      new TextEncoder().encode(
         arguments_.format === "csv"
           ? "occurrence_id,finding_id\n"
           : arguments_.format === "json"
             ? '{"documentType":"codex-security.findings"}\n'
             : '{"version":"2.1.0"}\n',
-      );
-      if (arguments_.output !== "-") {
-        const metadata = await lstat(arguments_.output).catch(() => undefined);
-        if (metadata?.isSymbolicLink()) {
-          throw new CodexSecurityError(
-            "results.sarif: expected a regular non-symlink file",
-          );
-        }
-        await mkdir(join(arguments_.output, ".."), { recursive: true });
-        await writeFile(arguments_.output, contents, { mode: 0o600 });
-      }
-      return contents;
-    },
+      ),
   };
 }

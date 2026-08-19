@@ -99,6 +99,7 @@ export async function loadContract(
     ),
   };
   throwIfAborted(options.signal);
+  let findingsPayload: unknown = payloads["findings.json"];
 
   const ajv = createValidator();
   for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
@@ -112,7 +113,10 @@ export async function loadContract(
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
     }
-    const payload = payloads[filename as keyof typeof payloads];
+    let payload: unknown =
+      filename === "findings.json"
+        ? findingsPayload
+        : payloads[filename as keyof typeof payloads];
     let valid: boolean;
     try {
       const result = validate(payload);
@@ -120,16 +124,25 @@ export async function loadContract(
         throw new Error("asynchronous JSON Schema validation is unsupported");
       }
       valid = result;
+      if (!valid && filename === "findings.json") {
+        payload = legacySealedFindingsForValidation(payload);
+        const compatibleResult = validate(payload);
+        if (typeof compatibleResult !== "boolean") {
+          throw new Error("asynchronous JSON Schema validation is unsupported");
+        }
+        valid = compatibleResult;
+      }
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
     }
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
     }
+    if (filename === "findings.json") findingsPayload = payload;
     throwIfAborted(options.signal);
   }
   const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
-  const findings = payloads["findings.json"] as unknown as FindingsDocument;
+  const findings = findingsPayload as FindingsDocument;
   const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
   if (
     findings.scanId !== manifest.scan.id ||
@@ -171,6 +184,210 @@ export async function loadContract(
   }
   await verifyScanRoot(scanRoot, options.signal);
   return { manifest, findings, coverage };
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function legacySealedFindingsForValidation(payload: unknown): unknown {
+  const compatible = structuredClone(payload);
+  if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
+    return compatible;
+  }
+  for (const finding of compatible["findings"]) {
+    if (!isJsonRecord(finding)) continue;
+    const legacyEvidence = finding["code_evidence"];
+    if (Array.isArray(legacyEvidence)) {
+      const compatibleEvidence: JsonRecord[] = [];
+      for (const evidence of legacyEvidence) {
+        if (!isJsonRecord(evidence)) continue;
+        const id = evidence["id"];
+        const code = evidence["code"];
+        if (
+          typeof id !== "string" ||
+          id.length === 0 ||
+          typeof code !== "string" ||
+          code.length === 0
+        ) {
+          continue;
+        }
+        compatibleEvidence.push(evidence);
+      }
+      finding["code_evidence"] = compatibleEvidence;
+    } else if ("code_evidence" in finding && legacyEvidence !== null) {
+      delete finding["code_evidence"];
+    }
+
+    for (const [sectionName, listFields] of [
+      ["root_cause", ["evidenceRefs", "evidence_refs"]],
+      [
+        "validation",
+        [
+          "assertions",
+          "counterEvidence",
+          "evidenceRefs",
+          "evidence_refs",
+          "limitations",
+        ],
+      ],
+      [
+        "attackPath",
+        [
+          "assumptions",
+          "blindspots",
+          "controls",
+          "evidenceRefs",
+          "evidence_refs",
+          "limitations",
+          "preconditions",
+          "steps",
+        ],
+      ],
+    ] satisfies Array<[string, string[]]>) {
+      const section = finding[sectionName];
+      if (!isJsonRecord(section)) continue;
+      normalizeLegacyStringLists(section, listFields);
+    }
+
+    const legacyRootCause = finding["root_cause"];
+    if (isJsonRecord(legacyRootCause)) {
+      removeUnsupportedLegacyStrings(legacyRootCause, [
+        "summary",
+        "code",
+        "language",
+      ]);
+    } else if (
+      "root_cause" in finding &&
+      legacyRootCause !== null &&
+      typeof legacyRootCause !== "string"
+    ) {
+      delete finding["root_cause"];
+    }
+
+    const validation = finding["validation"];
+    if (isJsonRecord(validation)) {
+      normalizeLegacyStringOrList(validation, "evidence");
+      removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
+      removeUnsupportedLegacyNullableStrings(validation, [
+        "status",
+        "disposition",
+        "result",
+      ]);
+    }
+
+    const attackPath = finding["attackPath"];
+    if (!isJsonRecord(attackPath)) continue;
+    removeUnsupportedLegacyStrings(attackPath, ["summary"]);
+    for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
+      const detail = attackPath[field];
+      if (detail === null) {
+        delete attackPath[field];
+        continue;
+      }
+      if (typeof detail === "string") {
+        if (detail.length === 0) delete attackPath[field];
+        continue;
+      }
+      if (!isJsonRecord(detail)) {
+        if (field in attackPath) delete attackPath[field];
+        continue;
+      }
+      removeUnsupportedLegacyStrings(detail, [
+        "summary",
+        "source",
+        "sink",
+        "outcome",
+        ...(field === "reachability" ? ["attacker", "entrypoint"] : []),
+      ]);
+      normalizeLegacyStringLists(detail, [
+        "evidenceRefs",
+        "evidence_refs",
+        "transformations",
+        ...(field === "reachability" ? ["preconditions"] : []),
+      ]);
+    }
+    for (const field of ["impact", "likelihood"]) {
+      const detail = attackPath[field];
+      if (isJsonRecord(detail)) {
+        removeUnsupportedLegacyStrings(detail, ["level", "rationale", "why"]);
+      } else if (
+        detail !== undefined &&
+        detail !== null &&
+        (typeof detail !== "string" || detail.length === 0)
+      ) {
+        delete attackPath[field];
+      }
+    }
+  }
+  return compatible;
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeLegacyStringLists(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (!(field in section)) continue;
+    const value = section[field];
+    if (Array.isArray(value)) {
+      section[field] = value.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+      );
+    } else if (typeof value === "string" && value.length > 0) {
+      section[field] = [value];
+    } else {
+      delete section[field];
+    }
+  }
+}
+
+function normalizeLegacyStringOrList(section: JsonRecord, field: string): void {
+  if (!(field in section)) return;
+  const value = section[field];
+  if (typeof value === "string") {
+    if (value.length === 0) delete section[field];
+    return;
+  }
+  if (!Array.isArray(value)) {
+    delete section[field];
+    return;
+  }
+  const normalized = value.filter(
+    (item): item is string => typeof item === "string" && item.length > 0,
+  );
+  section[field] = normalized;
+}
+
+function removeUnsupportedLegacyStrings(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (
+      field in section &&
+      (typeof section[field] !== "string" || section[field].length === 0)
+    ) {
+      delete section[field];
+    }
+  }
+}
+
+function removeUnsupportedLegacyNullableStrings(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (
+      field in section &&
+      section[field] !== null &&
+      (typeof section[field] !== "string" || section[field].length === 0)
+    ) {
+      delete section[field];
+    }
+  }
 }
 
 function validateCanonicalContract(
@@ -793,11 +1010,12 @@ async function sha256ScanFile(
   try {
     throwIfAborted(signal);
     const digest = createHash("sha256");
-    for await (const chunk of file.createReadStream({
-      signal,
-      autoClose: false,
-    })) {
-      digest.update(chunk);
+    const buffer = Buffer.alloc(64 * 1024);
+    while (true) {
+      throwIfAborted(signal);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      digest.update(buffer.subarray(0, bytesRead));
     }
     throwIfAborted(signal);
     return digest.digest("hex");
@@ -830,8 +1048,8 @@ async function openCheckedScanFile(
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
-      opened.dev !== checked.metadata.dev ||
-      opened.ino !== checked.metadata.ino
+      opened.ino !== checked.metadata.ino ||
+      !(await sameCheckedFileDevice(file, checked, opened))
     ) {
       throw new ContractValidationError(
         `${context}: expected the checked regular file.`,
@@ -872,6 +1090,46 @@ async function openCheckedScanFile(
       `${context}: unable to open the checked regular file.`,
       { cause: error },
     );
+  }
+}
+
+export async function sameCheckedFileDevice(
+  file: FileHandle,
+  checked: CheckedScanFile,
+  opened: Stats,
+  platform: NodeJS.Platform = process.platform,
+  openReference: (path: string, flags: number) => Promise<FileHandle> = open,
+): Promise<boolean> {
+  if (opened.ino !== checked.metadata.ino) return false;
+  if (opened.dev === checked.metadata.dev) return true;
+  if (platform !== "win32") return false;
+
+  const [openedIdentity, checkedIdentity] = await Promise.all([
+    file.stat({ bigint: true }),
+    lstat(checked.path, { bigint: true }),
+  ]);
+  if (
+    !openedIdentity.isFile() ||
+    !checkedIdentity.isFile() ||
+    checkedIdentity.isSymbolicLink() ||
+    openedIdentity.ino !== checkedIdentity.ino
+  ) {
+    return false;
+  }
+
+  const reference = await openReference(
+    checked.path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const referenceIdentity = await reference.stat({ bigint: true });
+    return (
+      referenceIdentity.isFile() &&
+      openedIdentity.dev === referenceIdentity.dev &&
+      openedIdentity.ino === referenceIdentity.ino
+    );
+  } finally {
+    await reference.close();
   }
 }
 

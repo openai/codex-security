@@ -11,8 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "bun:test";
+import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 type JsonObject = Record<string, unknown>;
@@ -164,6 +164,45 @@ async function startMcp(root: string) {
 }
 
 describe("compact diff scan", () => {
+  test("reads committed diff previews from the selected head revision", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/feature.ts", "const marker = 'base';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+
+    writeSource(repository, "src/feature.ts", "const marker = 'head';\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "head");
+    const head = git(repository, "rev-parse", "HEAD");
+    git(repository, "checkout", "--detach", base);
+
+    const output = join(root, "rank-input.jsonl");
+    const result = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      base,
+      "--head",
+      head,
+      "--mode",
+      "revisions",
+      "--out",
+      output,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const row = JSON.parse(readFileSync(output, "utf8")) as {
+      path: string;
+      preview: string;
+    };
+    expect(row.path).toBe("src/feature.ts");
+    expect(row.preview).toContain("head");
+    expect(row.preview).not.toContain("base");
+  });
+
   test("uses the selected Git revisions and keeps deleted source files", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
@@ -206,7 +245,68 @@ describe("compact diff scan", () => {
     ]);
   });
 
-  test("includes staged, unstaged, and untracked working-tree changes", () => {
+  test("omits committed symlinks from the revision inventory", () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/handler.py", "value = 1\n");
+    writeSource(repository, "src/deleted-link.py", "handler.py");
+    git(repository, "add", ".");
+    const deletedLink = git(repository, "hash-object", "src/deleted-link.py");
+    git(
+      repository,
+      "update-index",
+      "--cacheinfo",
+      `120000,${deletedLink},src/deleted-link.py`,
+    );
+    git(repository, "commit", "-qm", "base");
+    const base = git(repository, "rev-parse", "HEAD");
+
+    rmSync(join(repository, "src", "deleted-link.py"));
+    writeSource(repository, "src/handler.py", "value = 2\n");
+    writeSource(repository, "src/丁.py", "value = 3\n");
+    writeSource(repository, "src/added-link.py", "handler.py");
+    git(repository, "add", ".");
+    const addedLink = git(repository, "hash-object", "src/added-link.py");
+    git(
+      repository,
+      "update-index",
+      "--cacheinfo",
+      `120000,${addedLink},src/added-link.py`,
+    );
+    git(repository, "commit", "-qm", "selected changes");
+    const head = git(repository, "rev-parse", "HEAD");
+    const output = join(root, "in-scope.txt");
+
+    const executable = Bun.which("python3") ?? Bun.which("python");
+    expect(executable).not.toBeNull();
+    const result = spawnSync(
+      executable!,
+      [
+        "-B",
+        "-c",
+        "import locale, runpy, sys; locale.setlocale(locale.LC_CTYPE, 'C'); runpy.run_path(sys.argv.pop(1), run_name='__main__')",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--diff-base",
+        base,
+        "--diff-head",
+        head,
+        "--out",
+        output,
+      ],
+      { encoding: "utf8", env: { ...process.env, PYTHONUTF8: "0" } },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(output, "utf8").split("\n").filter(Boolean)).toEqual([
+      "src/handler.py",
+      "src/丁.py",
+    ]);
+  });
+
+  test("keeps staged, unstaged, and untracked working-tree inputs aligned", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
     git(repository, "add", ".");
@@ -238,16 +338,46 @@ describe("compact diff scan", () => {
       "src/staged.py",
       "src/untracked.py",
     ]);
+
+    const reviewOutput = join(root, "rank-input.jsonl");
+    const review = python(
+      "generate_rank_input.py",
+      "make-diff-rank-input",
+      "--repo",
+      repository,
+      "--base",
+      "HEAD",
+      "--mode",
+      "local-patch",
+      "--out",
+      reviewOutput,
+    );
+    expect(review.status, review.stderr).toBe(0);
+    expect(
+      readFileSync(reviewOutput, "utf8")
+        .trim()
+        .split("\n")
+        .map((row) => (JSON.parse(row) as { path: string }).path),
+    ).toEqual(["src/handler.py", "src/staged.py", "src/untracked.py"]);
   });
 
   test("keeps deleted inventory paths without accepting unsafe candidates", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
+    writeSource(repository, "src/second.py", "value = 2\n");
     const inventory = join(root, "in-scope.txt");
     const input = join(root, "candidates.jsonl");
     const output = join(root, "normalized.jsonl");
-    writeFileSync(inventory, "src/deleted.py\nsrc/handler.py\n");
-    writeFileSync(input, `${JSON.stringify(candidate("src/handler.py"))}\n`);
+    writeFileSync(inventory, "src/deleted.py\nsrc/handler.py\nsrc/second.py\n");
+    writeFileSync(
+      input,
+      [
+        candidate("src/handler.py"),
+        { ...candidate("src/second.py"), summary: "Résumé: missing guard" },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n") + "\n",
+    );
     const args = [
       "--input",
       input,
@@ -266,10 +396,16 @@ describe("compact diff scan", () => {
       "--allow-missing-in-scope",
     );
     expect(accepted.status, accepted.stderr).toBe(0);
-    const normalized = JSON.parse(readFileSync(output, "utf8")) as {
-      locations: { path: string }[];
-    };
-    expect(normalized.locations[0]?.path).toBe("src/handler.py");
+    const contents = readFileSync(output, "utf8");
+    expect(contents).toContain("Résumé: missing guard");
+    const normalized = contents
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { locations: { path: string }[] });
+    expect(normalized.map((entry) => entry.locations[0]?.path).sort()).toEqual([
+      "src/handler.py",
+      "src/second.py",
+    ]);
 
     writeFileSync(inventory, "../escaped.py\nsrc/handler.py\n");
     const escaped = python(
@@ -281,7 +417,7 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
-  test("runs the compact MCP diff lifecycle through a completed scan", async () => {
+  test.each(["object", "Markdown"])("MCP diff retains %s", async (format) => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
     writeSource(repository, "src/handler.py", "value = 1\n");
@@ -311,10 +447,10 @@ describe("compact diff scan", () => {
       expect(tools.map((tool) => tool.name)).toContain(
         "record_codex_security_discovery_candidates",
       );
-      expect(
-        tools.find((tool) => tool.name === "start_codex_security_standard_scan")
-          ?.inputSchema.properties["userContext"]?.maxLength,
-      ).toBe(2400);
+      const preservedContextMaxLength = tools.find(
+        (tool) => tool.name === "start_codex_security_standard_scan",
+      )?.inputSchema.properties["userContext"]?.maxLength;
+      expect(preservedContextMaxLength).toBeUndefined();
 
       const selection = {
         targetPath: repository,
@@ -340,10 +476,11 @@ describe("compact diff scan", () => {
         claimToken: handoffClaimToken,
         threadId: owner,
       });
-      await call("get_codex_security_scan_context", {
+      const context = await call("get_codex_security_scan_context", {
         scanId,
         handoffClaimToken,
       });
+      const scanDir = (context["scan"] as JsonObject)["scanDir"] as string;
 
       const inventory = await call("prepare_codex_security_review_items", {
         scanId,
@@ -385,15 +522,201 @@ describe("compact diff scan", () => {
         ],
       });
       await call("record_candidate_attack_paths", { scanId, attackPaths: [] });
+      const canonicalModel = {
+        summary: "A local handler processes selected input (src/handler.py:1).",
+        assets: ["Integrity of the selected result."],
+        trustBoundaries: [
+          "Caller input reaches the handler without authority over private state (src/handler.py:1).",
+        ],
+        attackerCapabilities: [
+          "A caller can choose input but cannot choose another user's state.",
+        ],
+        securityObjectives: ["Keep each result bound to its selected input."],
+        assumptions: ["A shared-service deployment has not been established."],
+      };
+      const markdownFact =
+        "Selected input stays separate from private state (src/handler.py:1).";
+      const savedModelPath = join(
+        scanDir,
+        "artifacts",
+        "01_context",
+        "threat_model.md",
+      );
+      mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        savedModelPath,
+        `# Saved threat model\n\n${markdownFact}\n`,
+      );
+      const threatModel =
+        format === "Markdown"
+          ? { summary: readFileSync(savedModelPath, "utf8") }
+          : canonicalModel;
+      const openQuestions = [
+        {
+          question:
+            "Does a supported embedding share this worker across callers?",
+          followUpPrompt:
+            "Confirm the deployment's ownership and isolation controls.",
+        },
+      ];
+      const coverageNote =
+        "The handler does not grant access to another caller's state (src/handler.py:1).";
+      const finding = {
+        ruleId: "path-traversal.archive-extraction",
+        title: "Unsafe archive extraction",
+        summary: "An untrusted archive entry reaches a filesystem write.",
+        severity: { level: "high" },
+        confidence: {
+          level: "high",
+          rationale: "Source evidence establishes reachability.",
+        },
+        taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+        locations: [{ path: "src/handler.py", startLine: 1 }],
+        remediation: "Validate each output path before writing.",
+        provenance: { source: "local_plugin" },
+      };
+      const invalidRootCauseReference = await client.request("tools/call", {
+        name: "record_codex_security_scan_draft",
+        arguments: {
+          scanId,
+          handoffClaimToken,
+          findings: [
+            {
+              ...finding,
+              root_cause: {
+                evidenceRefs: ["missing-root-cause-evidence"],
+              },
+            },
+          ],
+          coverage: {
+            completeness: "complete",
+            surfaces: [{ label: "Changed files", disposition: "rejected" }],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        },
+        _meta: { "openai/threadId": owner },
+      });
+      expect(invalidRootCauseReference["isError"]).toBe(true);
+      expect(JSON.stringify(invalidRootCauseReference)).toContain(
+        "root_cause.evidenceRefs",
+      );
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
-        findings: [],
+        findings: [
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-duplicate-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-duplicate-instance",
+              reportId: "DSS-147-A",
+            },
+          },
+        ],
         coverage: {
           completeness: "complete",
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
+        },
+      });
+      expect(
+        (
+          JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
+            findings: JsonObject[];
+          }
+        ).findings.map((draftFinding) => draftFinding["identity"]),
+      ).toEqual([
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+      ]);
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-singleton",
+              reportId: "DSS-144-A",
+            },
+          },
+          {
+            ...finding,
+            code_evidence: [
+              {
+                code: "value = 2",
+                id: "legacy-source",
+              },
+            ],
+            attackPath: {
+              dataflow: { evidence_refs: ["legacy-source"] },
+            },
+          },
+          {
+            ...finding,
+            ruleId: "path-traversal.archive-upload",
+            identity: {
+              anchor: "candidate-cross-rule",
+              instance: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "second-report",
+            },
+          },
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-authored-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              reportId: "DSS-147-B",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              ledgerRowId: "ledger-row-c",
+            },
+          },
+        ],
+        threatModel,
+        coverage: {
+          completeness: "complete",
+          surfaces: [
+            {
+              label: "Changed files",
+              disposition: "rejected",
+              notes: coverageNote,
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+          openQuestions,
         },
       });
       await call("complete_codex_security_scan", {
@@ -421,36 +744,104 @@ describe("compact diff scan", () => {
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",
       );
+      expect(
+        ((completed["findings"] as JsonObject)["findings"] as JsonObject[]).map(
+          (completedFinding) => completedFinding["identity"],
+        ),
+      ).toEqual([
+        { anchor: "candidate-singleton", instance: "dss-144-a" },
+        { anchor: "unsafe-archive-extraction" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "second-report" },
+        { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+        {
+          anchor: "candidate-authored-instance",
+          instance: "dss-147-b",
+        },
+        { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
+      ]);
+      const legacyFinding = (
+        (completed["findings"] as JsonObject)["findings"] as JsonObject[]
+      )[1];
+      expect(legacyFinding?.["code_evidence"]).toEqual([
+        { code: "value = 2", id: "legacy-source" },
+      ]);
+      expect(legacyFinding?.["attackPath"]).toEqual({
+        dataflow: { evidence_refs: ["legacy-source"] },
+      });
+      expect(
+        ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
+          "threatModel"
+        ],
+      ).toEqual(threatModel);
+      expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
+        openQuestions,
+      );
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.threatModel).toEqual(threatModel);
+      expect(contract.coverage.openQuestions).toEqual(openQuestions);
+      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      const report = readFileSync(join(scanDir, "report.md"), "utf8");
+      const modelFacts =
+        format === "Markdown"
+          ? [markdownFact]
+          : Object.values(canonicalModel).flat();
+      for (const fact of modelFacts) {
+        expect(report).toContain(fact);
+      }
+      expect(report).toContain(openQuestions[0]!.question);
+      expect(report).toContain(openQuestions[0]!.followUpPrompt);
+      expect(report).toContain(coverageNote);
+
+      const terminalDir = join(root, "terminal-scan");
+      mkdirSync(terminalDir, { mode: 0o700 });
+      const markdownModel = `# Existing threat model\n\n## Assumptions\n\n${markdownFact}\n`;
+      const terminalManifest = structuredClone(
+        completed["manifest"],
+      ) as JsonObject;
+      const terminalScan = terminalManifest["scan"] as JsonObject;
+      terminalScan["threatModel"] = { summary: markdownModel };
+      delete terminalScan["sealedAt"];
+      delete terminalScan["artifacts"];
+      for (const [name, document] of [
+        ["scan-manifest.json", terminalManifest],
+        ["findings.json", completed["findings"]],
+        ["coverage.json", completed["coverage"]],
+      ] as const) {
+        writeFileSync(join(terminalDir, name), JSON.stringify(document));
+      }
+      const finalized = python(
+        "finalize_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+        "--source-root",
+        repository,
+      );
+      expect(finalized.status, finalized.stderr).toBe(0);
+      const validated = python(
+        "validate_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+      );
+      expect(validated.status, validated.stderr).toBe(0);
+      const terminalResult = JSON.parse(
+        readFileSync(join(terminalDir, "scan-manifest.json"), "utf8"),
+      ) as { scan: { threatModel: unknown; sealedAt: string } };
+      expect(terminalResult.scan.threatModel).toEqual({
+        summary: markdownModel,
+      });
+      expect(terminalResult.scan.sealedAt).toBeDefined();
+      const terminalReport = readFileSync(
+        join(terminalDir, "report.md"),
+        "utf8",
+      );
+      expect(terminalReport).toContain(markdownFact);
+      expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
+        report.match(/^#{1,2} .+$/gm),
+      );
     } finally {
       await client.close();
     }
-  });
-
-  test("preserves stable finding identities from existing public scans", () => {
-    const runtime = brotliDecompressSync(
-      Buffer.concat(
-        ["000", "001"].map((part) =>
-          readFileSync(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-        ),
-      ),
-    ).toString("utf8");
-    const source = /function buildFindings\(findings\) \{[\s\S]*?\n\}/u.exec(
-      runtime,
-    )?.[0];
-    expect(source).toBeDefined();
-    const buildFindings = new Function(
-      "semanticIdentifier",
-      `${source}\nreturn buildFindings;`,
-    )((value: string) => value) as (findings: JsonObject[]) => JsonObject[];
-
-    const [finding] = buildFindings([
-      {
-        title: "Changed title",
-        extensions: { candidateId: "candidate-stable" },
-      },
-    ]);
-    expect((finding?.["identity"] as JsonObject)["anchor"]).toBe(
-      "candidate-stable",
-    );
   });
 });

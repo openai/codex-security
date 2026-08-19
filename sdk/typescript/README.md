@@ -16,10 +16,11 @@ npx @openai/codex-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
-later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scanning and
-exporting findings also require Python 3.10 or later. If you use Python 3.10,
-install the `tomli` package. Select another interpreter with `--python`,
-`pythonPath`, or `PYTHON` when needed.
+later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scans, bulk
+scans, exports, scan history, and saved findings also require Python 3.10 or
+later. Python 3.10 also requires `tomli`. Use `--python` with `scan`,
+`bulk-scan`, or `export`; use `pythonPath` with the SDK. Set `PYTHON` to select
+an interpreter for any Python-backed command.
 
 When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
@@ -83,6 +84,7 @@ Pass scan configuration to `security.run(repository, options)` or
 | `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
 | `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
 | `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
+| `maxTimeHours`          | Limit deep-scan discovery to a positive number of hours, up to 96.                    |
 | `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                            |
 | `parentScanId`          | Link a rerun to an existing parent scan.                                              |
 | `expectedPluginVersion` | Require the original plugin version when replaying a scan.                            |
@@ -90,9 +92,11 @@ Pass scan configuration to `security.run(repository, options)` or
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
 `onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
-`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
-`onObserverError`. Preflight does not start the runtime, authenticate, resolve
-Python, inspect the plugin, or run those scan-lifecycle callbacks.
+`onTrustedAccessStatus`, `onReconnect`, `onSessionEvent`, `onWorkerStatus`,
+`onWarning`, and `onObserverError`. `onSessionEvent` receives saved scan and
+worker events with their thread IDs and worker numbers. Preflight does not start
+the runtime, authenticate, resolve Python, inspect the plugin, or run those
+scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -198,8 +202,12 @@ Trusted Access for Cyber. To apply or check your access, visit
 ## CLI
 
 ```bash
+npx @openai/codex-security scan
 npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --headless
+npx @openai/codex-security scan /path/to/repository --patch
+npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --json
+npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --create-pr
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -212,30 +220,46 @@ npx @openai/codex-security scan /path/to/repository --verbose
 npx @openai/codex-security scan /path/to/repository --dry-run
 npx @openai/codex-security scan /path/to/repository --fail-on-severity high
 npx @openai/codex-security scan /path/to/repository --max-cost 5
-npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
+npx @openai/codex-security scan /path/to/repository --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
 npx @openai/codex-security install-hook
 npx @openai/codex-security bulk-scan
 npx @openai/codex-security bulk-scan --model gpt-5.6-terra --effort high
-npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3
+npx @openai/codex-security bulk-scan --workers 4 --mode deep --max-attempts 3 --max-cost 25
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --workers 4 --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security bulk-scan repositories.csv --output-dir /path/outside/repositories/security-scans --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scans list /path/to/repository
 npx @openai/codex-security scans list --scan-root /path/outside/repository/results
+npx @openai/codex-security scans show
 npx @openai/codex-security scans show SCAN_ID
+npx @openai/codex-security scans logs
 npx @openai/codex-security scans logs SCAN_ID
+npx @openai/codex-security scans rerun
 npx @openai/codex-security scans rerun SCAN_ID
 npx @openai/codex-security scans match PREVIOUS_SCAN_ID CURRENT_SCAN_ID
 npx @openai/codex-security scans match --all
+npx @openai/codex-security scans compare
+npx @openai/codex-security scans compare PREVIOUS_SCAN_ID
 npx @openai/codex-security scans compare PREVIOUS_SCAN_ID CURRENT_SCAN_ID
+npx @openai/codex-security findings
 npx @openai/codex-security findings list /path/to/repository
 npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The route already checks permissions"
+npx @openai/codex-security export
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
+npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID
+npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
+npx @openai/codex-security patch OCCURRENCE_ID
+npx @openai/codex-security patch --scan SCAN_ID --severity high --json
+npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
+npx @openai/codex-security patch --resume-pr codex-security/patch-SCAN_ID
+npx @openai/codex-security patch --scan latest --severity medium
+npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
+npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
 ```
 
 Run `npx @openai/codex-security --version` for the installed CLI version or
@@ -255,6 +279,10 @@ directory and any enclosing Git worktree. When SARIF is produced, it is written
 to
 `<scan-dir>/exports/results.sarif`.
 
+Working-tree snapshots include files from untracked nested Git repositories.
+Initialized submodules must be clean and checked out at the commit recorded by
+the parent repository.
+
 Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
 shares them with every repository. Directories are searched recursively for
 Markdown, text, PDF, and Word (`.docx`) files.
@@ -263,8 +291,9 @@ Markdown, text, PDF, and Word (`.docx`) files.
 
 For `scan --mode deep`, `--workers` limits concurrent discovery workers,
 `--subagents` controls each worker's subagents, `--stop-after-no-new` stops after
-that many runs find no new issues, and `--max-discovery-runs` limits total runs.
-These options are also available on SDK scans:
+that many runs find no new issues, `--max-discovery-runs` limits total runs, and
+`--max-time-hours` limits discovery duration. These options are also available
+on SDK scans:
 
 ```ts
 await security.run("/path/to/repository", {
@@ -273,6 +302,7 @@ await security.run("/path/to/repository", {
   subagents: 0,
   stopAfterNoNew: 3,
   maxDiscoveryRuns: 10,
+  maxTimeHours: 1.5,
 });
 ```
 
@@ -285,7 +315,14 @@ workers = 2
 subagents = 0
 stop_after_no_new = 3
 max_discovery_runs = 10
+max_time_hours = 1.5
 ```
+
+The discovery deadline defaults to 96 hours. The configured value may be any
+positive number, including fractional hours, up to 96. At the deadline,
+in-flight discovery stops and completed findings are reduced and returned.
+The 97-hour outer tool-call timeout reserves approximately one hour for final
+reduction and result delivery, including at the 96-hour maximum.
 
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
@@ -305,9 +342,29 @@ for a passing policy. Incomplete scans still write the available human or JSON
 result to stdout and a coverage warning to stderr, including in report-only
 mode.
 
+Use `--patch` to fix and verify confirmed findings after a complete scan.
+`--patch-severity high` selects high and critical findings; the default is low
+and above. After showing the findings summary, interactive scans with findings
+ask whether to open a color-coded finding browser with complete finding details
+and a separate patch-instructions panel. Use the arrow keys to
+browse, `Tab` to inspect details, `Space` to select individual findings, `i` to
+edit instructions for the focused finding, `1`–`4` to select by severity, and
+`r` to optionally create a GitHub pull request after patching. Press `Enter` to
+patch or `q` to keep the checkout unchanged. Each selected finding runs in its
+own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
+saved-finding `patch` command to commit only verified patch files and open a
+pull request with `gh`. If the push or pull request fails, run the printed
+`patch --resume-pr BRANCH` command from the same repository. It uses the saved
+commit without running Codex again and refuses to publish if the branch changed.
+JSON scan results include `patchSeverity`. Scan and
+saved-finding results include one `patches` entry per selected finding with
+status `verified`, `no_change`, `blocked`, or `failed`, plus `pullRequest` when
+one is created. When `--fail-on-severity` is also set, verified and already-fixed
+findings no longer fail the policy.
+
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
 the implied provider. Use `--model gpt-5.6-terra` to switch models and
-`--effort minimal|low|medium|high|xhigh` to set reasoning effort. Repeat
+`--effort minimal|low|medium|high|xhigh|max` to set reasoning effort. Repeat
 `--codex KEY=VALUE` for other Codex settings; existing
 `--codex 'model_reasoning_effort="high"'` overrides remain supported.
 
@@ -318,7 +375,9 @@ configuration. Each scan starts with a private runtime and these Codex
 defaults:
 
 ```toml
-cli_auth_credentials_store = "file"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+cli_auth_credentials_store = "auto"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
@@ -367,37 +426,41 @@ and `features.multi_agent_v2.enabled=false` are incompatible and rejected.
 `model_reasoning_effort` `--codex` keys; they do not accept general scan
 runtime overrides.
 
-These overrides do not change the scan's approval policy or filesystem
-permissions. See [Local security model](#local-security-model).
+These overrides cannot replace the scanner-owned approval reviewer or
+filesystem profile. Use `--codex 'approval_policy="never"'` to deny approval
+requests instead of reviewing them automatically. See
+[Local security model](#local-security-model).
 
 ### Deep-scan engine configuration
 
-When the bundled plugin runs in a normal Codex host, its repeated-discovery
-engine reads `$CODEX_HOME/codex-security/config.toml`, defaulting to
+Deep scans read `$CODEX_HOME/codex-security/config.toml`, defaulting to
 `~/.codex/codex-security/config.toml`:
 
 ```toml
 [deep_scan]
-workers = "auto"
+workers = 4
 subagents = 3
-stop_after_no_new = 6
-max_discovery_runs = 60
+stop_after_no_new = 4
+stop_after_consecutive_errors = 3
+max_discovery_runs = 40
+max_time_hours = 96
 ```
 
-`workers = "auto"` uses half the available parallelism, with a minimum of one
-and a maximum of six discovery workers. Set `workers` to a positive integer to
-choose an explicit count. `subagents` must be a nonnegative integer;
-`stop_after_no_new` and `max_discovery_runs` must be positive integers. Unknown
-`[deep_scan]` keys are rejected.
+The default is four discovery workers; the legacy `workers = "auto"` setting
+also resolves to four. Set `workers` to a positive integer to choose an explicit
+count. `subagents` must be a nonnegative integer;
+`stop_after_no_new`, `stop_after_consecutive_errors`, and `max_discovery_runs`
+must be positive integers. `max_time_hours` must be a positive finite number no
+greater than 96; fractional hours are supported. Unknown `[deep_scan]` keys are
+rejected.
 
 These settings are separate from Codex's
 `features.multi_agent_v2.max_concurrent_threads_per_session` and
-`bulk-scan --workers`. Importantly, standalone CLI and SDK scans create an
-isolated `CODEX_HOME` and do not import the ambient deep-scan configuration
-file. Consequently, `scan --mode deep` currently uses the deep engine's
-defaults; there are no standalone CLI flags for these four settings. Use
-`--codex` to adjust the Codex session thread limit, not to set `[deep_scan]`
-values.
+`bulk-scan --workers`. Standalone CLI and SDK scans create an isolated
+`CODEX_HOME`, import the ambient `[deep_scan]` configuration, and apply explicit
+CLI or SDK options on top. Set `stop_after_consecutive_errors` in the
+configuration file. Use `--codex` to adjust the Codex session thread limit, not
+to set `[deep_scan]` values.
 
 ### Environment variables
 
@@ -406,10 +469,13 @@ The CLI and SDK recognize the following user-configurable environment:
 | Variable                                                                    | Effect                                                                                        |
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
+| `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default Linear team and project for completed-scan publication.                               |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Patch Linear issues or publish directly with a personal API key.                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
+| `CODEX_CLI_PATH`                                                            | Use another Codex executable for authentication, plugin setup, scans, and nested workers.     |
 | `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
 | `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                     |
 | `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                           |
@@ -417,8 +483,13 @@ The CLI and SDK recognize the following user-configurable environment:
 | `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
 | `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
 
+On Windows, `CODEX_CLI_PATH` must name a native `.exe` or `.com`. Command
+shims such as `codex.cmd` automatically use the bundled Codex executable
+instead.
+
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
-the managed Codex runtime, and finally `python3` or `python` from `PATH`.
+the managed Codex runtime, and finally `python3` or `python` from `PATH` (`py`
+is also supported on Windows).
 `CODEX_SECURITY_STATE_DIR` takes precedence over `CODEX_HOME`; keep both
 state and result paths outside the scanned repository.
 
@@ -460,9 +531,8 @@ Progress and summaries use stderr; structured scan results remain on stdout.
 Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Structured JSON results remain on stdout. Verbose diagnostics may contain
-sensitive data; review local logs before sharing them. The interactive
-dashboard omits activity containing recognizable credentials.
+Structured JSON results remain on stdout. Review sensitive verbose logs before
+sharing them. The normal activity feed hides credentials.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
@@ -470,8 +540,12 @@ scan history, and bulk-scan receipt. Estimates use
 including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
-running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit.
+running cost exceeds the limit. If a Deep Scan has already finished discovery,
+it returns a sealed partial report with any completed findings and lists
+unvalidated candidates as follow-up work. Requests already in progress can
+finish above the limit; preparing the partial report makes no additional model
+requests. Incomplete coverage retains its existing exit code.
+For `bulk-scan`, the limit applies separately to each repository attempt.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -504,28 +578,147 @@ Use `--post-scan-prompt-file PATH` to run a follow-up in the same authenticated
 session after each scan, including incomplete or failed scans. Canceled scans
 and scans stopped at their configured cost limit do not start another turn.
 
-`--workers` limits concurrent scans and `--max-attempts` retries failures.
-Results remain under `--output-dir`; rerun the same command to resume.
+`--workers` sets the number of concurrent repository scans and defaults to
+`4`. `--max-attempts` sets how many times each pending repository can run per
+invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
+same command to resume.
+
+### Publish completed scans to Linear
+
+Publish every finding from a completed standard, deep, or scoped scan to one
+Linear team:
+
+```bash
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Add `--linear-project PROJECT_ID` to place the issues in a Linear project.
+The existing `--project` flag remains an alias. Without a project, issues are
+created directly in the selected team.
+
+To choose from all completed scans saved in your local scan history, omit the
+scan directory. The selector highlights each repository and shows its finding
+count, relative run time, and abbreviated scan ID:
+
+```bash
+npx @openai/codex-security publish scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and the
+optional `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue
+titles without creating them, or `--json` to return structured publication
+results.
+Interactive publication shows a full-screen activity view with live Codex
+output and issue-creation progress. Other terminals receive plain progress on
+stderr, so `--json` output remains machine-readable.
+
+By default, publishing starts Codex with your existing Codex configuration and
+connected Linear app. Sign in to Codex and connect Linear before publishing in
+this mode. No separate Linear API token is required, and publication does not
+use the isolated Codex home created for security scans.
+
+To publish directly through the Linear API without starting Codex, configure a
+Linear personal API key:
+
+```bash
+export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID
+```
+
+Direct API publication leaves issues unassigned by default. Pass
+`--linear-assignee teammate@example.com` or `--linear-assignee USER_ID` to
+assign the issues to a Linear user by email address or user ID.
+`--linear-assignee` requires direct API publication.
+
+You can also pass `--linear-api-key KEY`, which takes precedence over
+`CODEX_SECURITY_LINEAR_API_KEY`. Prefer the environment variable to avoid
+exposing your API key in shell history and process listings. API keys are not
+added to successful publication results, scan history, or sealed scan artifacts.
+Error messages are preserved as returned. `--dry-run` never contacts Linear in
+either mode.
+
+Each finding creates a separate new issue titled
+`[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
+repository, scanned scope, source locations and code snippets, severity,
+confidence, vulnerability classification, summary, and remediation guidance.
+Verified immutable Git revisions include source links. Findings are published
+concurrently in batches of up to 20. Successful issue identifiers are linked
+to their findings in the local scan-history database, and structured results
+are read back from that database rather than generated by Codex. The completed
+scan must already exist in the local scan history. Running publication again
+creates another set of issues for the same scan; existing issues are not
+matched, updated, or reused.
+
+Issue descriptions contain source code and vulnerability details. Select a
+Linear destination authorized to receive that information. Publication receipts
+are stored separately from the sealed scan artifacts.
+
+You can also publish a scan from TypeScript:
+
+```ts
+import { publishScan } from "@openai/codex-security";
+
+const publication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  onProgress: (progress) => {
+    if (progress.type === "issue_completed") {
+      console.error(
+        `Processed ${progress.completed} of ${progress.total} findings.`,
+      );
+    }
+  },
+});
+
+console.log(publication.scanId);
+console.log(publication.created.length);
+```
+
+Add `projectId: "PROJECT_ID"` to the options to publish into a specific Linear
+project instead of directly to the team.
+
+Pass `linearApiKey` to publish directly through the Linear API. Omit
+`assigneeId` to leave issues unassigned, or supply a Linear user ID or email
+address to select an assignee:
+
+```ts
+const directPublication = await publishScan("/path/to/completed-scan", {
+  destination: "linear",
+  teamId: "TEAM_ID",
+  linearApiKey: process.env["CODEX_SECURITY_LINEAR_API_KEY"],
+  assigneeId: "teammate@example.com",
+});
+```
 
 ### Scan history and reruns
 
-`npx @openai/codex-security scans list` lists scans for the current repository. Pass a
-repository path to inspect another checkout, `--scan-root DIR` to list scans
-whose artifacts are under a particular root. `scans show SCAN_ID` includes the
-scan configuration, results, coverage, and artifact locations. Add
+`scans` or `scans list` lists scans for the current repository. Pass a repository
+path to inspect another checkout, or `--scan-root DIR` to list scans whose
+artifacts are under a particular root. `scans show` opens the latest completed
+scan for the current repository. Pass `SCAN_ID` to inspect another scan. Scan
+details include the configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
-`scans logs SCAN_ID` shows complete session events from the scan and its
-workers, which can include source code and credentials.
+`scans logs` shows session events from the latest scan, including an active scan.
+Pass `SCAN_ID` to select another scan. During a scan, press `d` for live details.
+Filter with `a` for all sources, `m` for the main scan, or `1`–`9` for a worker.
+Logs and live details can contain source code and credentials.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
 
-Scan history uses the existing Codex Security workbench database at
-`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Set
-`CODEX_SECURITY_STATE_DIR` to place the database elsewhere. Scan credentials
-are never stored in the scan configuration. Recorded failure summaries and
-bulk-scan receipts omit messages that contain recognizable credentials.
+Scan history uses `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3` when
+`CODEX_SECURITY_STATE_DIR` is set. Otherwise, it uses
+`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`; `CODEX_HOME`
+defaults to `~/.codex`. Scan credentials are never stored in the scan
+configuration. Recorded failure summaries and bulk-scan receipts omit messages
+that contain recognizable credentials.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the
@@ -535,22 +728,25 @@ default directory, select a writable directory outside the scanned repository:
 export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
 ```
 
-Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as
-a false positive and explain why. Later scans dismiss a matching finding only
-when the same reason still applies.
+`findings` or `findings list` lists open findings for the current repository.
+Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as a
+false positive and explain why. Later scans dismiss a matching finding only when
+the same reason still applies.
 
-`scans rerun SCAN_ID` repeats the original configuration against the current
-checkout so a fixed vulnerability can be checked again.
+`scans rerun` repeats the latest completed scan against the current checkout.
+Pass `SCAN_ID` to rerun another scan.
 
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
 cause; `scans match --all` matches all completed scans of the current repository,
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
 
-`scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
-root cause, reuses saved matches, and reports findings as new, persisting,
-reopened, resolved, or unknown. Missing findings are not treated as resolved when
-the later scan is incomplete or does not cover their original scope.
+`scans compare` compares the two latest completed scans. Pass one scan ID to
+compare it with the latest completed scan, or two IDs to select both scans. It
+matches findings by root cause, reuses saved matches, and reports findings as
+new, persisting, reopened, resolved, or unknown. Missing findings are not
+treated as resolved when the later scan is incomplete or does not cover their
+original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
@@ -577,12 +773,14 @@ npx @openai/codex-security scan . \
 ```
 
 JSON scans never use interactive terminal controls, even when stderr is a TTY.
-The `validate`, `patch`, `login`, and `logout` commands reject `--json` because
-they do not produce structured CLI output. Sign-in commands remain interactive.
-CSV exports cannot be written to stdout while JSON output is requested.
+Saved-finding patch commands support `--json`; literal issue and file patch
+commands do not. The `validate`, `login`, and `logout` commands reject `--json`.
+Sign-in commands remain interactive. CSV exports cannot be written to stdout
+while JSON output is requested.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
-starting Codex or loading credentials. JSON preserves the sealed findings
+starting Codex or loading credentials. Without a scan directory, it exports the
+latest completed scan for the current repository. JSON preserves the sealed findings
 document. CSV uses the portable findings columns, marks findings as open, and
 does not include local workbench triage state. The exporter validates the seal
 before writing, accepts `--output -` for stdout, and can use
@@ -592,11 +790,30 @@ Run `npx @openai/codex-security export --help` for all export options.
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
 input can be either a file, whose contents are read into the request, or literal
-text. Both commands operate on the current directory, use the scan model
-and reasoning defaults, ignore unrelated user configuration and plugins, and
-print the final response without the underlying Codex event stream. Override
-the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
-`--effort high` or `--codex 'model_reasoning_effort="high"'`.
+text. These inputs operate on the current directory. Pass a saved finding or
+occurrence ID instead to patch its original repository, or use
+`patch --scan SCAN_ID --severity high` for high and critical findings from one
+scan. `--scan latest` selects the most recent scan of the current repository.
+Saved-finding patch commands accept `--json` and return a verified, already
+fixed, blocked, or failed result for each finding. Both commands use the scan
+model and reasoning defaults and disable plugins. Patching starts a separate
+saved task in the Codex desktop app for each finding. Override the model with
+`--codex 'model="gpt-5.6-sol"'` and the
+reasoning effort with `--effort high` or
+`--codex 'model_reasoning_effort="high"'`.
+
+Use `patch --linear-issue ISSUE` to import a Linear issue by identifier or URL.
+Repeat `--linear-issue` to include more issues. Use
+`patch --linear-project "PROJECT"` to patch every open issue in a project. Add
+`--linear-filter '{"labels":{"name":{"eq":"security"}}}'` to apply a native
+Linear issue filter on the server. Completed and canceled issues are excluded
+unless the filter explicitly sets `state`. Set `CODEX_SECURITY_LINEAR_API_KEY`
+for a personal API key, or `LINEAR_ACCESS_TOKEN` for an OAuth access token.
+`LINEAR_API_KEY` is also accepted. `--linear-api-key KEY` overrides these
+environment settings; prefer the environment variable to keep keys out of shell
+history. Imported content is always literal, and issue URLs must match the
+selected workspace. Linear access is read-only, and its credentials are not
+passed to the patch subprocess.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
@@ -633,7 +850,7 @@ from the root of the Codex Security repository:
 mkdir -p results state
 chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
-export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.4
+export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:latest
 docker compose pull codex-security
 docker compose run --rm codex-security login --device-auth
 docker compose run --rm codex-security
@@ -669,11 +886,15 @@ repository, Git installation, configured tools, and other scans under the
 same account are not separate security principals.
 
 Every scan uses the `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. It can read the local filesystem and write to
-workspace roots and the selected scan state directory. Scans do not request
-interactive approval. Setting `approval_policy`, `sandbox_mode`, or permissions
-through `--codex` or SDK `codexOverrides` does not replace these controls or
-make them more restrictive. Independently enforced host and network
+automatically reviewed execution approvals. Its baseline profile allows reads
+of the local filesystem and writes to workspace roots and the selected scan
+state directory. Approval requests are reviewed without an interactive prompt;
+approved requests can grant additional permissions for a specific operation.
+Use `--codex 'approval_policy="never"'` or a selected profile with that policy
+to deny all requests instead. Other `approval_policy`, `approvals_reviewer`,
+`sandbox_mode`, or permission overrides cannot replace the reviewer or baseline
+filesystem profile. Saved scans retain their effective approval policy; older
+saved scans remain deny-all when rerun. Independently enforced host and network
 restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment, including

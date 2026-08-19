@@ -305,6 +305,80 @@ describe("malformed scan artifact recovery", () => {
     });
   });
 
+  test("builds each ordinary scan context once without losing selected findings", async () => {
+    const fixture = await startDraftScan();
+    const findingsPath = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(findingsPath);
+    const original = document.findings[0]!;
+    document.findings = Array.from({ length: 21 }, (_, index) => {
+      const finding = structuredClone(original);
+      finding.identity.anchor = `scan-context-finding-${index}`;
+      return finding;
+    });
+    await writeJson(findingsPath, document);
+    await completeScan(fixture);
+
+    const page = await workbench(fixture, [
+      "list-findings",
+      "--scan-id",
+      fixture.scanId,
+      "--offset",
+      "20",
+      "--limit",
+      "1",
+    ]);
+    const occurrenceId = (
+      page["findingsPage"] as {
+        findings: Array<{ occurrenceId: string }>;
+      }
+    ).findings[0]!.occurrenceId;
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_db as workbench",
+          "calls = []",
+          "original = workbench.scan_result",
+          "def count_result(connection, scan, **kwargs):",
+          "    calls.append(kwargs.get('occurrence_id'))",
+          "    return original(connection, scan, **kwargs)",
+          "workbench.scan_result = count_result",
+          "with workbench.connect() as connection:",
+          "    ordinary = workbench.scan_context(connection, sys.argv[2])",
+          "    ordinary_calls = len(calls)",
+          "    calls.clear()",
+          "    selected = workbench.scan_context(connection, sys.argv[2], sys.argv[3])",
+          "print(json.dumps({'ordinaryCalls': ordinary_calls, 'selectedCalls': len(calls), 'ordinaryCount': len(ordinary['scan']['findings']), 'selectedCount': len(selected['scan']['findings']), 'workspaceCount': len(selected['workspace']['results']['findings']), 'selectedIncluded': any(finding['occurrenceId'] == sys.argv[3] for finding in selected['scan']['findings'])}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.scanId,
+        occurrenceId,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual({
+      ordinaryCalls: 1,
+      selectedCalls: 2,
+      ordinaryCount: 20,
+      selectedCount: 21,
+      workspaceCount: 20,
+      selectedIncluded: true,
+    });
+  }, 30_000);
+
   test("returns authoritative clean, dirty, and nested Git target contracts", async () => {
     for (const kind of ["clean", "dirty", "nested"] as const) {
       const fixture = await startDraftScan(kind);
@@ -386,6 +460,94 @@ describe("malformed scan artifact recovery", () => {
     expect((await completeScan(fixture)).progress.status).toBe("complete");
   });
 
+  test.each([
+    ["unavailable", undefined],
+    [
+      "worker-inclusive",
+      {
+        coverage: "complete",
+        source: "codex_rollout",
+        threadCount: 3,
+        inputTokens: 5_000,
+        cachedInputTokens: 400,
+        cacheWriteInputTokens: 0,
+        outputTokens: 120,
+        reasoningOutputTokens: 20,
+        totalTokens: 5_120,
+      },
+    ],
+  ] as const)(
+    "reconciles authoritative scan cost without replacing %s usage or sealed artifacts",
+    async (_scenario, measuredUsage) => {
+      const fixture = await startDraftScan();
+      const firstCompletion = await workbench(fixture, [
+        "complete-scan",
+        "--scan-id",
+        fixture.scanId,
+        ...(measuredUsage === undefined
+          ? []
+          : ["--cost-json", JSON.stringify({ usage: measuredUsage })]),
+      ]);
+      const initiallyCompleted = firstCompletion["scan"] as ScanSummary & {
+        usage: Record<string, unknown>;
+        cost?: unknown;
+      };
+      expect(initiallyCompleted.progress.status).toBe("complete");
+      expect(initiallyCompleted.usage).toBeDefined();
+      if (measuredUsage !== undefined) {
+        expect(initiallyCompleted.usage).toEqual(measuredUsage);
+      }
+      expect(initiallyCompleted.cost).toBeUndefined();
+
+      const artifactNames = [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+        "report.md",
+      ];
+      const sealedArtifacts = await Promise.all(
+        artifactNames.map((name) => readFile(join(fixture.scanDir, name))),
+      );
+      const cost = {
+        model: "gpt-5.6-sol",
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        cacheWriteInputTokens: 0,
+        outputTokens: 30,
+        estimatedUsd: 0.00625,
+      };
+
+      const reconciled = await workbench(fixture, [
+        "complete-scan",
+        "--scan-id",
+        fixture.scanId,
+        "--cost-json",
+        JSON.stringify(cost),
+      ]);
+      expect(reconciled["scan"]).toMatchObject({
+        progress: { status: "complete" },
+        usage: initiallyCompleted.usage,
+        cost,
+      });
+
+      const persisted = await workbench(fixture, [
+        "get-scan",
+        "--scan-id",
+        fixture.scanId,
+      ]);
+      expect(persisted["scan"]).toMatchObject({
+        progress: { status: "complete" },
+        usage: initiallyCompleted.usage,
+        cost,
+      });
+      expect(
+        await Promise.all(
+          artifactNames.map((name) => readFile(join(fixture.scanDir, name))),
+        ),
+      ).toEqual(sealedArtifacts);
+    },
+  );
+
   test("preserves target-drift classification from prepared completion", async () => {
     const fixture = await startDraftScan();
     const source = join(fixture.repository, "src", "extract.py");
@@ -435,6 +597,23 @@ describe("malformed scan artifact recovery", () => {
       fixture.scanId,
     ]);
     expect((stored["scan"] as ScanSummary).progress.status).toBe("failed");
+  });
+
+  test("keeps explicit scan cancellation distinct from failure", async () => {
+    const fixture = await startDraftScan();
+
+    await workbench(fixture, ["cancel-scan", "--scan-id", fixture.scanId]);
+    const stored = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+
+    expect(stored["scan"]).toMatchObject({
+      canceledAt: expect.any(String),
+      failureMessage: null,
+      progress: { status: "canceled" },
+    });
   });
 
   test("normalizes finding identities and persists recovery warnings", async () => {

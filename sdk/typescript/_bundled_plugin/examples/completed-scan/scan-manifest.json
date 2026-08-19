@@ -21,7 +21,7 @@
     },
     "scope": {
       "includePaths": [
-        "src/"
+        "."
       ],
       "excludePaths": []
     },
@@ -35,7 +35,7 @@
       },
       {
         "path": "coverage.json",
-        "sha256": "ca91e7a3a89a477796b912232bb3473dead1d342f8b6b37b073bda168819aaa6",
+        "sha256": "d55b9b98d48323b4659dfee6531ec83ec538f2084325412b7188bf85ad68b01b",
         "mediaType": "application/json"
       }
     ]

@@ -40,10 +40,91 @@ def git_bytes(
     return completed.stdout if completed.returncode == 0 else None
 
 
+def git_blob_bytes(
+    target: Path,
+    object_names: list[str],
+    *,
+    git_dir: Path | None = None,
+    work_tree: Path | None = None,
+) -> list[bytes | None]:
+    """Read ordered raw blobs with one NUL-framed ``git cat-file --batch`` call."""
+    if not object_names:
+        return []
+
+    request = b"\0".join(os.fsencode(name) for name in object_names) + b"\0"
+    completed = git_command(
+        target,
+        "cat-file",
+        "--batch",
+        "-Z",
+        text=False,
+        input_data=request,
+        git_dir=git_dir,
+        work_tree=work_tree,
+    )
+    if completed.returncode != 0:
+        return [None] * len(object_names)
+
+    try:
+        return _decode_git_batch_blobs(completed.stdout, len(object_names))
+    except ValueError:
+        return [None] * len(object_names)
+
+
+def _decode_git_batch_blobs(output: bytes, count: int) -> list[bytes | None]:
+    """Decode ordered ``cat-file --batch -Z`` records without scanning blob bytes."""
+    blobs: list[bytes | None] = []
+    offset = 0
+    for _ in range(count):
+        header, offset = _read_nul_field(output, offset)
+        size = _git_batch_blob_size(header)
+        if size is None:
+            blobs.append(None)
+            continue
+        blob, offset = _read_sized_nul_field(output, offset, size)
+        blobs.append(blob)
+    return blobs
+
+
+def _read_nul_field(output: bytes, offset: int) -> tuple[bytes, int]:
+    """Read one NUL-terminated protocol field and return the next offset."""
+    end = output.find(b"\0", offset)
+    if end < 0:
+        raise ValueError("missing NUL terminator")
+    return output[offset:end], end + 1
+
+
+def _git_batch_blob_size(header: bytes) -> int | None:
+    """Return a blob header's byte count, or ``None`` for a non-blob record."""
+    fields = header.rsplit(b" ", 2)
+    if len(fields) != 3 or fields[1] != b"blob":
+        return None
+    try:
+        size = int(fields[2])
+    except ValueError as error:
+        raise ValueError("invalid blob size") from error
+    if size < 0:
+        raise ValueError("invalid blob size")
+    return size
+
+
+def _read_sized_nul_field(
+    output: bytes,
+    offset: int,
+    size: int,
+) -> tuple[bytes, int]:
+    """Read exactly ``size`` blob bytes followed by one NUL record terminator."""
+    end = offset + size
+    if output[end : end + 1] != b"\0":
+        raise ValueError("missing blob terminator")
+    return output[offset:end], end + 1
+
+
 def git_command(
     target: Path,
     *args: str,
     text: bool,
+    input_data: str | bytes | None = None,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
@@ -65,6 +146,7 @@ def git_command(
             capture_output=True,
             env=environment,
             text=text,
+            input=input_data,
         )
     except FileNotFoundError:
         # Git is optional for Codebase scans. Treat an unavailable executable like

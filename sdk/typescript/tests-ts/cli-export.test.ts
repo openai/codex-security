@@ -1,4 +1,6 @@
 import {
+  chmod,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -20,6 +22,16 @@ import {
   capture,
   dependencies,
 } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+
+async function copyCompletedScan(root: string): Promise<string> {
+  const scan = join(root, "scan");
+  await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), scan, {
+    recursive: true,
+  });
+  if (process.platform !== "win32") await chmod(scan, 0o700);
+  return scan;
+}
 
 describe("CLI", () => {
   test("does not pass credentials or Python startup paths to the exporter", () => {
@@ -63,6 +75,28 @@ describe("CLI", () => {
       expect(stdout.text()).toBe(expected);
       expect(stderr.text()).toBe("");
     }
+  });
+
+  test("exports the latest completed scan when no directory is provided", async () => {
+    const scanDir = join(tmpdir(), "codex-security-latest-scan");
+    const deps = dependencies({
+      onWorkbench: () => ({ scans: [{ scanId: "latest-scan", scanDir }] }),
+    });
+    let exportedScanDir = "";
+    deps.exportFindings = async (arguments_) => {
+      exportedScanDir = arguments_.scanDir;
+      return new Uint8Array();
+    };
+
+    expect(
+      await main(
+        ["export", "--output", "-"],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(exportedScanDir).toBe(scanDir);
   });
 
   test("waits for delayed stdout writes without closing the destination", async () => {
@@ -307,27 +341,32 @@ describe("CLI", () => {
   test("writes exported findings to the requested file", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
     try {
-      for (const [format, filename, expected] of [
-        ["csv", "findings.csv", "occurrence_id,finding_id\n"],
-        [
-          "json",
-          "findings.json",
-          '{"documentType":"codex-security.findings"}\n',
-        ],
-        ["sarif", "results.sarif", '{"version":"2.1.0"}\n'],
+      const scan = await copyCompletedScan(directory);
+      for (const [format, filename] of [
+        ["csv", "findings.csv"],
+        ["json", "findings.json"],
+        ["sarif", "results.sarif"],
       ] as const) {
         const stdout = capture();
         const stderr = capture();
         const output = join(directory, filename);
         expect(
           await main(
-            ["export", "scan", "--export-format", format, "--output", output],
+            ["export", scan, "--export-format", format, "--output", output],
             stdout.stream,
             stderr.stream,
-            dependencies(),
           ),
         ).toBe(0);
-        expect(await readFile(output, "utf8")).toBe(expected);
+        const contents = await readFile(output, "utf8");
+        if (format === "csv") {
+          expect(contents).toContain("occurrence_id,finding_id,");
+        } else if (format === "json") {
+          expect(JSON.parse(contents)).toMatchObject({
+            documentType: "codex-security.findings",
+          });
+        } else {
+          expect(JSON.parse(contents)).toMatchObject({ version: "2.1.0" });
+        }
         if (process.platform !== "win32")
           expect((await stat(output)).mode & 0o777).toBe(0o600);
         expect(stdout.text()).toBe("");
@@ -335,6 +374,64 @@ describe("CLI", () => {
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("expands home-relative export paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-export-home-"));
+    const home = join(root, "home");
+    const currentDirectory = join(root, "current");
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    try {
+      await mkdir(home);
+      await mkdir(currentDirectory);
+      const scan = await copyCompletedScan(home);
+      const sourceRoot = join(home, "source");
+      await mkdir(sourceRoot);
+      process.env["HOME"] = home;
+      process.env["USERPROFILE"] = home;
+
+      const exports: Array<{
+        scanDir: string;
+        output: string;
+        sourceRoot?: string;
+      }> = [];
+      const deps = dependencies({ currentDirectory });
+      deps.exportFindings = async (arguments_) => {
+        exports.push(arguments_);
+        return undefined;
+      };
+      expect(
+        await main(
+          [
+            "export",
+            "~/scan",
+            "--export-format",
+            "sarif",
+            "--output",
+            "~/findings.sarif",
+            "--source-root",
+            "~/source",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(exports).toEqual([
+        expect.objectContaining({
+          scanDir: await realpath(scan),
+          output: join(await realpath(home), "findings.sarif"),
+          sourceRoot,
+        }),
+      ]);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -366,6 +463,7 @@ describe("CLI", () => {
   test("rejects a repository-controlled output symlink without following it", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
     try {
+      const scan = await copyCompletedScan(directory);
       const outside = join(directory, "outside.txt");
       const output = join(directory, "results.sarif");
       await writeFile(outside, "unchanged\n");
@@ -373,16 +471,15 @@ describe("CLI", () => {
       const stderr = capture();
       expect(
         await main(
-          ["export", "scan", "--output", output],
+          ["export", scan, "--output", output],
           capture().stream,
           stderr.stream,
-          dependencies(),
         ),
       ).toBe(2);
       expect(await readFile(outside, "utf8")).toBe("unchanged\n");
       expect((await lstat(output)).isSymbolicLink()).toBe(true);
-      expect(stderr.text()).toBe(
-        "codex-security: results.sarif: expected a regular non-symlink file\n",
+      expect(stderr.text()).toMatch(
+        /codex-security: results\.sarif: (?:expected a regular non-symlink file|\[Errno 22\] scan-local files must not be reparse points)/u,
       );
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -422,18 +519,18 @@ describe("CLI", () => {
   test("creates the optional scan-local exports directory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
     try {
-      const scan = join(directory, "scan");
+      const scan = await copyCompletedScan(directory);
       const output = join(scan, "exports", "results.sarif");
-      await mkdir(scan);
       expect(
         await main(
           ["export", scan, "--output", output],
           capture().stream,
           capture().stream,
-          dependencies(),
         ),
       ).toBe(0);
-      expect(await readFile(output, "utf8")).toBe('{"version":"2.1.0"}\n');
+      expect(JSON.parse(await readFile(output, "utf8"))).toMatchObject({
+        version: "2.1.0",
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -442,11 +539,10 @@ describe("CLI", () => {
   test("exports through a symlinked output parent", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
     try {
-      const scan = join(directory, "scan");
+      const scan = await copyCompletedScan(directory);
       const actualOutput = join(directory, "actual-output");
       const linkedOutput = join(directory, "linked-output");
       const output = join(linkedOutput, "results.json");
-      await mkdir(scan);
       await mkdir(actualOutput);
       await writeFile(join(actualOutput, "results.json"), "old\n");
       await symlink(
@@ -462,7 +558,6 @@ describe("CLI", () => {
           ["export", scan, "--export-format", "json", "--output", output],
           stdout.stream,
           stderr.stream,
-          dependencies(),
         ),
       ).toBe(0);
       expect(

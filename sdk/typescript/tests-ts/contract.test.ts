@@ -1,18 +1,22 @@
 import { createHash } from "node:crypto";
+import type { Stats } from "node:fs";
 import {
   chmod,
   cp,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   rm,
   symlink,
+  type FileHandle,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { ContractValidationError, loadContract } from "../src/index.js";
+import { sameCheckedFileDevice } from "../src/contract.js";
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -101,6 +105,124 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
+  test("ships a completed example that passes tracking preflight", () => {
+    const result = Bun.spawnSync(
+      [
+        Bun.which("python3") ?? "python",
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
+        EXAMPLE,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  });
+
+  test("compares exact Windows volume serials without rounding file identity", async () => {
+    const scanDir = await copyExample();
+    const path = join(scanDir, "scan-manifest.json");
+    const metadata = await lstat(path);
+    const identity = await lstat(path, { bigint: true });
+    const volume = BigInt.asUintN(32, identity.dev);
+    const highDevice = (1n << 60n) | volume;
+    expect(highDevice).toBeGreaterThan(BigInt(Number.MAX_SAFE_INTEGER));
+
+    let device = highDevice;
+    let inode = identity.ino;
+    let regular = true;
+    let inspected = 0;
+    let referenceDevice = highDevice;
+    let referenceInode = identity.ino;
+    let referenceRegular = true;
+    let referenceClosed = 0;
+    const file = {
+      stat: async () => {
+        inspected += 1;
+        return {
+          dev: device,
+          ino: inode,
+          isFile: () => regular,
+        };
+      },
+    } as unknown as FileHandle;
+    const reference = {
+      stat: async () => ({
+        dev: referenceDevice,
+        ino: referenceInode,
+        isFile: () => referenceRegular,
+      }),
+      close: async () => {
+        referenceClosed += 1;
+      },
+    } as unknown as FileHandle;
+    const openReference = async () => reference;
+    const checked = { path, metadata, parents: [] };
+    const opened = { dev: Number(highDevice), ino: metadata.ino } as Stats;
+
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(true);
+    expect(referenceClosed).toBe(1);
+
+    const inconsistentNumberInode = {
+      dev: metadata.dev,
+      ino: metadata.ino + 1024,
+    } as Stats;
+    await expect(
+      sameCheckedFileDevice(
+        file,
+        checked,
+        inconsistentNumberInode,
+        "win32",
+        openReference,
+      ),
+    ).resolves.toBe(false);
+
+    device = highDevice ^ 1n;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(false);
+    expect(referenceClosed).toBe(2);
+
+    referenceDevice = device;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(true);
+    expect(referenceClosed).toBe(3);
+
+    device = highDevice;
+    referenceDevice = highDevice;
+    inode = identity.ino + 1n;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(false);
+
+    inode = identity.ino;
+    regular = false;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(false);
+
+    regular = true;
+    referenceInode = identity.ino + 1n;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(false);
+
+    referenceInode = identity.ino;
+    referenceRegular = false;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(false);
+
+    const windowsInspections = inspected;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "linux", openReference),
+    ).resolves.toBe(false);
+    expect(inspected).toBe(windowsInspections);
+  });
+
   test("loads the unchanged plugin example with typed canonical names", async () => {
     const scanDir = await copyExample();
     const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
@@ -111,6 +233,137 @@ describe("canonical scan contract", () => {
     expect(contract.findings.findings[0]?.severity.level).toBe("high");
     expect(contract.coverage.mode).toBe("repository");
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
+  });
+
+  test("preserves schema-valid sealed finding details", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const validation = {
+      evidence: "single proof",
+      counterEvidence: [],
+      status: null,
+      disposition: null,
+      result: null,
+    };
+    findings["findings"][0]["validation"] = validation;
+    findings["findings"][0]["code_evidence"] = null;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation).toEqual(validation);
+    expect(loaded.findings.findings[0]?.code_evidence).toBeNull();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("preserves valid details while normalizing malformed legacy siblings", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const validation = {
+      evidence: "single proof",
+      counterEvidence: [],
+      status: null,
+      disposition: null,
+      result: null,
+    };
+    findings["findings"][0]["validation"] = validation;
+    const codeEvidence = [{ id: " ", code: " " }];
+    findings["findings"][0]["code_evidence"] = codeEvidence;
+    findings["findings"][0]["attackPath"] = {
+      steps: { first: "upload" },
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation).toEqual(validation);
+    expect(loaded.findings.findings[0]?.code_evidence).toEqual(codeEvidence);
+    expect(loaded.findings.findings[0]?.attackPath?.steps).toBeUndefined();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("preserves empty union lists while normalizing malformed siblings", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["validation"] = { evidence: [] };
+    findings["findings"][0]["attackPath"] = {
+      steps: { first: "upload" },
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation?.evidence).toEqual([]);
+    expect(loaded.findings.findings[0]?.attackPath?.steps).toBeUndefined();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("normalizes pre-typed sealed finding details without changing the artifact", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const legacyValidation = {
+      evidence: { kind: "trace" },
+      counterEvidence: [null, "The mitigation was checked."],
+    };
+    const legacyAttackPath = { steps: { first: "upload" } };
+    findings["findings"][0]["validation"] = legacyValidation;
+    findings["findings"][0]["attackPath"] = legacyAttackPath;
+    findings["findings"][0]["root_cause"] = null;
+    findings["findings"][0]["code_evidence"] = [
+      { id: "legacy-source", code: "legacy_source()" },
+    ];
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.findings.findings[0]?.code_evidence?.[0]?.id).toBe(
+      "legacy-source",
+    );
+    const loadedFinding = loaded.findings.findings[0];
+    expect(loadedFinding?.validation?.evidence).toBeUndefined();
+    expect(
+      loadedFinding?.validation?.counterEvidence?.map((item) =>
+        item.toUpperCase(),
+      ),
+    ).toEqual(["THE MITIGATION WAS CHECKED."]);
+    expect(loadedFinding?.attackPath?.steps).toBeUndefined();
+    expect(loadedFinding?.root_cause).toBeNull();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("rejects malformed canonical root-cause details", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["rootCause"] = { summary: [] };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("findings.json");
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("loads an empty legacy root cause without changing the artifact", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["root_cause"] = "";
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.root_cause).toBe("");
+    expect(await readJson(findingsPath)).toEqual(findings);
   });
 
   test("honors cancellation during contract validation", async () => {
@@ -911,9 +1164,15 @@ describe("canonical scan contract", () => {
 
   test("binds requested path scope, mode, and plugin version", async () => {
     const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = await readJson(manifestPath);
+    manifest["scan"]["scope"]["includePaths"] = ["src"];
+    await writeJson(manifestPath, manifest);
     const coveragePath = join(scanDir, "coverage.json");
     const coverage = await readJson(coveragePath);
     coverage["mode"] = "scoped_path";
+    coverage["inventoryStrategy"] = "scoped_path";
+    coverage["includePaths"] = ["src"];
     await writeJson(coveragePath, coverage);
     await reseal(scanDir);
 

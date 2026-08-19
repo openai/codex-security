@@ -5,11 +5,10 @@ const PACKAGE_VERSIONS = packageVersions(
   new URL("../package.json", import.meta.url),
 );
 
-/** npm-compatible successor to the Python package version 0.1.0b3. */
 export const VERSION = PACKAGE_VERSIONS.package;
 export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
-export const BUNDLED_PLUGIN_VERSION = "0.1.17" as const;
+export const BUNDLED_PLUGIN_VERSION = "0.1.22" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
 const VERSION_PATTERN =
@@ -79,6 +78,7 @@ export async function checkForUpdate({
   entrypoint,
   currentVersion = VERSION,
   fetch: fetchLatest = fetch,
+  signal,
 }: {
   environment?: NodeJS.ProcessEnv;
   entrypoint?: string;
@@ -87,6 +87,7 @@ export async function checkForUpdate({
     input: Parameters<typeof fetch>[0],
     init?: Parameters<typeof fetch>[1],
   ) => ReturnType<typeof fetch>;
+  signal?: AbortSignal;
 } = {}): Promise<UpdateNotice | undefined> {
   if (!updateNoticeEnabled(environment)) return undefined;
 
@@ -96,12 +97,16 @@ export async function checkForUpdate({
       environment["npm_config_registry"] ??
       environment["NPM_CONFIG_REGISTRY"] ??
       "https://registry.npmjs.org/";
+    const timeout = AbortSignal.timeout(3_000);
     const response = await fetchLatest(
       new URL(
         `${encodeURIComponent(PACKAGE_NAME)}/latest`,
         registry.endsWith("/") ? registry : `${registry}/`,
       ),
-      { signal: AbortSignal.timeout(3_000) },
+      {
+        signal:
+          signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      },
     );
     if (!response.ok) return undefined;
 
