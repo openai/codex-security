@@ -4773,6 +4773,47 @@ describe("CLI", () => {
     }
   });
 
+  test("does not claim partial output when the cost limit stops before writing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cost-empty-"));
+    const stdout = capture();
+    const stderr = capture();
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir);
+    const cost = fakeResult([], "complete", {
+      input_tokens: 1_250,
+      cached_input_tokens: 200,
+      output_tokens: 30,
+    }).cost!;
+
+    try {
+      expect(
+        await main(
+          ["scan", ".", "--verbose", "--json", "--max-cost", "0.005"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onTurn: (_repository, options) => {
+              (options as ScanOptions).onOutputDirReady?.(scanDir);
+              throw new ScanCostLimitExceededError(0.005, cost, scanDir);
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; no partial output was kept.",
+      );
+      expect(stderr.text()).not.toContain(
+        `partial output remains at ${scanDir}`,
+      );
+      expect(stderr.text()).toContain(
+        'scan.failed classification="cost_limit_exceeded" partial_output=false max_cost_usd=0.005 estimated_usd=0.00625',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("accepts a scan at its estimated cost limit", async () => {
     const stdout = capture();
     const result = fakeResult([], "complete", {
