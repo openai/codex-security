@@ -70,5 +70,7 @@ test("validates committed diffs with tracked-file output larger than 1 MB", asyn
     repo,
     DiffTarget.refs({ base: "HEAD" }),
   );
-  await expect(validateCommittedDiffCheckout(repo, target)).resolves.toBeUndefined();
+  await expect(
+    validateCommittedDiffCheckout(repo, target),
+  ).resolves.toBeUndefined();
 });
