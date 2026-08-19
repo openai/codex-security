@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { stripVTControlCharacters } from "node:util";
 import { main } from "../src/cli.js";
 import type { Finding, JsonObject } from "../src/index.js";
@@ -73,6 +74,17 @@ describe("read-only finding verification", () => {
     });
     expect(stderr.text()).not.toContain("lin_api_SYNTHETIC_SECRET");
     expect(prompt).toContain("standalone verification-only mode");
+    expect(prompt).toContain(
+      await readFile(
+        new URL(
+          "../_bundled_plugin/references/static-finding-assessment.md",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    expect(prompt).not.toContain("$codex-security:fix-finding");
+    expect(prompt).not.toContain("$codex-security:validation");
     expect(prompt).toContain("Synthetic security evidence for SEC-123");
     expect(prompt).not.toContain("lin_api_SYNTHETIC_SECRET");
     expect(environment?.["OPENAI_API_KEY"]).toBe("sk-proj-SYNTHETIC_MODEL_KEY");

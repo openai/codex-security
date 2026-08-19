@@ -1,6 +1,6 @@
 ---
 name: fix-finding
-description: Use when the user explicitly asks to fix and verify a validated or plausible security finding, or to verify an existing fix without modifying the repository. Do not use as the primary trigger for full PR, commit, branch, patch, or repository scans.
+description: Use when the user explicitly asks to fix and verify a validated or plausible security finding. Do not use as the primary trigger for full PR, commit, branch, patch, or repository scans.
 ---
 
 # Fix Finding
@@ -41,22 +41,6 @@ Use this guidance whenever reproducing the finding, running tests, or validating
 - Use repository-supported setup commands. Keep repair effort bounded so it does not displace path analysis, patching, or focused verification.
 - Do not stop a progressing command merely because it is slow. Inspect process state, logs, artifacts, or resource use first.
 - If runtime validation remains unavailable, use the strongest targeted static or harness-based artifact that preserves the real integration boundary. Do not substitute a simplified harness that removes the behavior being protected. Record every unrun check as unknown.
-
-## Standalone Verification Mode
-
-When the caller explicitly requests standalone verification-only mode, inspect the current checkout without creating, modifying, or deleting repository files. Do not implement a fix, apply a patch, commit changes, or modify issue trackers.
-
-In this mode, this section and the caller's requested JSON result envelope are the complete workflow and output contract. Skip the patch workflow, workbench remediation stages, patch-only outcome statuses, and report-writing instructions elsewhere in this skill. Apply shared evidence and safety requirements only when they are compatible with read-only verification; return `inconclusive`, not `blocked`, for an unresolved proof gap.
-
-For each supplied finding, identify the original source, broken control, sensitive operation, preconditions, and legitimate behavior. Trace those same security properties through the current implementation, accounting for moved or refactored code. Run the original reproducer, focused regression checks, bypass checks, and legitimate-behavior checks when they can run without writing to the repository. If a necessary check requires an unavailable writable directory, report its exact proof gap instead of weakening the read-only boundary.
-
-Return exactly one result for every expected identifier, in the supplied order:
-
-- `fixed`: current source or focused runtime evidence proves the original security boundary is closed and legitimate behavior remains intact.
-- `still_vulnerable`: current source or focused runtime evidence proves the same vulnerable path remains reachable.
-- `inconclusive`: repository mismatch, missing original context, unavailable checks, or another proof gap prevents a supported decision.
-
-Every result must include specific evidence. Never interpret a removed line, a renamed file, a closed ticket, an unrelated passing test, or the absence of a new scan finding as proof that the original vulnerability is fixed. This standalone mode does not require a workbench remediation request, reviewed patch artifact, or action token.
 
 ## Workflow
 

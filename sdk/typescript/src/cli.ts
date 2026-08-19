@@ -2920,7 +2920,7 @@ export async function main(
             progress.start();
             try {
               exitCode = await runSkill(
-                "fix-finding",
+                "verify-fix",
                 selected === undefined ? [...positionals, ...imports] : [],
                 options.codex,
                 options.effort,
@@ -4206,7 +4206,7 @@ async function runFindingPatches(
 }
 
 async function runSkill(
-  skill: "validation" | "fix-finding",
+  skill: "validation" | "fix-finding" | "verify-fix",
   inputs: readonly (string | ImportedIssue)[],
   codexOverrides: readonly string[],
   effort: ScanReasoningEffort | undefined,
@@ -4306,21 +4306,31 @@ async function runSkill(
     contents.push(contentsOrLiteral);
   }
   const plugin = await bundledPluginRoot();
-  const verify = options.verificationIds !== undefined;
+  const verify = skill === "verify-fix";
   const inputLabel = skill === "validation" || verify ? "Findings" : "Issues";
   const prompt = [
-    `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
     ...(verify
       ? [
+          "Determine whether each previously reported security finding has been remediated in the current checkout.",
+          "Use the shared static finding assessment methodology below to trace the original source, control, sink, trust boundary, counterevidence, and proof gaps:",
+          await readFile(
+            join(plugin, "references", "static-finding-assessment.md"),
+            "utf8",
+          ),
           "Operate in standalone verification-only mode. Do not create, modify, or delete repository files, apply patches, commit changes, or modify external issue trackers.",
+          "Trace the original exploit path through current or moved code. Check plausible bypasses and preserved legitimate behavior. Run original reproducers and focused regression checks only when they do not write to the repository; otherwise report the exact proof gap.",
+          "Do not treat a removed line, renamed file, closed ticket, unrelated passing test, or absence of a new scan finding as proof that the original vulnerability was fixed.",
           `Expected result identifiers (JSON array): ${JSON.stringify(options.verificationIds)}`,
           'Return exactly one JSON object with a "results" array in the same order. Include one object per supplied finding: {"id":"...","status":"fixed|still_vulnerable|inconclusive","evidence":"specific current source, exploit, test, or proof-gap evidence"}. Use "fixed" only after showing the original security boundary is closed and legitimate behavior remains intact. Use "still_vulnerable" only with a current vulnerable path; otherwise use "inconclusive".',
         ]
-      : options.findings === undefined
-        ? []
-        : [
-            'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"proof that the original issue is fixed and legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
-          ]),
+      : [
+          `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
+          ...(options.findings === undefined
+            ? []
+            : [
+                'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"proof that the original issue is fixed and legitimate behavior still works","reason":"required for blocked or failed outcomes"}. Use "verified" only after the original issue no longer reproduces and relevant checks pass. Preserve unrelated local changes.',
+              ]),
+        ]),
     ...(options.findingInstructions === undefined
       ? []
       : [
@@ -4331,12 +4341,13 @@ async function runSkill(
     JSON.stringify(contents),
   ].join("\n");
   const patch = skill === "fix-finding";
+  const appServer = patch || verify;
   return dependencies.runCodex(
     [
-      ...(patch ? ["app-server"] : ["exec", "--ignore-user-config"]),
+      ...(appServer ? ["app-server"] : ["exec", "--ignore-user-config"]),
       "--disable",
       "plugins",
-      ...(patch ? [] : ["--ephemeral", "--color", "never", "--json"]),
+      ...(appServer ? [] : ["--ephemeral", "--color", "never", "--json"]),
       "--config",
       `model=${JSON.stringify(model)}`,
       "--config",
@@ -4354,7 +4365,7 @@ async function runSkill(
       'approval_policy="never"',
       "--config",
       'responses_api_metadata.codex_security_surface="cli"',
-      ...(patch
+      ...(appServer
         ? []
         : [
             "--sandbox",
@@ -4369,7 +4380,7 @@ async function runSkill(
       command: verify ? "verify-fix" : patch ? "patch" : "validate",
       stdout,
       stderr,
-      ...(patch
+      ...(appServer
         ? {
             appServer: {
               directory,
