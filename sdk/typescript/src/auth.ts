@@ -243,18 +243,8 @@ function preferredAuthUrl(value: string): string | null {
   )) {
     const url = match[0].replace(/[.,;:!?)\]}]+$/, "");
     try {
-      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-      if (
-        hostname !== "localhost" &&
-        !hostname.endsWith(".localhost") &&
-        !(isIP(hostname) === 4 && hostname.startsWith("127.")) &&
-        hostname !== "0.0.0.0" &&
-        hostname !== "[::1]" &&
-        hostname !== "[::]" &&
-        hostname !== "[::ffff:0:0]" &&
-        !hostname.startsWith("[::ffff:7f") &&
-        !hostname.startsWith("[::7f")
-      ) {
+      const hostname = new URL(url).hostname;
+      if (!isLoopbackHost(hostname)) {
         return url;
       }
     } catch {
@@ -262,6 +252,50 @@ function preferredAuthUrl(value: string): string | null {
     }
   }
   return null;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname
+    .toLowerCase()
+    .replace(/\.$/, "")
+    .replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return true;
+  }
+  const ipVersion = isIP(host);
+  if (ipVersion === 4) {
+    return host === "0.0.0.0" || host.startsWith("127.");
+  }
+  if (ipVersion === 6) {
+    if (
+      host === "::1" ||
+      host === "0:0:0:0:0:0:0:1" ||
+      host === "::" ||
+      host === "0:0:0:0:0:0:0:0"
+    ) {
+      return true;
+    }
+    if (
+      host === "::ffff:0.0.0.0" ||
+      host === "::ffff:0:0" ||
+      host === "0:0:0:0:0:ffff:0:0"
+    ) {
+      return true;
+    }
+    if (
+      host.startsWith("::ffff:127.") ||
+      host.startsWith("::127.") ||
+      host.startsWith("0:0:0:0:0:ffff:127.") ||
+      host.startsWith("0:0:0:0:0:0:127.") ||
+      host.startsWith("::ffff:7f") ||
+      host.startsWith("::7f") ||
+      host.startsWith("0:0:0:0:0:ffff:7f") ||
+      host.startsWith("0:0:0:0:0:0:7f")
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function userCodeFromOutput(value: string): string | null {
