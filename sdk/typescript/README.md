@@ -830,6 +830,11 @@ structured output. Exit code `0` means every finding is fixed, `1` means at
 least one finding remains vulnerable, and `2` means a result is inconclusive or
 verification could not complete.
 
+Interactive verification shows the same live agent-activity dashboard used by
+scans and Linear publication. Reasoning, repository commands, and progress are
+written to stderr; redirected output and CI receive plain progress lines, and
+JSON results on stdout remain machine-readable.
+
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
 a runtime/export error, `130` for interruption, and `143` for termination.

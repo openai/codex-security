@@ -548,6 +548,160 @@ class PublicationProgressPresenter {
   }
 }
 
+class VerificationProgressPresenter {
+  readonly #stream: Writable;
+  readonly #dependencies: CliDependencies;
+  readonly #repository: string;
+  readonly #total: number;
+  readonly #seenActivities = new Set<string>();
+  readonly #reasoning = new Map<string, string>();
+  #dashboard: ScanDashboard | null = null;
+
+  public constructor(
+    stream: Writable,
+    dependencies: CliDependencies,
+    repository: string,
+    total: number,
+  ) {
+    this.#stream = stream;
+    this.#dependencies = dependencies;
+    this.#repository = repository;
+    this.#total = total;
+  }
+
+  public start(): void {
+    if (
+      this.#stream.isTTY === true &&
+      this.#dependencies.environment["CI"] === undefined &&
+      this.#dependencies.environment["TERM"] !== "dumb"
+    ) {
+      const dashboard = new ScanDashboard(this.#stream, {
+        repository: this.#repository,
+        presentation: "verification",
+        clock: this.#dependencies,
+        color: this.#dependencies.environment["NO_COLOR"] === undefined,
+        sanitize: safeErrorMessage,
+      });
+      dashboard.setPublicationProgress(0, this.#total);
+      dashboard.setStage(`Verifying findings · 0/${this.#total}`);
+      try {
+        dashboard.start();
+        this.#dashboard = dashboard;
+        return;
+      } catch {
+        try {
+          dashboard.stop();
+        } catch {}
+      }
+    }
+
+    this.#write(
+      `Verifying ${this.#total} finding${this.#total === 1 ? "" : "s"} against the current checkout.`,
+    );
+  }
+
+  public observe(event: Readonly<Record<string, unknown>>): void {
+    const method = event["method"];
+    const params = event["params"];
+    if (
+      typeof params !== "object" ||
+      params === null ||
+      Array.isArray(params)
+    ) {
+      return;
+    }
+    const values = params as Record<string, unknown>;
+    let normalized: Record<string, unknown>;
+
+    if (method === "item/reasoning/summaryTextDelta") {
+      const id = values["itemId"];
+      const delta = values["delta"];
+      if (typeof id !== "string" || typeof delta !== "string") return;
+      const text = `${this.#reasoning.get(id) ?? ""}${delta}`;
+      this.#reasoning.set(id, text);
+      normalized = {
+        type: "item.updated",
+        item: { id, type: "reasoning", text },
+      };
+    } else if (method === "item/started" || method === "item/completed") {
+      const item = values["item"];
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        return;
+      }
+      const current = item as Record<string, unknown>;
+      const type = current["type"];
+      let converted: Record<string, unknown>;
+      if (type === "commandExecution") {
+        converted = { ...current, type: "command_execution" };
+      } else if (type === "mcpToolCall") {
+        converted = { ...current, type: "mcp_tool_call" };
+      } else if (type === "agentMessage") {
+        if (current["phase"] !== "commentary") return;
+        converted = { ...current, type: "agent_message" };
+      } else if (type === "reasoning") {
+        const summary = current["summary"];
+        const text = Array.isArray(summary)
+          ? summary
+              .filter((entry): entry is string => typeof entry === "string")
+              .join("\n")
+          : current["text"];
+        if (typeof text !== "string") return;
+        converted = { ...current, text };
+      } else {
+        return;
+      }
+      normalized = {
+        type: method === "item/started" ? "item.started" : "item.completed",
+        item: converted,
+      };
+    } else {
+      return;
+    }
+
+    for (const activity of scanActivitiesFromEvent(
+      normalized,
+      this.#repository,
+    )) {
+      if (this.#dashboard !== null) {
+        this.#dashboard.record(activity);
+        continue;
+      }
+      const key = `${activity.id}\0${activity.description}`;
+      if (this.#seenActivities.has(key)) continue;
+      this.#seenActivities.add(key);
+      const label =
+        activity.kind === "reasoning" || activity.kind === "message"
+          ? "Codex"
+          : "Tool";
+      this.#write(`${label}: ${activity.description}`);
+    }
+  }
+
+  public complete(results: readonly FindingVerification[]): void {
+    if (this.#dashboard === null) return;
+    this.#dashboard.setPublicationProgress(results.length, this.#total);
+    this.#dashboard.setStage(
+      `Verification complete · ${results.length}/${this.#total}`,
+    );
+    for (const result of results) {
+      this.#dashboard.note(`${result.status.toUpperCase()} ${result.id}`);
+    }
+  }
+
+  public stop(): void {
+    try {
+      this.#dashboard?.stop();
+    } catch {}
+    this.#dashboard = null;
+  }
+
+  #write(message: string): void {
+    try {
+      this.#stream.write(`${safePatchText(message)}\n`);
+    } catch {}
+  }
+}
+
 function effortOption() {
   return z
     .enum(MODEL_REASONING_EFFORTS, {
@@ -737,6 +891,7 @@ interface SkillCommandOutput {
     readonly directory: string;
     readonly prompt: string;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
 }
 
@@ -763,6 +918,7 @@ interface SkillRunOptions {
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
   verificationIds?: readonly string[];
+  onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
@@ -1050,6 +1206,7 @@ export async function runCodexSkillCommand(
                     prompt: output.appServer.prompt,
                     input: invocation.stdin!,
                     sandbox: output.appServer.sandbox,
+                    onEvent: output.appServer.onEvent,
                   },
             ),
             new Promise<undefined>((resolve) => {
@@ -2753,53 +2910,66 @@ export async function main(
                 return true;
               },
             };
-            exitCode = await runSkill(
-              "fix-finding",
-              selected === undefined ? [...positionals, ...imports] : [],
-              options.codex,
-              options.effort,
-              verificationOutput,
+            const progress = new VerificationProgressPresenter(
               errorOutput,
               dependencies,
-              {
-                directory: repository,
-                ...(selected === undefined
-                  ? {}
-                  : { findings: selected.findings }),
-                verificationIds: identifiers,
-                environment,
-              },
+              repository,
+              identifiers.length,
             );
-            if (exitCode !== 0) return undefined;
-
-            let reported: unknown;
+            progress.start();
             try {
-              reported = JSON.parse(response);
-            } catch {
-              throw new CodexSecurityError(
-                "Verification results were not valid JSON.",
+              exitCode = await runSkill(
+                "fix-finding",
+                selected === undefined ? [...positionals, ...imports] : [],
+                options.codex,
+                options.effort,
+                verificationOutput,
+                errorOutput,
+                dependencies,
+                {
+                  directory: repository,
+                  ...(selected === undefined
+                    ? {}
+                    : { findings: selected.findings }),
+                  verificationIds: identifiers,
+                  environment,
+                  onEvent: progress.observe.bind(progress),
+                },
               );
+              if (exitCode !== 0) return undefined;
+
+              let reported: unknown;
+              try {
+                reported = JSON.parse(response);
+              } catch {
+                throw new CodexSecurityError(
+                  "Verification results were not valid JSON.",
+                );
+              }
+              const parsed = z
+                .object({ results: z.array(findingVerificationSchema) })
+                .safeParse(reported);
+              if (
+                !parsed.success ||
+                parsed.data.results.length !== identifiers.length ||
+                parsed.data.results.some(
+                  ({ id }, index) => id !== identifiers[index],
+                )
+              ) {
+                throw new CodexSecurityError(
+                  "Codex did not return an evidence-backed verification result for every finding.",
+                );
+              }
+              results = parsed.data.results;
+              progress.complete(results);
+              exitCode = results.some(({ status }) => status === "inconclusive")
+                ? 2
+                : results.some(({ status }) => status === "still_vulnerable")
+                  ? 1
+                  : 0;
+            } finally {
+              progress.stop();
             }
-            const parsed = z
-              .object({ results: z.array(findingVerificationSchema) })
-              .safeParse(reported);
-            if (
-              !parsed.success ||
-              parsed.data.results.length !== identifiers.length ||
-              parsed.data.results.some(
-                ({ id }, index) => id !== identifiers[index],
-              )
-            ) {
-              throw new CodexSecurityError(
-                "Codex did not return an evidence-backed verification result for every finding.",
-              );
-            }
-            results = parsed.data.results;
-            exitCode = results.some(({ status }) => status === "inconclusive")
-              ? 2
-              : results.some(({ status }) => status === "still_vulnerable")
-                ? 1
-                : 0;
           }
 
           if (format === "json" || format === "jsonl") {
@@ -4204,6 +4374,9 @@ async function runSkill(
               directory,
               prompt,
               ...(verify ? { sandbox: "read-only" as const } : {}),
+              ...(options.onEvent === undefined
+                ? {}
+                : { onEvent: options.onEvent }),
             },
           }
         : {}),
@@ -4218,6 +4391,7 @@ export async function readSkillCommandOutput(
     readonly prompt: string;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
 ): Promise<{
   message?: string;
@@ -4257,6 +4431,19 @@ export async function readSkillCommandOutput(
     }
     const value = event as Record<string, unknown>;
     if (appServer !== undefined) {
+      const params = value["params"];
+      if (
+        typeof params === "object" &&
+        params !== null &&
+        "threadId" in params &&
+        params.threadId === threadId &&
+        "turnId" in params &&
+        params.turnId === turnId
+      ) {
+        try {
+          appServer.onEvent?.(value);
+        } catch {}
+      }
       if (value["id"] !== undefined) {
         if (typeof value["method"] === "string") {
           send({

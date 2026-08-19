@@ -1175,6 +1175,18 @@ lines.on("line", (line) => {
   }
   if (request.method === "turn/start") {
     send({ id: 3, result: { turn: { id: "verification-turn" } } });
+    send({ method: "item/started", params: {
+      threadId: "another-thread", turnId: "verification-turn",
+      item: { id: "hidden-command", type: "commandExecution", command: "private command" },
+    } });
+    send({ method: "item/started", params: {
+      threadId: "verification", turnId: "verification-turn",
+      item: { id: "verification-command", type: "commandExecution", command: "rg authorization src/guard.ts" },
+    } });
+    send({ method: "item/reasoning/summaryTextDelta", params: {
+      threadId: "verification", turnId: "verification-turn",
+      itemId: "verification-reasoning", delta: "Tracing the original control.",
+    } });
     send({ method: "item/completed", params: {
       threadId: "verification", turnId: "verification-turn",
       item: { type: "agentMessage", text: "Verified without modifying source" },
@@ -1187,6 +1199,7 @@ lines.on("line", (line) => {
 `;
     const stdout = capture();
     const stderr = capture();
+    const activity: Readonly<Record<string, unknown>>[] = [];
 
     await expect(
       runCodexSkillCommand(
@@ -1200,6 +1213,7 @@ lines.on("line", (line) => {
             prompt:
               "Verify the synthetic finding without editing the repository",
             sandbox: "read-only",
+            onEvent: (event) => activity.push(event),
           },
         },
         { command: process.execPath },
@@ -1207,6 +1221,12 @@ lines.on("line", (line) => {
     ).resolves.toBe(0);
     expect(stdout.text()).toBe("Verified without modifying source\n");
     expect(stderr.text()).toBe("");
+    expect(activity.map((event) => event["method"])).toEqual([
+      "item/started",
+      "item/reasoning/summaryTextDelta",
+      "item/completed",
+    ]);
+    expect(JSON.stringify(activity)).not.toContain("private command");
   });
 
   test.each([

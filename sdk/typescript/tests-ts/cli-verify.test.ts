@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import { main } from "../src/cli.js";
 import type { Finding, JsonObject } from "../src/index.js";
 import type { LinearClientFactory } from "../src/linear.js";
@@ -41,6 +42,17 @@ describe("read-only finding verification", () => {
             expect(output?.appServer?.sandbox).toBe("read-only");
             prompt = output!.appServer!.prompt;
             environment = processEnvironment;
+            output?.appServer?.onEvent?.({
+              method: "item/completed",
+              params: {
+                item: {
+                  id: "commentary-1",
+                  type: "agentMessage",
+                  phase: "commentary",
+                  text: "Tracing the original authorization boundary.",
+                },
+              },
+            });
             output?.stdout.write(
               JSON.stringify({
                 results: [
@@ -70,7 +82,14 @@ describe("read-only finding verification", () => {
         },
       ],
     });
-    expect(stderr.text()).toBe("");
+    expect(stderr.text()).toContain(
+      "Verifying 1 finding against the current checkout.",
+    );
+    expect(stderr.text()).toContain(
+      "Codex: Tracing the original authorization boundary.",
+    );
+    expect(stderr.text()).not.toContain("lin_api_SYNTHETIC_SECRET");
+    expect(stderr.text()).not.toContain("\u001B");
     expect(prompt).toContain("standalone verification-only mode");
     expect(prompt).toContain(
       "Do not create, modify, or delete repository files",
@@ -83,6 +102,146 @@ describe("read-only finding verification", () => {
     expect(environment).toEqual({
       OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
     });
+  });
+
+  test("shows live agent progress in the verification dashboard while keeping JSON clean", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+
+    expect(
+      await main(
+        ["verify", "A previously reported authorization bypass", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            const emit = output?.appServer?.onEvent;
+            emit?.({
+              method: "item/started",
+              params: {
+                item: {
+                  id: "command-1",
+                  type: "commandExecution",
+                  command: "rg authorization src/guard.ts",
+                },
+              },
+            });
+            emit?.({
+              method: "item/reasoning/summaryTextDelta",
+              params: {
+                itemId: "reasoning-1",
+                delta: "Checking the original authorization guard.",
+              },
+            });
+            emit?.({
+              method: "item/started",
+              params: {
+                item: {
+                  id: "tool-1",
+                  type: "mcpToolCall",
+                  tool: "read_file",
+                  arguments: { path: "src/guard.ts" },
+                },
+              },
+            });
+            emit?.({
+              method: "item/completed",
+              params: {
+                item: {
+                  id: "commentary-1",
+                  type: "agentMessage",
+                  phase: "commentary",
+                  text: "The bypass now reaches the shared guard.",
+                },
+              },
+            });
+            output?.stdout.write(
+              JSON.stringify({
+                results: [
+                  {
+                    id: "finding-1",
+                    status: "fixed",
+                    evidence: "The original authorization bypass is rejected.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+
+    const activity = stripVTControlCharacters(stderr.text());
+    expect(activity).toContain("CODEX SECURITY  ·  VERIFY  ·  repository");
+    expect(activity).toContain("Verifying findings · 0/1");
+    expect(activity).toContain("rg authorization src/guard.ts");
+    expect(activity).toContain("Checking the original authorization guard.");
+    expect(activity).toContain("read_file");
+    expect(activity).toContain("The bypass now reaches the shared guard.");
+    expect(activity).toContain("FINDINGS  1 / 1 processed");
+    expect(activity).not.toContain("FILES");
+    expect(activity).not.toContain("PATCH INSTRUCTIONS");
+    expect(stderr.text()).toContain("\u001B[?1049h\u001B[?25l");
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      results: [{ id: "finding-1", status: "fixed" }],
+    });
+    expect(stdout.text()).not.toContain("\u001B");
+  });
+
+  test("uses plain verification progress in CI and dumb terminals", async () => {
+    for (const environment of [{ CI: "1" }, { TERM: "dumb" }]) {
+      const stdout = capture();
+      const stderr = capture(true);
+
+      expect(
+        await main(
+          ["verify", "A previously reported authorization bypass", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            environment,
+            onCodex: (_args, output) => {
+              output?.appServer?.onEvent?.({
+                method: "item/completed",
+                params: {
+                  item: {
+                    id: "reasoning-1",
+                    type: "reasoning",
+                    summary: ["Checking the original authorization guard."],
+                  },
+                },
+              });
+              output?.stdout.write(
+                JSON.stringify({
+                  results: [
+                    {
+                      id: "finding-1",
+                      status: "fixed",
+                      evidence:
+                        "The original authorization bypass is rejected.",
+                    },
+                  ],
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(0);
+
+      expect(stderr.text()).toContain(
+        "Verifying 1 finding against the current checkout.",
+      );
+      expect(stderr.text()).toContain(
+        "Codex: Checking the original authorization guard.",
+      );
+      expect(stderr.text()).not.toContain("\u001B");
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        results: [{ id: "finding-1", status: "fixed" }],
+      });
+    }
   });
 
   test("verifies completed Linear project issues when explicitly selected", async () => {

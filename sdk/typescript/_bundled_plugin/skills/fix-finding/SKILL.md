@@ -46,6 +46,8 @@ Use this guidance whenever reproducing the finding, running tests, or validating
 
 When the caller explicitly requests standalone verification-only mode, inspect the current checkout without creating, modifying, or deleting repository files. Do not implement a fix, apply a patch, commit changes, or modify issue trackers.
 
+In this mode, this section and the caller's requested JSON result envelope are the complete workflow and output contract. Skip the patch workflow, workbench remediation stages, patch-only outcome statuses, and report-writing instructions elsewhere in this skill. Apply shared evidence and safety requirements only when they are compatible with read-only verification; return `inconclusive`, not `blocked`, for an unresolved proof gap.
+
 For each supplied finding, identify the original source, broken control, sensitive operation, preconditions, and legitimate behavior. Trace those same security properties through the current implementation, accounting for moved or refactored code. Run the original reproducer, focused regression checks, bypass checks, and legitimate-behavior checks when they can run without writing to the repository. If a necessary check requires an unavailable writable directory, report its exact proof gap instead of weakening the read-only boundary.
 
 Return exactly one result for every expected identifier, in the supplied order:

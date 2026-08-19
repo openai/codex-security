@@ -40,6 +40,41 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("renders verification progress and agent activity without scan-only fields", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 100, rows: 18 },
+      {
+        repository: "/synthetic/payments-api",
+        presentation: "verification",
+        color: false,
+        clock: fakeClock(),
+      },
+    );
+
+    dashboard.setPublicationProgress(0, 2);
+    dashboard.setStage("Verifying findings · 0/2");
+    dashboard.start();
+    dashboard.record({
+      id: "verification-command",
+      kind: "command",
+      status: "running",
+      description: "rg authorization src/guard.ts",
+      paths: ["src/guard.ts"],
+    });
+
+    const text = stripVTControlCharacters(stderr.text());
+    expect(text).toContain("CODEX SECURITY  ·  VERIFY  ·  payments-api");
+    expect(text).toContain("Waiting for verification activity");
+    expect(text).toContain("Verifying findings · 0/2");
+    expect(text).toContain("FINDINGS  0 / 2 processed");
+    expect(text).toContain("rg authorization src/guard.ts");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("TOKENS");
+    expect(text).not.toContain("COST");
+    dashboard.stop();
+  });
+
   test("renders publication progress without scan-only inventory and cost fields", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
