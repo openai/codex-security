@@ -2937,7 +2937,10 @@ export async function main(
                   onEvent: progress.observe.bind(progress),
                 },
               );
-              if (exitCode !== 0) return undefined;
+              if (exitCode !== 0) {
+                if (exitCode !== 130 && exitCode !== 143) exitCode = 2;
+                return undefined;
+              }
 
               let reported: unknown;
               try {

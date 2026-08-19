@@ -398,6 +398,32 @@ describe("read-only finding verification", () => {
     );
   });
 
+  test.each([
+    [1, 2],
+    [7, 2],
+    [130, 130],
+    [143, 143],
+  ] as const)(
+    "maps Codex exit %i to verification exit %i",
+    async (codexStatus, expectedStatus) => {
+      const stdout = capture();
+
+      expect(
+        await main(
+          [
+            "verify-fix",
+            "A previously reported authorization bypass",
+            "--json",
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({ onCodex: () => codexStatus }),
+        ),
+      ).toBe(expectedStatus);
+      expect(stdout.text()).toBe("");
+    },
+  );
+
   test("sanitizes model-controlled evidence in human-readable output", async () => {
     const stdout = capture();
 
