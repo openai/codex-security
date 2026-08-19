@@ -81,7 +81,7 @@ function findings(severities: readonly SeverityLevel[]): Finding[] {
 }
 
 async function settle(): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  await new Promise<void>((resolve) => setTimeout(resolve, 60));
 }
 
 describe("interactive patch finding browser", () => {
