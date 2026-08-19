@@ -2550,18 +2550,26 @@ function isOutsidePath(path: string): boolean {
 async function hasPartialOutput(path: string): Promise<boolean> {
   try {
     return (await readdir(path)).length > 0;
-  } catch {
-    // Keep the path in the diagnostic when it disappeared or cannot be read.
-    // Only suppress the message when emptiness was confirmed.
-    return true;
+  } catch (error: unknown) {
+    return !(
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    );
   }
 }
 
 function hasPartialOutputSync(path: string): boolean {
   try {
     return readdirSync(path).length > 0;
-  } catch {
-    return true;
+  } catch (error: unknown) {
+    return !(
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    );
   }
 }
 
