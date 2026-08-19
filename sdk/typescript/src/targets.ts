@@ -413,6 +413,7 @@ async function gitOutput(
       encoding: "utf8",
       signal,
       env: command.environment,
+      maxBuffer: Infinity,
     },
   );
   return stdout.trim();
