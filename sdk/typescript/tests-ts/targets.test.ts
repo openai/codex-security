@@ -126,6 +126,31 @@ describe("scan target normalization", () => {
     });
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "rejects Windows repository roots that alias across runtimes",
+    async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-repository-alias-")),
+      );
+      temporaryDirectories.push(root);
+      const repository = join(root, "repository");
+      const ambiguous = join(root, "repository.");
+      const linked = join(root, "linked-repository");
+      await Promise.all([mkdir(repository), mkdir(ambiguous)]);
+      await symlink(ambiguous, linked, "junction");
+
+      expect(await realpath(repository)).not.toBe(await realpath(ambiguous));
+      await expect(normalizeRepository(repository)).resolves.toBe(
+        await realpath(repository),
+      );
+      for (const path of [ambiguous, linked]) {
+        await expect(normalizeRepository(path)).rejects.toThrow(
+          "Windows-ambiguous components",
+        );
+      }
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "preserves trailing whitespace in Git worktree paths",
     async () => {
@@ -146,6 +171,33 @@ describe("scan target normalization", () => {
       "outside the repository",
     );
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects NTFS alternate streams before runtime initialization",
+    async () => {
+      const repo = await repository();
+      const stream = join(repo, "src", "app.ts:synthetic-stream");
+      await writeFile(stream, "export const hidden = true;\n");
+
+      await expect(normalizeTarget(repo, [stream])).rejects.toThrow(
+        "unsupported colon component",
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "allows colons in POSIX path components",
+    async () => {
+      const repo = await repository();
+      const path = join(repo, "src", "app.ts:fixture");
+      await writeFile(path, "export const fixture = true;\n");
+
+      await expect(normalizeTarget(repo, [path])).resolves.toEqual({
+        kind: "paths",
+        paths: ["src/app.ts:fixture"],
+      });
+    },
+  );
 
   test("reports a path that disappears during normalization as invalid", async () => {
     const repo = await repository();

@@ -73,6 +73,10 @@ EXPORT_PATHS = {
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
+WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
+    r'[<>:"|?*\x00-\x1f]|[ .]$|^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$',
+    re.IGNORECASE,
+)
 
 
 class ContractError(ValueError):
@@ -225,15 +229,32 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
     path = PurePosixPath(value)
     normalized = path.as_posix()
     if (
-        not value
+        not value.strip()
         or (normalized == "." and not allow_dot)
+        or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
         or "\\" in value
         or "\0" in value
+        or any(ord(character) < 32 for character in value)
         or path.is_absolute()
         or ".." in path.parts
     ):
         raise ContractError(f"{context}: expected a safe repository-relative POSIX path")
     return normalized
+
+
+def _require_portable_relative_path(
+    value: str, context: str, *, allow_dot: bool = False
+) -> str:
+    normalized = _require_safe_relative_path(value, context, allow_dot=allow_dot)
+    if any(_windows_unsafe_path_component(part) for part in value.split("/")):
+        raise ContractError(f"{context}: expected a safe scan-relative POSIX path")
+    return normalized
+
+
+def _windows_unsafe_path_component(value: str) -> bool:
+    if not value or value == ".":
+        return False
+    return WINDOWS_UNSAFE_PATH_COMPONENT_RE.search(value) is not None
 
 
 def _require_scan_directory(scan_dir: Path) -> Path:
@@ -347,7 +368,7 @@ def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: 
 
 def open_scan_local_file_descriptor(scan_dir: Path, relative_path: str, context: str) -> int:
     scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_safe_relative_path(relative_path, context)
+    relative_path = _require_portable_relative_path(relative_path, context)
     if not _descriptor_relative_reads_available():
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
@@ -478,7 +499,7 @@ def write_scan_local_bytes(
         if relative_path in {"", ".", ".."} or "/" in relative_path or "\0" in relative_path:
             raise ContractError("external output path: expected a safe file name")
     else:
-        relative_path = _require_safe_relative_path(relative_path, "scan-local output path")
+        relative_path = _require_portable_relative_path(relative_path, "scan-local output path")
     path = scan_dir / relative_path
     if not _descriptor_relative_writes_available():
         if not _is_windows():
@@ -529,7 +550,7 @@ def write_scan_local_bytes(
 
 def _remove_scan_local_file_if_exists(scan_dir: Path, relative_path: str) -> None:
     scan_dir = _require_scan_directory(scan_dir)
-    relative_path = _require_safe_relative_path(relative_path, "scan-local cleanup path")
+    relative_path = _require_portable_relative_path(relative_path, "scan-local cleanup path")
     if not _descriptor_relative_writes_available():
         if not _is_windows():
             raise ContractError("scan-local cleanup requires descriptor-relative file operations")
@@ -936,7 +957,7 @@ def _recover_unsealed_coverage(
                         try:
                             if not isinstance(ref, str):
                                 raise ContractError(f"{ref_context}: expected a string")
-                            normalized_ref = _require_safe_relative_path(ref, ref_context)
+                            normalized_ref = _require_portable_relative_path(ref, ref_context)
                             if not normalized_ref.startswith("artifacts/"):
                                 raise ContractError(
                                     f"{ref_context}: expected a file under artifacts/"
@@ -1322,7 +1343,9 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         for ref_index, ref in enumerate(receipt_refs):
             if not isinstance(ref, str):
                 raise ContractError(f"{context}.receiptRefs[{ref_index}]: expected a string")
-            normalized_ref = _require_safe_relative_path(ref, f"{context}.receiptRefs[{ref_index}]")
+            normalized_ref = _require_portable_relative_path(
+                ref, f"{context}.receiptRefs[{ref_index}]"
+            )
             if not normalized_ref.startswith("artifacts/"):
                 raise ContractError(
                     f"{context}.receiptRefs[{ref_index}]: expected a file under artifacts/"
@@ -1367,16 +1390,19 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     if not artifacts:
         raise ContractError("manifest.scan.artifacts: expected generated artifact records")
     artifact_paths: set[str] = set()
+    artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
         if not isinstance(artifact, dict):
             raise ContractError(f"{context}: expected an object")
-        path = _require_safe_relative_path(
+        path = _require_portable_relative_path(
             _require_str(artifact, "path", context), f"{context}.path"
         )
-        if path in artifact_paths:
+        collision_key = path.lower()
+        if collision_key in artifact_collision_keys:
             raise ContractError(f"{context}.path: duplicate artifact path")
         artifact_paths.add(path)
+        artifact_collision_keys.add(collision_key)
         _require_str(artifact, "sha256", context)
         _require_str(artifact, "mediaType", context)
     for required_path in ("findings.json", "coverage.json"):
@@ -2146,7 +2172,7 @@ def _validate_sarif(sarif: dict[str, Any]) -> None:
 def _artifact_record(
     scan_dir: Path, relative_path: str, media_type: str, contents: bytes | None = None
 ) -> dict[str, str]:
-    relative_path = _require_safe_relative_path(relative_path, "artifact path")
+    relative_path = _require_portable_relative_path(relative_path, "artifact path")
     if contents is not None:
         _require_scan_local_file(scan_dir, relative_path, relative_path)
     return {
@@ -2167,7 +2193,7 @@ def _coverage_receipt_refs(coverage: dict[str, Any]) -> list[str]:
 
 def _validate_sealed_coverage_receipts(scan: dict[str, Any], coverage: dict[str, Any]) -> None:
     artifact_paths = {
-        _require_safe_relative_path(artifact["path"], "sealed artifact path")
+        _require_portable_relative_path(artifact["path"], "sealed artifact path")
         for artifact in scan["artifacts"]
     }
     for ref in _coverage_receipt_refs(coverage):
@@ -2190,16 +2216,19 @@ def _validate_existing_seal(
     if not isinstance(artifacts, list) or not artifacts:
         raise ContractError("manifest.scan.artifacts: sealed manifest requires artifact records")
     artifact_paths: set[str] = set()
+    artifact_collision_keys: set[str] = set()
     for index, artifact in enumerate(artifacts):
         context = f"manifest.scan.artifacts[{index}]"
         if not isinstance(artifact, dict):
             raise ContractError(f"{context}: expected an object")
-        path = _require_safe_relative_path(
+        path = _require_portable_relative_path(
             _require_str(artifact, "path", context), f"{context}.path"
         )
-        if path in artifact_paths:
+        collision_key = path.lower()
+        if collision_key in artifact_collision_keys:
             raise ContractError(f"{context}.path: duplicate artifact path")
         artifact_paths.add(path)
+        artifact_collision_keys.add(collision_key)
         expected_sha256 = _require_str(artifact, "sha256", context)
         contents = (artifact_contents or {}).get(path)
         actual_sha256 = (
@@ -2424,7 +2453,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
     scan = _require_dict(manifest, "scan", "manifest")
     artifacts = _require_list(scan, "artifacts", "manifest.scan")
     artifact_paths = [
-        _require_safe_relative_path(
+        _require_portable_relative_path(
             _require_str(artifact, "path", f"manifest.scan.artifacts[{index}]"),
             f"manifest.scan.artifacts[{index}].path",
         )

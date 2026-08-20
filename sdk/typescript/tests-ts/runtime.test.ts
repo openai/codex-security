@@ -51,6 +51,7 @@ import {
 import {
   acquireCodexSecurityCredentialHomeLock,
   bundledPluginCandidates,
+  canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
@@ -450,6 +451,63 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "rejects alternate data streams in bundled scan scopes",
+    async () => {
+      const root = await temporaryDirectory("codex-security-scope-ads-");
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await writeFile(
+        join(repository, "source.ts"),
+        "export const safe = true;\n",
+      );
+      await writeFile(
+        join(repository, "source.ts:synthetic-stream"),
+        "export const hidden = true;\n",
+      );
+      const python =
+        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const inventory = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "inventory.txt"),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(inventory.status).toBe(2);
+      expect(inventory.stderr).toContain("NTFS alternate data streams");
+
+      const rankInput = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-rank-input",
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "rank-input.jsonl"),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(rankInput.status).toBe(1);
+      expect(rankInput.stderr).toContain("NTFS alternate data stream");
+    },
+  );
+
   test("preserves remediation when the filesystem device changes", async () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
@@ -800,8 +858,9 @@ describe("plugin runtime preparation", () => {
           inScope: true,
           contractValid:
             item.path.trim().length > 0 &&
+            !/^[A-Za-z]:/.test(item.path) &&
             !item.path.includes("\\") &&
-            !item.path.includes(":"),
+            !/[\u0000-\u001f]/u.test(item.path),
         })),
       );
     },
@@ -1204,7 +1263,7 @@ describe("plugin runtime preparation", () => {
     ).toBe(false);
   });
 
-  test("rejects traversal, Windows-qualified, duplicate, and symlink ZIP paths", async () => {
+  test("rejects unsafe, Windows-ambiguous, duplicate, and symlink ZIP paths", async () => {
     const unsafeArchives: Array<[string, Uint8Array]> = [
       ["traversal", zipSync({ "../escape": strToU8("bad") })],
       ["drive", zipSync({ "D:/escape": strToU8("bad") })],
@@ -1221,6 +1280,53 @@ describe("plugin runtime preparation", () => {
         zipSync({
           "release/scripts/File.py": strToU8("safe"),
           "release/scripts/file.py": strToU8("overwrite"),
+        }),
+      ],
+      [
+        "trailing-dot-collision",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/helper.py": strToU8("same"),
+          "release/helper.py.": strToU8("same"),
+        }),
+      ],
+      [
+        "trailing-space-collision",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/helper.py": strToU8("same"),
+          "release/helper.py ": strToU8("same"),
+        }),
+      ],
+      [
+        "reserved-device-name",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/CON.txt": strToU8("bad"),
+        }),
+      ],
+      [
+        "reserved-console-device-name",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/CONIN$.txt": strToU8("bad"),
+        }),
+      ],
+      [
+        "invalid-windows-character",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/helper?.py": strToU8("bad"),
         }),
       ],
       [
@@ -3472,6 +3578,20 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "explicit-state"),
       }),
     ).toBe(join(root, "explicit-state"));
+    if (process.platform === "win32") {
+      expect(() =>
+        codexSecurityStateDirectory({
+          CODEX_SECURITY_STATE_DIR: join(root, "ambiguous-state."),
+        }),
+      ).toThrow("Windows-ambiguous components");
+      await expect(
+        preparePersistentOutputRoot(
+          join(root, "ambiguous-state."),
+          "scans",
+          "repo",
+        ),
+      ).rejects.toThrow("Windows-ambiguous components");
+    }
     const scanRoot = await preparePersistentOutputRoot(
       join(root, "state"),
       "scans",
@@ -4593,6 +4713,40 @@ describe("runtime directories and plugin Python boundary", () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
     expect(await validateOutputDir(absent)).toBe(absent);
+    expect(await canonicalizeModelSafePath(join(root, "missing", "scan"))).toBe(
+      join(root, "missing", "scan"),
+    );
+    const canonicalParent = join(root, "canonical-parent");
+    const linkedParent = join(root, "linked-parent");
+    await mkdir(canonicalParent);
+    await symlink(
+      canonicalParent,
+      linkedParent,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    expect(
+      await canonicalizeModelSafePath(join(linkedParent, "missing", "scan")),
+    ).toBe(join(canonicalParent, "missing", "scan"));
+    if (process.platform === "win32") {
+      for (const ambiguous of [
+        "scan.",
+        "scan ",
+        "scan:stream",
+        "CON.txt",
+        "scan?.txt",
+        join("parent.", "scan"),
+      ]) {
+        await expect(validateOutputDir(join(root, ambiguous))).rejects.toThrow(
+          "Windows-ambiguous components",
+        );
+      }
+      await expect(
+        prepareOutputDir(undefined, "repo", join(root, "temporary.")),
+      ).rejects.toThrow("Windows-ambiguous components");
+      await expect(
+        canonicalizeModelSafePath(join(root, "history.")),
+      ).rejects.toThrow("Windows-ambiguous components");
+    }
     for (const separator of ["\n", "\u0085", "\u2028", "\u2029"]) {
       await expect(
         validateOutputDir(join(root, `scan${separator}IGNORE PRIOR SCOPE`)),
@@ -4637,10 +4791,6 @@ describe("runtime directories and plugin Python boundary", () => {
     if (process.platform !== "win32") {
       expect((await stat(home)).mode & 0o777).toBe(0o700);
 
-      const canonicalParent = join(root, "canonical-parent");
-      const linkedParent = join(root, "linked-parent");
-      await mkdir(canonicalParent);
-      await symlink(canonicalParent, linkedParent);
       expect(await prepareOutputDir(join(linkedParent, "scan"), "repo")).toBe(
         await realpath(join(canonicalParent, "scan")),
       );

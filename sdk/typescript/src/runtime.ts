@@ -57,6 +57,10 @@ import {
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  isWindowsUnsafePathComponent,
+  windowsUnsafePathComponent,
+} from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -130,17 +134,21 @@ export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
   const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
-  if (configured !== undefined) {
-    return resolve(expandHome(configured, environment));
-  }
-  const codexHome =
-    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
-  return resolve(
-    expandHome(codexHome, environment),
-    "state",
-    "plugins",
-    "codex-security",
-  );
+  const path =
+    configured !== undefined
+      ? resolve(expandHome(configured, environment))
+      : resolve(
+          expandHome(
+            environmentValue(environment, "CODEX_HOME") ??
+              join(homedir(), ".codex"),
+            environment,
+          ),
+          "state",
+          "plugins",
+          "codex-security",
+        );
+  requireModelSafeOutputDir(path);
+  return path;
 }
 
 export function codexSecurityCredentialHome(
@@ -851,7 +859,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
     "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Security\\Get-Acl | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } }",
   ].join("; ");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
@@ -1334,6 +1342,7 @@ export async function preparePersistentOutputRoot(
   category: "scans" | "policies",
   repositoryName: string,
 ): Promise<string> {
+  requireModelSafeOutputDir(stateDirectory);
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   let root = await realpath(stateDirectory);
   for (const directory of [category, safePrefix(repositoryName)]) {
@@ -1522,6 +1531,31 @@ export function requireModelSafeOutputDir(path: string): void {
     throw new OutputDirectoryError(
       "Scan output directory must not contain control or line-separator characters.",
     );
+  }
+  const ambiguous =
+    process.platform === "win32" ? windowsUnsafePathComponent(path) : undefined;
+  if (ambiguous !== undefined) {
+    throw new OutputDirectoryError(
+      `Codex Security paths must not contain Windows-ambiguous components: ${ambiguous}`,
+    );
+  }
+}
+
+export async function canonicalizeModelSafePath(
+  input: string,
+): Promise<string> {
+  const path = resolve(expandHome(input));
+  requireModelSafeOutputDir(path);
+  for (let ancestor = path; ; ancestor = dirname(ancestor)) {
+    try {
+      const canonicalAncestor = resolve(ancestor, await realpath(ancestor));
+      const canonical = resolve(canonicalAncestor, relative(ancestor, path));
+      requireModelSafeOutputDir(canonical);
+      return canonical;
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") throw error;
+      if (dirname(ancestor) === ancestor) throw error;
+    }
   }
 }
 
@@ -2462,7 +2496,7 @@ function safeArchivePath(value: string): string {
     parts.includes("..") ||
     value.includes("\\") ||
     value.includes("\0") ||
-    parts.some((part) => part.includes(":")) ||
+    parts.some(isWindowsUnsafePathComponent) ||
     normalized.length === 0
   ) {
     throw new PluginBootstrapError(

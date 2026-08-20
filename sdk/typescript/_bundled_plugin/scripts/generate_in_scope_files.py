@@ -15,6 +15,21 @@ class InventoryError(ValueError):
     """Raised when the repository, scope, or inventory cannot be used safely."""
 
 
+def windows_stream_component(path: Path) -> str | None:
+    """Return the first NTFS alternate-data-stream component."""
+
+    if os.name != "nt":
+        return None
+    return next(
+        (
+            component
+            for component in path.parts
+            if component != path.anchor and ":" in component
+        ),
+        None,
+    )
+
+
 def resolve_repository(value: str) -> Path:
     """Resolve the repository once so every scope is bound to its real root."""
     try:
@@ -32,6 +47,11 @@ def resolve_scope(repository: Path, value: str) -> str:
         raise InventoryError("--scope: expected a non-empty file or directory")
 
     requested = Path(value).expanduser()
+    stream = windows_stream_component(requested)
+    if stream is not None:
+        raise InventoryError(
+            f"--scope: NTFS alternate data streams are not supported: {stream}"
+        )
     scope = requested if requested.is_absolute() else repository / requested
     try:
         resolved = scope.resolve(strict=True)

@@ -835,6 +835,31 @@ describe("multiscan", () => {
     expect(scans).toBe(0);
   });
 
+  test("rejects task IDs that collide with Windows path names", async () => {
+    const paths = await fixture();
+    let scans = 0;
+    for (const id of ["task.", "CON", "nul.txt", "COM1", "LPT9.log"]) {
+      await writeFile(
+        paths.input,
+        `id,repository,revision\n${id},./repository,${"0".repeat(40)}\n`,
+      );
+
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+          ),
+        ),
+      ).rejects.toThrow("safe, unique path names");
+    }
+
+    expect(scans).toBe(0);
+  });
+
   test("materializes the pinned commit, applies row options, and removes its checkout", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "payments");
@@ -2071,6 +2096,14 @@ describe("multiscan", () => {
         name: "scope",
         row: `safe,${source.path},${source.revision},../outside`,
       },
+      ...(process.platform === "win32"
+        ? [
+            {
+              name: "windows-qualified-scope",
+              row: `safe,${source.path},${source.revision},src:stream`,
+            },
+          ]
+        : []),
       {
         name: "revision",
         row: `safe,${source.path},HEAD,.`,

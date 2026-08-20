@@ -101,6 +101,7 @@ import {
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
+  canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   expandHome,
@@ -1585,7 +1586,11 @@ export async function main(
         const scanRoot =
           options.scanRoot === undefined
             ? undefined
-            : resolveCliPath(directory, options.scanRoot);
+            : process.platform === "win32"
+              ? await canonicalizeModelSafePath(
+                  resolveCliPath(directory, options.scanRoot),
+                )
+              : resolveCliPath(directory, options.scanRoot);
         const repository =
           scanRoot !== undefined && args.repository === undefined
             ? undefined

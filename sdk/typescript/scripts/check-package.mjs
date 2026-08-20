@@ -190,6 +190,7 @@ const distFiles = new Set(
     "targets",
     "trusted-executable",
     "version",
+    "windows-path",
     "worker-progress",
   ].flatMap((module) =>
     ["js", "js.map", "d.ts", "d.ts.map"].map(

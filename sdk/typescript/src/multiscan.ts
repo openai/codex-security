@@ -35,6 +35,8 @@ const REQUIRED_ARTIFACTS = [
 ];
 const LOCK_LEASE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 5_000;
+const WINDOWS_DEVICE_PATH_NAME =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
 interface MultiscanTask {
   id: string;
@@ -721,7 +723,7 @@ function parseInventory(
     if (
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) ||
       id.endsWith(".") ||
-      /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(id)
+      WINDOWS_DEVICE_PATH_NAME.test(id)
     ) {
       throw new Error("Multiscan task IDs must be safe, unique path names.");
     }
@@ -743,6 +745,7 @@ function parseInventory(
       (isAbsolute(scope) ||
         scope.includes("\\") ||
         scope.split("/").includes("..") ||
+        (process.platform === "win32" && scope.includes(":")) ||
         scope.includes("\0"))
     ) {
       throw new Error("Multiscan scope must stay inside its repository.");
