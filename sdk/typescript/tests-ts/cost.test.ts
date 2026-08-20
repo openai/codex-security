@@ -184,6 +184,7 @@ describe("scan cost", () => {
     for (const [model, expectedUsd] of [
       ["openai.gpt-5.6", 35],
       ["openai.gpt-5.6-sol", 35],
+      ["openai.gpt-daybreak-blue-latest", 35],
       ["openai.gpt-5.6-terra", 14],
       ["openai.gpt-5.6-luna", 1.4],
     ] as const) {
@@ -196,8 +197,9 @@ describe("scan cost", () => {
     expect(estimateScanCost("openai.unknown-model", usage)).toBeNull();
   });
 
-  test("uses current Terra and Luna input, cache, and output rates", () => {
+  test("uses current input, cache, and output rates", () => {
     for (const [model, input, cached, write, output] of [
+      ["gpt-daybreak-blue-latest", 5, 0.5, 6.25, 30],
       ["gpt-5.6-terra", 2, 0.2, 2.5, 12],
       ["gpt-5.6-luna", 0.2, 0.02, 0.25, 1.2],
     ] as const) {

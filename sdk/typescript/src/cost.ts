@@ -866,9 +866,13 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const pricingModel = model.startsWith("openai.")
+  let pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
+  // https://developers.openai.com/api/docs/pricing#cyber-models
+  if (pricingModel === "gpt-daybreak-blue-latest") {
+    pricingModel = "gpt-5.6-sol";
+  }
   const pricing = MODEL_PRICING_NANODOLLARS[pricingModel];
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
