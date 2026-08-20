@@ -342,6 +342,13 @@ describe("CLI", () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
     try {
       const scan = await copyCompletedScan(directory);
+      const paths = [
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+      ].map((name) => join(scan, name));
+      const before = await Promise.all(paths.map((path) => readFile(path)));
+      const source = JSON.parse(before[1]!.toString()).findings[0];
       for (const [format, filename] of [
         ["csv", "findings.csv"],
         ["json", "findings.json"],
@@ -365,15 +372,96 @@ describe("CLI", () => {
             documentType: "codex-security.findings",
           });
         } else {
-          expect(JSON.parse(contents)).toMatchObject({ version: "2.1.0" });
+          const sarif = JSON.parse(contents);
+          expect(sarif.version).toBe("2.1.0");
+          const run = sarif.runs[0];
+          expect(run.tool.driver.rules[0]).toMatchObject({
+            id: source.ruleId,
+            help: { markdown: expect.stringContaining(source.remediation) },
+            properties: {
+              "security-severity": "8.1",
+              tags: expect.arrayContaining([
+                "security",
+                "external/cwe/cwe-022",
+              ]),
+            },
+          });
+          expect(run.results[0]).toMatchObject({
+            ruleId: source.ruleId,
+            message: { text: expect.stringContaining(source.remediation) },
+            partialFingerprints: {
+              "codexSecurity/v1": source.fingerprints.primary,
+            },
+          });
         }
         if (process.platform !== "win32")
           expect((await stat(output)).mode & 0o777).toBe(0o600);
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toBe(`${format.toUpperCase()}: ${output}\n`);
       }
+      expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
+        before,
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("expands home-relative export paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-export-home-"));
+    const home = join(root, "home");
+    const currentDirectory = join(root, "current");
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    try {
+      await mkdir(home);
+      await mkdir(currentDirectory);
+      const scan = await copyCompletedScan(home);
+      const sourceRoot = join(home, "source");
+      await mkdir(sourceRoot);
+      process.env["HOME"] = home;
+      process.env["USERPROFILE"] = home;
+
+      const exports: Array<{
+        scanDir: string;
+        output: string;
+        sourceRoot?: string;
+      }> = [];
+      const deps = dependencies({ currentDirectory });
+      deps.exportFindings = async (arguments_) => {
+        exports.push(arguments_);
+        return undefined;
+      };
+      expect(
+        await main(
+          [
+            "export",
+            "~/scan",
+            "--export-format",
+            "sarif",
+            "--output",
+            "~/findings.sarif",
+            "--source-root",
+            "~/source",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(exports).toEqual([
+        expect.objectContaining({
+          scanDir: await realpath(scan),
+          output: join(await realpath(home), "findings.sarif"),
+          sourceRoot,
+        }),
+      ]);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
+      await rm(root, { recursive: true, force: true });
     }
   });
 

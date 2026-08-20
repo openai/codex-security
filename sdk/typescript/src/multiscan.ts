@@ -36,6 +36,8 @@ const REQUIRED_ARTIFACTS = [
 ];
 const LOCK_LEASE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 5_000;
+const WINDOWS_DEVICE_PATH_NAME =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
 interface MultiscanTask {
   id: string;
@@ -361,10 +363,12 @@ function notifyProgress(
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {
-  const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") throw error;
-    return undefined;
-  });
+  const metadata = await lstat(path, { bigint: true }).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    },
+  );
   if (metadata?.isSymbolicLink()) {
     throw new Error("Multiscan output directories must not be symbolic links.");
   }
@@ -380,7 +384,7 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     await mkdir(prepared, { recursive: true, mode: 0o700 });
   }
   const canonical = await realpath(prepared);
-  const directory = await lstat(canonical);
+  const directory = await lstat(canonical, { bigint: true });
   if (
     metadata !== undefined &&
     (directory.dev !== metadata.dev || directory.ino !== metadata.ino)
@@ -388,13 +392,13 @@ async function ensureOutputDirectory(path: string): Promise<string> {
     throw new Error("Multiscan output directories changed during preparation.");
   }
   if (process.platform === "win32") return canonical;
-  if ((directory.mode & 0o022) !== 0) {
+  if ((directory.mode & 0o022n) !== 0n) {
     throw new Error(
       "Multiscan output directories must not be group- or world-writable.",
     );
   }
   const owner = process.geteuid?.();
-  if (owner !== undefined && directory.uid !== owner) {
+  if (owner !== undefined && directory.uid !== BigInt(owner)) {
     throw new Error(
       "Multiscan output directories must be owned by the current user.",
     );
@@ -444,7 +448,8 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
       await rm(stale, { recursive: true, force: true });
     }
   }
-  const createdLock = await lstat(path);
+  // Windows file IDs can exceed JavaScript's safe integer range.
+  const createdLock = await lstat(path, { bigint: true });
   const owner = `${JSON.stringify({
     pid: process.pid,
     ownerId: randomUUID(),
@@ -454,7 +459,7 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
   try {
     await writeFile(ownerPath, owner, { flag: "wx", mode: 0o600 });
   } catch (error) {
-    const currentLock = await lstat(path).catch(
+    const currentLock = await lstat(path, { bigint: true }).catch(
       (cleanup: NodeJS.ErrnoException) => {
         if (cleanup.code !== "ENOENT") throw cleanup;
         return undefined;
@@ -743,7 +748,7 @@ function parseInventory(
     if (
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) ||
       id.endsWith(".") ||
-      /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(id)
+      WINDOWS_DEVICE_PATH_NAME.test(id)
     ) {
       throw new Error("Multiscan task IDs must be safe, unique path names.");
     }
@@ -765,6 +770,7 @@ function parseInventory(
       (isAbsolute(scope) ||
         scope.includes("\\") ||
         scope.split("/").includes("..") ||
+        (process.platform === "win32" && scope.includes(":")) ||
         scope.includes("\0"))
     ) {
       throw new Error("Multiscan scope must stay inside its repository.");

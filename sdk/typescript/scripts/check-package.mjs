@@ -164,6 +164,7 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "codex-prompt",
     "config",
     "contract",
     "cost",
@@ -173,6 +174,7 @@ const distFiles = new Set(
     "linear",
     "models",
     "multiscan",
+    "patch-tui",
     "publication",
     "publication-events",
     "publication-store",
@@ -187,6 +189,7 @@ const distFiles = new Set(
     "targets",
     "trusted-executable",
     "version",
+    "windows-path",
     "worker-progress",
   ].flatMap((module) =>
     ["js", "js.map", "d.ts", "d.ts.map"].map(
