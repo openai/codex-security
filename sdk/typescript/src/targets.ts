@@ -276,6 +276,20 @@ export async function normalizeTarget(
         `Path target is outside the repository: ${value}`,
       );
     }
+    let metadata;
+    try {
+      metadata = await abortable(() => stat(canonical), signal);
+    } catch (error) {
+      throwIfAborted(signal);
+      throw new InvalidTargetError(`Path target does not exist: ${value}`, {
+        cause: error,
+      });
+    }
+    if (!metadata.isFile() && !metadata.isDirectory()) {
+      throw new InvalidTargetError(
+        `Path target must be a regular file or directory: ${value}`,
+      );
+    }
     const normalized = relativePath.split(sep).join("/") || ".";
     if (!paths.includes(normalized)) {
       paths.push(normalized);
