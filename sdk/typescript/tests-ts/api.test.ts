@@ -675,6 +675,35 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects unsupported authentication modes before runtime initialization", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: { OPENAI_API_KEY: "synthetic-openai-key" },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+    const options = {
+      auth: "unsupported",
+    } as unknown as ScanOptions;
+
+    await expect(client.preflight(repository, options)).rejects.toThrow(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+    await expect(client.run(repository, options)).rejects.toThrow(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
   test("rejects explicit API-key authentication without a configured key before runtime initialization", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -3117,7 +3146,12 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("uses selected profile pricing for live and persisted scan cost", async () => {
+  const pricedModels = [
+    "gpt-5.6-terra",
+    "gpt-daybreak-blue-latest",
+    "gpt-daybreak-red-latest",
+  ];
+  test.each(pricedModels)("tracks live and saved %s costs", async (model) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3133,7 +3167,7 @@ describe("CodexSecurity orchestration", () => {
       output_tokens: 3,
       reasoning_output_tokens: 1,
     };
-    const expectedCost = estimateScanCost("gpt-5.6-terra", usage);
+    const expectedCost = estimateScanCost(model, usage);
     expect(expectedCost).not.toBeNull();
     if (expectedCost === null) throw new Error("Missing selected-model price");
 
@@ -3147,7 +3181,7 @@ describe("CodexSecurity orchestration", () => {
           model_reasoning_effort: "low",
           profiles: {
             review: {
-              model: "gpt-5.6-terra",
+              model,
               model_reasoning_effort: "high",
             },
           },
@@ -3190,7 +3224,7 @@ describe("CodexSecurity orchestration", () => {
       onCost: (cost) => costs.push({ ...cost }),
     });
 
-    expect(result.turnResult.model).toBe("gpt-5.6-terra");
+    expect(result.turnResult.model).toBe(model);
     expect(result.cost).toEqual(expectedCost);
     expect(costs).toEqual([expectedCost]);
 

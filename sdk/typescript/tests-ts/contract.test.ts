@@ -106,6 +106,20 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
+  test("ships a completed example that passes tracking preflight", () => {
+    const result = Bun.spawnSync(
+      [
+        Bun.which("python3") ?? "python",
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
+        EXAMPLE,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  });
+
   test("compares exact Windows volume serials without rounding file identity", async () => {
     const scanDir = await copyExample();
     const path = join(scanDir, "scan-manifest.json");
@@ -220,6 +234,137 @@ describe("canonical scan contract", () => {
     expect(contract.findings.findings[0]?.severity.level).toBe("high");
     expect(contract.coverage.mode).toBe("repository");
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
+  });
+
+  test("preserves schema-valid sealed finding details", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const validation = {
+      evidence: "single proof",
+      counterEvidence: [],
+      status: null,
+      disposition: null,
+      result: null,
+    };
+    findings["findings"][0]["validation"] = validation;
+    findings["findings"][0]["code_evidence"] = null;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation).toEqual(validation);
+    expect(loaded.findings.findings[0]?.code_evidence).toBeNull();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("preserves valid details while normalizing malformed legacy siblings", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const validation = {
+      evidence: "single proof",
+      counterEvidence: [],
+      status: null,
+      disposition: null,
+      result: null,
+    };
+    findings["findings"][0]["validation"] = validation;
+    const codeEvidence = [{ id: " ", code: " " }];
+    findings["findings"][0]["code_evidence"] = codeEvidence;
+    findings["findings"][0]["attackPath"] = {
+      steps: { first: "upload" },
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation).toEqual(validation);
+    expect(loaded.findings.findings[0]?.code_evidence).toEqual(codeEvidence);
+    expect(loaded.findings.findings[0]?.attackPath?.steps).toBeUndefined();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("preserves empty union lists while normalizing malformed siblings", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["validation"] = { evidence: [] };
+    findings["findings"][0]["attackPath"] = {
+      steps: { first: "upload" },
+    };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.validation?.evidence).toEqual([]);
+    expect(loaded.findings.findings[0]?.attackPath?.steps).toBeUndefined();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("normalizes pre-typed sealed finding details without changing the artifact", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    const legacyValidation = {
+      evidence: { kind: "trace" },
+      counterEvidence: [null, "The mitigation was checked."],
+    };
+    const legacyAttackPath = { steps: { first: "upload" } };
+    findings["findings"][0]["validation"] = legacyValidation;
+    findings["findings"][0]["attackPath"] = legacyAttackPath;
+    findings["findings"][0]["root_cause"] = null;
+    findings["findings"][0]["code_evidence"] = [
+      { id: "legacy-source", code: "legacy_source()" },
+    ];
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.findings.findings[0]?.code_evidence?.[0]?.id).toBe(
+      "legacy-source",
+    );
+    const loadedFinding = loaded.findings.findings[0];
+    expect(loadedFinding?.validation?.evidence).toBeUndefined();
+    expect(
+      loadedFinding?.validation?.counterEvidence?.map((item) =>
+        item.toUpperCase(),
+      ),
+    ).toEqual(["THE MITIGATION WAS CHECKED."]);
+    expect(loadedFinding?.attackPath?.steps).toBeUndefined();
+    expect(loadedFinding?.root_cause).toBeNull();
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("rejects malformed canonical root-cause details", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["rootCause"] = { summary: [] };
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("findings.json");
+    expect(await readJson(findingsPath)).toEqual(findings);
+  });
+
+  test("loads an empty legacy root cause without changing the artifact", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["root_cause"] = "";
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+    expect(loaded.findings.findings[0]?.root_cause).toBe("");
+    expect(await readJson(findingsPath)).toEqual(findings);
   });
 
   test("honors cancellation during contract validation", async () => {

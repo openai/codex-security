@@ -95,6 +95,9 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
   "gpt-5.6-luna": [200, 20, 250, 1_200],
+  // https://developers.openai.com/api/docs/pricing#cyber-models
+  "gpt-daybreak-blue-latest": [5_000, 500, 6_250, 30_000],
+  "gpt-daybreak-red-latest": [12_500, 1_250, 15_625, 75_000],
 };
 
 const COST_POLL_INTERVAL_MS = 100;

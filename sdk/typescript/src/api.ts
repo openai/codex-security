@@ -2770,6 +2770,11 @@ export function scanAuthentication(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
 ): ScanAuthentication {
+  if (auth !== "auto" && auth !== "chatgpt" && auth !== "api-key") {
+    throw new TypeError(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+  }
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
