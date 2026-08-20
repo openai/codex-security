@@ -1,10 +1,18 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   comparisonEnvironment,
+  matchCompletedScan,
   matchScanFindings,
   type ScanComparisonInput,
   type ScanComparisonOptions,
@@ -59,6 +67,10 @@ describe("semantic scan comparison", () => {
     const credentialHome = join(stateDirectory, "codex-home");
     await mkdir(credentialHome, { recursive: true, mode: 0o700 });
     let statusProbed = false;
+    const account = async () => {
+      statusProbed = true;
+      return { authenticated: true, details: "Logged in using ChatGPT" };
+    };
 
     const environment = await comparisonEnvironment(
       {
@@ -66,13 +78,7 @@ describe("semantic scan comparison", () => {
         OPENAI_API_KEY: "synthetic-key-must-not-be-used",
         CODEX_API_KEY: "synthetic-secondary-must-not-be-used",
       },
-      async () => {
-        statusProbed = true;
-        return {
-          authenticated: true,
-          details: "Logged in using ChatGPT",
-        };
-      },
+      account,
     );
 
     expect(environment["CODEX_SECURITY_STATE_DIR"]).toBe(stateDirectory);
@@ -83,8 +89,71 @@ describe("semantic scan comparison", () => {
       "synthetic-secondary-must-not-be-used",
     );
     expect(environment["CODEX_HOME"]).toBeUndefined();
+    const provider = {
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      CODEX_SECURITY_SCAN_ID: "scan",
+      CODEX_HOME: "/provider-home",
+      FIREWORKS_API_KEY: "provider-key",
+    };
+    expect(await comparisonEnvironment(provider, account)).toEqual(provider);
     expect(statusProbed).toBe(false);
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "recognizes provider scan variables regardless of Windows casing",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const stateDirectory = join(root, "state");
+      const providerHome = join(root, "provider-home");
+      await mkdir(join(stateDirectory, "codex-home"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      let statusProbed = false;
+      const provider = {
+        codex_security_scan_id: "scan",
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+        codex_home: providerHome,
+        FIREWORKS_API_KEY: "synthetic-provider-key",
+      };
+
+      const environment = await comparisonEnvironment(provider, async () => {
+        statusProbed = true;
+        return { authenticated: true, details: "Logged in using ChatGPT" };
+      });
+
+      expect(environment).toEqual(provider);
+      expect(statusProbed).toBe(false);
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "replaces differently cased Windows CODEX_HOME variables",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const stateDirectory = join(root, "state");
+      const credentialHome = join(stateDirectory, "codex-home");
+      await mkdir(credentialHome, { recursive: true, mode: 0o700 });
+
+      const environment = await comparisonEnvironment(
+        {
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          codex_home: join(root, "ambient-home"),
+        },
+        async () => ({
+          authenticated: true,
+          details: "Logged in using ChatGPT",
+        }),
+        undefined,
+        async () => await realpath(credentialHome),
+      );
+
+      expect(environment["CODEX_HOME"]).toBe(await realpath(credentialHome));
+      expect(environment["codex_home"]).toBeUndefined();
+    },
+  );
 
   test("reuses managed keyring credentials when no environment key is present", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
@@ -190,6 +259,25 @@ describe("semantic scan comparison", () => {
     expect(environment["CODEX_HOME"]).toBe(ambientHome);
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "recognizes stored credentials under a backslash home-relative path",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+      temporaryDirectories.push(root);
+      const ambientHome = join(root, "ambient-codex-home");
+      await mkdir(ambientHome);
+      await writeFile(join(ambientHome, "auth.json"), "{}");
+      const environment = await comparisonEnvironment({
+        CODEX_HOME: "~\\ambient-codex-home",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "",
+        USERPROFILE: root,
+      });
+
+      expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+    },
+  );
+
   test("compares all findings with one restricted structured-output turn", async () => {
     const input: ScanComparisonInput = {
       before: [finding("before-1"), finding("before-2")],
@@ -248,6 +336,135 @@ describe("semantic scan comparison", () => {
     expect(calls.prompt).toContain("untrusted data");
     expect(calls.prompt).toContain(JSON.stringify(input));
   });
+
+  test("matches open and dismissed findings from the same target", async () => {
+    const open = { findingId: "open", occurrenceId: "old-open" };
+    const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
+    const after = { findingId: "renamed", occurrenceId: "new-renamed" };
+    const commands: (readonly string[])[] = [];
+    let input: ScanComparisonInput | undefined;
+    await matchCompletedScan({
+      scanId: "current",
+      repository: "/repository",
+      previousFindings: [open],
+      falsePositives: [{ findingId: "dismissed", sourceScanId: "prior" }],
+      findings: [after],
+      environment: {
+        CODEX_HOME: "/provider-home",
+        CODEX_SECURITY_SCAN_ID: "current",
+        FIREWORKS_API_KEY: "synthetic-provider-key",
+      },
+      async workbench(args) {
+        commands.push(args);
+        return args[0] === "list-unmatched-scan-pairs"
+          ? {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: [after],
+                  beforeScans: [
+                    {
+                      scanId: "another-target",
+                      findings: [{ ...dismissed, occurrenceId: "foreign" }],
+                    },
+                    { scanId: "prior", findings: [open, dismissed] },
+                  ],
+                },
+              ],
+            }
+          : {};
+      },
+      async matchFindings(value, options) {
+        input = value;
+        expect(options).toMatchObject({
+          environment: {
+            CODEX_HOME: "/provider-home",
+            CODEX_SECURITY_SCAN_ID: "current",
+          },
+        });
+        return {
+          matches: [
+            {
+              beforeOccurrenceIds: ["old-dismissed"],
+              afterOccurrenceIds: ["new-renamed"],
+              confidence: "high",
+              reason: "Same dismissed root cause.",
+            },
+          ],
+          uncertain: [
+            {
+              beforeOccurrenceId: "old-open",
+              afterOccurrenceId: "new-renamed",
+              reason: "Possible match.",
+            },
+          ],
+        };
+      },
+    });
+    expect(input).toEqual({ before: [open, dismissed], after: [after] });
+    expect(commands.map(([command]) => command)).toEqual([
+      "list-unmatched-scan-pairs",
+      "save-scan-comparison",
+    ]);
+    const saved = JSON.parse(commands[1]!.at(-1)!) as ScanComparisonResult;
+    expect(
+      saved.matches.map(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
+    ).toEqual([["old-dismissed"]]);
+    expect(saved.uncertain).toEqual([]);
+  });
+
+  test.each([
+    ["no history", false, false, false, 0, false],
+    ["a stable identity", true, false, true, 2, false],
+    ["a renamed dismissed identity", false, true, false, 2, true],
+  ] as const)(
+    "only starts a model turn when needed for %s",
+    async (
+      _scenario,
+      open,
+      dismissed,
+      stable,
+      expectedCalls,
+      expectedModel,
+    ) => {
+      const before = { findingId: "previous", occurrenceId: "old" };
+      const after = {
+        findingId: stable ? "previous" : "new",
+        occurrenceId: "new",
+      };
+      let calls = 0;
+      let modelCalled = false;
+      await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: open ? [before] : [],
+        falsePositives: dismissed
+          ? [{ findingId: "previous", sourceScanId: "prior" }]
+          : [],
+        findings: [after],
+        async workbench(args) {
+          calls += 1;
+          return args[0] === "list-unmatched-scan-pairs"
+            ? {
+                batches: [
+                  {
+                    afterScanId: "current",
+                    afterFindings: [after],
+                    beforeScans: [{ scanId: "prior", findings: [before] }],
+                  },
+                ],
+              }
+            : {};
+        },
+        async matchFindings() {
+          modelCalled = true;
+          return { matches: [], uncertain: [] };
+        },
+      });
+      expect(calls).toBe(expectedCalls);
+      expect(modelCalled).toBe(expectedModel);
+    },
+  );
 
   test("rejects malformed model JSON", async () => {
     const { codex } = fakeCodex("not-json");

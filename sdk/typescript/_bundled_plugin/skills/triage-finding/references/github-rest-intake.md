@@ -53,20 +53,19 @@ If the user supplied a GitHub repository but did not name a finding source, do n
 - security advisories and private vulnerability reports
 - all of the above
 
-If the user names a source, query only the matching REST endpoint family. If the user chooses `all`, query code scanning, Dependabot vulnerabilities, Dependabot malware, and repository security advisories/private vulnerability reports.
+If the user names a source, query only the matching endpoint family through the authorized transport. If the user chooses `all`, query code scanning, Dependabot vulnerabilities, Dependabot malware, and repository security advisories/private vulnerability reports.
 
 GitHub Issues are not part of `all` and are not a default source. Fetch and normalize a GitHub Issue only when the user explicitly supplies a specific issue URL or number, or explicitly asks to triage GitHub Issues.
 
-## REST-Only Finding Retrieval
+## GitHub Finding Retrieval
 
-Use GitHub REST endpoints for all finding retrieval. Do not use the GitHub Connector to fetch repository finding data, even if the connector is installed or the user explicitly asks to use it. If the user asks for the GitHub Connector, silently use it only for auth token acquisition when available, then continue with REST.
+Use GitHub REST endpoints by default. If the user explicitly selects the GitHub Connector, use its read-only tools for the selected repository and finding source instead.
 
-The connector is auth-only in this workflow because the available connector surface does not cover all required GitHub security endpoints for code scanning,
-Dependabot alerts, repository security advisories, and private vulnerability reports.
+The connector may not expose every security endpoint. If the requested connector cannot retrieve the selected findings, explain which capability is unavailable and ask before switching to REST. Identify the GitHub hostname, exact repository, and proposed account when it can be verified safely. Do not acquire a different token, inspect another credential source, or use a different account before the user approves that fallback. After approval, use only the approved transport and credential source.
 
 ## Auth Priority
 
-Acquire a REST token in this order:
+When the user chooses a REST account or credential source, use only that account or source. Ask before selecting another. When REST is the default and the user did not select an account or credential, acquire a token in this order:
 
 1. GitHub Connector-provided auth token, if a connector token acquisition tool is available.
 2. `gh auth token`, if `gh` is installed and authenticated.
@@ -84,7 +83,7 @@ Accept: application/vnd.github+json
 X-GitHub-Api-Version: 2022-11-28
 ```
 
-If no REST auth source is available, ask the user to connect GitHub or provide one of the supported auth sources above. Do not continue with unauthenticated requests for private or owner-only security data.
+If REST is the authorized transport and its approved auth source is unavailable, ask the user to connect GitHub or provide one of the supported auth sources above. Do not require REST credentials for connector retrieval or continue with unauthenticated requests for private or owner-only security data.
 
 ## Endpoints
 

@@ -28,8 +28,6 @@ def parse_args(description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("get-setup-preference")
-
     create_workspace = subparsers.add_parser("create-workspace")
     create_workspace.add_argument("--workspace-id", required=True)
     create_workspace.add_argument("--thread-id")
@@ -37,9 +35,6 @@ def parse_args(description: str) -> argparse.Namespace:
     create_workspace.add_argument("--target-title")
     create_workspace.add_argument("--target-summary")
     create_workspace.add_argument("--user-context")
-    create_preflight = create_workspace.add_mutually_exclusive_group()
-    create_preflight.add_argument("--capability-preflight-json")
-    create_preflight.add_argument("--capability-preflight-json-file", type=Path)
     create_workspace.add_argument("--scope")
     create_workspace.add_argument("--mode", choices=MODES, default="standard")
     create_workspace.add_argument("--diff-target-kind", choices=DIFF_TARGET_KINDS)
@@ -50,14 +45,6 @@ def parse_args(description: str) -> argparse.Namespace:
     get_workspace = subparsers.add_parser("get-workspace")
     get_workspace.add_argument("--workspace-id", required=True)
     get_workspace.add_argument("--thread-id")
-
-    get_latest_workspace = subparsers.add_parser("get-latest-workspace")
-    get_latest_workspace.add_argument("--thread-id", required=True)
-
-    list_workspace_scans = subparsers.add_parser("list-workspace-scans")
-    list_workspace_scans.add_argument("--workspace-id", required=True)
-    list_workspace_scans.add_argument("--offset", type=non_negative_int, default=0)
-    list_workspace_scans.add_argument("--limit", type=workspace_scan_limit, default=20)
 
     inspect_target = subparsers.add_parser("inspect-target")
     inspect_target.add_argument("--target-path", required=True)
@@ -71,25 +58,6 @@ def parse_args(description: str) -> argparse.Namespace:
     inspect_setup.add_argument("--diff-head-revision")
     inspect_setup.add_argument("--diff-content-digest")
 
-    begin_diff_resolution = subparsers.add_parser("begin-diff-resolution")
-    begin_diff_resolution.add_argument("--workspace-id", required=True)
-    begin_diff_resolution.add_argument("--request-id", required=True)
-    begin_diff_resolution.add_argument("--target-path", required=True)
-    begin_diff_resolution.add_argument("--user-context")
-
-    cancel_diff_resolution = subparsers.add_parser("cancel-diff-resolution")
-    cancel_diff_resolution.add_argument("--workspace-id", required=True)
-    cancel_diff_resolution.add_argument("--request-id", required=True)
-
-    set_diff_target = subparsers.add_parser("set-diff-target")
-    set_diff_target.add_argument("--workspace-id", required=True)
-    set_diff_target.add_argument("--request-id", required=True)
-    set_diff_target.add_argument("--target-summary", required=True)
-    set_diff_target.add_argument("--diff-target-kind", choices=DIFF_TARGET_KINDS, required=True)
-    set_diff_target.add_argument("--diff-base-revision")
-    set_diff_target.add_argument("--diff-head-revision")
-    set_diff_target.add_argument("--diff-content-digest")
-
     save_workspace = subparsers.add_parser("save-workspace")
     save_workspace.add_argument("--workspace-id", required=True)
     save_workspace.add_argument("--target-path", required=True)
@@ -102,22 +70,11 @@ def parse_args(description: str) -> argparse.Namespace:
     save_workspace.add_argument("--diff-head-revision")
     save_workspace.add_argument("--diff-content-digest")
 
-    set_capability_preflight = subparsers.add_parser("set-capability-preflight")
-    set_capability_preflight.add_argument("--workspace-id", required=True)
-    set_capability_preflight.add_argument("--checked-target-path", required=True)
-    set_capability_preflight.add_argument("--checked-mode", choices=MODES, required=True)
-    set_preflight = set_capability_preflight.add_mutually_exclusive_group(required=True)
-    set_preflight.add_argument("--capability-preflight-json")
-    set_preflight.add_argument("--capability-preflight-json-file", type=Path)
-
     start_scan = subparsers.add_parser("start-scan")
     start_scan.add_argument("--workspace-id", required=True)
     start_scan.add_argument("--scan-root")
     start_scan.add_argument("--model")
     start_scan.add_argument("--reasoning-effort")
-
-    disable_setup_ui = subparsers.add_parser("disable-setup-ui")
-    disable_setup_ui.add_argument("--workspace-id", required=True)
 
     start_prompt_only_scan = subparsers.add_parser("start-prompt-only-scan")
     start_prompt_only_scan.add_argument("--thread-id", required=True)
@@ -190,6 +147,10 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--archive-existing", action="store_true")
     register_cli_scan.add_argument("--archived-scan-dir")
 
+    set_scan_thread = subparsers.add_parser("set-scan-thread")
+    set_scan_thread.add_argument("--scan-id", required=True)
+    set_scan_thread.add_argument("--thread-id", required=True)
+
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
 
@@ -238,6 +199,7 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
     update_progress.add_argument("--deep-review-pass", type=positive_int)
     update_progress.add_argument("--claim-token")
+    update_progress.add_argument("--coordinator-generation", type=positive_int)
     update_progress.add_argument("--model")
     update_progress.add_argument("--reasoning-effort")
 
@@ -250,6 +212,11 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
+
+    complete_budget_exhausted_scan = subparsers.add_parser("complete-budget-exhausted-scan")
+    complete_budget_exhausted_scan.add_argument("--scan-id", required=True)
+    complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
+    complete_budget_exhausted_scan.add_argument("--message")
 
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
@@ -337,8 +304,18 @@ def parse_args(description: str) -> argparse.Namespace:
     export_findings.add_argument("--scan-id", required=True)
     export_findings.add_argument("--format", choices=EXPORT_FORMATS, required=True)
 
+    for command in ("prepare-linear-publication", "record-linear-publications"):
+        publication = subparsers.add_parser(command)
+        publication.add_argument("--input-file", required=True)
+
     subparsers.add_parser("database-info")
-    return parser.parse_args()
+    arguments = sys.argv[1:]
+    if "--user-context-stdin" in arguments:
+        if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
+            parser.error("pass exactly one user-context transport")
+        index = arguments.index("--user-context-stdin")
+        arguments[index : index + 1] = ["--user-context", sys.stdin.read()]
+    return parser.parse_args(arguments)
 
 
 def non_negative_int(value: str) -> int:
@@ -352,13 +329,6 @@ def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("expected a positive integer")
-    return parsed
-
-
-def workspace_scan_limit(value: str) -> int:
-    parsed = positive_int(value)
-    if parsed > 100:
-        raise argparse.ArgumentTypeError("expected an integer between 1 and 100")
     return parsed
 
 

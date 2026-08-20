@@ -14,7 +14,7 @@ This skill is for backlog burn-down. It starts from findings the user already ha
 
 ## Backlog Burn-Down Scope
 
-Treat multiple supplied findings as one backlog-reduction problem, not as a set of unrelated one-off triages. The goal is to turn noisy existing finding sources into a ranked, evidence-backed action queue while preserving one result per input for auditability and app rendering.
+Treat multiple supplied findings as one backlog-reduction problem, not as a set of unrelated one-off triages. The goal is to turn noisy existing finding sources into a ranked, evidence-backed action queue while preserving one result per input for auditability.
 
 For now, run the workflow inline in the current thread, but structure the work like a backlog pipeline:
 
@@ -73,10 +73,9 @@ classify a verdict, or emit the `triage-finding/v0` JSON contract. Ask the user 
 - security advisories and private vulnerability reports
 - all of the above
 
-If the user specifies a source, query only the matching GitHub REST endpoint family from `references/github-rest-intake.md`. If the user chooses all, query the REST sources listed there, but do not include GitHub Issues in all.
+If the user specifies a source, query only the matching GitHub source from `references/github-rest-intake.md` through the authorized transport. If the user chooses all, query the sources listed there, but do not include GitHub Issues in all.
 
-Use REST for all GitHub finding retrieval. Do not use the GitHub Connector to fetch findings, even when it is installed or the user explicitly asks for it.
-If the user asks to use the GitHub Connector, silently use it only as the first auth-token source when a connector token acquisition path is available, then retrieve finding data directly with REST. If connector token acquisition is not available, fall through to the next REST auth source in the reference.
+Use REST by default. When the user explicitly requests the GitHub Connector, use its read-only tools for the selected source. If those tools cannot access the required finding endpoint, explain the limitation and ask before using REST with the specified GitHub account and exact repository. Never silently switch transports, accounts, or credentials.
 
 Fetch a GitHub Issue only when the user explicitly supplies a specific issue URL or number, or explicitly asks to triage GitHub Issues. Normalize explicit issues as `source_type: "freeform"`.
 
@@ -92,7 +91,7 @@ SARIF results, CVE/GHSA or advisory descriptions, scanner tickets, bug bounty re
 Start by extracting:
 
 - repository path or current working repository
-- GitHub repository owner/name and selected GitHub REST source, when the input is a GitHub repository intake request
+- GitHub repository owner/name, selected finding source, and authorized transport, when the input is a GitHub repository intake request
 - Jira/Linear source query, issue key or identifier, URL, project, status,
   labels, components, priority, assignee, reporter, timestamps, and issue type when the input is imported from a ticketing system
 - input id, scanner id, SARIF rule/result id, CVE/GHSA id, ticket id, or Codex Security `findingId`/`occurrenceId` when present
@@ -129,7 +128,7 @@ If no policy applies, record that absence as a proof gap and continue with the n
    - Do not write back to Jira or Linear unless the user explicitly asks.
 2. If the input is a GitHub repository intake request, follow `references/github-rest-intake.md`.
    - If the user did not specify a GitHub finding source, ask for the source and stop without emitting triage JSON.
-   - If REST auth is unavailable, ask for a supported auth source and stop without emitting triage JSON.
+   - If REST is the authorized transport and its approved credential is unavailable, ask for a supported auth source and stop without emitting triage JSON. Do not require REST credentials for connector retrieval.
    - Normalize retrieved GitHub findings into the existing source types: `sarif`, `cve`, `advisory`, or `freeform` for explicit GitHub Issues.
    - Preserve GitHub provenance in `input_id`, `normalized_input.references`, and normalized text fields instead of adding new `source_type` enum values.
 3. Normalize each supplied or imported finding into a triage item.
@@ -191,8 +190,7 @@ If no policy applies, record that absence as a proof gap and continue with the n
 10. Assign exploitability stack ranks for `confirmed` and `needs_review` findings.
 11. For `confirmed` findings, add owner hints after verdicting when local ownership evidence is easy to derive.
 12. Build one valid `triage-finding/v0` result using the contract in `references/triage-result-contract.md`.
-13. If the Codex Security app tool `open_codex_security_triage_results` is available, call it with the complete result before the final response so the app renders the findings table. After a successful tool call, return a concise Markdown summary; do not paste the full JSON block unless the user asks for the raw contract.
-14. If the app tool is unavailable or rejects the result, fall back to the fenced JSON block alongside the concise Markdown summary.
+13. Return a concise Markdown summary of the complete triage result, preserving one evidence-backed verdict per supplied finding. Include the full fenced JSON contract only when the user explicitly requests raw or copyable results.
 
 ## Surface and Boundary Gate
 
@@ -275,9 +273,9 @@ Prefer CODEOWNERS or OWNERS evidence when available. If ownership is not clear,
 omit the owner hint rather than guessing. Owner hints are routing metadata only:
 do not use ownership to influence verdict, confidence, boundary assessment, or exploitability rank.
 
-The `triage-finding/v0` contract does not define a dedicated owner field. Do not add undocumented fields to the app-tool payload. Put owner-hint text in existing Markdown output, evidence, or recommended-next-step text when it is useful.
+The `triage-finding/v0` contract does not define a dedicated owner field. Do not add undocumented fields to the structured result. Put owner-hint text in existing Markdown output, evidence, or recommended-next-step text when it is useful.
 
-## App Surface and Output Contract
+## Output Contract
 
 The Markdown result should include:
 
@@ -295,7 +293,7 @@ The Markdown result should include:
 - recommended next step
 - `$fix-finding` handoff when verdict is `confirmed`
 
-The app-tool payload or fallback JSON block must include:
+When the user requests the raw JSON contract, it must include:
 
 - `schema_version: "triage-finding/v0"`
 - repository path and revision when available
@@ -304,14 +302,7 @@ The app-tool payload or fallback JSON block must include:
 - `boundary_assessment` on every finding result, even when fields are unknown
 - `exploitability_stack_rank` on every finding result
 
-Prefer the app tool over showing raw JSON. The intended default UX is:
-
-1. generate the valid `triage-finding/v0` result internally
-2. call `open_codex_security_triage_results` with that result
-3. respond with the concise Markdown summary
-
-Use the fenced JSON block only as a fallback when the app tool cannot be used,
-or when the user explicitly asks to see or copy the raw result contract.
+Generate the valid `triage-finding/v0` result internally, then respond with the concise Markdown summary. Include the fenced JSON block only when the user explicitly asks to see or copy the raw result contract.
 
 ## Fix-Finding Handoff
 
@@ -333,7 +324,7 @@ Do not invoke `$fix-finding` unless the user explicitly asks to continue into fi
 - Do not search for unrelated vulnerabilities.
 - Do not claim exhaustive repository coverage.
 - Do not claim runtime validation happened.
-- Do not use the GitHub Connector for GitHub finding retrieval. It may be used only as the first auth-token source for REST requests when available.
+- Honor the user's explicitly selected GitHub transport, account, and repository; never silently fall back to another credential or transport.
 - Do not mutate Jira, Linear, or other backlog sources unless the user explicitly asks for writeback after triage.
 - Do not include GitHub Issues in default GitHub intake or in the all-source GitHub intake path.
 - Do not mark `confirmed` solely because attacker-influenced data reaches a dangerous sink; first establish the relevant product surface and supported security boundary.

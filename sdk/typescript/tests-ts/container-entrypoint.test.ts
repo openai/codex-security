@@ -166,6 +166,35 @@ describe("customer container entrypoint", () => {
     },
   );
 
+  testPosix("accepts CSVs after global and bulk-scan options", async () => {
+    for (const arguments_ of [
+      ["bulk-scan", "--workers", "2", "/input/repositories.csv"],
+      ["bulk-scan", "--max-cost", "12.50", "/input/repositories.csv"],
+      ["bulk-scan", "bulk-scan", "--output-dir", "/output"],
+      [
+        "--format",
+        "toon",
+        "bulk-scan",
+        "--output-dir=/output",
+        "/input/repositories.csv",
+      ],
+    ] as const) {
+      const result = await runEntrypoint(arguments_);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(
+        [
+          ...arguments_,
+          ...(appArmorRestrictsUserNamespaces &&
+          !usesCodexSecurityAppArmorProfile
+            ? ["--codex", "features.use_legacy_landlock=true"]
+            : []),
+          "",
+        ].join("\n"),
+      );
+    }
+  });
+
   testPosix(
     "preserves bulk-scan help without injecting scan configuration",
     async () => {
@@ -229,15 +258,36 @@ describe("customer container entrypoint", () => {
   testPosix(
     "rejects interactive discovery before starting the CLI",
     async () => {
-      const result = await runEntrypoint(["bulk-scan"]);
-
-      expect(result.status).toBe(2);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toBe(
-        "codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.\n",
-      );
+      for (const arguments_ of [
+        ["bulk-scan"],
+        ["bulk-scan", "--workers", "8"],
+        ["bulk-scan", "--max-cost", "12.50"],
+        ["bulk-scan", "--scan-prompt-file", "prompt.md"],
+        ["bulk-scan", "--post-scan-prompt-file", "post-prompt.md"],
+        ["--format", "json", "bulk-scan", "--mode", "deep"],
+      ] as const) {
+        const result = await runEntrypoint(arguments_);
+        expect(result.status).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain(
+          "interactive discovery is not supported",
+        );
+      }
     },
   );
+
+  testPosix("rejects unsupported bulk-scan option terminators", async () => {
+    for (const arguments_ of [
+      ["bulk-scan", "--output-dir", "/output", "--", "--help"],
+      ["bulk-scan", "--output-dir", "--", "--help"],
+    ] as const) {
+      const result = await runEntrypoint(arguments_);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(
+        "does not support the -- option terminator",
+      );
+    }
+  });
 
   testPosix("does not change non-scan commands", async () => {
     const result = await runEntrypoint(["--version"]);
