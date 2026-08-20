@@ -293,6 +293,21 @@ def path_is_excluded(path: Path) -> bool:
     return path.name.endswith((".min.js", ".map"))
 
 
+def windows_stream_component(path: Path) -> str | None:
+    """Return the first NTFS alternate-data-stream component."""
+
+    if os.name != "nt":
+        return None
+    return next(
+        (
+            component
+            for component in path.parts
+            if component != path.anchor and ":" in component
+        ),
+        None,
+    )
+
+
 def resolve_scope(
     repo: Path,
     scope: str,
@@ -301,6 +316,9 @@ def resolve_scope(
     reject_symlinks: bool = False,
 ) -> Path:
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
+    stream = windows_stream_component(scope_path)
+    if stream is not None:
+        raise SystemExit(f"Scope must not use an NTFS alternate data stream: {stream}")
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
     if reject_symlinks:

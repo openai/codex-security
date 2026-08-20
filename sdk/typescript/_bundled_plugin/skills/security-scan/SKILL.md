@@ -17,7 +17,7 @@ After resolving the target and host-specific scan context, read `../../reference
 
 For a running host-backed scan, persist user-requested context changes with `update_codex_security_scan_context` and the current handoff token when required. At each real forward phase transition, use `structuredContent.scan.userContext` from `update_codex_security_scan_progress` as the immutable context for that phase and its workers. Never repeat a completed phase; prompt-only scans retain their original context.
 
-When an SDK or terminal host sets `CODEX_SECURITY_SCAN_ID`, emit its standalone `CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}` marker at discovery start, meaningful completed-review batches, and real later phase transitions. Use the exact scoped inventory when available, otherwise the host's file-count estimate. Collect each worker's count of fully reviewed files; add counts only for known-disjoint work and otherwise use their maximum as a conservative lower bound. Never create inventories or receipt files only for progress.
+When an SDK or terminal host sets `CODEX_SECURITY_SCAN_ID`, emit its standalone `CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}` marker at discovery start, meaningful completed-review batches, and real later phase transitions. Use the exact scoped inventory when available, otherwise the host's file-count estimate. Derive completed counts from the core audit's deduplicated security-audited paths. Never create inventories or receipt files only for progress.
 
 ## Workflow
 
