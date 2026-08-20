@@ -251,6 +251,9 @@ npx @openai/codex-security publish scan /path/outside/repository/results --to li
 npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
+npx @openai/codex-security verify-fix --linear-issue SEC-123 --json
+npx @openai/codex-security verify-fix --linear-project "Security backlog" --linear-filter '{"state":{"type":{"eq":"completed"}}}' --json
+npx @openai/codex-security verify-fix --scan SCAN_ID --severity high --json
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
 npx @openai/codex-security patch OCCURRENCE_ID
@@ -814,6 +817,23 @@ environment settings; prefer the environment variable to keep keys out of shell
 history. Imported content is always literal, and issue URLs must match the
 selected workspace. Linear access is read-only, and its credentials are not
 passed to the patch subprocess.
+
+Use `verify-fix` to check whether an existing security fix actually closes its
+original vulnerability without modifying the repository. Pass a finding
+description, a saved finding identifier, `--scan SCAN_ID`, `--linear-issue ISSUE`,
+or `--linear-project "PROJECT"`. Linear intake uses the same credentials and
+`--linear-filter` options as `patch`; explicitly filter for completed issues when
+verifying a finished backlog. Verification runs the bundled `verify-fix` skill
+in a read-only Codex sandbox and reports `fixed`, `still_vulnerable`, or
+`inconclusive` with supporting evidence for every finding. Use `--json` for
+structured output. Exit code `0` means every finding is fixed, `1` means at
+least one finding remains vulnerable, and `2` means a result is inconclusive or
+verification could not complete.
+
+Interactive verification shows the same live agent-activity dashboard used by
+scans and Linear publication. Reasoning, repository commands, and progress are
+written to stderr; redirected output and CI receive plain progress lines, and
+JSON results on stdout remain machine-readable.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or

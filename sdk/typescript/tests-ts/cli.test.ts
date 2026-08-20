@@ -202,6 +202,9 @@ describe("CLI", () => {
     expect(manifest.text()).toContain("codex-security bulk-scan [input]");
     expect(manifest.text()).toContain("codex-security export [scanDir]");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
+    expect(manifest.text()).toContain(
+      "codex-security verify-fix [findings...]",
+    );
     expect(manifest.text()).toContain("codex-security patch [issues...]");
     expect(manifest.text()).toContain(
       "codex-security findings false-positive <occurrenceId>",

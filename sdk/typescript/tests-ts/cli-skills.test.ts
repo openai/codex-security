@@ -1161,6 +1161,88 @@ lines.on("line", (line) => {
     expect(stderr.text()).toBe("");
   });
 
+  test("starts verification app-server threads with a read-only sandbox", async () => {
+    const source = `
+const assert = require("node:assert/strict");
+const lines = require("node:readline").createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") send({ id: 1, result: {} });
+  if (request.method === "config/read") {
+    assert.deepEqual(request.params, {
+      cwd: ${JSON.stringify(process.cwd())},
+      includeLayers: true,
+    });
+    send({ id: 4, result: { layers: [
+      { name: { type: "project" }, config: { mcp_servers: { repository: { command: "untrusted" } } } },
+      { name: { type: "user" }, config: { mcp_servers: { trusted: { command: "trusted" } } } },
+    ] } });
+  }
+  if (request.method === "thread/start") {
+    assert.deepEqual(request.params, {
+      approvalPolicy: "on-request",
+      sandbox: "read-only",
+      config: { mcp_servers: { repository: { enabled: false } } },
+    });
+    send({ id: 2, result: { thread: { id: "verification" } } });
+  }
+  if (request.method === "turn/start") {
+    send({ id: 3, result: { turn: { id: "verification-turn" } } });
+    send({ method: "item/started", params: {
+      threadId: "another-thread", turnId: "verification-turn",
+      item: { id: "hidden-command", type: "commandExecution", command: "private command" },
+    } });
+    send({ method: "item/started", params: {
+      threadId: "verification", turnId: "verification-turn",
+      item: { id: "verification-command", type: "commandExecution", command: "rg authorization src/guard.ts" },
+    } });
+    send({ method: "item/reasoning/summaryTextDelta", params: {
+      threadId: "verification", turnId: "verification-turn",
+      itemId: "verification-reasoning", delta: "Tracing the original control.",
+    } });
+    send({ method: "item/completed", params: {
+      threadId: "verification", turnId: "verification-turn",
+      item: { type: "agentMessage", text: "Verified without modifying source" },
+    } });
+    send({ method: "turn/completed", params: {
+      threadId: "verification", turn: { id: "verification-turn", status: "completed" },
+    } });
+  }
+});
+`;
+    const stdout = capture();
+    const stderr = capture();
+    const activity: Readonly<Record<string, unknown>>[] = [];
+
+    await expect(
+      runCodexSkillCommand(
+        ["-e", source],
+        {
+          command: "verify-fix",
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          appServer: {
+            directory: process.cwd(),
+            prompt:
+              "Verify the synthetic finding without editing the repository",
+            sandbox: "read-only",
+            onEvent: (event) => activity.push(event),
+          },
+        },
+        { command: process.execPath },
+      ),
+    ).resolves.toBe(0);
+    expect(stdout.text()).toBe("Verified without modifying source\n");
+    expect(stderr.text()).toBe("");
+    expect(activity.map((event) => event["method"])).toEqual([
+      "item/started",
+      "item/reasoning/summaryTextDelta",
+      "item/completed",
+    ]);
+    expect(JSON.stringify(activity)).not.toContain("private command");
+  });
+
   test.each([
     ["EOF after a final answer", "final_answer", false],
     ["EOF after commentary", "commentary", false],

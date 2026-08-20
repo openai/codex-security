@@ -107,6 +107,8 @@
     "skills/validation/SKILL.md",
     "skills/validation/agents/openai.yaml",
     "skills/validation/references/validation-guidance.md",
+    "skills/verify-fix/SKILL.md",
+    "skills/verify-fix/agents/openai.yaml",
     "skills/vulnerability-writeup/SKILL.md",
     "skills/vulnerability-writeup/agents/openai.yaml",
     "skills/vulnerability-writeup/references/report-format.md"
