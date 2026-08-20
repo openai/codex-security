@@ -1390,13 +1390,13 @@ export async function main(
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
-  ): Promise<JsonObject | undefined> => {
+  ): Promise<JsonObject> => {
     try {
       return await select(await dependencies.runWorkbench(args));
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
-      return undefined;
+      throw error;
     }
   };
   const latestScans = async (
@@ -1791,7 +1791,7 @@ export async function main(
         } catch (error) {
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
           exitCode = 2;
-          return undefined;
+          throw error;
         }
       },
     })
