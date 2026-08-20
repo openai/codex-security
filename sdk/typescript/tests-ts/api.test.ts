@@ -3117,7 +3117,11 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  const pricedModels = ["gpt-5.6-terra", "gpt-daybreak-blue-latest"];
+  const pricedModels = [
+    "gpt-5.6-terra",
+    "gpt-daybreak-blue-latest",
+    "gpt-daybreak-red-latest",
+  ];
   test.each(pricedModels)("tracks live and saved %s costs", async (model) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

@@ -95,6 +95,9 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-terra": [2_000, 200, 2_500, 12_000],
   "gpt-5.6-luna": [200, 20, 250, 1_200],
+  // https://developers.openai.com/api/docs/pricing#cyber-models
+  "gpt-daybreak-blue-latest": [5_000, 500, 6_250, 30_000],
+  "gpt-daybreak-red-latest": [12_500, 1_250, 15_625, 75_000],
 };
 
 const COST_POLL_INTERVAL_MS = 100;
@@ -866,13 +869,9 @@ export function estimateScanCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  let pricingModel = model.startsWith("openai.")
+  const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
-  // https://developers.openai.com/api/docs/pricing#cyber-models
-  if (pricingModel === "gpt-daybreak-blue-latest") {
-    pricingModel = "gpt-5.6-sol";
-  }
   const pricing = MODEL_PRICING_NANODOLLARS[pricingModel];
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
