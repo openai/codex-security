@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
-import { chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -68,7 +78,7 @@ describe("scan publication preparation", () => {
     expect(publication).toMatchObject({
       scanId: "scan_example_001",
       uploadId: "scan_example_001",
-      scanDirectory,
+      scanDirectory: await realpath(scanDirectory),
       destination: {
         type: "linear",
         teamId: "team_example",
@@ -107,6 +117,31 @@ describe("scan publication preparation", () => {
     expect(issue.description).toContain("without containment validation");
     expect(issue.description).toContain("Normalize destinations");
     expect(issue.description).not.toContain("/blob/deadbeef/");
+  });
+
+  test("uses the canonical scan directory beneath an aliased parent", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-alias-"),
+    );
+    temporaryDirectories.push(root);
+    const parent = join(root, "actual-parent");
+    const alias = join(root, "aliased-parent");
+    const scanDirectory = join(parent, "scan");
+    await mkdir(parent);
+    await cp(EXAMPLE, scanDirectory, { recursive: true });
+    if (process.platform !== "win32") await chmod(scanDirectory, 0o700);
+    await symlink(
+      parent,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const publication = await prepareScanPublication(
+      join(alias, "scan"),
+      DESTINATION,
+    );
+
+    expect(publication.scanDirectory).toBe(await realpath(scanDirectory));
   });
 
   test.each([

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -160,6 +161,12 @@ def now() -> str:
     return dependencies().now()
 
 
+def _parse_timestamp(value: str) -> datetime:
+    if isinstance(value, str) and value.endswith(("Z", "z")):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
+
+
 def state_dir() -> Path:
     return dependencies().state_dir()
 
@@ -219,7 +226,7 @@ def require_deep_scan_run(connection: sqlite3.Connection, scan_id: str) -> sqlit
 
 
 def deep_scan_deadline_reached(run: sqlite3.Row) -> bool:
-    elapsed = datetime.fromisoformat(now()) - datetime.fromisoformat(str(run["created_at"]))
+    elapsed = _parse_timestamp(now()) - _parse_timestamp(str(run["created_at"]))
     return elapsed.total_seconds() / 3600 >= run["max_time_hours"]
 
 
@@ -320,6 +327,31 @@ def finish_staged_file(promotion: tuple[Path, Path, Path | None]) -> None:
     backup = promotion[2]
     if backup is not None:
         backup.unlink(missing_ok=True)
+
+
+def create_publication_copy(source: str | Path, destination: str | Path) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def publication_matches_snapshot(publication: Path, snapshot: Path) -> bool:
+    try:
+        if publication.samefile(snapshot):
+            return True
+        if publication.stat().st_size != snapshot.stat().st_size:
+            return False
+        with publication.open("rb") as published, snapshot.open("rb") as source:
+            while True:
+                published_chunk = published.read(1024 * 1024)
+                source_chunk = source.read(1024 * 1024)
+                if published_chunk != source_chunk:
+                    return False
+                if not published_chunk:
+                    return True
+    except OSError:
+        return False
 
 
 def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
@@ -880,12 +912,12 @@ def coordinator_lease_is_live(
             """,
             (run["scan_id"],),
         ).fetchone()
-        return active_worker is not None and datetime.fromisoformat(
+        return active_worker is not None and _parse_timestamp(
             str(run["updated_at"])
-        ) > datetime.fromisoformat(timestamp) - timedelta(
+        ) > _parse_timestamp(timestamp) - timedelta(
             seconds=DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS
         )
-    heartbeat_time = datetime.fromisoformat(str(run["updated_at"]))
+    heartbeat_time = _parse_timestamp(str(run["updated_at"]))
     heartbeat_path = (
         Path(scan["scan_dir"])
         / "artifacts"
@@ -895,10 +927,10 @@ def coordinator_lease_is_live(
     try:
         heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
         if heartbeat["coordinatorGeneration"] == run["coordinator_generation"]:
-            heartbeat_time = max(heartbeat_time, datetime.fromisoformat(heartbeat["updatedAt"]))
+            heartbeat_time = max(heartbeat_time, _parse_timestamp(heartbeat["updatedAt"]))
     except (OSError, KeyError, TypeError, ValueError):
         pass
-    current_time = datetime.fromisoformat(timestamp)
+    current_time = _parse_timestamp(timestamp)
     return heartbeat_time > current_time - timedelta(seconds=DEEP_SCAN_COORDINATOR_LEASE_SECONDS)
 
 
@@ -1069,7 +1101,7 @@ def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id
         snapshot = Path(reducer["artifact_dir"]) / "canonical" / ledger.name
         if not snapshot.exists():
             continue
-        published = ledger.exists() and ledger.samefile(snapshot)
+        published = publication_matches_snapshot(ledger, snapshot)
         interrupted = reducer["status"] != "succeeded"
         if not published and not (interrupted and backups and not ledger.exists()):
             continue
@@ -1571,7 +1603,7 @@ def commit_deep_scan_dedup_locked(
             publication_copy = canonical_path.with_name(
                 f".{canonical_path.name}.{uuid.uuid4()}.publish"
             )
-            os.link(candidate_ledger_path, publication_copy)
+            create_publication_copy(candidate_ledger_path, publication_copy)
             promotion = promote_staged_file(
                 str(publication_copy),
                 canonical_candidate_ledger_path,

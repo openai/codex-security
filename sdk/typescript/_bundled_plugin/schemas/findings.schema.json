@@ -263,6 +263,29 @@
               }
             }
           },
+          "code_evidence": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "code"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "code": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
           "rootCause": {
             "type": [
               "object",
@@ -293,6 +316,41 @@
               }
             }
           },
+          "root_cause": {
+            "type": [
+              "object",
+              "string",
+              "null"
+            ],
+            "properties": {
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "evidence_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "language": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
           "remediation": {
             "type": "string",
             "minLength": 1
@@ -301,13 +359,280 @@
             "type": [
               "object",
               "null"
-            ]
+            ],
+            "properties": {
+              "assertions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "counterEvidence": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "evidence": {
+                "type": [
+                  "string",
+                  "array"
+                ],
+                "minLength": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "evidence_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "limitations": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "method": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "disposition": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1
+              },
+              "result": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1
+              }
+            }
           },
           "attackPath": {
             "type": [
               "object",
               "null"
-            ]
+            ],
+            "properties": {
+              "assumptions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "blindspots": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "controls": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "dataFlow": {
+                "type": [
+                  "string",
+                  "object"
+                ],
+                "minLength": 1,
+                "properties": {
+                  "summary": { "type": "string", "minLength": 1 },
+                  "source": { "type": "string", "minLength": 1 },
+                  "sink": { "type": "string", "minLength": 1 },
+                  "outcome": { "type": "string", "minLength": 1 },
+                  "transformations": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidenceRefs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidence_refs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                }
+              },
+              "data_flow": {
+                "type": [
+                  "string",
+                  "object"
+                ],
+                "minLength": 1,
+                "properties": {
+                  "summary": { "type": "string", "minLength": 1 },
+                  "source": { "type": "string", "minLength": 1 },
+                  "sink": { "type": "string", "minLength": 1 },
+                  "outcome": { "type": "string", "minLength": 1 },
+                  "transformations": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidenceRefs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidence_refs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                }
+              },
+              "dataflow": {
+                "type": [
+                  "string",
+                  "object"
+                ],
+                "minLength": 1,
+                "properties": {
+                  "summary": { "type": "string", "minLength": 1 },
+                  "source": { "type": "string", "minLength": 1 },
+                  "sink": { "type": "string", "minLength": 1 },
+                  "outcome": { "type": "string", "minLength": 1 },
+                  "transformations": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidenceRefs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidence_refs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                }
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "evidence_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "impact": {
+                "type": [
+                  "string",
+                  "object",
+                  "null"
+                ],
+                "minLength": 1,
+                "properties": {
+                  "level": { "type": "string", "minLength": 1 },
+                  "rationale": { "type": "string", "minLength": 1 },
+                  "why": { "type": "string", "minLength": 1 }
+                }
+              },
+              "likelihood": {
+                "type": [
+                  "string",
+                  "object",
+                  "null"
+                ],
+                "minLength": 1,
+                "properties": {
+                  "level": { "type": "string", "minLength": 1 },
+                  "rationale": { "type": "string", "minLength": 1 },
+                  "why": { "type": "string", "minLength": 1 }
+                }
+              },
+              "limitations": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "preconditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "reachability": {
+                "type": [
+                  "string",
+                  "object"
+                ],
+                "minLength": 1,
+                "properties": {
+                  "summary": { "type": "string", "minLength": 1 },
+                  "attacker": { "type": "string", "minLength": 1 },
+                  "entrypoint": { "type": "string", "minLength": 1 },
+                  "source": { "type": "string", "minLength": 1 },
+                  "sink": { "type": "string", "minLength": 1 },
+                  "outcome": { "type": "string", "minLength": 1 },
+                  "preconditions": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidenceRefs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "evidence_refs": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                }
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           },
           "remediationTests": {
             "type": "array",

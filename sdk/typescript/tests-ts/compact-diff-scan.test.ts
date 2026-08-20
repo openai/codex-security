@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, describe, expect, test } from "bun:test";
+import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 type JsonObject = Record<string, unknown>;
@@ -416,7 +417,7 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
-  test("runs the compact MCP diff lifecycle through a completed scan", async () => {
+  test.each(["object", "Markdown"])("MCP diff retains %s", async (format) => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
     writeSource(repository, "src/handler.py", "value = 1\n");
@@ -446,10 +447,10 @@ describe("compact diff scan", () => {
       expect(tools.map((tool) => tool.name)).toContain(
         "record_codex_security_discovery_candidates",
       );
-      expect(
-        tools.find((tool) => tool.name === "start_codex_security_standard_scan")
-          ?.inputSchema.properties["userContext"]?.maxLength,
-      ).toBe(2400);
+      const preservedContextMaxLength = tools.find(
+        (tool) => tool.name === "start_codex_security_standard_scan",
+      )?.inputSchema.properties["userContext"]?.maxLength;
+      expect(preservedContextMaxLength).toBeUndefined();
 
       const selection = {
         targetPath: repository,
@@ -475,10 +476,11 @@ describe("compact diff scan", () => {
         claimToken: handoffClaimToken,
         threadId: owner,
       });
-      await call("get_codex_security_scan_context", {
+      const context = await call("get_codex_security_scan_context", {
         scanId,
         handoffClaimToken,
       });
+      const scanDir = (context["scan"] as JsonObject)["scanDir"] as string;
 
       const inventory = await call("prepare_codex_security_review_items", {
         scanId,
@@ -520,15 +522,201 @@ describe("compact diff scan", () => {
         ],
       });
       await call("record_candidate_attack_paths", { scanId, attackPaths: [] });
+      const canonicalModel = {
+        summary: "A local handler processes selected input (src/handler.py:1).",
+        assets: ["Integrity of the selected result."],
+        trustBoundaries: [
+          "Caller input reaches the handler without authority over private state (src/handler.py:1).",
+        ],
+        attackerCapabilities: [
+          "A caller can choose input but cannot choose another user's state.",
+        ],
+        securityObjectives: ["Keep each result bound to its selected input."],
+        assumptions: ["A shared-service deployment has not been established."],
+      };
+      const markdownFact =
+        "Selected input stays separate from private state (src/handler.py:1).";
+      const savedModelPath = join(
+        scanDir,
+        "artifacts",
+        "01_context",
+        "threat_model.md",
+      );
+      mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        savedModelPath,
+        `# Saved threat model\n\n${markdownFact}\n`,
+      );
+      const threatModel =
+        format === "Markdown"
+          ? { summary: readFileSync(savedModelPath, "utf8") }
+          : canonicalModel;
+      const openQuestions = [
+        {
+          question:
+            "Does a supported embedding share this worker across callers?",
+          followUpPrompt:
+            "Confirm the deployment's ownership and isolation controls.",
+        },
+      ];
+      const coverageNote =
+        "The handler does not grant access to another caller's state (src/handler.py:1).";
+      const finding = {
+        ruleId: "path-traversal.archive-extraction",
+        title: "Unsafe archive extraction",
+        summary: "An untrusted archive entry reaches a filesystem write.",
+        severity: { level: "high" },
+        confidence: {
+          level: "high",
+          rationale: "Source evidence establishes reachability.",
+        },
+        taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+        locations: [{ path: "src/handler.py", startLine: 1 }],
+        remediation: "Validate each output path before writing.",
+        provenance: { source: "local_plugin" },
+      };
+      const invalidRootCauseReference = await client.request("tools/call", {
+        name: "record_codex_security_scan_draft",
+        arguments: {
+          scanId,
+          handoffClaimToken,
+          findings: [
+            {
+              ...finding,
+              root_cause: {
+                evidenceRefs: ["missing-root-cause-evidence"],
+              },
+            },
+          ],
+          coverage: {
+            completeness: "complete",
+            surfaces: [{ label: "Changed files", disposition: "rejected" }],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        },
+        _meta: { "openai/threadId": owner },
+      });
+      expect(invalidRootCauseReference["isError"]).toBe(true);
+      expect(JSON.stringify(invalidRootCauseReference)).toContain(
+        "root_cause.evidenceRefs",
+      );
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
-        findings: [],
+        findings: [
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-duplicate-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-duplicate-instance",
+              reportId: "DSS-147-A",
+            },
+          },
+        ],
         coverage: {
           completeness: "complete",
           surfaces: [{ label: "Changed files", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
+        },
+      });
+      expect(
+        (
+          JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
+            findings: JsonObject[];
+          }
+        ).findings.map((draftFinding) => draftFinding["identity"]),
+      ).toEqual([
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+      ]);
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-singleton",
+              reportId: "DSS-144-A",
+            },
+          },
+          {
+            ...finding,
+            code_evidence: [
+              {
+                code: "value = 2",
+                id: "legacy-source",
+              },
+            ],
+            attackPath: {
+              dataflow: { evidence_refs: ["legacy-source"] },
+            },
+          },
+          {
+            ...finding,
+            ruleId: "path-traversal.archive-upload",
+            identity: {
+              anchor: "candidate-cross-rule",
+              instance: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "second-report",
+            },
+          },
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-authored-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              reportId: "DSS-147-B",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              ledgerRowId: "ledger-row-c",
+            },
+          },
+        ],
+        threatModel,
+        coverage: {
+          completeness: "complete",
+          surfaces: [
+            {
+              label: "Changed files",
+              disposition: "rejected",
+              notes: coverageNote,
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+          openQuestions,
         },
       });
       await call("complete_codex_security_scan", {
@@ -555,6 +743,102 @@ describe("compact diff scan", () => {
       );
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",
+      );
+      expect(
+        ((completed["findings"] as JsonObject)["findings"] as JsonObject[]).map(
+          (completedFinding) => completedFinding["identity"],
+        ),
+      ).toEqual([
+        { anchor: "candidate-singleton", instance: "dss-144-a" },
+        { anchor: "unsafe-archive-extraction" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "second-report" },
+        { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+        {
+          anchor: "candidate-authored-instance",
+          instance: "dss-147-b",
+        },
+        { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
+      ]);
+      const legacyFinding = (
+        (completed["findings"] as JsonObject)["findings"] as JsonObject[]
+      )[1];
+      expect(legacyFinding?.["code_evidence"]).toEqual([
+        { code: "value = 2", id: "legacy-source" },
+      ]);
+      expect(legacyFinding?.["attackPath"]).toEqual({
+        dataflow: { evidence_refs: ["legacy-source"] },
+      });
+      expect(
+        ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
+          "threatModel"
+        ],
+      ).toEqual(threatModel);
+      expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
+        openQuestions,
+      );
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.threatModel).toEqual(threatModel);
+      expect(contract.coverage.openQuestions).toEqual(openQuestions);
+      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      const report = readFileSync(join(scanDir, "report.md"), "utf8");
+      const modelFacts =
+        format === "Markdown"
+          ? [markdownFact]
+          : Object.values(canonicalModel).flat();
+      for (const fact of modelFacts) {
+        expect(report).toContain(fact);
+      }
+      expect(report).toContain(openQuestions[0]!.question);
+      expect(report).toContain(openQuestions[0]!.followUpPrompt);
+      expect(report).toContain(coverageNote);
+
+      const terminalDir = join(root, "terminal-scan");
+      mkdirSync(terminalDir, { mode: 0o700 });
+      const markdownModel = `# Existing threat model\n\n## Assumptions\n\n${markdownFact}\n`;
+      const terminalManifest = structuredClone(
+        completed["manifest"],
+      ) as JsonObject;
+      const terminalScan = terminalManifest["scan"] as JsonObject;
+      terminalScan["threatModel"] = { summary: markdownModel };
+      delete terminalScan["sealedAt"];
+      delete terminalScan["artifacts"];
+      for (const [name, document] of [
+        ["scan-manifest.json", terminalManifest],
+        ["findings.json", completed["findings"]],
+        ["coverage.json", completed["coverage"]],
+      ] as const) {
+        writeFileSync(join(terminalDir, name), JSON.stringify(document));
+      }
+      const finalized = python(
+        "finalize_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+        "--source-root",
+        repository,
+      );
+      expect(finalized.status, finalized.stderr).toBe(0);
+      const validated = python(
+        "validate_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+      );
+      expect(validated.status, validated.stderr).toBe(0);
+      const terminalResult = JSON.parse(
+        readFileSync(join(terminalDir, "scan-manifest.json"), "utf8"),
+      ) as { scan: { threatModel: unknown; sealedAt: string } };
+      expect(terminalResult.scan.threatModel).toEqual({
+        summary: markdownModel,
+      });
+      expect(terminalResult.scan.sealedAt).toBeDefined();
+      const terminalReport = readFileSync(
+        join(terminalDir, "report.md"),
+        "utf8",
+      );
+      expect(terminalReport).toContain(markdownFact);
+      expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
+        report.match(/^#{1,2} .+$/gm),
       );
     } finally {
       await client.close();
