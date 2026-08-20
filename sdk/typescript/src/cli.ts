@@ -46,6 +46,7 @@ import {
   CodexSecurity,
   createSecurityInternal,
   listRepositoryFindings,
+  SCAN_AUTH_MODES,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -2188,7 +2189,7 @@ export async function main(
       options: z
         .object({
           auth: z
-            .enum(["auto", "chatgpt", "api-key"])
+            .enum(SCAN_AUTH_MODES)
             .default("auto")
             .describe(
               "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",

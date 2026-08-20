@@ -226,7 +226,8 @@ export interface ScanOptions extends DeepScanOptions {
   signal?: AbortSignal;
 }
 
-export type ScanAuthMode = "auto" | "chatgpt" | "api-key";
+export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
+export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 
 export type ScanAuthentication =
   | {
@@ -2770,7 +2771,7 @@ export function scanAuthentication(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
 ): ScanAuthentication {
-  if (auth !== "auto" && auth !== "chatgpt" && auth !== "api-key") {
+  if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
       "Scan authentication mode must be auto, chatgpt, or api-key.",
     );
