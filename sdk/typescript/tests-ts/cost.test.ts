@@ -692,6 +692,55 @@ describe("live scan cost tracking", () => {
     ).toEqual([1, 2, 3]);
   });
 
+  test("excludes sessions beside the deep worker output directories", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "current");
+    await writeSession(
+      home,
+      "scan-thread",
+      { input_tokens: 1_000, output_tokens: 10 },
+      undefined,
+      scanDirectory,
+      "2026-07-26T12:00:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-worker",
+      { input_tokens: 250, output_tokens: 2 },
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "worker",
+        "output",
+      ),
+      "2026-07-26T12:01:00Z",
+    );
+    // A session running in a directory that sits beside workers/ under
+    // deep_discovery is not a worker output directory and must not be counted.
+    await writeSession(
+      home,
+      "bystander",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(scanDirectory, "artifacts", "deep_discovery", "output"),
+      "2026-07-26T12:02:00Z",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      scanDirectory,
+    });
+    tracker.start("scan-thread");
+
+    expect((await tracker.stop()).usage).toMatchObject({
+      input_tokens: 1_250,
+      output_tokens: 12,
+    });
+  });
+
   test("ignores replayed parent history in forked worker sessions", async () => {
     const home = await codexHome();
     const inherited = {

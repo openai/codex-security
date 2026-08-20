@@ -1,5 +1,5 @@
 import { open, readdir } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import {
   scanActivityFromSessionEvent,
   type ScanActivity,
@@ -248,13 +248,18 @@ export class ScanCostTracker {
           this.#options.scanDirectory,
           "artifacts",
         );
-        const workerDirectory = relative(
-          join(artifactsDirectory, "deep_discovery", "workers"),
-          session.workingDirectory,
-        ).split(sep);
+        const workers = join(artifactsDirectory, "deep_discovery", "workers");
+        const workerDirectory = relative(workers, session.workingDirectory);
+        const components = workerDirectory.split(sep);
         if (
-          session.workingDirectory === artifactsDirectory ||
-          (workerDirectory.length === 2 && workerDirectory[1] === "output")
+          relative(artifactsDirectory, session.workingDirectory) === "" ||
+          (!isAbsolute(workerDirectory) &&
+            components.length === 2 &&
+            components[0] !== ".." &&
+            relative(
+              join(workers, components[0]!, "output"),
+              session.workingDirectory,
+            ) === "")
         ) {
           included.add(session.threadId);
         }
