@@ -144,6 +144,7 @@ def git_command(
             full_command,
             check=False,
             capture_output=True,
+            encoding="utf-8" if text and os.name == "nt" else None,
             env=environment,
             text=text,
             input=input_data,
