@@ -322,6 +322,7 @@ describe("scan and patch workflow", () => {
       expect(pullRequestArguments).toEqual([
         "pr",
         "create",
+        "--draft",
         "--head",
         "codex-security/patch-scan",
         "--title",
@@ -839,7 +840,7 @@ describe("scan and patch workflow", () => {
     expect(patched[0]).not.toHaveProperty("instructions");
   });
 
-  test("creates a pull request when selected in the interactive review", async () => {
+  test("creates a draft pull request when selected in the interactive review", async () => {
     let published = false;
     const url = "https://github.example.test/example/repository/pull/13";
     const outcome = await runWorkflow(
@@ -896,7 +897,7 @@ describe("scan and patch workflow", () => {
     });
   });
 
-  test("creates a pull request for verified saved-finding patches", async () => {
+  test("creates a draft pull request for verified saved-finding patches", async () => {
     const result = resultWithFindings(["high"]);
     const url = "https://github.example.test/example/repository/pull/14";
     let repository = "";

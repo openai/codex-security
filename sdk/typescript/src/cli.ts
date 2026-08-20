@@ -261,7 +261,7 @@ const PROVIDER_OPTION = z
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
-  .describe("Create a GitHub pull request after verified patches.");
+  .describe("Create a draft GitHub pull request after verified patches.");
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -4010,6 +4010,7 @@ async function publishPatchBranch(
       url = await run("gh", [
         "pr",
         "create",
+        "--draft",
         "--head",
         branch,
         "--title",
@@ -4090,7 +4091,9 @@ async function createPatchPullRequest(
   const branch = `codex-security/patch-${selected.scanId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const run = (command: "git" | "gh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, selected.repository);
-  stderr.write("Creating a GitHub pull request for verified patches...\n");
+  stderr.write(
+    "Creating a draft GitHub pull request for verified patches...\n",
+  );
   await run("git", ["switch", "-c", branch]);
   await run("git", ["--literal-pathspecs", "add", "--", ...files]);
   await run("git", [
