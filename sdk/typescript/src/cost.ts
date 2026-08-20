@@ -1,12 +1,11 @@
+import { open, readdir } from "node:fs/promises";
+import { join, relative, sep } from "node:path";
 import {
   estimateScanCost,
   tokenUsage,
   type ScanCost,
   type ScanTokenUsage,
 } from "./cost-model.js";
-export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
-import { open, readdir } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
 import {
   scanActivityFromSessionEvent,
   type ScanActivity,
@@ -15,6 +14,8 @@ import {
   scanProgressUpdatesFromEvent,
   type ScanProgress,
 } from "./worker-progress.js";
+
+export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
 export interface ScanSessionEvent {
   threadId: string;

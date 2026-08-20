@@ -8,6 +8,8 @@ const rates = [
   ["gpt-5.6-sol", 5000n, 500n, 6250n, 30000n],
   ["gpt-5.6-terra", 2000n, 200n, 2500n, 12000n],
   ["gpt-5.6-luna", 200n, 20n, 250n, 1200n],
+  ["gpt-daybreak-blue-latest", 5000n, 500n, 6250n, 30000n],
+  ["gpt-daybreak-red-latest", 12500n, 1250n, 15625n, 75000n],
 ] as const;
 const count = fc.integer({ min: 0, max: 1_000_000_000 });
 const usageParts = fc.record({

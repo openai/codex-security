@@ -100,6 +100,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
@@ -2101,8 +2102,10 @@ async function prepareDeepScanConfig(
   options: DeepScanOptions,
   signal: AbortSignal,
 ): Promise<void> {
-  const ambientHome =
-    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
+  const ambientHome = expandHome(
+    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex"),
+    environment,
+  );
   const source = join(ambientHome, "codex-security", "config.toml");
   let configured: TomlTable = {};
   try {
@@ -2128,14 +2131,15 @@ async function prepareDeepScanConfig(
     const value = options[name];
     if (value !== undefined) overrides[key] = value;
   }
+  const sharedConfig = await sameExistingPath(source, destination);
   const hasOverrides = Object.keys(overrides).length > 0;
   if (existing === undefined && !hasOverrides) {
-    if (destination !== source) {
+    if (!sharedConfig) {
       await rm(destination, { force: true });
     }
     return;
   }
-  if (destination === source && !hasOverrides) return;
+  if (sharedConfig && !hasOverrides) return;
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   await writeFile(
     destination,
@@ -2145,6 +2149,15 @@ async function prepareDeepScanConfig(
     }),
     { mode: 0o600, signal },
   );
+}
+
+async function sameExistingPath(left: string, right: string): Promise<boolean> {
+  if (left === right) return true;
+  const [canonicalLeft, canonicalRight] = await Promise.all([
+    realpath(left).catch(() => null),
+    realpath(right).catch(() => null),
+  ]);
+  return canonicalLeft !== null && canonicalLeft === canonicalRight;
 }
 
 export function createSecurity(
@@ -2757,6 +2770,11 @@ export function scanAuthentication(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
 ): ScanAuthentication {
+  if (auth !== "auto" && auth !== "chatgpt" && auth !== "api-key") {
+    throw new TypeError(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+  }
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",

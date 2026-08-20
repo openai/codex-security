@@ -415,7 +415,7 @@ async function gitOutput(
       env: command.environment,
     },
   );
-  return stdout.trim();
+  return stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
 }
 
 async function outermostGitMarkerRoot(

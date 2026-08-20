@@ -20,7 +20,16 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = PLUGIN_ROOT / "preflight" / "capability-profiles.toml"
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+
+
+def default_system_config() -> Path:
+    if os.name == "nt":
+        program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+        return Path(program_data) / "OpenAI" / "Codex" / "config.toml"
+    return Path("/etc/codex/config.toml")
+
+
+SYSTEM_CONFIG = default_system_config()
 DEFAULT_CONFIG = DEFAULT_CODEX_HOME / "config.toml"
 VALID_SEVERITIES = {"block", "warn", "suggest"}
 VALID_MULTI_AGENT_OWNERS = {"native", "codex-bridge"}
@@ -244,6 +253,16 @@ def project_trust_level(
         if not isinstance(projects, dict):
             continue
         project = projects.get(str(project_root))
+        if not isinstance(project, dict) and os.name == "nt":
+            project_key = os.path.normcase(os.path.realpath(project_root))
+            project = next(
+                (
+                    value
+                    for path, value in projects.items()
+                    if os.path.normcase(os.path.realpath(path)) == project_key
+                ),
+                None,
+            )
         if not isinstance(project, dict):
             continue
         trust_level = project.get("trust_level")

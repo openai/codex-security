@@ -51,6 +51,13 @@ SARIF_LEVELS = {
     "low": "note",
     "informational": "note",
 }
+SARIF_SECURITY_SCORES = {
+    "critical": 9.5,
+    "high": 8.0,
+    "medium": 5.0,
+    "low": 2.0,
+    "informational": 0.0,
+}
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
@@ -694,7 +701,7 @@ def _finding_strength(finding: dict[str, Any]) -> tuple[int, int, int]:
     return (
         ("informational", "low", "medium", "high", "critical").index(finding["severity"]["level"]),
         ("low", "medium", "high").index(finding["confidence"]["level"]),
-        len(finding.get("codeEvidence") or []),
+        _finding_evidence_strength(finding),
     )
 
 
@@ -735,6 +742,12 @@ def _recover_unsealed_findings(
         try:
             if not isinstance(finding, dict):
                 raise ContractError(f"{context}: expected an object")
+            compatible_findings = _legacy_sealed_findings_for_validation(
+                {"findings": [finding]}
+            )["findings"]
+            compatible_finding = compatible_findings[0]
+            normalized_legacy_details = compatible_finding != finding
+            finding = compatible_finding
             identity = _require_dict(finding, "identity", context)
             fields: list[tuple[dict[str, Any], str, str, str]] = [
                 (finding, "ruleId", context, "rule identifier"),
@@ -742,7 +755,9 @@ def _recover_unsealed_findings(
             ]
             if "instance" in identity:
                 fields.append((identity, "instance", f"{context}.identity", "instance"))
-            normalized_fields = []
+            normalized_fields = (
+                ["legacy finding details"] if normalized_legacy_details else []
+            )
             for parent, field, field_context, label in fields:
                 value = _require_str(parent, field, field_context)
                 if SLUG_RE.fullmatch(value):
@@ -1222,12 +1237,14 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
         _validate_location(location, f"{context}.locations[{index}]")
 
     evidence_ids: set[str] = set()
-    code_evidence = finding.get("codeEvidence")
-    if code_evidence is not None:
+    for evidence_key in ("codeEvidence", "code_evidence"):
+        if evidence_key not in finding:
+            continue
+        code_evidence = finding[evidence_key]
         if not isinstance(code_evidence, list):
-            raise ContractError(f"{context}.codeEvidence: expected an array")
+            raise ContractError(f"{context}.{evidence_key}: expected an array")
         for index, evidence in enumerate(code_evidence):
-            evidence_context = f"{context}.codeEvidence[{index}]"
+            evidence_context = f"{context}.{evidence_key}[{index}]"
             if not isinstance(evidence, dict):
                 raise ContractError(f"{evidence_context}: expected an object")
             evidence_id = _require_str(evidence, "id", evidence_context)
@@ -1236,19 +1253,33 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
 
-    for section_name in ("rootCause", "validation", "attackPath"):
-        section = finding.get(section_name)
-        if not isinstance(section, dict) or "evidenceRefs" not in section:
+    referenced_sections = [
+        (section_name, finding.get(section_name))
+        for section_name in ("rootCause", "root_cause", "validation", "attackPath")
+    ]
+    attack_path = finding.get("attackPath")
+    if isinstance(attack_path, dict):
+        referenced_sections.extend(
+            (f"attackPath.{section_name}", attack_path.get(section_name))
+            for section_name in ("dataFlow", "dataflow", "data_flow", "reachability")
+        )
+    for section_name, section in referenced_sections:
+        if not isinstance(section, dict):
             continue
-        refs = section["evidenceRefs"]
-        if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref for ref in refs):
-            raise ContractError(f"{context}.{section_name}.evidenceRefs: expected strings")
-        unknown_refs = sorted(set(refs) - evidence_ids)
-        if unknown_refs:
-            raise ContractError(
-                f"{context}.{section_name}.evidenceRefs: unknown code-evidence ids: "
-                + ", ".join(unknown_refs)
-            )
+        for refs_key in ("evidenceRefs", "evidence_refs"):
+            if refs_key not in section:
+                continue
+            refs = section[refs_key]
+            if not isinstance(refs, list) or any(
+                not isinstance(ref, str) or not ref for ref in refs
+            ):
+                raise ContractError(f"{context}.{section_name}.{refs_key}: expected strings")
+            unknown_refs = sorted(set(refs) - evidence_ids)
+            if unknown_refs:
+                raise ContractError(
+                    f"{context}.{section_name}.{refs_key}: unknown code-evidence ids: "
+                    + ", ".join(unknown_refs)
+                )
 
     provenance = _require_dict(finding, "provenance", context)
     _require_str(provenance, "source", f"{context}.provenance")
@@ -1466,6 +1497,190 @@ def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     _validate_schema_node(payload, schema, schema_path.stem)
 
 
+def _filter_unknown_legacy_evidence_refs(
+    section: dict[str, Any], evidence_ids: set[str]
+) -> None:
+    for refs_field in ("evidenceRefs", "evidence_refs"):
+        refs = section.get(refs_field)
+        if isinstance(refs, list):
+            section[refs_field] = [
+                ref
+                for ref in refs
+                if isinstance(ref, str) and ref.strip() and ref in evidence_ids
+            ]
+
+
+def _normalize_legacy_string_list_fields(
+    section: dict[str, Any], fields: tuple[str, ...]
+) -> None:
+    for field in fields:
+        if field not in section:
+            continue
+        value = section[field]
+        if isinstance(value, str):
+            normalized = [value] if value.strip() else []
+        elif isinstance(value, list):
+            normalized = [
+                item for item in value if isinstance(item, str) and item.strip()
+            ]
+        else:
+            normalized = []
+        if normalized:
+            section[field] = normalized
+        else:
+            section.pop(field)
+
+
+def _remove_unsupported_legacy_scalar_fields(
+    section: dict[str, Any], fields: tuple[str, ...]
+) -> None:
+    for field in fields:
+        if field in section and (
+            not isinstance(section[field], str) or section[field] == ""
+        ):
+            section.pop(field)
+
+
+def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str, Any]:
+    compatible = copy.deepcopy(findings)
+    finding_items = compatible.get("findings")
+    if not isinstance(finding_items, list):
+        return compatible
+    for finding in finding_items:
+        if not isinstance(finding, dict):
+            continue
+        canonical_evidence = finding.get("codeEvidence")
+        canonical_evidence = canonical_evidence if isinstance(canonical_evidence, list) else []
+        canonical_evidence_ids = {
+            evidence["id"]
+            for evidence in canonical_evidence
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("id"), str)
+            and evidence["id"]
+        }
+        legacy_evidence = finding.get("code_evidence")
+        if isinstance(legacy_evidence, list):
+            compatible_legacy_evidence = []
+            seen_evidence_ids = set(canonical_evidence_ids)
+            for evidence in legacy_evidence:
+                if not isinstance(evidence, dict):
+                    continue
+                evidence_id = evidence.get("id")
+                evidence_code = evidence.get("code")
+                if (
+                    not isinstance(evidence_id, str)
+                    or not evidence_id.strip()
+                    or not isinstance(evidence_code, str)
+                    or not evidence_code.strip()
+                ):
+                    continue
+                if evidence_id in seen_evidence_ids:
+                    continue
+                seen_evidence_ids.add(evidence_id)
+                compatible_legacy_evidence.append(evidence)
+            finding["code_evidence"] = compatible_legacy_evidence
+        elif "code_evidence" in finding:
+            finding.pop("code_evidence")
+        compatible_legacy_evidence = finding.get("code_evidence")
+        compatible_legacy_evidence = (
+            compatible_legacy_evidence if isinstance(compatible_legacy_evidence, list) else []
+        )
+        evidence_ids = canonical_evidence_ids | {
+            evidence["id"]
+            for evidence in compatible_legacy_evidence
+            if isinstance(evidence, dict)
+            and isinstance(evidence.get("id"), str)
+            and evidence["id"]
+        }
+        for section_name, list_fields in (
+            ("root_cause", ("evidenceRefs", "evidence_refs")),
+            (
+                "validation",
+                (
+                    "assertions",
+                    "counterEvidence",
+                    "evidence",
+                    "evidenceRefs",
+                    "evidence_refs",
+                    "limitations",
+                ),
+            ),
+            (
+                "attackPath",
+                (
+                    "assumptions",
+                    "blindspots",
+                    "controls",
+                    "evidenceRefs",
+                    "evidence_refs",
+                    "limitations",
+                    "preconditions",
+                    "steps",
+                ),
+            ),
+        ):
+            section = finding.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            _normalize_legacy_string_list_fields(section, list_fields)
+            _filter_unknown_legacy_evidence_refs(section, evidence_ids)
+        legacy_root_cause = finding.get("root_cause")
+        if isinstance(legacy_root_cause, dict):
+            _remove_unsupported_legacy_scalar_fields(
+                legacy_root_cause, ("summary", "code", "language")
+            )
+        elif (
+            "root_cause" in finding
+            and legacy_root_cause is not None
+            and (not isinstance(legacy_root_cause, str) or legacy_root_cause == "")
+        ):
+            finding.pop("root_cause")
+        validation = finding.get("validation")
+        if isinstance(validation, dict):
+            _remove_unsupported_legacy_scalar_fields(
+                validation, ("method", "status", "summary", "disposition", "result")
+            )
+        attack_path = finding.get("attackPath")
+        if not isinstance(attack_path, dict):
+            continue
+        _remove_unsupported_legacy_scalar_fields(attack_path, ("summary",))
+        for field in ("dataFlow", "data_flow", "dataflow", "reachability"):
+            if field not in attack_path:
+                continue
+            detail = attack_path.get(field)
+            if detail is None:
+                attack_path.pop(field)
+                continue
+            if not isinstance(detail, (str, dict)):
+                attack_path.pop(field)
+                continue
+            if isinstance(detail, str):
+                if detail == "":
+                    attack_path.pop(field)
+                continue
+            detail_scalar_fields = ("summary", "source", "sink", "outcome")
+            if field == "reachability":
+                detail_scalar_fields += ("attacker", "entrypoint")
+            _remove_unsupported_legacy_scalar_fields(detail, detail_scalar_fields)
+            _normalize_legacy_string_list_fields(
+                detail, ("evidenceRefs", "evidence_refs", "transformations")
+            )
+            _filter_unknown_legacy_evidence_refs(detail, evidence_ids)
+            if field == "reachability":
+                _normalize_legacy_string_list_fields(detail, ("preconditions",))
+        for field in ("impact", "likelihood"):
+            detail = attack_path.get(field)
+            if isinstance(detail, dict):
+                _remove_unsupported_legacy_scalar_fields(
+                    detail, ("level", "rationale", "why")
+                )
+            elif detail is not None and (
+                not isinstance(detail, str) or detail == ""
+            ):
+                attack_path.pop(field)
+    return compatible
+
+
 def _validate_canonical_schemas_before_projection(
     manifest: dict[str, Any],
     findings: dict[str, Any],
@@ -1493,13 +1708,65 @@ def _validate_contract_refs(scan: dict[str, Any]) -> None:
             raise ContractError(f"manifest.scan.{field}: expected {expected!r}")
 
 
-def _sarif_rule(rule_id: str) -> dict[str, Any]:
+def _sarif_label(value: str) -> str:
+    words = re.sub(r"[-_./]+", " ", value).split()
+    acronyms = {"api", "csrf", "html", "http", "id", "rce", "sql", "ssrf", "url", "xml", "xss"}
+    label = " ".join(word.upper() if word.lower() in acronyms else word for word in words)
+    return label[:1].upper() + label[1:]
+
+
+def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    name = ": ".join(_sarif_label(part) for part in rule_id.split("."))
+    categories = sorted({finding["taxonomy"]["category"] for finding in findings})
+    cwes = sorted({cwe for finding in findings for cwe in finding["taxonomy"]["cwe"]})
+    tags = {"security", *categories}
+    for cwe in cwes:
+        match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
+        if match and int(match[1]) > 0:
+            tags.add(f"external/cwe/cwe-{int(match[1]):03d}")
+    description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
+    if cwes:
+        description += f" Weaknesses: {', '.join(cwes)}."
+    remediation = "\n\n".join(sorted({finding["remediation"] for finding in findings}))
+    properties: dict[str, Any] = {"tags": sorted(tags)}
+    # GitHub assigns security severity to the shared rule, not each result.
+    score = max(
+        finding["severity"].get("score", SARIF_SECURITY_SCORES[finding["severity"]["level"]])
+        for finding in findings
+    )
+    if score > 0:
+        properties["security-severity"] = str(score)
     return {
         "id": rule_id,
-        "name": rule_id,
-        "shortDescription": {"text": rule_id},
-        "properties": {"tags": ["security"]},
+        "name": name,
+        "shortDescription": {"text": name},
+        "fullDescription": {"text": description},
+        "help": {
+            "text": f"{description}\n\nRemediation:\n\n{remediation}",
+            "markdown": f"{description}\n\n## Remediation\n\n{remediation}",
+        },
+        "properties": properties,
     }
+
+
+def _sarif_finding_message(finding: dict[str, Any]) -> str:
+    taxonomy = finding["taxonomy"]
+    details = [
+        finding["title"],
+        finding["summary"],
+        f"Severity: {finding['severity']['level']}",
+        f"Category: {_sarif_label(taxonomy['category'])}",
+    ]
+    if taxonomy["cwe"]:
+        details.append(f"Weaknesses: {', '.join(taxonomy['cwe'])}")
+    details.append(f"Remediation:\n{finding['remediation']}")
+    for key, label in (
+        ("remediationTests", "Remediation tests"),
+        ("preventiveControls", "Preventive controls"),
+    ):
+        if finding.get(key):
+            details.append(f"{label}:\n" + "\n".join(f"- {item}" for item in finding[key]))
+    return "\n\n".join(details)
 
 
 def _utf16_code_units(value: str) -> Iterator[int]:
@@ -1608,21 +1875,94 @@ def _sarif_primary_location(finding: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _merged_code_evidence(finding: dict[str, Any]) -> list[dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    for evidence_key in ("codeEvidence", "code_evidence"):
+        code_evidence = finding.get(evidence_key)
+        if not isinstance(code_evidence, list):
+            continue
+        for evidence in code_evidence:
+            if not isinstance(evidence, dict):
+                continue
+            evidence_id = evidence.get("id")
+            if isinstance(evidence_id, str) and evidence_id:
+                catalog.setdefault(evidence_id, evidence)
+    return list(catalog.values())
+
+
+def _finding_evidence_strength(finding: dict[str, Any]) -> int:
+    evidence = _merged_code_evidence(finding)
+    seen_ids = {
+        item["id"] for item in evidence if isinstance(item.get("id"), str) and item["id"].strip()
+    }
+    seen_codes = {
+        item["code"]
+        for item in evidence
+        if isinstance(item.get("code"), str) and item["code"].strip()
+    }
+    strength = len(evidence)
+    for section_name in ("rootCause", "root_cause"):
+        section = finding.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for evidence_name in ("codeEvidence", "code_evidence"):
+            embedded = section.get(evidence_name)
+            if not isinstance(embedded, list):
+                continue
+            for item in embedded:
+                if not isinstance(item, dict):
+                    continue
+                code = item.get("code")
+                if not isinstance(code, str) or not code.strip() or code in seen_codes:
+                    continue
+                evidence_id = item.get("id")
+                if isinstance(evidence_id, str) and evidence_id.strip():
+                    if evidence_id in seen_ids:
+                        continue
+                    seen_ids.add(evidence_id)
+                seen_codes.add(code)
+                strength += 1
+        code = section.get("code")
+        if isinstance(code, str) and code.strip() and code not in seen_codes:
+            seen_codes.add(code)
+            strength += 1
+    return strength
+
+
 def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     primary = _sarif_primary_location(finding)
     locations = [
         primary,
         *(location for location in finding["locations"] if location is not primary),
     ]
-    locations.extend(
-        {
-            "path": evidence["path"],
-            "startLine": evidence["startLine"],
-            "endLine": evidence.get("endLine", evidence["startLine"]),
-            "role": f"evidence:{evidence['id']}",
-        }
-        for evidence in finding.get("codeEvidence", [])
-    )
+    for evidence in _merged_code_evidence(finding):
+        path = evidence.get("path")
+        start_line = evidence.get("startLine")
+        if (
+            not isinstance(path, str)
+            or not isinstance(start_line, int)
+            or isinstance(start_line, bool)
+            or start_line < 1
+        ):
+            continue
+        try:
+            path = _require_safe_relative_path(path, "SARIF evidence location")
+        except ContractError:
+            continue
+        locations.append(
+            {
+                "path": path,
+                "startLine": start_line,
+                "endLine": (
+                    evidence["endLine"]
+                    if isinstance(evidence.get("endLine"), int)
+                    and not isinstance(evidence["endLine"], bool)
+                    and evidence["endLine"] >= start_line
+                    else start_line
+                ),
+                "role": f"evidence:{evidence['id']}",
+            }
+        )
     unique: dict[tuple[str, int, int], dict[str, Any]] = {}
     for location in locations:
         key = (
@@ -1732,7 +2072,7 @@ def _sarif_result(
         "ruleId": finding["ruleId"],
         "ruleIndex": rule_index,
         "level": SARIF_LEVELS[finding["severity"]["level"]],
-        "message": {"text": finding["summary"]},
+        "message": {"text": _sarif_finding_message(finding)},
         "locations": [_sarif_location(location) for location in _sarif_locations(finding)],
         "partialFingerprints": partial_fingerprints,
         "properties": properties,
@@ -1757,7 +2097,9 @@ def build_sarif(
             "driver": {
                 "name": "Codex Security",
                 "version": scan["producer"]["version"],
-                "rules": [_sarif_rule(rule_id) for rule_id in ordered_rule_ids],
+                "rules": [
+                    _sarif_rule(rule_id, findings_by_rule[rule_id]) for rule_id in ordered_rule_ids
+                ],
             }
         },
         "automationDetails": {"id": scan["id"]},
@@ -1894,11 +2236,12 @@ def _read_sealed_scan(
         },
     )
     _validate_manifest(manifest)
-    _validate_findings(manifest, findings)
+    findings_for_validation = _legacy_sealed_findings_for_validation(findings)
+    _validate_findings(manifest, findings_for_validation)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_sealed_coverage_receipts(scan, coverage)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings, schema_dir / "findings.schema.json")
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _validate_derived_finding_identities(manifest, findings)
     return manifest, findings, coverage, findings_bytes
@@ -2196,8 +2539,11 @@ def _prepare_scan_finalization(
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
     _validate_target(_require_dict(scan, "target", "manifest.scan"))
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
+    findings_for_validation = (
+        _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
+    )
     if was_sealed:
-        _validate_findings(manifest, findings)
+        _validate_findings(manifest, findings_for_validation)
         _validate_derived_finding_identities(manifest, findings)
     elif completion_warnings is not None:
         discarded_findings = _recover_unsealed_findings(
@@ -2209,16 +2555,20 @@ def _prepare_scan_finalization(
         _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
     else:
         _populate_unsealed_finding_identities(manifest, findings)
-    _validate_findings(manifest, findings)
+    _validate_findings(manifest, findings_for_validation)
     _validate_coverage(manifest, coverage, scan_dir)
-    _validate_canonical_schemas_before_projection(manifest, findings, coverage, schema_dir)
+    _validate_canonical_schemas_before_projection(
+        manifest, findings_for_validation, coverage, schema_dir
+    )
     _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-        validate_against_schema(findings, schema_dir / "findings.schema.json")
+        validate_against_schema(
+            findings_for_validation, schema_dir / "findings.schema.json"
+        )
         validate_against_schema(coverage, schema_dir / "coverage.schema.json")
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_report_output_paths(scan_dir)

@@ -23,6 +23,7 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
+import { enclosingGitWorktreeRoot } from "../src/targets.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -42,12 +43,12 @@ afterEach(async () => {
   );
 });
 
-async function repository(): Promise<string> {
+async function repository(name = "repo"): Promise<string> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-targets-")),
   );
   temporaryDirectories.push(root);
-  const repo = join(root, "repo");
+  const repo = join(root, name);
   await mkdir(join(repo, "src"), { recursive: true });
   await writeFile(join(repo, "src", "app.ts"), "export const ok = true;\n");
   git(repo, "init", "-b", "main");
@@ -124,6 +125,19 @@ describe("scan target normalization", () => {
       paths: ["src", "src/app.ts"],
     });
   });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing whitespace in Git worktree paths",
+    async () => {
+      for (const suffix of [" ", "\r"]) {
+        const repo = await repository(`repo${suffix}`);
+        expect(await enclosingGitWorktreeRoot(repo)).toBe(await realpath(repo));
+        await expect(
+          normalizeTarget(repo, DiffTarget.refs({ base: "HEAD" })),
+        ).resolves.toMatchObject({ kind: "refs" });
+      }
+    },
+  );
 
   test("rejects empty and escaping paths", async () => {
     const repo = await repository();
