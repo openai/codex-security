@@ -33,7 +33,12 @@ import {
   ScanInterruptedError,
   VERSION,
 } from "../src/index.js";
-import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import {
+  main,
+  parseCodexOverrides,
+  Progress,
+  resolveCliPath,
+} from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
@@ -127,6 +132,9 @@ describe("CLI", () => {
             enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
+          patch: { type: "boolean" },
+          patchSeverity: { enum: ["critical", "high", "medium", "low"] },
+          createPr: { type: "boolean" },
           headless: { type: "boolean" },
         },
       },
@@ -194,6 +202,9 @@ describe("CLI", () => {
     expect(manifest.text()).toContain("codex-security bulk-scan [input]");
     expect(manifest.text()).toContain("codex-security export [scanDir]");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
+    expect(manifest.text()).toContain(
+      "codex-security verify-fix [findings...]",
+    );
     expect(manifest.text()).toContain("codex-security patch [issues...]");
     expect(manifest.text()).toContain(
       "codex-security findings false-positive <occurrenceId>",
@@ -777,6 +788,55 @@ describe("CLI", () => {
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("expands home-relative bulk scan paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-home-"));
+    const home = join(root, "home");
+    const currentDirectory = join(root, "current");
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    try {
+      await mkdir(home);
+      await mkdir(currentDirectory);
+      await multiscanInventory(home);
+      process.env["HOME"] = home;
+      process.env["USERPROFILE"] = home;
+
+      expect(resolveCliPath(currentDirectory, "~/repositories.csv")).toBe(
+        join(home, "repositories.csv"),
+      );
+      expect(resolveCliPath(currentDirectory, "~person/repositories.csv")).toBe(
+        join(currentDirectory, "~person", "repositories.csv"),
+      );
+
+      const stdout = capture();
+      expect(
+        await main(
+          [
+            "bulk-scan",
+            "~/repositories.csv",
+            "--output-dir",
+            "~/results",
+            "--json",
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({ currentDirectory }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        completed: 1,
+        failed: 0,
+        resultsPath: join(home, "results", "results.jsonl"),
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -1762,6 +1822,44 @@ describe("CLI", () => {
     }
   });
 
+  test.each([false, true])(
+    "subscribes to session details only with TTY stdin: %s",
+    async (stdinTTY) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        "isTTY",
+      );
+      const stderr = capture(true);
+      let subscribed = false;
+      try {
+        Object.defineProperty(process.stdin, "isTTY", {
+          configurable: true,
+          value: stdinTTY,
+        });
+        const code = await main(
+          ["scan", "."],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onTurn: (_repository, options) => {
+              subscribed =
+                typeof (options as ScanOptions).onSessionEvent === "function";
+            },
+          }),
+        );
+        expect(code).toBe(0);
+        expect(stderr.text()).toContain("CODEX SECURITY");
+        expect(subscribed).toBe(stdinTTY);
+      } finally {
+        if (descriptor === undefined) {
+          Reflect.deleteProperty(process.stdin, "isTTY");
+        } else {
+          Object.defineProperty(process.stdin, "isTTY", descriptor);
+        }
+      }
+    },
+  );
+
   test("uses plain scan progress in headless, CI, and noninteractive terminals", async () => {
     for (const { options, environment, isTTY } of [
       { options: ["--headless"], environment: {}, isTTY: true },
@@ -2073,7 +2171,6 @@ describe("CLI", () => {
   test("rejects structured modes before starting interactive Codex commands", async () => {
     for (const [command, arguments_] of [
       ["validate", ["finding"]],
-      ["patch", ["issue"]],
       ["login", []],
       ["login", ["status"]],
       ["logout", []],
@@ -4476,6 +4573,29 @@ describe("CLI", () => {
       "Running scan: reviewing files (src, tests)",
     );
     expect(stderr.text()).not.toContain("% complete");
+  });
+
+  test("preserves directory names for absolute scan paths with trailing separators", async () => {
+    const stdout = capture();
+    const stderr = capture();
+
+    expect(
+      await main(
+        [
+          "scan",
+          ".",
+          "--path",
+          "/synthetic-parent/trailing-directory/",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
+    expect(stderr.text()).toContain("Running scan: trailing-directory");
+    expect(stderr.text()).not.toContain("synthetic-parent");
   });
 
   test("shows live stage, files, workers, tokens, and cost without a budget", async () => {

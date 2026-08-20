@@ -140,14 +140,7 @@ jobs:
       - name: Prepare private Windows test root
         id: windows-temp
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $path = Join-Path $env:USERPROFILE '.codex-security-ci-temp'
-          New-Item -ItemType Directory -Path $path -Force | Out-Null
-          $sid = (whoami /user /fo csv /nh | ConvertFrom-Csv -Header Name, Sid).Sid
-          & icacls $path /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Could not secure the Windows test root' }
-          "path=$path" >> $env:GITHUB_OUTPUT
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
 
       - name: Test shard ${{ matrix.shard }}
         timeout-minutes: 10
@@ -155,8 +148,19 @@ jobs:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
-          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: ${{ runner.environment == 'github-hosted' && 'true' || 'false' }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
         run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}
+
+      - name: Test machine-wide PowerShell policy
+        if: matrix.shard == 3 && runner.environment == 'github-hosted'
+        timeout-minutes: 5
+        working-directory: sdk/typescript
+        env:
+          TEMP: ${{ steps.windows-temp.outputs.path }}
+          TMP: ${{ steps.windows-temp.outputs.path }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
+        run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
       - name: Typecheck
         if: matrix.shard == 7

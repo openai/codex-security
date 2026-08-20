@@ -92,9 +92,11 @@ Pass scan configuration to `security.run(repository, options)` or
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
 `onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
-`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
-`onObserverError`. Preflight does not start the runtime, authenticate, resolve
-Python, inspect the plugin, or run those scan-lifecycle callbacks.
+`onTrustedAccessStatus`, `onReconnect`, `onSessionEvent`, `onWorkerStatus`,
+`onWarning`, and `onObserverError`. `onSessionEvent` receives saved scan and
+worker events with their thread IDs and worker numbers. Preflight does not start
+the runtime, authenticate, resolve Python, inspect the plugin, or run those
+scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -203,6 +205,9 @@ Trusted Access for Cyber. To apply or check your access, visit
 npx @openai/codex-security scan
 npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --headless
+npx @openai/codex-security scan /path/to/repository --patch
+npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --json
+npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --create-pr
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -246,8 +251,16 @@ npx @openai/codex-security publish scan /path/outside/repository/results --to li
 npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
+npx @openai/codex-security verify-fix --linear-issue SEC-123 --json
+npx @openai/codex-security verify-fix --linear-project "Security backlog" --linear-filter '{"state":{"type":{"eq":"completed"}}}' --json
+npx @openai/codex-security verify-fix --scan SCAN_ID --severity high --json
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
+npx @openai/codex-security patch OCCURRENCE_ID
+npx @openai/codex-security patch --scan SCAN_ID --severity high --json
+npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
+npx @openai/codex-security patch --resume-pr codex-security/patch-SCAN_ID
+npx @openai/codex-security patch --scan latest --severity medium
 npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
 npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
 ```
@@ -331,6 +344,26 @@ Incomplete coverage and CLI/runtime errors exit 2 so they cannot be mistaken
 for a passing policy. Incomplete scans still write the available human or JSON
 result to stdout and a coverage warning to stderr, including in report-only
 mode.
+
+Use `--patch` to fix and verify confirmed findings after a complete scan.
+`--patch-severity high` selects high and critical findings; the default is low
+and above. After showing the findings summary, interactive scans with findings
+ask whether to open a color-coded finding browser with complete finding details
+and a separate patch-instructions panel. Use the arrow keys to
+browse, `Tab` to inspect details, `Space` to select individual findings, `i` to
+edit instructions for the focused finding, `1`–`4` to select by severity, and
+`r` to optionally create a GitHub pull request after patching. Press `Enter` to
+patch or `q` to keep the checkout unchanged. Each selected finding runs in its
+own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
+saved-finding `patch` command to commit only verified patch files and open a
+pull request with `gh`. If the push or pull request fails, run the printed
+`patch --resume-pr BRANCH` command from the same repository. It uses the saved
+commit without running Codex again and refuses to publish if the branch changed.
+JSON scan results include `patchSeverity`. Scan and
+saved-finding results include one `patches` entry per selected finding with
+status `verified`, `no_change`, `blocked`, or `failed`, plus `pullRequest` when
+one is created. When `--fail-on-severity` is also set, verified and already-fixed
+findings no longer fail the policy.
 
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
 the implied provider. Use `--model gpt-5.6-terra` to switch models and
@@ -458,7 +491,8 @@ shims such as `codex.cmd` automatically use the bundled Codex executable
 instead.
 
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
-the managed Codex runtime, and finally `python3` or `python` from `PATH`.
+the managed Codex runtime, and finally `python3` or `python` from `PATH` (`py`
+is also supported on Windows).
 `CODEX_SECURITY_STATE_DIR` takes precedence over `CODEX_HOME`; keep both
 state and result paths outside the scanned repository.
 
@@ -500,9 +534,8 @@ Progress and summaries use stderr; structured scan results remain on stdout.
 Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Structured JSON results remain on stdout. Verbose diagnostics may contain
-sensitive data; review local logs before sharing them. The interactive
-dashboard omits activity containing recognizable credentials.
+Structured JSON results remain on stdout. Review sensitive verbose logs before
+sharing them. The normal activity feed hides credentials.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
@@ -676,7 +709,9 @@ details include the configuration, results, coverage, and artifact locations. Ad
 `--show-linked-findings` to include finding links from previous scans.
 
 `scans logs` shows session events from the latest scan, including an active scan.
-Pass `SCAN_ID` to select another scan. Logs can contain source code and credentials.
+Pass `SCAN_ID` to select another scan. During a scan, press `d` for live details.
+Filter with `a` for all sources, `m` for the main scan, or `1`–`9` for a worker.
+Logs and live details can contain source code and credentials.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
@@ -741,9 +776,10 @@ npx @openai/codex-security scan . \
 ```
 
 JSON scans never use interactive terminal controls, even when stderr is a TTY.
-The `validate`, `patch`, `login`, and `logout` commands reject `--json` because
-they do not produce structured CLI output. Sign-in commands remain interactive.
-CSV exports cannot be written to stdout while JSON output is requested.
+Saved-finding patch commands support `--json`; literal issue and file patch
+commands do not. The `validate`, `login`, and `logout` commands reject `--json`.
+Sign-in commands remain interactive. CSV exports cannot be written to stdout
+while JSON output is requested.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
 starting Codex or loading credentials. Without a scan directory, it exports the
@@ -757,10 +793,15 @@ Run `npx @openai/codex-security export --help` for all export options.
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
 input can be either a file, whose contents are read into the request, or literal
-text. Both commands operate on the current directory, use the scan model
-and reasoning defaults, disable plugins, and print the final response without
-the underlying Codex event stream. Patching starts a saved task in the Codex
-desktop app. Override the model with `--codex 'model="gpt-5.6-sol"'` and the
+text. These inputs operate on the current directory. Pass a saved finding or
+occurrence ID instead to patch its original repository, or use
+`patch --scan SCAN_ID --severity high` for high and critical findings from one
+scan. `--scan latest` selects the most recent scan of the current repository.
+Saved-finding patch commands accept `--json` and return a verified, already
+fixed, blocked, or failed result for each finding. Both commands use the scan
+model and reasoning defaults and disable plugins. Patching starts a separate
+saved task in the Codex desktop app for each finding. Override the model with
+`--codex 'model="gpt-5.6-sol"'` and the
 reasoning effort with `--effort high` or
 `--codex 'model_reasoning_effort="high"'`.
 
@@ -776,6 +817,23 @@ environment settings; prefer the environment variable to keep keys out of shell
 history. Imported content is always literal, and issue URLs must match the
 selected workspace. Linear access is read-only, and its credentials are not
 passed to the patch subprocess.
+
+Use `verify-fix` to check whether an existing security fix actually closes its
+original vulnerability without modifying the repository. Pass a finding
+description, a saved finding identifier, `--scan SCAN_ID`, `--linear-issue ISSUE`,
+or `--linear-project "PROJECT"`. Linear intake uses the same credentials and
+`--linear-filter` options as `patch`; explicitly filter for completed issues when
+verifying a finished backlog. Verification runs the bundled `verify-fix` skill
+in a read-only Codex sandbox and reports `fixed`, `still_vulnerable`, or
+`inconclusive` with supporting evidence for every finding. Use `--json` for
+structured output. Exit code `0` means every finding is fixed, `1` means at
+least one finding remains vulnerable, and `2` means a result is inconclusive or
+verification could not complete.
+
+Interactive verification shows the same live agent-activity dashboard used by
+scans and Linear publication. Reasoning, repository commands, and progress are
+written to stderr; redirected output and CI receive plain progress lines, and
+JSON results on stdout remain machine-readable.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or

@@ -35,6 +35,10 @@ Do not repeat this guard after it passes, on later context loads, or after the s
 
 After preserving any native continuation's scan context and applying its one-time concurrent-scan guard, read `../../references/scan-prologue.md` once. Deep scans do not run a capability helper, inspect runtime tools, request configuration remediation, or publish preflight checks. The coordinator validates its own ownership, target, scope, and sandbox and manages its workers independently of this thread's delegation runtime and subagent allowance.
 
+## TAC Status Advisory
+
+Immediately before the first `start_codex_security_deep_scan` call, the top-level parent uses the hosted Codex Security Access app [$codex-security-access](app://connector_openai_codex_security_access) to call `get_tac_status` once; workers never perform this advisory. Reuse an existing result when continuing the same scan. Report the exact `status` and TAC grant levels. If `status` is `not_granted`, prominently warn before scan-start progress that TAC access is not granted and protected outputs may not be displayable, and include the returned `enrollmentUrl` as a clickable application link, falling back to `https://chatgpt.com/cyber` when it is absent. If `status` is `unknown` or the app or action is unavailable, warn that access could not be verified and protected outputs may not be displayable. Then continue regardless: the advisory never authorizes, gates, or becomes a capability preflight for the scan. Do not poll or repeat it between phases; recheck only when the user explicitly requests a fresh result after an account or TAC access change.
+
 ## Run Independent Standard Scans
 
 Use the same coordinator tool in every host:
