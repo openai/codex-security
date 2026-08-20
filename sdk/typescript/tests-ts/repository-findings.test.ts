@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import { resolvePluginPython } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-test("combines repository findings without reviving dismissed aliases", () => {
-  const python = (Bun.which("python3") ?? Bun.which("python"))!;
+test("combines repository findings without reviving dismissed aliases", async () => {
+  const python = await resolvePluginPython();
 
   const probe = `
 import argparse, json, sqlite3, sys
@@ -63,10 +64,12 @@ print(json.dumps(result))
 
   const execution = spawnSync(
     python,
-    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
-    { encoding: "utf8", timeout: 10_000 },
+    ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts")],
+    { input: probe, encoding: "utf8", timeout: 10_000, windowsHide: true },
   );
-  expect(execution.status, execution.stderr).toBe(0);
+  expect(execution.status, execution.stderr || execution.error?.message).toBe(
+    0,
+  );
 
   const result = JSON.parse(execution.stdout) as Record<
     string,
