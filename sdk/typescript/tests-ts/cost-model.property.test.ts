@@ -47,36 +47,36 @@ describe("cost-model invariants", () => {
 
   test("matches an integer nanodollar oracle for every priced model", () => {
     fc.assert(
-      fc.property(
-        usageParts,
-        fc.constantFrom(...rates),
-        fc.boolean(),
-        (
-          parts,
-          [model, inputRate, cachedRate, writeRate, outputRate],
-          prefixed,
-        ) => {
-          const selected = prefixed ? `openai.${model}` : model;
-          const tokens = usage(parts);
+      fc.property(usageParts, (parts) => {
+        const tokens = usage(parts);
+        expect(tokenUsage(tokens)).toEqual({
+          ...tokens,
+          total_tokens: tokens.input_tokens + tokens.output_tokens,
+        });
+        for (const [
+          model,
+          inputRate,
+          cachedRate,
+          writeRate,
+          outputRate,
+        ] of rates) {
           const nanos =
             BigInt(parts.uncached) * inputRate +
             BigInt(parts.cached) * cachedRate +
             BigInt(parts.written) * writeRate +
             BigInt(parts.output) * outputRate;
-          expect(estimateScanCost(selected, tokens)).toEqual({
-            model: selected,
-            inputTokens: tokens.input_tokens,
-            cachedInputTokens: parts.cached,
-            cacheWriteInputTokens: parts.written,
-            outputTokens: parts.output,
-            estimatedUsd: Number(nanos) / 1_000_000_000,
-          });
-          expect(tokenUsage(tokens)).toEqual({
-            ...tokens,
-            total_tokens: tokens.input_tokens + tokens.output_tokens,
-          });
-        },
-      ),
+          for (const selected of [model, `openai.${model}`]) {
+            expect(estimateScanCost(selected, tokens)).toEqual({
+              model: selected,
+              inputTokens: tokens.input_tokens,
+              cachedInputTokens: parts.cached,
+              cacheWriteInputTokens: parts.written,
+              outputTokens: parts.output,
+              estimatedUsd: Number(nanos) / 1_000_000_000,
+            });
+          }
+        }
+      }),
       propertyOptions,
     );
   });
