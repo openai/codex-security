@@ -49,6 +49,29 @@ describe("CLI update notice", () => {
     );
   });
 
+  test("cancels registry requests when the caller aborts", async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const pending = checkForUpdate({
+      environment: {},
+      signal: controller.signal,
+      fetch: async (_url, options) => {
+        requestSignal = options?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          requestSignal?.addEventListener(
+            "abort",
+            () => reject(requestSignal?.reason),
+            { once: true },
+          );
+        });
+      },
+    });
+
+    controller.abort();
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(pending).resolves.toBeUndefined();
+  });
+
   test("recognizes npx and local or global npm, pnpm, Yarn, and Bun", () => {
     const installed = "/workspace/node_modules/pkg/dist/version.js";
     const packageName = "@openai/codex-security@latest";
@@ -189,6 +212,30 @@ describe("CLI update notice", () => {
     });
     expect(stderr.text()).toBe(formatUpdateNotice(notice));
     expect(stderr.text()).not.toContain("CODEX_SECURITY_NO_UPDATE_NOTICE");
+  });
+
+  test("finishes the command and aborts an unfinished update check", async () => {
+    const stdout = capture();
+    const stderr = capture(true);
+    let updateSignal: AbortSignal | undefined;
+    const result = await main(
+      ["info", "--json"],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        onUpdateCheck: async (signal) => {
+          updateSignal = signal;
+          return await new Promise<undefined>(() => {});
+        },
+      }),
+    );
+
+    expect(result).toBe(0);
+    expect(updateSignal?.aborted).toBe(true);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      cliVersion: expect.any(String),
+    });
+    expect(stderr.text()).toBe("");
   });
 
   test("skips checks for noninteractive output, help, dry runs, and disabled notices", async () => {

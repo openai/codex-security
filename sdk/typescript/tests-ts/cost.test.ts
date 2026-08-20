@@ -10,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
+import {
+  estimateScanCost,
+  ScanCostTracker,
+  type ScanSessionEvent,
+} from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 
@@ -45,6 +49,8 @@ async function writeSession(
   threadId: string,
   usage: Record<string, number>,
   parentThreadId?: string,
+  workingDirectory?: string,
+  timestamp?: string,
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
@@ -56,6 +62,8 @@ async function writeSession(
         type: "session_meta",
         payload: {
           id: threadId,
+          ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
+          ...(timestamp === undefined ? {} : { timestamp }),
           ...(parentThreadId === undefined
             ? {}
             : {
@@ -112,47 +120,54 @@ function progressMessage(
 }
 
 describe("scan cost", () => {
-  test("retains cached and alternate cache-write usage in workbench totals", async () => {
-    const { PLUGIN_ROOT } = await import("./plugin-root.js");
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const usage = {
-      input_tokens: 100,
-      cached_input_tokens: 40,
-      cache_write_tokens: 15,
-      output_tokens: 20,
-      reasoning_output_tokens: 5,
-      total_tokens: 120,
-    };
-    const probe = [
-      "import json, sys",
-      "sys.path.insert(0, sys.argv[1])",
-      "import workbench_scan_usage",
-      "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
-      "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
-    ].join("\n");
-    const result = spawnSync(
-      python!,
-      [
-        "-I",
-        "-B",
-        "-c",
-        probe,
-        join(PLUGIN_ROOT, "scripts"),
-        JSON.stringify(usage),
-      ],
-      { encoding: "utf8" },
-    );
+  test.each([
+    [{ cache_write_tokens: 15 }, 15],
+    [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
+    [{ cache_write_input_tokens: 0, cache_write_tokens: 80 }, 0],
+  ] as const)(
+    "keeps workbench cache-write normalization aligned with SDK usage",
+    async (cacheWrites, expectedCacheWrites) => {
+      const { PLUGIN_ROOT } = await import("./plugin-root.js");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+      const usage = {
+        input_tokens: 100,
+        cached_input_tokens: 40,
+        ...cacheWrites,
+        output_tokens: 20,
+        reasoning_output_tokens: 5,
+        total_tokens: 120,
+      };
+      const probe = [
+        "import json, sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_scan_usage",
+        "payload = {'info': {'total_token_usage': json.loads(sys.argv[2])}}",
+        "print(json.dumps(workbench_scan_usage._token_snapshot(payload)))",
+      ].join("\n");
+      const result = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          probe,
+          join(PLUGIN_ROOT, "scripts"),
+          JSON.stringify(usage),
+        ],
+        { encoding: "utf8" },
+      );
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      inputTokens: 100,
-      cachedInputTokens: 40,
-      cacheWriteInputTokens: 15,
-      outputTokens: 20,
-      totalTokens: 120,
-    });
-  });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        inputTokens: 100,
+        cachedInputTokens: 40,
+        cacheWriteInputTokens: expectedCacheWrites,
+        outputTokens: 20,
+        totalTokens: 120,
+      });
+    },
+  );
 
   test("uses published GPT-5.6 model rates", () => {
     const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
@@ -169,6 +184,8 @@ describe("scan cost", () => {
     for (const [model, expectedUsd] of [
       ["openai.gpt-5.6", 35],
       ["openai.gpt-5.6-sol", 35],
+      ["openai.gpt-daybreak-blue-latest", 35],
+      ["openai.gpt-daybreak-red-latest", 87.5],
       ["openai.gpt-5.6-terra", 14],
       ["openai.gpt-5.6-luna", 1.4],
     ] as const) {
@@ -181,8 +198,10 @@ describe("scan cost", () => {
     expect(estimateScanCost("openai.unknown-model", usage)).toBeNull();
   });
 
-  test("uses current Terra and Luna input, cache, and output rates", () => {
+  test("uses current input, cache, and output rates", () => {
     for (const [model, input, cached, write, output] of [
+      ["gpt-daybreak-blue-latest", 5, 0.5, 6.25, 30],
+      ["gpt-daybreak-red-latest", 12.5, 1.25, 15.625, 75],
       ["gpt-5.6-terra", 2, 0.2, 2.5, 12],
       ["gpt-5.6-luna", 0.2, 0.02, 0.25, 1.2],
     ] as const) {
@@ -241,6 +260,30 @@ describe("scan cost", () => {
         output_tokens: 10,
       })?.estimatedUsd,
     ).toBe(0.0051);
+  });
+
+  test("preserves legacy cache writes after SDK normalization adds zero", () => {
+    expect(
+      estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
+        cache_write_tokens: 200,
+        output_tokens: 10,
+      }),
+    ).toMatchObject({ cacheWriteInputTokens: 200, estimatedUsd: 0.0051 });
+  });
+
+  test("ignores impossible legacy cache writes while retaining canonical usage", () => {
+    expect(
+      estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1_000,
+        cached_input_tokens: 100,
+        cache_write_input_tokens: 0,
+        cache_write_tokens: 1_001,
+        output_tokens: 10,
+      }),
+    ).toMatchObject({ cacheWriteInputTokens: 0, estimatedUsd: 0.00485 });
   });
 
   test("does not double-charge reasoning tokens included in output", () => {
@@ -384,14 +427,14 @@ describe("live scan cost tracking", () => {
 
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
-    await writeSession(home, "scan-thread", {
+    const parent = await writeSession(home, "scan-thread", {
       input_tokens: 1_000,
       cached_input_tokens: 100,
       cache_write_input_tokens: 200,
       output_tokens: 10,
       reasoning_output_tokens: 2,
     });
-    await writeSession(
+    const worker = await writeSession(
       home,
       "worker-thread",
       {
@@ -406,11 +449,24 @@ describe("live scan cost tracking", () => {
       input_tokens: 1_000_000,
       output_tokens: 1_000_000,
     });
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
+    await waitFor(() => events.length === 4);
+    await appendFile(
+      parent,
+      `${JSON.stringify({ type: "turn_context", payload: { instructions: "Check authorization" } })}\n`,
+    );
+    await appendSessionItem(worker, {
+      type: "function_call",
+      name: "spawn_agent",
+    });
+    await tracker.refresh();
+    await tracker.refresh();
 
     expect(await tracker.stop()).toEqual({
       usage: {
@@ -430,6 +486,210 @@ describe("live scan cost tracking", () => {
         estimatedUsd: 0.006275,
       },
     });
+    expect(
+      events.map(({ threadId, parentThreadId, event }) => [
+        threadId,
+        parentThreadId,
+        event["type"],
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        ["scan-thread", null, "session_meta"],
+        ["scan-thread", null, "event_msg"],
+        ["worker-thread", "scan-thread", "session_meta"],
+        ["worker-thread", "scan-thread", "event_msg"],
+        ["scan-thread", null, "turn_context"],
+        ["worker-thread", "scan-thread", "response_item"],
+      ]),
+    );
+    expect(events).toHaveLength(6);
+  });
+
+  test.each(["parent", "main"] as const)(
+    "replays early worker events when the %s session arrives later",
+    async (missing) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scan");
+      const usage = { input_tokens: 10, output_tokens: 1 };
+      const writeMain = () =>
+        writeSession(
+          home,
+          "scan-thread",
+          usage,
+          undefined,
+          scanDirectory,
+          "2026-07-26T12:00:00Z",
+        );
+      if (missing === "parent") await writeMain();
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        usage,
+        missing === "parent" ? "parent-worker" : undefined,
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "one",
+          "output",
+        ),
+        "2026-07-26T12:01:00Z",
+      );
+      const message = (text: string) => ({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      });
+      await appendSessionItem(worker, message("Early worker output."));
+      const unrelated = await writeSession(home, "unrelated-thread", usage);
+      await appendSessionItem(unrelated, message("Unrelated output."));
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        scanDirectory: missing === "main" ? scanDirectory : undefined,
+        model: "gpt-5.6-sol",
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      expect(events.some((event) => event.threadId === "worker-thread")).toBe(
+        false,
+      );
+
+      if (missing === "parent") {
+        await writeSession(home, "parent-worker", usage, "scan-thread");
+      } else {
+        await writeMain();
+      }
+      await appendSessionItem(worker, message("Late worker output."));
+      await tracker.refresh();
+      await tracker.refresh();
+      await tracker.stop();
+
+      const workerEvents = events.filter(
+        (event) => event.threadId === "worker-thread",
+      );
+      expect(workerEvents.map((event) => event.event)).toEqual([
+        expect.objectContaining({ type: "session_meta" }),
+        expect.objectContaining({ type: "event_msg" }),
+        { type: "response_item", payload: message("Early worker output.") },
+        { type: "response_item", payload: message("Late worker output.") },
+      ]);
+      expect(new Set(workerEvents.map((event) => event.worker))).toEqual(
+        new Set([1]),
+      );
+      expect(
+        events.some((event) => event.threadId === "unrelated-thread"),
+      ).toBe(false);
+    },
+  );
+
+  test("counts independent Deep workers inside the scan directory only", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "current");
+    await writeSession(
+      home,
+      "scan-thread",
+      { input_tokens: 1_000, output_tokens: 10 },
+      undefined,
+      scanDirectory,
+      "2026-07-26T12:00:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-worker",
+      { input_tokens: 250, output_tokens: 2 },
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "worker",
+        "output",
+      ),
+      "2026-07-26T12:01:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-reducer",
+      { input_tokens: 125, output_tokens: 1 },
+      undefined,
+      join(scanDirectory, "artifacts"),
+      "2026-07-26T12:02:00Z",
+    );
+    await writeSession(
+      home,
+      "deep-worker-child",
+      { input_tokens: 50, output_tokens: 1 },
+      "deep-worker",
+    );
+    await writeSession(
+      home,
+      "unrelated-thread",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      `${scanDirectory}-other`,
+    );
+    await writeSession(
+      home,
+      "previous-scan",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(scanDirectory, "artifacts", "deep_discovery", "previous-worker"),
+      "2026-07-26T11:59:00Z",
+    );
+    await writeSession(
+      home,
+      "unknown-start",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "workers",
+        "stale",
+        "output",
+      ),
+    );
+    await writeSession(
+      home,
+      "nested-scan",
+      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      undefined,
+      join(scanDirectory, "nested", "artifacts"),
+      "2026-07-26T12:03:00Z",
+    );
+    const events: ScanSessionEvent[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      scanDirectory,
+      onSessionEvent: (event) => events.push(event),
+    });
+    tracker.start("scan-thread");
+
+    expect((await tracker.stop()).usage).toMatchObject({
+      input_tokens: 1_425,
+      output_tokens: 14,
+    });
+    const labels = new Map(
+      events.map(({ threadId, worker }) => [threadId, worker]),
+    );
+    expect(new Set(labels.keys())).toEqual(
+      new Set([
+        "scan-thread",
+        "deep-worker",
+        "deep-reducer",
+        "deep-worker-child",
+      ]),
+    );
+    expect(labels.get("scan-thread")).toBeUndefined();
+    expect(
+      [...labels.values()].filter((worker) => worker !== undefined).sort(),
+    ).toEqual([1, 2, 3]);
   });
 
   test("ignores replayed parent history in forked worker sessions", async () => {
@@ -550,6 +810,7 @@ describe("live scan cost tracking", () => {
 
     const activities: ScanActivity[] = [];
     const progress: ScanProgress[] = [];
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
@@ -557,6 +818,7 @@ describe("live scan cost tracking", () => {
       expectedFilesTotal: 8,
       onActivity: (activity) => activities.push(activity),
       onProgress: (update) => progress.push(update),
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
 
@@ -600,6 +862,13 @@ describe("live scan cost tracking", () => {
     expect(progress).toEqual([
       { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
     ]);
+    const workerEvents = events.filter(
+      ({ threadId }) => threadId === "worker-thread",
+    );
+    expect(workerEvents).toHaveLength(6);
+    expect(JSON.stringify(workerEvents)).not.toContain(
+      "Inherited parent commentary.",
+    );
   });
 
   test("forwards actions from this scan's delegated workers only", async () => {
@@ -634,11 +903,13 @@ describe("live scan cost tracking", () => {
     }
 
     const activities: ScanActivity[] = [];
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
       repository: "/code/juice-shop",
       onActivity: (activity) => activities.push(activity),
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
     await tracker.stop();
@@ -661,6 +932,14 @@ describe("live scan cost tracking", () => {
         worker: 1,
       },
     ]);
+    expect(
+      new Map(events.map(({ threadId, worker }) => [threadId, worker])),
+    ).toEqual(
+      new Map([
+        ["scan-thread", undefined],
+        ["worker-thread", 1],
+      ]),
+    );
   });
 
   test("forwards genuine worker reasoning and transcript text", async () => {
@@ -1382,15 +1661,17 @@ describe("live scan cost tracking", () => {
     });
   });
 
-  test("retains a bounded partial event across incremental reads", async () => {
+  test("retains a partial event across incremental reads", async () => {
     const home = await codexHome();
     const path = await writeSession(home, "scan-thread", {
       input_tokens: 100,
       output_tokens: 10,
     });
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
     await tracker.refresh();
@@ -1407,87 +1688,41 @@ describe("live scan cost tracking", () => {
     const padding = " ".repeat(128 * 1_024);
     await appendFile(path, `${padding}${event.slice(0, 40)}`);
     expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+    expect(events).toHaveLength(2);
 
     await appendFile(path, `${event.slice(40)}\n`);
     expect((await tracker.stop()).cost?.inputTokens).toBe(250);
+    expect(events).toHaveLength(3);
+    expect(events.at(-1)?.event).toEqual(JSON.parse(event));
   });
 
-  test("rejects and quarantines a session event larger than 1 MiB", async () => {
+  test("reads session events larger than 16 MiB", async () => {
     const home = await codexHome();
     const path = await writeSession(home, "scan-thread", {
       input_tokens: 100,
       output_tokens: 10,
     });
-    await appendFile(path, "x".repeat(1 * 1_024 * 1_024 + 1));
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
     });
     tracker.start("scan-thread");
 
-    await expect(tracker.refresh()).rejects.toThrow(
-      "Codex session event exceeds the 1 MiB safety limit.",
-    );
-    expect((await tracker.refresh()).cost).toEqual({
-      model: "gpt-5.6-terra",
-      inputTokens: 100,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      outputTokens: 10,
-      estimatedUsd: 0.00032,
+    const event = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: 250, output_tokens: 20 },
+        },
+        details: "x".repeat(16 * 1_024 * 1_024 + 1),
+      },
     });
-  });
+    await appendFile(path, event.slice(0, -10));
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
 
-  test("ignores oversized events from unrelated prior credential sessions", async () => {
-    const home = await codexHome();
-    const unrelated = await writeSession(home, "unrelated-thread", {
-      input_tokens: 99,
-      output_tokens: 1,
-    });
-    await appendFile(unrelated, "x".repeat(1 * 1_024 * 1_024 + 1));
-    await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      model: "gpt-5.6-terra",
-    });
-    tracker.start("scan-thread");
-
-    expect((await tracker.stop()).cost).toMatchObject({
-      inputTokens: 100,
-      outputTokens: 10,
-    });
-  });
-
-  test("ignores oversized delegated sessions belonging to an unrelated scan", async () => {
-    const home = await codexHome();
-    await writeSession(home, "unrelated-parent", {
-      input_tokens: 1,
-      output_tokens: 1,
-    });
-    const unrelated = await writeSession(
-      home,
-      "unrelated-child",
-      { input_tokens: 1, output_tokens: 1 },
-      "unrelated-parent",
-    );
-    await appendFile(unrelated, "x".repeat(1 * 1_024 * 1_024 + 1));
-    await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      model: "gpt-5.6-terra",
-    });
-    tracker.start("scan-thread");
-
-    expect((await tracker.stop()).cost).toMatchObject({
-      inputTokens: 100,
-      outputTokens: 10,
-    });
+    await appendFile(path, `${event.slice(-10)}\n`);
+    expect((await tracker.stop()).cost?.inputTokens).toBe(250);
   });
 
   test("reports a changed running cost only once", async () => {

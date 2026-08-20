@@ -2,11 +2,61 @@
 
 set -eu
 
-if [ "${1:-}" = bulk-scan ]; then
-    case "${2:-}" in
-        --help|-h)
+bulk_scan_command=
+bulk_scan_input=
+bulk_scan_metadata=
+expects_option_value=
+
+for argument do
+    if [ "$argument" = -- ] && [ "$bulk_scan_command" = yes ]; then
+        printf '%s\n' 'codex-security: bulk-scan does not support the -- option terminator.' >&2
+        exit 2
+    fi
+
+    case "$argument" in
+        --help|-h|--llms|--llms-full|--schema|--version)
+            bulk_scan_metadata=yes
+            continue
             ;;
-        ""|-*)
+    esac
+
+    if [ "$expects_option_value" = yes ]; then
+        expects_option_value=
+        continue
+    fi
+
+    case "$argument" in
+        --)
+            break
+            ;;
+        bulk-scan)
+            if [ "$bulk_scan_command" = yes ]; then
+                bulk_scan_input=$argument
+            else
+                bulk_scan_command=yes
+            fi
+            ;;
+        --output-dir|--workers|--mode|--model|--effort|--provider|\
+            --knowledge-base|--max-attempts|--max-cost|--plugin-path|--python|\
+            --codex|--filter-output|--format|\
+            --scan-prompt-file|--post-scan-prompt-file|\
+            --token-limit|--token-offset)
+            expects_option_value=yes
+            ;;
+        -*)
+            ;;
+        *)
+            if [ "$bulk_scan_command" != yes ]; then
+                break
+            fi
+            bulk_scan_input=$argument
+            ;;
+    esac
+done
+
+if [ "$bulk_scan_command" = yes ] && [ "$bulk_scan_metadata" != yes ]; then
+    case "$bulk_scan_input" in
+        "")
             printf '%s\n' 'codex-security: bulk-scan requires a repository CSV; interactive discovery is not supported in this image.' >&2
             exit 2
             ;;

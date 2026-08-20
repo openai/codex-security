@@ -48,26 +48,40 @@ operations can use repository configuration, hooks, filters, attributes,
 credential helpers, worktrees, and executables on your `PATH`. These are not
 separate security boundaries.
 
-The product also does not isolate users, tasks, repositories, or scan jobs
-that share the same operating-system account, credentials, or local state.
-Do not treat shared local state as a multi-user or multi-tenant system.
+### Local trust and attacker prerequisites
+
+The product does not isolate users, tasks, repositories, or scan jobs that
+share the same operating-system account, credentials, or local state. Do not
+treat shared local state as a multi-user or multi-tenant system.
+
+Private Codex state, workbench databases, output directories, and resume
+receipts are not separate security boundaries from your operating-system
+account. A report that depends on changing them must show how an
+attacker-controlled input reaches them through a supported workflow and
+crosses a security boundary.
 
 Trusting a repository does not authorize unrelated actions. Repository
-contents, model output, patches, service responses, and imported artifacts
-are data. They are not permission to scan another target, expose a credential,
-contact another destination, modify an unrelated file, or apply a patch.
+contents, filenames, symlinks, model output, patches, service responses, and
+imported artifacts are data. They do not authorize another target, a broader
+scope, a different credential, an unrelated read or write, an unapproved
+patch or network destination, a bypassed restriction, or a passing result for
+incomplete coverage.
 
 ### How scans run
 
 Each scan uses the product's `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. The scan does not request interactive approval. Its
-profile allows reads of the local filesystem and writes to workspace roots and
-the selected scan state directory.
+automatic approval review. Its baseline profile allows reads of the local
+filesystem and writes to workspace roots and the selected scan state directory.
+Requests are reviewed automatically without an interactive prompt; approved
+requests can grant additional permissions for a specific operation. Set
+`approval_policy="never"` to deny all requests instead.
 
-Setting `approval_policy`, `sandbox_mode`, or permissions through `--codex` or
-SDK `codexOverrides` does not replace the scan's approval policy or make its
-filesystem profile more restrictive. Separately enforced host and network
-restrictions still apply.
+Setting `approval_policy`, `approvals_reviewer`, `sandbox_mode`, or permissions
+through `--codex` or SDK `codexOverrides` cannot replace the automatic reviewer
+or baseline filesystem profile. A strict `approval_policy="never"` override,
+including one in the selected profile, is preserved. Saved scans retain their
+effective approval policy, and older scans remain deny-all when rerun.
+Separately enforced host and network restrictions still apply.
 
 Scan and workbench subprocesses can inherit your environment. The workbench
 removes `OPENAI_API_KEY` and `CODEX_API_KEY`, but it does not remove every
@@ -79,7 +93,9 @@ environment credentials it needs.
 
 A security issue must cross a boundary the product actually provides:
 
-- Scan only the selected target and write only to authorized output paths.
+- Scan only the selected target and requested scope; write only to authorized
+  output paths.
+- Honor explicitly selected credentials and documented cost controls.
 - Keep credentials, private source, and scan results out of model requests,
   logs, reports, and network destinations the operator did not authorize.
 - Apply the scan's actual filesystem and execution profile and respect host or
@@ -100,6 +116,8 @@ Report reproducible issues in an official release, such as:
   independently enforced host, execution, filesystem, or network restriction.
 - A scan, patch, file write, or network request outside the action you
   authorized.
+- Ignoring the target, path scope, credential, or documented cost limit you
+  explicitly selected.
 - Path traversal, a symlink, an archive, or a file-replacement race that writes
   outside the approved output or sends an unrelated local file to a model.
 - An incomplete, forged, or incorrectly scoped scan accepted as complete or as
@@ -116,17 +134,28 @@ Report reproducible issues in an official release, such as:
 The following are not security vulnerabilities by themselves:
 
 - Reading selected repository files, resolving worktrees, running Git, or
-  using configured hooks, filters, credential helpers, and executables.
-- An attack that first requires control of your trusted repository, local Git
-  installation, operating-system account, environment, or Codex state.
-- A claim that depends on you intentionally selecting a malicious plugin,
-  interpreter, executable, credential, scan artifact, or override.
-- Access, cancellation, modified results, or scan-history visibility between
-  processes that already share your operating-system account and local state.
-- Prompt injection, unexpected model output, a missed finding, or a false
-  positive that does not cross an actual security boundary.
-- A documented exclusion, ignore rule, soft cost limit, estimate, or Git
-  behavior accurately reflected in the scan and its results.
+  using configured hooks, filters, credential helpers, and executables within
+  the authority you granted.
+- An attack that assumes prior control of your operating-system account,
+  trusted local Git settings, private Codex state, or private scan outputs
+  without showing how a supported input gains that control.
+- A claim that depends on you deliberately granting a plugin, interpreter, or
+  executable the authority your account already has.
+- Access, cancellation, or changes to private scan state, workbench databases,
+  results, resume receipts, or scan history by a process that already shares
+  your account and local state.
+- Prompt injection, unexpected model output, missed findings, false positives,
+  or unsigned review receipts that do not cross a boundary or cause a supported
+  security gate to accept incomplete or misrepresented coverage.
+- A documented exclusion, ignore rule, estimate, or Git behavior accurately
+  reflected in the scan and its results.
+- Disclosed estimation uncertainty or unavoidable in-flight cost overruns
+  when an explicitly requested limit is still enforced as documented.
+- Terminal formatting or control characters without a demonstrated security
+  impact in a supported terminal.
+- A hypothetical compromise of a trusted release runner, registry, or
+  dependency supplier without a path from untrusted input to a protected
+  release or a bypass of its integrity controls.
 - A dependency advisory, theoretical attack, or old package version without a
   reproducible impact on a supported release.
 - Slow processing of a file, document, or repository you deliberately selected.
