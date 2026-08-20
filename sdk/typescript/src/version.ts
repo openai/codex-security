@@ -12,7 +12,7 @@ export const BUNDLED_PLUGIN_VERSION = "0.1.22" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
 const VERSION_PATTERN =
-  /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
 export interface UpdateNotice {
   readonly currentVersion: string;
@@ -149,22 +149,82 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
 function isNewerVersion(latest: string, current: string): boolean {
   const candidate = VERSION_PATTERN.exec(latest);
   const installed = VERSION_PATTERN.exec(current);
-  if (candidate === null || installed === null) return false;
+  if (
+    candidate === null ||
+    installed === null ||
+    !isValidPrerelease(candidate[4]) ||
+    !isValidPrerelease(installed[4])
+  ) {
+    return false;
+  }
 
   for (let index = 1; index <= 3; index += 1) {
-    const difference = Number(candidate[index]) - Number(installed[index]);
+    const difference = compareNumericIdentifiers(
+      candidate[index]!,
+      installed[index]!,
+    );
     if (difference !== 0) return difference > 0;
   }
 
   if (candidate[4] === installed[4]) return false;
   if (candidate[4] === undefined) return true;
   if (installed[4] === undefined) return false;
-  return (
-    new Intl.Collator("en", { numeric: true }).compare(
-      candidate[4],
-      installed[4],
-    ) > 0
+  return isNewerPrerelease(candidate[4], installed[4]);
+}
+
+function isNewerPrerelease(candidate: string, installed: string): boolean {
+  const candidateIdentifiers = candidate.split(".");
+  const installedIdentifiers = installed.split(".");
+  const length = Math.max(
+    candidateIdentifiers.length,
+    installedIdentifiers.length,
   );
+
+  for (let index = 0; index < length; index += 1) {
+    const candidateIdentifier = candidateIdentifiers[index];
+    const installedIdentifier = installedIdentifiers[index];
+    if (candidateIdentifier === installedIdentifier) continue;
+    if (candidateIdentifier === undefined) return false;
+    if (installedIdentifier === undefined) return true;
+
+    const candidateIsNumeric = /^\d+$/u.test(candidateIdentifier);
+    const installedIsNumeric = /^\d+$/u.test(installedIdentifier);
+    if (candidateIsNumeric && installedIsNumeric) {
+      return (
+        compareNumericIdentifiers(candidateIdentifier, installedIdentifier) > 0
+      );
+    }
+    if (candidateIsNumeric !== installedIsNumeric) {
+      return !candidateIsNumeric;
+    }
+    return candidateIdentifier > installedIdentifier;
+  }
+
+  return false;
+}
+
+function isValidPrerelease(value: string | undefined): boolean {
+  return (
+    value === undefined ||
+    value
+      .split(".")
+      .every(
+        (identifier) =>
+          !/^\d+$/u.test(identifier) ||
+          identifier === "0" ||
+          !identifier.startsWith("0"),
+      )
+  );
+}
+
+function compareNumericIdentifiers(
+  candidate: string,
+  installed: string,
+): number {
+  if (candidate.length !== installed.length) {
+    return candidate.length > installed.length ? 1 : -1;
+  }
+  return candidate === installed ? 0 : candidate > installed ? 1 : -1;
 }
 
 function packageVersions(url: URL): {
