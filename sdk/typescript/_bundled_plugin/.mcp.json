@@ -9,6 +9,8 @@
         "CODEX_SQLITE_HOME",
         "CODEX_API_KEY",
         "CODEX_CLI_PATH",
+        "OPENROUTER_API_KEY",
+        "FIREWORKS_API_KEY",
         "AWS_BEARER_TOKEN_BEDROCK",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
@@ -27,8 +29,10 @@
         "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
         "PYTHON",
         "CODEX_SECURITY_KNOWLEDGE_BASE",
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
         "CODEX_SECURITY_SCAN_ROOT",
         "CODEX_SECURITY_STATE_DIR",
+        "CODEX_SECURITY_SURFACE",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
@@ -37,7 +41,7 @@
         "REQUESTS_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS"
       ],
-      "tool_timeout_sec": 86400
+      "tool_timeout_sec": 349200
     }
   }
 }

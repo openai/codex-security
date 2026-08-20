@@ -1,5 +1,10 @@
 {
   "apps": {
+    "codex-security-access": {
+      "id": "connector_openai_codex_security_access",
+      "category": "Security",
+      "required": true
+    },
     "linear": {
       "id": "asdk_app_69a089a326dc8191b32a3f2553f5be2c",
       "category": "Work Tracking & Coordination"

@@ -17,6 +17,17 @@ const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
   "GIT_COMMON_DIR",
   "GIT_REPLACE_REF_BASE",
 ]);
+const GIT_REPOSITORY_ENVIRONMENT = new Set([
+  ...UNSUPPORTED_GIT_ENVIRONMENT,
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_GRAFT_FILE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_NAMESPACE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+]);
 
 export type ScanMode = "standard" | "deep";
 export type DiffTargetKind = "refs" | "working_tree";
@@ -273,6 +284,39 @@ export async function normalizeTarget(
   return { kind: "paths", paths };
 }
 
+export async function validateCommittedDiffCheckout(
+  repository: string,
+  target: NormalizedTarget,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (target.kind !== "refs") return;
+
+  const checkoutHead = await resolveGitRef(repository, "HEAD", signal);
+  if (checkoutHead !== target.head) {
+    throw new InvalidTargetError(
+      `Committed-diff scans require the repository checkout to match the requested head revision. Checkout HEAD is ${checkoutHead}; requested head is ${target.head}. Check out the requested head and retry.`,
+    );
+  }
+
+  const status = await gitOutput(
+    repository,
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    signal,
+  );
+  if (status.length !== 0) {
+    throw new InvalidTargetError(
+      "Committed-diff scans require a clean repository checkout. Commit, stash, or remove local changes and retry. Use `git stash --include-untracked` to stash untracked files.",
+    );
+  }
+
+  const tracked = await gitOutput(repository, ["ls-files", "-t", "-z"], signal);
+  if (tracked.split("\0").some((entry) => entry.startsWith("S "))) {
+    throw new InvalidTargetError(
+      "Committed-diff scans require a full repository checkout. Sparse checkouts are not supported; materialize skipped tracked files and retry.",
+    );
+  }
+}
+
 export function validateMode(target: NormalizedTarget, mode: ScanMode): void {
   if (mode !== "standard" && mode !== "deep") {
     throw new InvalidTargetError(`Unsupported scan mode: ${String(mode)}`);
@@ -356,7 +400,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
     "git",
-    isolatedGitEnvironment(),
+    isolatedGitEnvironment(args[0] === "rev-parse"),
     await outermostGitMarkerRoot(repository, signal),
   );
   if (command === null)
@@ -364,7 +408,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-C", repository, ...args],
+    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
     {
       encoding: "utf8",
       signal,
@@ -394,17 +438,25 @@ async function outermostGitMarkerRoot(
   }
 }
 
-function isolatedGitEnvironment(): NodeJS.ProcessEnv {
+function isolatedGitEnvironment(
+  preserveGitConfiguration: boolean,
+): NodeJS.ProcessEnv {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
-    if (name.toUpperCase().startsWith("GIT_")) {
+    const normalized = name.toUpperCase();
+    if (
+      GIT_REPOSITORY_ENVIRONMENT.has(normalized) ||
+      normalized === "GIT_ALLOW_PROTOCOL" ||
+      (!preserveGitConfiguration && normalized.startsWith("GIT_"))
+    ) {
       delete environment[name];
     }
   }
+  environment["GIT_ALLOW_PROTOCOL"] = "";
   return environment;
 }
 
-async function abortable<T>(
+export async function abortable<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
@@ -413,16 +465,18 @@ async function abortable<T>(
   return await new Promise<T>((resolvePromise, reject) => {
     const onAbort = (): void => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
-    void operation().then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolvePromise(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
+    void Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolvePromise(value);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
   });
 }
 

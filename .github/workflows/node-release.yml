@@ -127,7 +127,6 @@ jobs:
           pnpm --dir sdk/typescript run types
           pnpm --dir sdk/typescript run test
           pnpm --dir sdk/typescript run format
-          pnpm --dir sdk/typescript run build
 
       - name: Pack
         working-directory: sdk/typescript
@@ -401,3 +400,26 @@ jobs:
       - name: Publish to npm using trusted publishing
         if: needs.verify.outputs.mode == 'publish' && github.ref_name != 'npm-v0.1.0'
         run: npm publish ./dist/*.tgz --provenance --access public --tag latest
+
+  dispatch-github-release:
+    if: github.repository == 'openai/codex-security'
+    name: dispatch GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Dispatch the verified GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh workflow run node-github-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "tag=$RELEASE_TAG" \
+            -f "run_id=$RELEASE_RUN_ID"

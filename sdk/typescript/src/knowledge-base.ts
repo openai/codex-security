@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
+import { expandHome } from "./runtime.js";
 
 const SUPPORTED_EXTENSIONS = new Set([
   ".md",
@@ -37,7 +38,7 @@ export async function prepareKnowledgeBase(
     signal?.throwIfAborted();
     if (!requested.trim())
       throw new Error("Knowledge base paths cannot be empty.");
-    const path = resolve(requested);
+    const path = resolve(expandHome(requested));
     const metadata = await lstat(path);
     if (metadata.isSymbolicLink()) {
       throw new Error(`Knowledge base paths cannot be symbolic links: ${path}`);
@@ -49,7 +50,9 @@ export async function prepareKnowledgeBase(
     }
 
     const source = await realpath(path);
-    const selected = metadata.isDirectory() ? await discover(source) : [source];
+    const selected = metadata.isDirectory()
+      ? await discover(source, signal)
+      : [source];
     if (selected.length === 0) {
       throw new Error(
         `Knowledge base directory contains no supported documents: ${path}`,
@@ -111,14 +114,22 @@ export async function prepareKnowledgeBase(
   };
 }
 
-async function discover(directory: string): Promise<string[]> {
+async function discover(
+  directory: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  signal?.throwIfAborted();
   const documents: string[] = [];
   const entries = await readdir(directory, { withFileTypes: true });
+  signal?.throwIfAborted();
   for (const entry of entries) {
+    signal?.throwIfAborted();
     const path = join(directory, entry.name);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      documents.push(...(await discover(path)));
+      for (const document of await discover(path, signal)) {
+        documents.push(document);
+      }
     } else if (
       entry.isFile() &&
       SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase())
@@ -144,13 +155,13 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
     const { getDocument, VerbosityLevel } = await import(
       "pdfjs-dist/legacy/build/pdf.mjs"
     );
-    const document = await getDocument({
+    const loadingTask = getDocument({
       data: new Uint8Array(bytes),
-      isEvalSupported: false,
       stopAtErrors: true,
       verbosity: VerbosityLevel.ERRORS,
-    }).promise;
+    });
     try {
+      const document = await loadingTask.promise;
       const pages: string[] = [];
       for (let number = 1; number <= document.numPages; number++) {
         const content = await (await document.getPage(number)).getTextContent();
@@ -162,7 +173,7 @@ async function extractPdf(path: string, bytes: Uint8Array): Promise<string> {
       }
       return pages.join("\n");
     } finally {
-      await document.destroy();
+      await loadingTask.destroy();
     }
   } catch (error) {
     throw new Error(`Cannot extract text from knowledge base PDF: ${path}`, {
