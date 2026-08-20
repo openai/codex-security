@@ -27,6 +27,21 @@ outside an approved path.
 - Support Windows as well as Unix. Use platform-aware path and process APIs, and test realistic Windows paths and directory links when relevant.
 - Favor direct flows and clear errors over defensive fallbacks for implausible cases.
 
+## Public CLI changes
+
+Treat commands, arguments, flags, accepted values, public environment
+variables, and defaults as public API.
+
+- Do not add or change public CLI surface unless the task explicitly calls for
+  it. A request for new behavior is not permission to invent a command or flag.
+- Prefer existing commands, settings, and Codex behavior. Do not add flags for
+  implementation convenience or when a safe, compatible default is enough.
+- Before adding CLI surface, explain the user need, exact syntax and defaults,
+  why existing behavior is insufficient, and compatibility impact. Ask if those
+  choices are unclear.
+- Update relevant help, schemas, documentation, and tests in the same change.
+  Describe the public CLI change in the pull request.
+
 ## Unit tests
 
 Add focused Bun tests in `tests-ts/<module>.test.ts`. Cover observable behavior,
