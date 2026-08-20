@@ -108,6 +108,49 @@ async function plugin(root: string, version = "1.2.3"): Promise<string> {
   return path;
 }
 
+interface McpServerResponse {
+  id: number;
+  result: {
+    capabilities?: Record<string, unknown>;
+    tools?: Array<{
+      name: string;
+      inputSchema: {
+        properties: { userContext?: { maxLength?: number } };
+      };
+    }>;
+  };
+}
+
+async function inspectMcpServer(): Promise<McpServerResponse[]> {
+  const messages = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "codex-security-test", version: "1.0.0" },
+      },
+    },
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  ];
+  const execution = promisify(execFile)(
+    "node",
+    [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+  );
+  execution.child.stdin?.end(
+    `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+  );
+  const { stdout } = await execution;
+  return stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as McpServerResponse);
+}
+
 describe("plugin runtime preparation", () => {
   test("keeps installed-package plugin lookup inside the package", async () => {
     const root = await temporaryDirectory();
@@ -519,48 +562,8 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("accepts preserved context before starting a headless scan", () => {
-    const messages = [
-      {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: { name: "codex-security-test", version: "1.0.0" },
-        },
-      },
-      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
-      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    ];
-    const server = spawnSync(
-      process.execPath,
-      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
-      {
-        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
-        encoding: "utf8",
-        timeout: 10_000,
-      },
-    );
-    expect(server.status, server.stderr).toBe(0);
-    const responses = server.stdout
-      .trim()
-      .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            id: number;
-            result: {
-              tools?: Array<{
-                name: string;
-                inputSchema: {
-                  properties: { userContext?: { maxLength?: number } };
-                };
-              }>;
-            };
-          },
-      );
+  test("accepts preserved context before starting a headless scan", async () => {
+    const responses = await inspectMcpServer();
     const tool = responses
       .find((response) => response.id === 2)
       ?.result.tools?.find(
@@ -579,43 +582,7 @@ describe("plugin runtime preparation", () => {
     expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
     expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
 
-    const messages = [
-      {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: { name: "codex-security-test", version: "1.0.0" },
-        },
-      },
-      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
-      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    ];
-    const server = spawnSync(
-      process.execPath,
-      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
-      {
-        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
-        encoding: "utf8",
-        timeout: 10_000,
-      },
-    );
-    expect(server.status, server.stderr).toBe(0);
-    const responses = server.stdout
-      .trim()
-      .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            id: number;
-            result: {
-              capabilities?: Record<string, unknown>;
-              tools?: Array<{ name: string }>;
-            };
-          },
-      );
+    const responses = await inspectMcpServer();
     expect(
       responses.find((response) => response.id === 1)?.result.capabilities,
     ).not.toHaveProperty("resources");
