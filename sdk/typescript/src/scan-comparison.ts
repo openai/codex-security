@@ -24,6 +24,7 @@ import {
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
+  type CodexCommand,
 } from "./runtime.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
@@ -158,13 +159,21 @@ export async function runReadOnlyCodex(
           options.signal,
         )
       : undefined;
+  const command =
+    environment === undefined ? undefined : resolveCodexCommand(environment);
   const codex =
     options.codex ??
     new Codex({
+      codexPathOverride: command!.command,
       env: environment,
       config: {
         ...config,
-        mcp_servers: await disabledMcpServers(config, environment!, options),
+        mcp_servers: await disabledMcpServers(
+          command!,
+          config,
+          environment!,
+          options,
+        ),
         allow_login_shell: false,
         responses_api_metadata: {
           codex_security_surface: runtimeOptions.surface,
@@ -205,12 +214,13 @@ export async function runReadOnlyCodex(
 }
 
 async function disabledMcpServers(
+  command: CodexCommand,
   config: JsonObject | undefined,
   environment: Record<string, string>,
   options: ReadOnlyCodexOptions,
 ): Promise<JsonObject> {
   const { success, stdout, stderr } = await runCodexCommand(
-    resolveCodexCommand({}),
+    command,
     [
       "-C",
       options.workingDirectory ?? process.cwd(),

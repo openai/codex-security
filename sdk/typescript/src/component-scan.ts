@@ -159,7 +159,11 @@ export async function runComponentScans(
       outputDir: join(output, `component-${index + 1}`),
     }),
   );
-  notify(() => options.onPlan?.(receipts.map((receipt) => ({ ...receipt }))));
+  notify(() =>
+    options.onPlan?.(
+      receipts.map((receipt) => ({ ...receipt, paths: [...receipt.paths] })),
+    ),
+  );
   const results = new Map<string, ScanResult>();
   let next = 0;
   const settled = await Promise.allSettled(
@@ -172,7 +176,9 @@ export async function runComponentScans(
           const receipt = receipts[next++];
           if (receipt === undefined) return;
           receipt.status = "started";
-          notify(() => options.onProgress?.({ ...receipt }));
+          notify(() =>
+            options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
+          );
           const emit = (event: ComponentScanUpdate): void =>
             notify(() =>
               options.onScanEvent?.({ ...event, componentId: receipt.id }),
@@ -208,7 +214,9 @@ export async function runComponentScans(
             receipt.status = "failed";
             receipt.error = safeErrorMessage(error);
           }
-          notify(() => options.onProgress?.({ ...receipt }));
+          notify(() =>
+            options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
+          );
         }
       } finally {
         await security.close();
@@ -222,7 +230,9 @@ export async function runComponentScans(
       receipt.error = options.signal?.aborted
         ? "Scan canceled."
         : "Component scan did not finish.";
-      notify(() => options.onProgress?.({ ...receipt }));
+      notify(() =>
+        options.onProgress?.({ ...receipt, paths: [...receipt.paths] }),
+      );
     }
   }
   const { findings, matches, uncertain, error } = await deduplicateFindings(

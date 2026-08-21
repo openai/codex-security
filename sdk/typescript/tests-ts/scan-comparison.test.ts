@@ -1,4 +1,5 @@
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   realpath,
@@ -73,21 +74,30 @@ describe("semantic scan comparison", () => {
       join(home, "config.toml"),
       '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
     );
+    const executable = join(
+      home,
+      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+    );
+    await copyFile(resolveCodexCommand({}).command, executable);
     const environment = {
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],
       TEMP: process.env["TEMP"],
       TMP: process.env["TMP"],
       CODEX_HOME: home,
+      CODEX_CLI_PATH: executable,
       OPENAI_API_KEY: "synthetic-key",
     };
     const { codex } = fakeCodex({ matches: [], uncertain: [] });
     let config: CodexOptions["config"];
+    let codexPath: string | undefined;
     const startThread = spyOn(
       Codex.prototype,
       "startThread",
     ).mockImplementation(function (this: Codex, options) {
       config = (this as unknown as { options: CodexOptions }).options.config;
+      codexPath = (this as unknown as { options: CodexOptions }).options
+        .codexPathOverride;
       return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
     });
     try {
@@ -109,8 +119,9 @@ describe("semantic scan comparison", () => {
         synthetic: { command: "synthetic-integration", enabled: false },
         inherited: { enabled: false },
       });
+      expect(codexPath).toBe(executable);
       const effective = await runCodexCommand(
-        resolveCodexCommand({}),
+        resolveCodexCommand(environment),
         [
           "-C",
           home,

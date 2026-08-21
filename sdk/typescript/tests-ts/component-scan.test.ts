@@ -311,12 +311,16 @@ test("forwards scan events with their component identity without letting observe
         "pending",
         "pending",
       ]);
+      for (const receipt of receipts) receipt.paths.splice(0);
       planned = true;
       throw new Error("optional plan observer");
     },
     onScanEvent(event) {
       events.push(event);
       throw new Error("optional event observer");
+    },
+    onProgress(receipt) {
+      receipt.paths[0] = "changed-by-observer";
     },
     createSecurity: client(async (_repository, options) => {
       expect(planned).toBe(true);
@@ -370,6 +374,31 @@ test("forwards scan events with their component identity without letting observe
       value: { description: component.paths.join(",") },
     });
   }
+});
+
+test("CLI keeps untrusted component names and errors on one terminal-safe line", async () => {
+  const paths = await fixture();
+  const planFile = join(paths.root, "components.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({
+      components: [{ name: "API\nFORGED\u001b[2J", paths: ["apps/api"] }],
+    }),
+  );
+  const result = await cli(
+    paths,
+    ["--components-file", planFile, "--headless"],
+    {
+      createSecurity: client(async () => {
+        throw new Error("bad\nPATH\u001b[2J");
+      }),
+    },
+  );
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("API FORGED [2J failed: bad PATH [2J\n");
+  expect(result.stderr).not.toContain("\u001b");
+  expect(result.stderr).not.toContain("\nFORGED");
+  expect(result.stderr).not.toContain("\nPATH");
 });
 
 test.each(["dashboard", "headless", "ci"])(
