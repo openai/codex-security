@@ -125,6 +125,10 @@ describe("CLI update notice", () => {
       ["0.1.0", "0.1.0", false],
       ["0.2.0", "0.1.0", false],
       ["0.2.0", "not-a-version", false],
+      ["1.0.0", "01.0.0", false],
+      ["1.0.0-alpha.1", "1.0.0-alpha.01", false],
+      ["1.0.0", "1.0.0-alpha..1", false],
+      ["1.0.0", "1.0.0+build..1", false],
       ["0.2.0", "0.2.0-beta.1", false],
       ["0.2.0-beta.2", "0.2.0-beta.1", false],
       ["0.2.0-beta.1", "0.2.0-beta.2", true],
@@ -146,6 +150,64 @@ describe("CLI update notice", () => {
         fetch: registryResponse(null),
       }),
     ).toBeUndefined();
+  });
+
+  test("uses SemVer precedence for prerelease identifiers", async () => {
+    const precedence = [
+      "1.0.0-alpha",
+      "1.0.0-alpha.1",
+      "1.0.0-alpha.beta",
+      "1.0.0-beta",
+      "1.0.0-beta.2",
+      "1.0.0-beta.11",
+      "1.0.0-rc.1",
+      "1.0.0",
+    ];
+
+    for (let index = 1; index < precedence.length; index += 1) {
+      const lower = precedence[index - 1]!;
+      const higher = precedence[index]!;
+      await expect(
+        checkForUpdate({
+          environment: {},
+          currentVersion: lower,
+          fetch: registryResponse(higher),
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        checkForUpdate({
+          environment: {},
+          currentVersion: higher,
+          fetch: registryResponse(lower),
+        }),
+      ).resolves.toBeUndefined();
+    }
+
+    await expect(
+      checkForUpdate({
+        environment: {},
+        currentVersion: "1.0.0-alpha.1",
+        fetch: registryResponse("1.0.0-alpha-1"),
+      }),
+    ).resolves.toBeDefined();
+
+    const longNumericIdentifier = "9".repeat(4_096);
+    await expect(
+      checkForUpdate({
+        environment: {},
+        currentVersion: `1.0.0-alpha.${longNumericIdentifier}`,
+        fetch: registryResponse(`1.0.0-alpha.1${longNumericIdentifier}`),
+      }),
+    ).resolves.toBeDefined();
+
+    const longCoreTail = "0".repeat(4_095);
+    await expect(
+      checkForUpdate({
+        environment: {},
+        currentVersion: `1${longCoreTail}.0.0`,
+        fetch: registryResponse(`2${longCoreTail}.0.0`),
+      }),
+    ).resolves.toBeDefined();
   });
 
   test("suppresses registry checks in CI or when disabled", async () => {
