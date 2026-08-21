@@ -24,8 +24,8 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const ambientHome = join(root, "ambient-codex-home");
     const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(ambientHome);
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(ambientHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
     const interpreter =

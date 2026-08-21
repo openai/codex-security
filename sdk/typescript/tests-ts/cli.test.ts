@@ -799,7 +799,7 @@ describe("CLI", () => {
     const previousHome = process.env["HOME"];
     const previousUserProfile = process.env["USERPROFILE"];
     try {
-      await mkdir(home);
+      await mkdir(home, { mode: 0o700 });
       await mkdir(currentDirectory);
       await multiscanInventory(home);
       process.env["HOME"] = home;

@@ -966,6 +966,10 @@ describe("deep scan workbench ownership", () => {
     const stateDir = join(root, "state");
     const codexHome = join(root, "codex-home");
     await mkdir(repository);
+    await mkdir(join(root, "scans", "repository"), {
+      recursive: true,
+      mode: 0o700,
+    });
     await writeFile(join(repository, "source.py"), "# source fixture\n");
 
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -1355,6 +1359,10 @@ describe("deep scan workbench ownership", () => {
     const codexHome = join(root, "codex-home");
     const configDir = join(codexHome, "codex-security");
     await mkdir(repository);
+    await mkdir(join(root, "scans", "repository"), {
+      recursive: true,
+      mode: 0o700,
+    });
     await mkdir(configDir, { recursive: true });
     await writeFile(join(repository, "source.py"), "# source fixture\n");
     await writeFile(

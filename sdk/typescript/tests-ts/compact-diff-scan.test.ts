@@ -515,8 +515,9 @@ describe("compact diff scan", () => {
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "changed");
     const headRevision = git(repository, "rev-parse", "HEAD");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
+    mkdirSync(join(root, "scans"), { mode: 0o700 });
+    mkdirSync(join(root, "scans", "repository"), { mode: 0o700 });
+    mkdirSync(join(root, "state"), { mode: 0o700 });
     const client = await startMcp(root);
     const owner = "compact-diff-owner";
     const call = (name: string, args: JsonObject) =>
