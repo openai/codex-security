@@ -10,6 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -107,13 +108,102 @@ describe("scan knowledge bases", () => {
     }
   });
 
+  test("cancels recursive discovery before staging knowledge-base documents", async () => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "nested", "deeper");
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, "scope.md"), "Review application boundaries.");
+
+    const controller = new AbortController();
+    const reason = new Error("Knowledge-base discovery canceled.");
+    let checks = 0;
+    const signalSpy = spyOn(controller.signal, "throwIfAborted");
+    signalSpy.mockImplementation(() => {
+      if (++checks === 8) controller.abort(reason);
+      if (controller.signal.aborted) throw controller.signal.reason;
+    });
+    const temporarySpy = spyOn(os, "tmpdir");
+
+    try {
+      const prepared = prepareKnowledgeBase([root], controller.signal).then(
+        (knowledgeBase) => {
+          temporaryDirectories.push(knowledgeBase.path);
+          return knowledgeBase;
+        },
+      );
+      await expect(prepared).rejects.toBe(reason);
+      expect(temporarySpy).not.toHaveBeenCalled();
+    } finally {
+      signalSpy.mockRestore();
+      temporarySpy.mockRestore();
+    }
+  });
+
+  test("handles large nested document listings without argument overflow", async () => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "nested");
+    await mkdir(nested);
+    await writeFile(join(nested, "scope.md"), "Review application boundaries.");
+    const originalReaddir = filesystem.readdir;
+    const listingSpy = spyOn(filesystem, "readdir").mockImplementation(
+      async (...args) => {
+        const entries = await Reflect.apply(originalReaddir, filesystem, args);
+        return args[0] === nested ? Array(700_000).fill(entries[0]) : entries;
+      },
+    );
+
+    let knowledgeBase;
+    try {
+      knowledgeBase = await prepareKnowledgeBase([root]);
+      temporaryDirectories.push(knowledgeBase.path);
+    } finally {
+      listingSpy.mockRestore();
+    }
+
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Review application boundaries.",
+    ]);
+  });
+
+  test("removes staged documents when knowledge-base preparation is canceled", async () => {
+    const root = await temporaryDirectory();
+    const staging = join(root, "staging");
+    await mkdir(staging);
+    const first = join(root, "first.md");
+    const second = join(root, "second.md");
+    await writeFile(first, "First document.");
+    await writeFile(second, "Second document.");
+
+    const controller = new AbortController();
+    const reason = new Error("Knowledge-base preparation canceled.");
+    let checks = 0;
+    const signalSpy = spyOn(controller.signal, "throwIfAborted");
+    signalSpy.mockImplementation(() => {
+      if (++checks === 4) controller.abort(reason);
+      if (controller.signal.aborted) throw controller.signal.reason;
+    });
+    const temporarySpy = spyOn(os, "tmpdir").mockImplementation(() => staging);
+
+    try {
+      await expect(
+        prepareKnowledgeBase([first, second], controller.signal),
+      ).rejects.toBe(reason);
+      expect(await readdir(staging)).toEqual([]);
+    } finally {
+      signalSpy.mockRestore();
+      temporarySpy.mockRestore();
+    }
+  });
+
   test("expands ~ in requested paths and leaves absolute and ~user paths alone", async () => {
     const home = await temporaryDirectory();
     const documents = join(home, "docs");
     await mkdir(documents, { recursive: true });
     await writeFile(join(documents, "scope.md"), "Review the payment service.");
-    const realHomeDirectory = os.homedir();
-    const homeSpy = spyOn(os, "homedir").mockImplementation(() => home);
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    process.env["HOME"] = home;
+    process.env["USERPROFILE"] = home;
     try {
       const expanded = await prepareKnowledgeBase(["~/docs"]);
       temporaryDirectories.push(expanded.path);
@@ -129,9 +219,11 @@ describe("scan knowledge bases", () => {
 
       expect(expandHome("~other/docs")).toBe("~other/docs");
     } finally {
-      homeSpy.mockRestore();
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
     }
-    expect(os.homedir()).toBe(realHomeDirectory);
   });
 
   test("extracts searchable text from PDFs and DOCX documents", async () => {

@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { VERSION } from "../src/index.js";
-import { SYNTHETIC_CREDENTIALS } from "./support/cli.js";
+import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 
 const packageRoot = join(import.meta.dir, "..");
 
@@ -111,6 +111,7 @@ describe("CLI launcher", () => {
       );
       expect(build.error).toBeUndefined();
       expect(build.status).toBe(0);
+      expect(build.stderr).toBe("");
 
       expect(await readFile(join(dist, "cli.js"), "utf8")).toContain(
         'from "./api.js"',

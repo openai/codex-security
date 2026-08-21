@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmod,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -314,6 +316,7 @@ try {
       "--prefer-offline",
       "--include=optional",
       "--ignore-scripts",
+      "--package-lock=false",
       "--no-audit",
       "--no-fund",
       archive,
@@ -343,7 +346,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan.");`,
     ],
     { cwd: consumer },
   );
@@ -397,6 +400,98 @@ try {
 
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
+  assert.match(help, /\bpublish\b/u);
+
+  const publicationScan = join(consumer, "publication-scan");
+  await cp(
+    join(installedRoot, "_bundled_plugin", "examples", "completed-scan"),
+    publicationScan,
+    { recursive: true },
+  );
+  if (process.platform !== "win32") await chmod(publicationScan, 0o700);
+  const publication = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "publish",
+        "scan",
+        publicationScan,
+        "--to",
+        "linear",
+        "--linear-team",
+        "team-example",
+        "--dry-run",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_SECURITY_LINEAR_PROJECT: "",
+          CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(publication.scanId, "scan_example_001");
+  assert.equal(publication.uploadId, publication.scanId);
+  assert.deepEqual(publication.destination, {
+    type: "linear",
+    teamId: "team-example",
+  });
+  assert.equal(publication.dryRun, true);
+  assert.equal(publication.counts.findings, 1);
+  assert.equal(publication.counts.created, 0);
+  assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
+
+  const networkGuard = join(consumer, "reject-publication-network.cjs");
+  await writeFile(
+    networkGuard,
+    'globalThis.fetch = async () => { throw new Error("Publication dry runs must not make network requests."); };\n',
+  );
+  const directPublicationText = run(
+    process.execPath,
+    [
+      "--require",
+      networkGuard,
+      launcher,
+      "publish",
+      "scan",
+      publicationScan,
+      "--to",
+      "linear",
+      "--linear-team",
+      "team-example",
+      "--project",
+      "project-example",
+      "--linear-api-key",
+      "lin_api_SYNTHETIC_INSTALLED_OVERRIDE",
+      "--linear-assignee",
+      "security@example.test",
+      "--dry-run",
+      "--json",
+    ],
+    {
+      cwd: consumer,
+      capture: true,
+      env: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+        CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_INSTALLED_ENV",
+      },
+    },
+  );
+  const directPublication = JSON.parse(directPublicationText);
+  assert.equal(directPublication.scanId, publication.scanId);
+  assert.equal(directPublication.dryRun, true);
+  assert.equal(directPublication.counts.findings, 1);
+  assert.equal(directPublication.counts.created, 0);
+  assert.doesNotMatch(
+    directPublicationText,
+    /lin_api_|security@example\.test/u,
+  );
 
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
