@@ -15,6 +15,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import {
   comparisonEnvironment,
   matchCompletedScan,
@@ -65,7 +66,21 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
-  test("disables configured MCP servers for read-only helper turns", async () => {
+  test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(home);
+    await writeFile(
+      join(home, "config.toml"),
+      '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
+    );
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      OPENAI_API_KEY: "synthetic-key",
+    };
     const { codex } = fakeCodex({ matches: [], uncertain: [] });
     let config: CodexOptions["config"];
     const startThread = spyOn(
@@ -79,7 +94,8 @@ describe("semantic scan comparison", () => {
       await matchScanFindings(
         { before: [], after: [] },
         {
-          environment: { OPENAI_API_KEY: "synthetic-key" },
+          environment,
+          workingDirectory: home,
           config: {
             codexOverrides: {
               mcp_servers: {
@@ -91,7 +107,37 @@ describe("semantic scan comparison", () => {
       );
       expect(config?.["mcp_servers"]).toEqual({
         synthetic: { command: "synthetic-integration", enabled: false },
+        inherited: { enabled: false },
       });
+      const effective = await runCodexCommand(
+        resolveCodexCommand({}),
+        [
+          "-C",
+          home,
+          "-c",
+          'mcp_servers.synthetic.command="synthetic-integration"',
+          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+            "-c",
+            `mcp_servers.${name}.enabled=false`,
+          ]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        environment,
+      );
+      expect(effective.success).toBe(true);
+      expect(
+        JSON.parse(effective.stdout).map(
+          (server: { name: string; enabled: boolean }) => ({
+            name: server.name,
+            enabled: server.enabled,
+          }),
+        ),
+      ).toEqual([
+        { name: "inherited", enabled: false },
+        { name: "synthetic", enabled: false },
+      ]);
     } finally {
       startThread.mockRestore();
     }

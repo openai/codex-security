@@ -23,6 +23,7 @@ import {
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
+  runCodexCommand,
 } from "./runtime.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
@@ -149,24 +150,21 @@ export async function runReadOnlyCodex(
     options.reasoningEffort ??
     (configuredModel?.reasoningEffort as ModelReasoningEffort | undefined) ??
     "medium";
+  const environment =
+    options.codex === undefined
+      ? await comparisonEnvironment(
+          options.environment,
+          accountStatus,
+          options.signal,
+        )
+      : undefined;
   const codex =
     options.codex ??
     new Codex({
-      env: await comparisonEnvironment(
-        options.environment,
-        accountStatus,
-        options.signal,
-      ),
+      env: environment,
       config: {
         ...config,
-        mcp_servers: Object.fromEntries(
-          Object.entries(config?.["mcp_servers"] ?? {}).map(
-            ([name, server]) => [
-              name,
-              { ...(server as JsonObject), enabled: false },
-            ],
-          ),
-        ),
+        mcp_servers: await disabledMcpServers(config, environment!, options),
         allow_login_shell: false,
         responses_api_metadata: {
           codex_security_surface: runtimeOptions.surface,
@@ -204,6 +202,44 @@ export async function runReadOnlyCodex(
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   return turn.finalResponse;
+}
+
+async function disabledMcpServers(
+  config: JsonObject | undefined,
+  environment: Record<string, string>,
+  options: ReadOnlyCodexOptions,
+): Promise<JsonObject> {
+  const { success, stdout, stderr } = await runCodexCommand(
+    resolveCodexCommand({}),
+    [
+      "-C",
+      options.workingDirectory ?? process.cwd(),
+      "-c",
+      "features.plugins=false",
+      "mcp",
+      "list",
+      "--json",
+    ],
+    environment,
+    undefined,
+    options.signal,
+  );
+  if (!success)
+    throw new CodexSecurityError(
+      `Could not read MCP configuration for a read-only helper: ${stderr.trim()}`,
+    );
+  const inherited = JSON.parse(stdout) as { name: string }[];
+  const configured = (config?.["mcp_servers"] ?? {}) as JsonObject;
+  const names = new Set([
+    ...Object.keys(configured),
+    ...inherited.map(({ name }) => name),
+  ]);
+  return Object.fromEntries(
+    [...names].map((name) => [
+      name,
+      { ...(configured[name] as JsonObject), enabled: false },
+    ]),
+  );
 }
 
 export async function matchCompletedScan(
