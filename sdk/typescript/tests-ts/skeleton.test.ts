@@ -1,13 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
-import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
-import type {
-  Finding,
-  FindingCodeEvidence,
-  FindingRootCause,
-  FindingWriteup,
-  ScanHardening,
-  ScanRecord,
+import { parse } from "smol-toml";
+import {
+  type AttackPathDataflow,
+  type AttackPathReachability,
+  CodexSecurity,
+  CodexSecurityError,
+  VERSION,
 } from "../src/index.js";
 import { main } from "../src/cli.js";
 
@@ -28,6 +27,22 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("exports typed attack-path aliases", () => {
+    const dataflow: AttackPathDataflow = {
+      transformations: ["decode archive entry"],
+    };
+    const reachability: AttackPathReachability = {
+      attacker: "authenticated uploader",
+      entrypoint: "archive upload endpoint",
+      preconditions: ["archive extraction is enabled"],
+    };
+    const transformations: string[] | undefined = dataflow.transformations;
+    const attacker: string | undefined = reachability.attacker;
+
+    expect(transformations).toEqual(["decode archive entry"]);
+    expect(attacker).toBe("authenticated uploader");
+  });
+
   test("advertises the tested Node.js 22, 24, and 26 release lines", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -70,7 +85,7 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("uses the default test timeout consistently across CI platforms", async () => {
+  test("randomizes tests and keeps the default and Windows CI timeouts", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -78,11 +93,24 @@ describe("TypeScript package skeleton", () => {
       new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
       "utf8",
     );
+    const bunConfig = parse(
+      await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
+    );
 
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
-    expect(ciWorkflow).toContain("run: pnpm --dir sdk/typescript run test\n");
+    expect(bunConfig).toMatchObject({ test: { randomize: true } });
+    expect(ciWorkflow).toContain(
+      "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+    );
+    expect(ciWorkflow).toContain(
+      "run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
+    );
+    expect(ciWorkflow).toContain(
+      "name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+    );
+    expect(ciWorkflow).toContain("run: pnpm --dir sdk/typescript run test");
     expect(ciWorkflow).not.toContain("--timeout 60000");
   });
 
@@ -111,29 +139,6 @@ describe("TypeScript package skeleton", () => {
         /- name: Audit production dependencies\n(?:\s+if: [^\n]+\n)?\s+continue-on-error: true\n\s+run: (?:sfw )?pnpm --dir sdk\/typescript run audit:prod/u,
       );
     }
-  });
-
-  test("exposes canonical finding and hardening fields with public types", () => {
-    const finding = {} as Finding;
-    const scan = {} as ScanRecord;
-    const writeup: FindingWriteup | undefined = finding.writeup;
-    const evidence: FindingCodeEvidence[] | undefined = finding.codeEvidence;
-    const rootCause: string | FindingRootCause | undefined = finding.rootCause;
-    const hardening: ScanHardening | undefined = scan.hardening;
-    const reportPath: string | undefined = finding.writeup?.reportPath;
-    const firstEvidencePath: string | undefined =
-      finding.codeEvidence?.[0]?.path;
-    const portfolioPath: "hardening/hardening.md" | undefined =
-      scan.hardening?.portfolioPath;
-    expect([
-      writeup,
-      evidence,
-      rootCause,
-      hardening,
-      reportPath,
-      firstEvidencePath,
-      portfolioPath,
-    ]).toEqual(new Array(7).fill(undefined));
   });
 
   test("exports the async client and curated error base", async () => {

@@ -1,6 +1,14 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  delimiter,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 export interface TrustedExecutable {
   executable: string;
@@ -19,29 +27,46 @@ export async function resolveTrustedExecutable(
     ([name]) => name.toUpperCase() === "PATH",
   )?.[1];
   const entries: string[] = [];
-  for (const entry of path?.split(delimiter) ?? []) {
-    if (entry.length === 0 || !isAbsolute(entry)) continue;
+  for (let entry of path?.split(delimiter) ?? []) {
+    if (
+      process.platform === "win32" &&
+      entry.startsWith('"') &&
+      entry.endsWith('"')
+    ) {
+      entry = entry.slice(1, -1);
+    }
+    if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
     if (canonical === null || isWithin(root, canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
+  const pathLike = candidate.includes("/") || candidate.includes("\\");
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
+  // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
+  // will actually run instead of rejecting an otherwise valid Windows configuration.
   const extensions =
     process.platform === "win32"
       ? /\.(?:exe|com)$/iu.test(candidate)
         ? [{ suffix: "", runnable: true }]
-        : [
-            { suffix: ".exe", runnable: true },
-            { suffix: ".com", runnable: true },
-            { suffix: ".bat", runnable: false },
-            { suffix: ".cmd", runnable: false },
-            { suffix: "", runnable: false },
-          ]
+        : pathLike
+          ? extname(candidate) === ""
+            ? [{ suffix: ".exe", runnable: true }]
+            : [{ suffix: "", runnable: false }]
+          : [
+              { suffix: ".exe", runnable: true },
+              { suffix: ".com", runnable: true },
+              { suffix: ".bat", runnable: false },
+              { suffix: ".cmd", runnable: false },
+              { suffix: "", runnable: false },
+            ]
       : [{ suffix: "", runnable: true }];
-  const pathLike = candidate.includes("/") || candidate.includes("\\");
   const candidates = pathLike
-    ? [{ entry: null, path: resolve(candidate), runnable: true }]
+    ? extensions.map((extension) => ({
+        entry: null,
+        path: resolve(`${candidate}${extension.suffix}`),
+        runnable: extension.runnable,
+      }))
     : entries.flatMap((entry) =>
         extensions.map((extension) => ({
           entry,

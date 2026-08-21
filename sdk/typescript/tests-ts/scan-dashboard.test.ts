@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
 import { ScanDashboard } from "../src/scan-dashboard.js";
@@ -39,6 +40,206 @@ class DashboardTestInput extends EventEmitter {
 }
 
 describe("live scan dashboard", () => {
+  test("renders publication progress without scan-only inventory and cost fields", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 100, rows: 18 },
+      {
+        repository: "/synthetic/payments-api",
+        presentation: "publication",
+        input,
+        color: false,
+        clock: fakeClock(),
+      },
+    );
+
+    dashboard.setStage("Connecting to Linear");
+    dashboard.start();
+    input.emit("data", "d");
+    let text = stripVTControlCharacters(stderr.text());
+    expect(text).toContain("CODEX SECURITY  ·  PUBLISH  ·  payments-api");
+    expect(text).toContain("Waiting for publication activity");
+    expect(text).toContain("FINDINGS  waiting for findings");
+    expect(text).not.toContain("FILES");
+    expect(text).not.toContain("TOKENS");
+    expect(text).not.toContain("COST");
+    expect(text).not.toContain("DETAILS");
+    expect(text).not.toContain("d details");
+
+    dashboard.setPublicationProgress(2, 5);
+    dashboard.setStage("Publishing findings · 2/5");
+    dashboard.record({
+      id: "publication-reasoning",
+      kind: "reasoning",
+      status: "completed",
+      description: "Preparing the next Linear issue.",
+      paths: [],
+    });
+    text = stripVTControlCharacters(stderr.text());
+    expect(text).toContain("FINDINGS  2 / 5 processed");
+    expect(text).toContain("Publishing findings · 2/5");
+    expect(text).toContain("Preparing the next Linear issue.");
+    dashboard.stop();
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+  });
+
+  test("restores terminal state when dashboard initialization fails", () => {
+    const input = new DashboardTestInput();
+    const output: string[] = [];
+    let timerCleared = false;
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          output.push(chunk);
+          if (chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard rendering failed.");
+          }
+          return true;
+        },
+      },
+      {
+        repository: "/synthetic/repository",
+        input,
+        clock: {
+          ...fakeClock(),
+          clearInterval: () => {
+            timerCleared = true;
+          },
+        },
+      },
+    );
+
+    expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
+    expect(timerCleared).toBe(true);
+    expect(input.isRaw).toBe(false);
+    expect(input.listenerCount("data")).toBe(0);
+    expect(output.join("")).toContain("\u001B[?25h\u001B[?1049l");
+    dashboard.stop();
+  });
+
+  test("restores the screen when raw mode setup and cleanup both fail", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    input.setRawMode = (enabled) => {
+      throw new Error(
+        enabled
+          ? "Raw mode initialization failed."
+          : "Raw mode cleanup failed.",
+      );
+    };
+    const dashboard = new ScanDashboard(stderr.stream, {
+      repository: "/synthetic/repository",
+      input,
+      clock: fakeClock(),
+    });
+
+    expect(() => dashboard.start()).toThrow("Raw mode initialization failed.");
+    expect(stderr.text()).toContain("\u001B[?25h\u001B[?1049l");
+    expect(input.listenerCount("data")).toBe(0);
+  });
+
+  test("disables alternate scrolling when dashboard rollback fails", () => {
+    const input = new DashboardTestInput();
+    const output: string[] = [];
+    input.setRawMode = (enabled) => {
+      if (!enabled) throw new Error("Raw mode cleanup failed.");
+      input.isRaw = enabled;
+      return input;
+    };
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          output.push(chunk);
+          if (chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard rendering failed.");
+          }
+          return true;
+        },
+      },
+      { repository: "/synthetic/repository", input, clock: fakeClock() },
+    );
+
+    expect(() => dashboard.start()).toThrow("Dashboard rendering failed.");
+    expect(output.join("")).toContain("\u001B[?1007h");
+    expect(output.join("")).toContain("\u001B[?1007l\u001B[?25h\u001B[?1049l");
+  });
+
+  test("keeps later dashboard redraw failures from stopping the scan", () => {
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    const dashboard = new ScanDashboard(
+      {
+        write(chunk: string): boolean {
+          if (failRedraw && chunk.includes("\u001B[H")) {
+            throw new Error("Dashboard redraw failed.");
+          }
+          return true;
+        },
+      },
+      {
+        repository: "/synthetic/repository",
+        clock: {
+          ...fakeClock(),
+          setInterval: (callback) => {
+            redraw = callback;
+            return {} as NodeJS.Timeout;
+          },
+        },
+      },
+    );
+
+    dashboard.start();
+    failRedraw = true;
+
+    expect(() => redraw?.()).not.toThrow();
+    expect(() => dashboard.setStage("reviewing files")).not.toThrow();
+
+    failRedraw = false;
+    dashboard.stop();
+  });
+
+  test("handles asynchronous dashboard stream failures while a scan is active", async () => {
+    let redraw: (() => void) | undefined;
+    let failRedraw = false;
+    const stream = new Writable({
+      autoDestroy: false,
+      write(_chunk, _encoding, callback) {
+        if (failRedraw) {
+          queueMicrotask(() => callback(new Error("Dashboard output failed.")));
+        } else {
+          callback();
+        }
+      },
+    });
+    const dashboard = new ScanDashboard(stream, {
+      repository: "/synthetic/repository",
+      clock: {
+        ...fakeClock(),
+        setInterval: (callback) => {
+          redraw = callback;
+          return {} as NodeJS.Timeout;
+        },
+      },
+    });
+
+    dashboard.start();
+    expect(stream.listenerCount("error")).toBe(1);
+    const failure = new Promise<Error>((resolve) =>
+      stream.once("error", resolve),
+    );
+    failRedraw = true;
+    redraw?.();
+    dashboard.stop();
+    expect(stream.listenerCount("error")).toBe(2);
+
+    await expect(failure).resolves.toMatchObject({
+      message: "Dashboard output failed.",
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(stream.listenerCount("error")).toBe(0);
+  });
+
   test("redraws real scan activity and metrics in place", () => {
     const stderr = capture(true);
     const timers: NodeJS.Timeout[] = [];
@@ -86,6 +287,8 @@ describe("live scan dashboard", () => {
     expect(text).not.toContain("ACTIVITY");
     expect(text).not.toContain("events · live");
     expect(text).not.toContain("WORKERS");
+    expect(text).toContain("STAGE");
+    expect(text).toContain("FILES");
     expect(text).toContain(
       '[09:41:19] ◐ nl -ba "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
     );
@@ -103,6 +306,56 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).toContain("\u001B[?25l");
     expect(stderr.text()).toContain("\u001B[?25h");
     expect(timers).toEqual([]);
+  });
+
+  test("hides stage and file counts during Deep scans without wasting screen rows", () => {
+    const stderr = capture(true);
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 80, rows: 12 },
+      {
+        repository: "/code/juice-shop",
+        mode: "deep",
+        clock: fakeClock(),
+      },
+    );
+
+    dashboard.start();
+    dashboard.setStage("inspecting repository files");
+    dashboard.setFiles({
+      phase: "preflight",
+      filesCompleted: 0,
+      filesTotal: 1_258,
+    });
+    for (let index = 1; index <= 6; index += 1) {
+      dashboard.record({
+        id: `worker-1:read-${index}`,
+        kind: "command",
+        status: "completed",
+        description: `Reviewed source file ${index}`,
+        paths: [],
+        worker: 1,
+      });
+    }
+    dashboard.setCost(
+      fakeResult([], "complete", {
+        input_tokens: 1_250,
+        cached_input_tokens: 200,
+        output_tokens: 30,
+      }).cost!,
+    );
+
+    const frame = lastFrame(stderr);
+    dashboard.stop();
+
+    expect(frame).not.toContain("STAGE");
+    expect(frame).not.toContain("FILES");
+    expect(frame).not.toContain("inspecting repository files");
+    expect(frame).not.toContain("0 / 1,258 reviewed");
+    expect(frame).toContain("worker 1 · Reviewed source file 1");
+    expect(frame).toContain("worker 1 · Reviewed source file 6");
+    expect(frame).toContain("TOKENS");
+    expect(frame).toContain("COST");
+    expect(frame).toContain("TIME");
   });
 
   test("updates the same activity when a command completes", () => {
@@ -362,6 +615,227 @@ describe("live scan dashboard", () => {
     expect(lastFrame(stderr)).toContain("6 lines above live");
     input.emit("data", "\u001B[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
+    dashboard.stop();
+  });
+
+  test("shows unredacted, chronological session events and keeps the activity view safe", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 140, rows: 24 },
+      {
+        repository: "/code/juice-shop",
+        input,
+        color: true,
+        clock: fakeClock(),
+        sanitize: (value) => value.replaceAll("synthetic-secret", "[redacted]"),
+      },
+    );
+
+    dashboard.start();
+    dashboard.record({
+      id: "activity-1",
+      kind: "command",
+      status: "completed",
+      description: "rg -n synthetic-secret routes/login.ts",
+      paths: [],
+    });
+    for (const [seconds, type, payload] of [
+      [
+        2,
+        "turn_context",
+        { model: "gpt-5.6-sol", developer_instructions: "Check boundaries." },
+      ],
+      [0, "session_meta", { base_instructions: { text: "Inspect safely." } }],
+      [1, "message", { role: "user", content: [{ text: "Find bugs." }] }],
+      [
+        3,
+        "function_call",
+        {
+          name: "exec_command",
+          arguments:
+            "synthetic-secret `literal` **glob** \u001B[31mspoofed\u001B[0m\u0007",
+        },
+      ],
+      [
+        4,
+        "function_call_output",
+        {
+          output: [
+            {
+              text: "result\nfunction inspect() {\n  if (input) {\n    return input;\n  }\n\n  return null;\n}",
+            },
+          ],
+        },
+      ],
+      [5, "agent_reasoning", { text: "Inspect **critical** `db.raw(input)`." }],
+      [
+        5,
+        "reasoning",
+        {
+          summary: [
+            { text: "Inspect **critical** `db.raw(input)`." },
+            { text: "New final detail." },
+          ],
+          encrypted_content: "never-display-encrypted-reasoning",
+        },
+      ],
+      [6, "agent_message", { message: "Confirmed." }],
+      [6, "message", { role: "assistant", content: [{ text: "Confirmed." }] }],
+      [7, "token_count", {}],
+      [8, "reasoning", { summary: [] }],
+      [9, "agent_reasoning", { text: "   " }],
+    ] as [number, string, Record<string, unknown>][]) {
+      dashboard.recordDetails({
+        threadId: "scan-thread",
+        parentThreadId: null,
+        event: {
+          type: ["session_meta", "turn_context"].includes(type)
+            ? type
+            : type.startsWith("agent_") || type === "token_count"
+              ? "event_msg"
+              : "response_item",
+          payload: { type, ...payload },
+          timestamp: new Date(STARTED_AT + seconds * 1_000).toISOString(),
+        },
+      });
+    }
+
+    let frame = lastFrame(stderr);
+    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).toContain("d details");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    for (const line of [
+      "main · system: Inspect safely.",
+      "main · user: Find bugs.",
+      "main · context: gpt-5.6-sol · Check boundaries.",
+      "main · tool exec_command: synthetic-secret `literal` **glob** spoofed",
+      "main · result: result",
+      "main · reasoning: Inspect critical db.raw(input).",
+      "main · reasoning: New final detail.",
+      "main · assistant: Confirmed.",
+    ]) {
+      expect(frame).toContain(line);
+    }
+    expect(frame.indexOf("main · system:")).toBeLessThan(
+      frame.indexOf("main · context:"),
+    );
+    const continuation = " ".repeat("  [09:41:04] main · ".length);
+    expect(frame).toContain(`${continuation}  if (input) {`);
+    expect(frame).toContain(`\n${continuation}\n${continuation}  return null;`);
+    expect(frame).not.toContain("main · token count");
+    expect(frame.match(/main · reasoning:/gu)).toHaveLength(2);
+    expect(frame.match(/Inspect critical db\.raw\(input\)\./gu)).toHaveLength(
+      1,
+    );
+    expect(frame.match(/Confirmed\./gu)).toHaveLength(1);
+    for (const sequence of [
+      "\u001B[2m[09:41:05]\u001B[22m",
+      "\u001B[36mmain\u001B[39m",
+      "\u001B[35mreasoning:\u001B[39m",
+      "\u001B[36mtool exec_command:\u001B[39m",
+      "\u001B[32mresult:\u001B[39m",
+      "\u001B[36massistant:\u001B[39m",
+      "\u001B[1mcritical\u001B[22m",
+      "\u001B[2mdb.raw(input)\u001B[22m",
+    ]) {
+      expect(stderr.text()).toContain(sequence);
+    }
+    expect(frame).toContain("TOKENS");
+    expect(stderr.text()).not.toContain("never-display-encrypted-reasoning");
+    expect(stderr.text()).not.toContain("\u001B[31m");
+    expect(stderr.text()).not.toContain("\u0007");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("rg -n [redacted] routes/login.ts");
+    expect(frame).not.toContain("synthetic-secret");
+    dashboard.stop();
+  });
+
+  test("filters workers and scrolls the details separately from scan activity", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = new ScanDashboard(
+      { ...stderr.stream, columns: 120, rows: 14 },
+      { repository: "/code/juice-shop", input, clock: fakeClock() },
+    );
+    let payloadReads = 0;
+    const event = (threadId: string, text: string, worker?: number) => {
+      dashboard.recordDetails({
+        threadId,
+        parentThreadId: null,
+        worker,
+        event: {
+          type: "event_msg",
+          get payload() {
+            payloadReads += 1;
+            return { type: "agent_message", message: text };
+          },
+        },
+      });
+    };
+
+    dashboard.start();
+    event("worker-one", "Worker one inspected routes.", 1);
+    event("scan-thread", "Main scan started.");
+    event("worker-two", "Independent worker inspected models.", 2);
+    for (let index = 1; index <= 10; index += 1) {
+      event("scan-thread", `trace ${index}`);
+    }
+
+    input.emit("data", "d");
+    for (const [source, included, excluded] of [
+      ["m", "trace 10", "Worker one"],
+      ["1", "Worker one", "Independent worker"],
+      ["2", "Independent worker", "Worker one"],
+    ] as const) {
+      input.emit("data", source);
+      const frame = lastFrame(stderr);
+      expect(frame).toContain(
+        `DETAILS · ${source === "m" ? "main" : `worker ${source}`}`,
+      );
+      expect(frame).toContain(included);
+      expect(frame).not.toContain(excluded);
+    }
+
+    input.emit("data", "a");
+    input.emit("data", "\u001B[H");
+    let frame = lastFrame(stderr);
+    expect(frame).toContain("worker 1 · assistant: Worker one");
+    expect(frame).toContain("main · assistant: Main scan started.");
+    expect(frame).not.toContain("trace 10");
+    expect(frame).toContain("above live");
+
+    const readsBeforeScroll = payloadReads;
+    input.emit("data", "\u001B[B");
+    input.emit("data", "\u001B[A");
+    expect(payloadReads).toBe(readsBeforeScroll);
+
+    event("scan-thread", "live result\nsecond line");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Worker one inspected routes.");
+    expect(frame).not.toContain("live result");
+    expect(payloadReads).toBe(readsBeforeScroll + 3);
+
+    dashboard.record({
+      id: "background-activity",
+      kind: "command",
+      status: "completed",
+      description: "Background activity must not move the details.",
+      paths: [],
+    });
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Worker one inspected routes.");
+    expect(frame).not.toContain("trace 10");
+
+    input.emit("data", "d");
+    frame = lastFrame(stderr);
+    expect(frame).toContain("Background activity must not move the details.");
+    expect(frame).not.toContain("above live");
+    expect(stderr.text()).not.toMatch(/\u001B\[[\d;]*m/u);
     dashboard.stop();
   });
 

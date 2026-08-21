@@ -635,6 +635,54 @@ MIGRATIONS = (
         SET stop_after_consecutive_errors = stop_after_no_new;
         """,
     ),
+    (
+        28,
+        "persist deep scan discovery time limit",
+        """
+        ALTER TABLE deep_scan_runs
+        ADD COLUMN max_time_hours REAL NOT NULL DEFAULT 96;
+        """,
+    ),
+    (
+        29,
+        "persist finding publication associations",
+        """
+        CREATE TABLE finding_publications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            finding_id TEXT NOT NULL REFERENCES findings(id),
+            occurrence_id TEXT NOT NULL
+                REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+            destination_type TEXT NOT NULL,
+            team_id TEXT,
+            project_id TEXT,
+            external_id TEXT NOT NULL,
+            external_url TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (occurrence_id, destination_type, team_id, project_id, external_id),
+            UNIQUE (destination_type, team_id, project_id, external_id)
+        );
+
+        CREATE INDEX finding_publications_by_scan
+        ON finding_publications(scan_id, occurrence_id, id);
+
+        CREATE INDEX finding_publications_by_finding
+        ON finding_publications(finding_id, id);
+        """,
+    ),
+    (
+        30,
+        "preserve team-only finding publication associations",
+        """
+        CREATE UNIQUE INDEX finding_publications_team_only_occurrence
+        ON finding_publications(occurrence_id, destination_type, team_id, external_id)
+        WHERE project_id IS NULL;
+
+        CREATE UNIQUE INDEX finding_publications_team_only_external_issue
+        ON finding_publications(destination_type, team_id, external_id)
+        WHERE project_id IS NULL;
+        """,
+    ),
 )
 
 
@@ -689,6 +737,13 @@ def apply_migrations(
                         "completion_warnings_json",
                         "TEXT NOT NULL DEFAULT '[]'",
                     )
+                elif version == 28:
+                    add_column_if_missing(
+                        connection,
+                        "deep_scan_runs",
+                        "max_time_hours",
+                        "REAL NOT NULL DEFAULT 96",
+                    )
                 continue
             if version == 6:
                 repair_thread_scoped_workspaces_migration(connection)
@@ -729,7 +784,6 @@ def normalize_pre_release_execution_profile_migrations(
         12: "scan continuation threads",
     }
     model_migration_name = "persist scan model settings"
-    warnings_migration_name = "persist scan completion warnings"
     if execution_migrations.get(25) == "dynamic scan execution profiles":
         connection.execute(
             "UPDATE schema_migrations SET name = ? WHERE version = 25 AND name = ?",
@@ -737,9 +791,6 @@ def normalize_pre_release_execution_profile_migrations(
         )
         execution_migrations[25] = model_migration_name
     has_legacy_profile_history = execution_migrations.get(11) == legacy_names[11]
-    has_public_warnings_history = (
-        execution_migrations.get(25) == warnings_migration_name
-    )
 
     scan_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(scans)")
@@ -750,11 +801,7 @@ def normalize_pre_release_execution_profile_migrations(
     has_legacy_profile_columns = (
         "execution_model" in scan_columns or "execution_model" in workspace_columns
     )
-    if not (
-        has_legacy_profile_history
-        or has_public_warnings_history
-        or has_legacy_profile_columns
-    ):
+    if not (has_legacy_profile_history or has_legacy_profile_columns):
         return
 
     if (
@@ -795,17 +842,6 @@ def normalize_pre_release_execution_profile_migrations(
         raise SystemExit(
             "The Codex Security database has an unsupported execution-profile migration history."
         )
-
-    if has_public_warnings_history:
-        if execution_migrations.get(26) is not None:
-            raise SystemExit(
-                "The Codex Security database has an unsupported pre-release migration history."
-            )
-        connection.execute(
-            "UPDATE schema_migrations SET version = 26 WHERE version = 25 AND name = ?",
-            (warnings_migration_name,),
-        )
-        execution_migrations.pop(25)
 
     if execution_migrations.get(25) not in (None, model_migration_name):
         raise SystemExit(

@@ -1,8 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { brotliDecompressSync } from "node:zlib";
 import { expect, test } from "bun:test";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { loadBundledRuntime } from "./plugin-root.js";
 
 type WorkerEvent =
   | { type: "thread.started"; thread_id: string }
@@ -26,18 +23,17 @@ type WorkerExecutorConstructor = new (settings: {
 async function bundledWorkerExecutor(
   events: (signal: AbortSignal) => AsyncGenerator<WorkerEvent>,
 ): Promise<WorkerExecutorConstructor> {
-  const chunks = await Promise.all(
-    ["000", "001"].map((part) =>
-      readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-    ),
-  );
-  const runtime = brotliDecompressSync(Buffer.concat(chunks)).toString("utf8");
+  const runtime = await loadBundledRuntime();
   const source = /var CodexSdkWorkerExecutor = class \{[\s\S]*?\n\};/u.exec(
     runtime,
   )?.[0];
   if (source === undefined) {
     throw new Error("Bundled Deep Scan worker executor was not found.");
   }
+  const fileSystemImport = /\b(import_node_fs\d*)\.promises\.readFile\(/u.exec(
+    source,
+  )?.[1];
+  expect(fileSystemImport).toBeDefined();
 
   class FakeCodex {
     startThread() {
@@ -52,7 +48,7 @@ async function bundledWorkerExecutor(
 
   return new Function(
     "Codex",
-    "import_node_fs11",
+    fileSystemImport!,
     "assertVerifiedParentSandbox",
     "resolveCodexPath",
     "workerSubagentConfig",
