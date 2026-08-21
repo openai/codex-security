@@ -1,14 +1,18 @@
 {
   "mcpServers": {
     "codex-security": {
-      "command": "node",
-      "args": ["./mcp/server.mjs", "--stdio"],
+      "command": "./scripts/launch_codex_security_mcp",
+      "args": ["--stdio"],
       "cwd": ".",
       "env_vars": [
         "CODEX_HOME",
         "CODEX_SQLITE_HOME",
         "CODEX_API_KEY",
+        "CODEX_BROWSER_USE_NODE_PATH",
         "CODEX_CLI_PATH",
+        "CODEX_ELECTRON_RESOURCES_PATH",
+        "CODEX_MANAGED_PACKAGE_ROOT",
+        "CODEX_MCP_NODE_PATH",
         "OPENROUTER_API_KEY",
         "FIREWORKS_API_KEY",
         "AWS_BEARER_TOKEN_BEDROCK",
@@ -39,7 +43,8 @@
         "NO_PROXY",
         "SSL_CERT_FILE",
         "REQUESTS_CA_BUNDLE",
-        "NODE_EXTRA_CA_CERTS"
+        "NODE_EXTRA_CA_CERTS",
+        "XDG_CACHE_HOME"
       ],
       "tool_timeout_sec": 349200
     }

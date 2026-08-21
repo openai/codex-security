@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-test("registers security access as a required hosted app, not a local MCP server", async () => {
+test("registers security access as an optional hosted app, not a local MCP server", async () => {
   const [appConfiguration, mcpConfiguration] = await Promise.all([
     readFile(join(PLUGIN_ROOT, ".app.json"), "utf8"),
     readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
@@ -18,7 +18,7 @@ test("registers security access as a required hosted app, not a local MCP server
   expect(apps["codex-security-access"]).toEqual({
     id: "connector_openai_codex_security_access",
     category: "Security",
-    required: true,
+    required: false,
   });
   expect(mcpServers).not.toHaveProperty("codex-security-access");
 });
