@@ -8,8 +8,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import {
+  Codex,
+  type CodexOptions,
+  type ThreadOptions,
+  type TurnOptions,
+} from "@openai/codex-sdk";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   comparisonEnvironment,
   matchCompletedScan,
@@ -60,6 +65,38 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("disables configured MCP servers for read-only helper turns", async () => {
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    let config: CodexOptions["config"];
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation(function (this: Codex, options) {
+      config = (this as unknown as { options: CodexOptions }).options.config;
+      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+    });
+    try {
+      await matchScanFindings(
+        { before: [], after: [] },
+        {
+          environment: { OPENAI_API_KEY: "synthetic-key" },
+          config: {
+            codexOverrides: {
+              mcp_servers: {
+                synthetic: { command: "synthetic-integration", enabled: true },
+              },
+            },
+          },
+        },
+      );
+      expect(config?.["mcp_servers"]).toEqual({
+        synthetic: { command: "synthetic-integration", enabled: false },
+      });
+    } finally {
+      startThread.mockRestore();
+    }
+  });
+
   test("preserves environment API-key precedence over managed credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
     temporaryDirectories.push(root);

@@ -15,6 +15,7 @@ import {
   mergedCodexConfig,
   scanModelConfiguration,
   type CodexSecurityConfig,
+  type JsonObject,
 } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -158,6 +159,14 @@ export async function runReadOnlyCodex(
       ),
       config: {
         ...config,
+        mcp_servers: Object.fromEntries(
+          Object.entries(config?.["mcp_servers"] ?? {}).map(
+            ([name, server]) => [
+              name,
+              { ...(server as JsonObject), enabled: false },
+            ],
+          ),
+        ),
         allow_login_shell: false,
         responses_api_metadata: {
           codex_security_surface: runtimeOptions.surface,

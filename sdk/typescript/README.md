@@ -297,6 +297,69 @@ Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
 shares them with every repository. Directories are searched recursively for
 Markdown, text, PDF, and Word (`.docx`) files.
 
+### Scan project components
+
+`scan --path` runs one scan across the selected paths. Use `scan-components`
+to run a separate standard scan for each component of one local project:
+
+```bash
+npx @openai/codex-security scan-components /path/to/project \
+  --component apps/api --component apps/web --component packages/shared \
+  --workers 4 --output-dir /path/outside/project/results
+```
+
+Use `--auto` instead of `--component` to let Codex propose the split. To review
+or edit it first, save a plan, then run that plan into a new output directory:
+
+```bash
+npx @openai/codex-security scan-components /path/to/project \
+  --auto --plan-only --output-dir /path/outside/project/plan
+npx @openai/codex-security scan-components /path/to/project \
+  --components-file /path/outside/project/plan/components.json \
+  --output-dir /path/outside/project/results
+```
+
+A component can contain several repository-relative paths:
+
+```json
+{
+  "components": [
+    { "name": "API", "paths": ["apps/api", "packages/auth"] },
+    { "name": "Web", "paths": ["apps/web"] }
+  ]
+}
+```
+
+Automatic planning uses a local file inventory. In Git repositories it follows
+Git's ignore rules. Inventoried files omitted by the model are added to an
+`Other files` component. No source files are changed during planning.
+
+In an interactive terminal, one dashboard shows all components and their scan
+progress. Use the arrow keys to select a component, Enter to view its activity,
+and Esc to return. Other scans continue while you inspect one. Finding counts
+are preliminary until cross-component matching finishes. Use `--headless` for
+plain status lines; CI and redirected output use those automatically.
+Failed or incomplete components are also saved in `retry-components.json`.
+Pass that file to `--components-file` with a new output directory to retry them.
+
+Each component keeps its normal scan artifacts under `component-N/`.
+The combined `findings.json` uses the same root-cause matcher as `scans match`.
+It merges high-confidence matches even when their titles, locations, or
+fingerprints differ. Each group keeps its highest-severity finding and all
+original scan and occurrence IDs. Match reasons and uncertain pairs are saved;
+uncertain findings stay separate. `summary.json` records scan coverage and
+whether matching finished. `report.md` links to the component reports.
+These combined files are a project summary, not a new sealed scan. Use the
+individual scan folders with `export` and `publish`.
+
+The output directory must be empty and outside the project. Failed components
+do not stop the others. The command saves the available results and exits with
+code `2` if a component fails, coverage is incomplete, or cross-component
+matching fails. `--max-cost` applies to each component scan, not planning,
+cross-component matching, or the whole project. `--model` and `--effort` also
+apply to matching. `--knowledge-base`,
+`--scan-prompt-file`, and `--post-scan-prompt-file` work as they do for bulk scans.
+
 ### Configure deep scans
 
 For `scan --mode deep`, `--workers` limits concurrent discovery workers,
@@ -592,69 +655,6 @@ and scans stopped at their configured cost limit do not start another turn.
 `4`. `--max-attempts` sets how many times each pending repository can run per
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
-
-### Scan project components
-
-`scan --path` runs one scan across the selected paths. Use `scan-components`
-to run a separate standard scan for each component of one local project:
-
-```bash
-npx @openai/codex-security scan-components /path/to/project \
-  --component apps/api --component apps/web --component packages/shared \
-  --workers 4 --output-dir /path/outside/project/results
-```
-
-Use `--auto` instead of `--component` to let Codex propose the split. To review
-or edit it first, save a plan, then run that plan into a new output directory:
-
-```bash
-npx @openai/codex-security scan-components /path/to/project \
-  --auto --plan-only --output-dir /path/outside/project/plan
-npx @openai/codex-security scan-components /path/to/project \
-  --components-file /path/outside/project/plan/components.json \
-  --output-dir /path/outside/project/results
-```
-
-A component can contain several repository-relative paths:
-
-```json
-{
-  "components": [
-    { "name": "API", "paths": ["apps/api", "packages/auth"] },
-    { "name": "Web", "paths": ["apps/web"] }
-  ]
-}
-```
-
-Automatic planning uses a local file inventory. In Git repositories it follows
-Git's ignore rules. Inventoried files omitted by the model are added to an
-`Other files` component. No source files are changed during planning.
-
-In an interactive terminal, one dashboard shows all components and their scan
-progress. Use the arrow keys to select a component, Enter to view its activity,
-and Esc to return. Other scans continue while you inspect one. Finding counts
-are preliminary until cross-component matching finishes. Use `--headless` for
-plain status lines; CI and redirected output use those automatically.
-Failed or incomplete components are also saved in `retry-components.json`.
-Pass that file to `--components-file` with a new output directory to retry them.
-
-Each component keeps its normal scan artifacts under `component-N/`.
-The combined `findings.json` uses the same root-cause matcher as `scans match`.
-It merges high-confidence matches even when their titles, locations, or
-fingerprints differ. Each group keeps its highest-severity finding and all
-original scan and occurrence IDs. Match reasons and uncertain pairs are saved;
-uncertain findings stay separate. `summary.json` records scan coverage and
-whether matching finished. `report.md` links to the component reports.
-These combined files are a project summary, not a new sealed scan. Use the
-individual scan folders with `export` and `publish`.
-
-The output directory must be empty and outside the project. Failed components
-do not stop the others. The command saves the available results and exits with
-code `2` if a component fails, coverage is incomplete, or cross-component
-matching fails. `--max-cost` applies to each component scan, not planning,
-cross-component matching, or the whole project. `--model` and `--effort` also
-apply to matching. `--knowledge-base`,
-`--scan-prompt-file`, and `--post-scan-prompt-file` work as they do for bulk scans.
 
 ### Publish completed scans to Linear
 
