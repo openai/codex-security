@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
@@ -77,6 +77,42 @@ async function resolveWindowsExecutable(
 }
 
 describe("trusted executable resolution", () => {
+  test("accepts safe relative PATH entries without trusting repository links", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const unsafe = join(repository, "bin");
+    const linked = join(root, "linked");
+    const trusted = join(root, "trusted");
+    const executable = process.platform === "win32" ? "git.exe" : "git";
+    await Promise.all([mkdir(unsafe, { recursive: true }), mkdir(trusted)]);
+    await Promise.all([
+      writeFile(join(unsafe, executable), "untrusted executable"),
+      writeFile(join(trusted, executable), "trusted executable"),
+    ]);
+    await chmod(join(trusted, executable), 0o700);
+    await symlink(
+      unsafe,
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    expect(
+      await resolveTrustedExecutable(
+        "git",
+        {
+          PATH: ["", unsafe, linked, trusted]
+            .map((entry) => (entry ? relative(process.cwd(), entry) : entry))
+            .join(delimiter),
+          KEEP: "ok",
+        },
+        repository,
+      ),
+    ).toEqual({
+      executable: join(trusted, executable),
+      environment: { KEEP: "ok", PATH: trusted },
+    });
+  });
+
   test.skipIf(process.platform === "win32")(
     "preserves the invocation name of a trusted symlinked executable",
     async () => {
@@ -189,6 +225,35 @@ describe("trusted executable resolution", () => {
     ).toBeNull();
   });
 
+  test("resolves extensionless explicit Windows executable paths", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const trusted = join(root, "trusted");
+    await Promise.all([mkdir(repository), mkdir(trusted)]);
+    await Promise.all([
+      writeFile(join(trusted, "python.exe"), "python executable"),
+      writeFile(join(trusted, "python.cmd"), "batch"),
+    ]);
+
+    expect(
+      await resolveWindowsExecutable(
+        join(trusted, "python"),
+        trusted,
+        repository,
+      ),
+    ).toEqual({
+      executable: await realpath(join(trusted, "python.exe")),
+      environment: { KEEP: "ok", PATH: trusted },
+    });
+    expect(
+      await resolveWindowsExecutable(
+        join(trusted, "python.cmd"),
+        trusted,
+        repository,
+      ),
+    ).toBeNull();
+  });
+
   test("removes PATH entries containing repository-linked Windows shims", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -256,6 +321,32 @@ describe("trusted executable resolution", () => {
           KEEP: "ok",
           PATH: trusted,
         },
+      });
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "resolves executables from quoted Windows PATH entries",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const unsafe = join(repository, "tools");
+      const trusted = join(root, "trusted tools");
+      await Promise.all([mkdir(unsafe, { recursive: true }), mkdir(trusted)]);
+      await Promise.all([
+        writeFile(join(unsafe, "git.exe"), "untrusted executable"),
+        writeFile(join(trusted, "git.exe"), "executable"),
+      ]);
+
+      await expect(
+        resolveTrustedExecutable(
+          "git",
+          { Path: [`"${unsafe}"`, `"${trusted}"`].join(delimiter), KEEP: "ok" },
+          repository,
+        ),
+      ).resolves.toEqual({
+        executable: join(trusted, "git.exe"),
+        environment: { KEEP: "ok", PATH: trusted },
       });
     },
   );

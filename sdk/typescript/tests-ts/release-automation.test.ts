@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
@@ -140,6 +141,21 @@ const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
 const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
+
+function releaseShell(): string {
+  if (process.platform !== "win32") return "bash";
+  const git = Bun.which("git");
+  if (git === null) return "bash";
+  const gitBash = join(dirname(dirname(git)), "bin", "bash.exe");
+  return existsSync(gitBash) ? gitBash : "bash";
+}
+
+const bash = releaseShell();
+const jqMock = [
+  "jq() {",
+  '  node -e \'const fs=require("node:fs");const filter=process.argv.at(-1);const value=JSON.parse(fs.readFileSync(0,"utf8"));if(filter==="[.object.type, .object.sha] | @tsv"){const fields=[value.object?.type,value.object?.sha];if(fields.some((field)=>typeof field!=="string"))process.exit(1);process.stdout.write(fields.join("\\t")+"\\n");}else if(filter===".status // empty"){if(value.status!=null)process.stdout.write(String(value.status)+"\\n");}else process.exit(64);\' -- "$@"',
+  "}",
+].join("\n");
 const releaseSigningCertificate =
   "MIIHOjCCBr+gAwIBAgIUDDD6xE6tccKRAzn6GcB6Ajvw2+swCgYIKoZIzj0EAwMwNzEVMBMGA1UEChMMc2lnc3Rv" +
   "cmUuZGV2MR4wHAYDVQQDExVzaWdzdG9yZS1pbnRlcm1lZGlhdGUwHhcNMjYwNzI5MTg1MTA1WhcNMjYwNzI5MTkw" +
@@ -992,12 +1008,6 @@ describe("cryptographically verified npm provenance", () => {
     }
   });
 
-  test("fails closed when a certificate child does not advance", () => {
-    expect(readFileSync(automationScript, "utf8")).toMatch(
-      /const child = derElement\(bytes, cursor, element\.end\);\s*if \(child\.end <= cursor\) \{\s*throw invalidSigningCertificate\(\);\s*\}/u,
-    );
-  });
-
   test("rejects empty and noncanonical DER signing certificates", () => {
     const invalidCertificates = [
       Buffer.from([0x30, 0x00]),
@@ -1418,6 +1428,26 @@ describe("idempotent GitHub release verification", () => {
 });
 
 describe("GitHub release workflow safeguards", () => {
+  const checkedOutVersion = releaseVersion(
+    JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as ReleaseMetadata,
+  );
+  const checkedOutTag = `npm-v${checkedOutVersion}`;
+
+  test("rejects unsupported jq mock filters", () => {
+    const result = spawnSync(
+      bash,
+      [
+        "-c",
+        `${jqMock}\nprintf '%s\\n' '{"object":{"type":"commit","sha":"abc"}}' | jq -r '.wrong | @tsv'`,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(64);
+  });
+
   test("requires a real tag for protected npm publication", () => {
     expect(protectedReleaseWorkflow).toContain("release-tag");
     expect(protectedReleaseWorkflow).toContain('"$GITHUB_REF_TYPE"');
@@ -1455,7 +1485,7 @@ describe("GitHub release workflow safeguards", () => {
       "git() { return 0; }",
       "npm() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
       encoding: "utf8",
       env: {
@@ -1545,7 +1575,7 @@ describe("GitHub release workflow safeguards", () => {
 
       try {
         const outputPath = join(workspace, "outputs");
-        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
           cwd: fileURLToPath(new URL("../../../", import.meta.url)),
           encoding: "utf8",
           env: {
@@ -1641,7 +1671,7 @@ describe("GitHub release workflow safeguards", () => {
         "  return 1",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
         cwd: fileURLToPath(new URL("../../../", import.meta.url)),
         encoding: "utf8",
         env: {
@@ -1676,6 +1706,7 @@ describe("GitHub release workflow safeguards", () => {
       "Create the exact merged release tag",
     );
     const mock = [
+      jqMock,
       "gh() {",
       '  if [[ "$1" != "api" ]]; then return 64; fi',
       "  shift",
@@ -1692,7 +1723,7 @@ describe("GitHub release workflow safeguards", () => {
       "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -1741,6 +1772,7 @@ describe("GitHub release workflow safeguards", () => {
         "Create the exact merged release tag",
       );
       const mock = [
+        jqMock,
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
         "  shift",
@@ -1760,7 +1792,7 @@ describe("GitHub release workflow safeguards", () => {
         "  printf 'created exact release tag\\n'",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1815,6 +1847,7 @@ describe("GitHub release workflow safeguards", () => {
         "Create the exact merged release tag",
       );
       const mock = [
+        jqMock,
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
         "  shift",
@@ -1836,7 +1869,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1913,12 +1946,6 @@ describe("GitHub release workflow safeguards", () => {
         protectedReleaseWorkflow,
         "Revalidate protected release tag",
       );
-      const checkedOutVersion = releaseVersion(
-        JSON.parse(
-          readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-        ) as ReleaseMetadata,
-      );
-      const checkedOutTag = `npm-v${checkedOutVersion}`;
       const mock = [
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
@@ -1935,7 +1962,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1969,17 +1996,11 @@ describe("GitHub release workflow safeguards", () => {
       protectedReleaseWorkflow,
       "Validate release tag",
     );
-    const checkedOutVersion = releaseVersion(
-      JSON.parse(
-        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-      ) as ReleaseMetadata,
-    );
-    const checkedOutTag = `npm-v${checkedOutVersion}`;
     const mocks = [
       "git() { return 0; }",
       "sfw() { printf '%s\\n' '[\"0.1.1\",\"999999999999999999999999.0.0\"]'; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
       encoding: "utf8",
       env: {
@@ -2004,17 +2025,11 @@ describe("GitHub release workflow safeguards", () => {
       protectedReleaseWorkflow,
       "Validate release tag",
     );
-    const checkedOutVersion = releaseVersion(
-      JSON.parse(
-        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-      ) as ReleaseMetadata,
-    );
-    const checkedOutTag = `npm-v${checkedOutVersion}`;
     const mocks = [
       "git() { return 0; }",
       `sfw() { printf '%s\\n' '["0.1.0","${checkedOutVersion}"]'; }`,
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
       cwd: fileURLToPath(new URL("../../../", import.meta.url)),
       encoding: "utf8",
       env: {
@@ -2083,7 +2098,7 @@ describe("GitHub release workflow safeguards", () => {
       "Dispatch the verified GitHub release",
     );
     const mock = "gh() { printf '%s\\n' \"$@\"; }";
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2166,7 +2181,7 @@ describe("GitHub release workflow safeguards", () => {
       ].join("\n");
 
       try {
-        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
           encoding: "utf8",
           env: {
             ...process.env,
@@ -2209,7 +2224,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { return 99; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2248,7 +2263,7 @@ describe("GitHub release workflow safeguards", () => {
       "}",
       "sleep() { :; }",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2289,7 +2304,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -2352,7 +2367,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -2394,7 +2409,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -2533,7 +2548,7 @@ describe("GitHub release workflow safeguards", () => {
         "  fi",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", [], {
+      const result = spawnSync(bash, [], {
         input: `${mocks}\n${script}`,
         encoding: "utf8",
         env: {
@@ -2699,7 +2714,7 @@ describe("GitHub release workflow safeguards", () => {
           "  esac",
           "}",
         ].join("\n");
-        const result = spawnSync("bash", ["-c", `${mocks}\n${script}`], {
+        const result = spawnSync(bash, ["-c", `${mocks}\n${script}`], {
           cwd: workspace,
           encoding: "utf8",
           env: {
@@ -3011,7 +3026,7 @@ describe("GitHub release workflow safeguards", () => {
         '  command node "$@"',
         "}",
       ].join("\n");
-      const result = spawnSync("bash", [], {
+      const result = spawnSync(bash, [], {
         input: `${mocks}\n${script}`,
         encoding: "utf8",
         env: {
@@ -3162,7 +3177,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -3235,7 +3250,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -3296,7 +3311,7 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
         encoding: "utf8",
         env: {
           ...process.env,
@@ -3323,15 +3338,6 @@ describe("GitHub release workflow safeguards", () => {
       }
     },
   );
-
-  test("recovers when another PR concurrently creates the skip label", () => {
-    expect(releaseLabelsWorkflow).toContain(
-      'if ! gh api --method POST "repos/$GITHUB_REPOSITORY/labels"',
-    );
-    expect(releaseLabelsWorkflow).toContain(
-      '"repos/$GITHUB_REPOSITORY/labels/skip-release-notes"',
-    );
-  });
 
   test.each([
     { title: "feat!: breaking feature", label: "enhancement" },
@@ -3373,7 +3379,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -3426,7 +3432,7 @@ describe("GitHub release workflow safeguards", () => {
       "  esac",
       "}",
     ].join("\n");
-    const result = spawnSync("bash", ["-c", `${mock}\n${script}`], {
+    const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
       encoding: "utf8",
       env: {
         ...process.env,

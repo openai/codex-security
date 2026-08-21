@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -62,7 +62,53 @@ function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
   );
 }
 
+function macOsSandboxUnavailable(): boolean {
+  if (process.platform !== "darwin") return false;
+
+  // Check the host independently of the generated scan permission profile.
+  const result = Bun.spawnSync(
+    [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default)",
+      "/usr/bin/true",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return (
+    result.exitCode !== 0 &&
+    new TextDecoder().decode(result.stderr).trim() ===
+      "sandbox-exec: sandbox_apply: Operation not permitted"
+  );
+}
+
+async function scanSandboxFixture() {
+  const root = await temporaryDirectory();
+  const codexHome = join(root, "codex-home");
+  const workspace = join(root, "workspace");
+  const stateDirectory = join(root, "state");
+  await Promise.all(
+    [codexHome, workspace, stateDirectory].map((path) => mkdir(path)),
+  );
+  await writeCodexConfig(
+    join(codexHome, "config.toml"),
+    scanRuntimeCodexConfig(
+      await mergedCodexConfig({}),
+      stateDirectory,
+      codexHome,
+    ),
+  );
+  return { root, codexHome, workspace };
+}
+
 describe("Codex configuration", () => {
+  test("automatically reviews scan execution approvals by default", async () => {
+    expect(await mergedCodexConfig({})).toMatchObject({
+      approval_policy: "on-request",
+      approvals_reviewer: "auto_review",
+    });
+  });
+
   test("lets Codex honor native and managed credential storage", async () => {
     expect(DEFAULT_CODEX_CONFIG["cli_auth_credentials_store"]).toBe("auto");
     expect((await mergedCodexConfig({}))["cli_auth_credentials_store"]).toBe(
@@ -325,6 +371,65 @@ describe("Codex configuration", () => {
       },
     });
   });
+
+  test("writes scan permissions accepted by the pinned Codex CLI", async () => {
+    const { codexHome, workspace } = await scanSandboxFixture();
+    const result = runPinnedCodex(codexHome, [
+      "--cd",
+      workspace,
+      "features",
+      "list",
+    ]);
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(result.stdout.length).toBeGreaterThan(0);
+  });
+
+  test.skipIf(macOsSandboxUnavailable())(
+    "denies writes outside the scan workspace and state directory",
+    async () => {
+      const { root, codexHome, workspace } = await scanSandboxFixture();
+      const node = Bun.which("node");
+      expect(node).not.toBeNull();
+      const attemptWrite = (path: string) =>
+        runPinnedCodex(codexHome, [
+          "sandbox",
+          "--config",
+          "permissions.codex_security_scan.network.enabled=true",
+          "--permission-profile",
+          "codex_security_scan",
+          "--cd",
+          workspace,
+          node!,
+          "-e",
+          "require('node:fs').writeFileSync(process.argv[1], 'probe')",
+          path,
+        ]);
+
+      const allowed = join(workspace, "inside.txt");
+      const permitted = attemptWrite(allowed);
+      const outside = join(root, "outside.txt");
+      expect(attemptWrite(outside).exitCode).not.toBe(0);
+      await expect(stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
+      if (permitted.exitCode !== 0) {
+        const details = new TextDecoder().decode(permitted.stderr);
+        if (
+          process.platform === "linux" &&
+          /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+            details,
+          )
+        ) {
+          expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
+            0,
+          );
+          return;
+        }
+        throw new Error(
+          `The pinned Codex CLI rejected an allowed scan write: ${details}`,
+        );
+      }
+      expect(await readFile(allowed, "utf8")).toBe("probe");
+    },
+  );
 
   test("writes Windows sandbox settings accepted by the pinned Codex CLI", async () => {
     const root = await temporaryDirectory();

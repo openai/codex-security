@@ -949,6 +949,10 @@ def preview_for(
             data = sample + remaining
     except OSError:
         return "", True
+    return preview_for_bytes(path, data, preview_bytes)
+
+
+def preview_for_bytes(path: Path, data: bytes, preview_bytes: int) -> tuple[str, bool]:
     if is_binary_sample(data):
         return "", True
     text = data.decode("utf-8", errors="ignore")

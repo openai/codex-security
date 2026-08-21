@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -12,17 +13,20 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
+DEFAULT_WORKERS = 4
 DEFAULT_SUBAGENTS = 3
-DEFAULT_STOP_AFTER_NO_NEW = 6
+DEFAULT_STOP_AFTER_NO_NEW = 4
 DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = 3
-DEFAULT_MAX_DISCOVERY_RUNS = 60
-MAX_AUTOMATIC_WORKERS = 6
+DEFAULT_MAX_DISCOVERY_RUNS = 40
+DEFAULT_MAX_TIME_HOURS = 96
+MAX_TIME_HOURS = 96
 CONFIG_KEYS = {
     "workers",
     "subagents",
     "stop_after_no_new",
     "stop_after_consecutive_errors",
     "max_discovery_runs",
+    "max_time_hours",
 }
 
 
@@ -31,10 +35,13 @@ def codex_home() -> Path:
 
 
 def config_path() -> Path:
+    configured = os.environ.get("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
     return codex_home() / "codex-security" / "config.toml"
 
 
-def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int]:
+def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | float]:
     if isinstance(available_parallelism, bool) or available_parallelism < 1:
         raise SystemExit("Available parallelism must be a positive integer.")
     path = config_path()
@@ -59,9 +66,9 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int]:
             )
         configured = deep_scan
 
-    workers: object = configured.get("workers", "auto")
+    workers: object = configured.get("workers", DEFAULT_WORKERS)
     if workers == "auto":
-        resolved_workers = min(max(available_parallelism // 2, 1), MAX_AUTOMATIC_WORKERS)
+        resolved_workers = DEFAULT_WORKERS
     else:
         resolved_workers = require_integer(workers, "deep_scan.workers", minimum=1)
     stop_after_no_new = require_integer(
@@ -87,6 +94,10 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int]:
             "deep_scan.max_discovery_runs",
             minimum=1,
         ),
+        "maxTimeHours": require_positive_number(
+            configured.get("max_time_hours", DEFAULT_MAX_TIME_HOURS),
+            "deep_scan.max_time_hours",
+        ),
     }
 
 
@@ -100,6 +111,18 @@ def require_integer(value: object, label: str, *, minimum: int) -> int:
             else f"an integer of at least {minimum}"
         )
         raise SystemExit(f"{label} must be {qualifier}.")
+    return value
+
+
+def require_positive_number(value: object, label: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite or value <= 0 or value > MAX_TIME_HOURS:
+        raise SystemExit(f"{label} must be a positive finite number no greater than 96.")
     return value
 
 

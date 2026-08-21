@@ -1,10 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { isIP } from "node:net";
 import { PluginBootstrapError } from "./errors.js";
-import type { CodexCommand, ProcessEnvironment } from "./runtime.js";
+import {
+  runCodexCommand,
+  type CodexCommand,
+  type ProcessEnvironment,
+} from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
-type TerminalEscapeState = "text" | "escape" | "csi" | "osc" | "osc-escape";
 
 export interface LoginResult {
   success: boolean;
@@ -21,45 +24,30 @@ export interface AccountStatus {
 export class CodexLoginHandle {
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #completion: Promise<LoginResult>;
-  readonly #urlReady: Promise<void>;
-  readonly #deviceReady: Promise<void>;
-  #resolveUrlReady!: () => void;
-  #rejectUrlReady!: (error: unknown) => void;
-  #resolveDeviceReady!: () => void;
-  #rejectDeviceReady!: (error: unknown) => void;
-  #urlReadySettled = false;
-  #deviceReadySettled = false;
+  readonly #urlReady = Promise.withResolvers<void>();
+  readonly #deviceReady = Promise.withResolvers<void>();
   #canceled = false;
   #forcedTermination: ReturnType<typeof setTimeout> | undefined;
-  #forceCompletion: (() => void) | null = null;
-  #stdout = "";
-  #stderr = "";
-  #stdoutInstructionTail = "";
-  #stderrInstructionTail = "";
-  #stdoutTerminalState: TerminalEscapeState = "text";
-  #stderrTerminalState: TerminalEscapeState = "text";
-  #stdoutAuthUrl: string | null = null;
-  #stderrAuthUrl: string | null = null;
-  #stdoutUserCode: string | null = null;
-  #stderrUserCode: string | null = null;
+  readonly #output = { stdout: "", stderr: "" };
+  readonly #tails = { stdout: "", stderr: "" };
+  readonly #urls: Record<"stdout" | "stderr", string | null> = {
+    stdout: null,
+    stderr: null,
+  };
+  readonly #codes: Record<"stdout" | "stderr", string | null> = {
+    stdout: null,
+    stderr: null,
+  };
 
   public constructor(
     command: CodexCommand,
     args: readonly string[],
     environment: ProcessEnvironment,
-    onSuccess: () => void,
+    onSuccess: () => void | Promise<void>,
   ) {
-    this.#urlReady = new Promise<void>((resolve, reject) => {
-      this.#resolveUrlReady = resolve;
-      this.#rejectUrlReady = reject;
-    });
-    this.#deviceReady = new Promise<void>((resolve, reject) => {
-      this.#resolveDeviceReady = resolve;
-      this.#rejectDeviceReady = reject;
-    });
-    void this.#urlReady.catch(() => undefined);
-    void this.#deviceReady.catch(() => undefined);
-    this.#child = spawn(command.command, [...command.prefixArgs, ...args], {
+    void this.#urlReady.promise.catch(() => undefined);
+    void this.#deviceReady.promise.catch(() => undefined);
+    this.#child = spawn(command.command, [...args], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -74,50 +62,32 @@ export class CodexLoginHandle {
       this.#recordOutput("stderr", chunk);
     });
     this.#completion = new Promise((resolve, reject) => {
-      let fallback: ReturnType<typeof setTimeout> | undefined;
-      let completed = false;
-      const complete = (exitCode: number | null): void => {
-        if (completed) return;
-        completed = true;
-        if (fallback !== undefined) clearTimeout(fallback);
-        this.#clearForcedTermination();
-        this.#forceCompletion = null;
-        this.#destroyPipes();
+      this.#child.once("close", (exitCode) => {
+        clearTimeout(this.#forcedTermination);
         if (!this.#canceled) {
           this.#flushInstructionTails();
         }
         const result = {
           success: exitCode === 0 && !this.#canceled,
           exitCode,
-          stdout: this.#stdout,
-          stderr: this.#stderr,
+          ...this.#output,
         };
         this.#settleInstructionWaiters(result);
-        if (result.success) onSuccess();
-        resolve(result);
-      };
-      this.#forceCompletion = () => complete(this.#child.exitCode);
+        if (result.success) {
+          Promise.resolve(onSuccess()).then(() => resolve(result), reject);
+        } else {
+          resolve(result);
+        }
+      });
       this.#child.once("error", (error) => {
-        if (completed) return;
-        completed = true;
-        if (fallback !== undefined) clearTimeout(fallback);
-        this.#clearForcedTermination();
-        this.#forceCompletion = null;
-        this.#destroyPipes();
+        clearTimeout(this.#forcedTermination);
         this.#settleInstructionWaiters({
           success: false,
           exitCode: null,
-          stdout: this.#stdout,
+          stdout: this.#output.stdout,
           stderr: error.message,
         });
         reject(error);
-      });
-      this.#child.once("close", complete);
-      this.#child.once("exit", (exitCode) => {
-        fallback = setTimeout(() => {
-          this.#destroyPipes();
-          complete(exitCode);
-        }, LOGIN_CHILD_TERMINATION_GRACE_MS);
       });
     });
   }
@@ -127,7 +97,7 @@ export class CodexLoginHandle {
   }
 
   public get authUrl(): string | null {
-    return this.#stdoutAuthUrl ?? this.#stderrAuthUrl;
+    return this.#urls.stdout ?? this.#urls.stderr;
   }
 
   public get verificationUrl(): string | null {
@@ -135,7 +105,7 @@ export class CodexLoginHandle {
   }
 
   public get userCode(): string | null {
-    return this.#stdoutUserCode ?? this.#stderrUserCode;
+    return this.#codes.stdout ?? this.#codes.stderr;
   }
 
   public async wait(): Promise<LoginResult> {
@@ -145,123 +115,57 @@ export class CodexLoginHandle {
   public async waitForInstructions(
     options: { deviceCode?: boolean } = {},
   ): Promise<void> {
-    await (options.deviceCode === true ? this.#deviceReady : this.#urlReady);
+    await (options.deviceCode === true ? this.#deviceReady : this.#urlReady)
+      .promise;
   }
 
   public cancel(): void {
     this.#canceled = true;
-    this.#requestTermination();
-  }
-
-  #requestTermination(): void {
-    if (
-      this.#child.exitCode !== null ||
-      this.#child.signalCode !== null ||
-      this.#forceCompletion === null
-    ) {
-      this.#destroyPipes();
-      this.#forceCompletion?.();
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null)
       return;
-    }
     this.#child.kill("SIGTERM");
     if (this.#forcedTermination !== undefined) return;
     this.#forcedTermination = setTimeout(() => {
-      this.#forcedTermination = undefined;
       if (this.#child.exitCode === null && this.#child.signalCode === null) {
         this.#child.kill("SIGKILL");
       }
-      this.#destroyPipes();
-      this.#forceCompletion?.();
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
     }, LOGIN_CHILD_TERMINATION_GRACE_MS);
   }
 
-  #clearForcedTermination(): void {
-    if (this.#forcedTermination === undefined) return;
-    clearTimeout(this.#forcedTermination);
-    this.#forcedTermination = undefined;
-  }
-
-  #destroyPipes(): void {
-    this.#child.stdin.destroy();
-    this.#child.stdout.destroy();
-    this.#child.stderr.destroy();
-  }
-
   #recordOutput(stream: "stdout" | "stderr", chunk: string): void {
-    if (stream === "stdout") {
-      this.#stdout += chunk;
-    } else {
-      this.#stderr += chunk;
-    }
-
-    const tail =
-      stream === "stdout"
-        ? this.#stdoutInstructionTail
-        : this.#stderrInstructionTail;
-    const visible = visibleTerminalChunk(
-      chunk,
-      stream === "stdout"
-        ? this.#stdoutTerminalState
-        : this.#stderrTerminalState,
-    );
-    const lastDelimiter = visible.text.lastIndexOf("\n");
+    this.#output[stream] += chunk;
+    const output = `${this.#tails[stream]}${chunk.replaceAll("\r", "\n")}`;
+    const lastDelimiter = output.lastIndexOf("\n");
     const completed =
-      lastDelimiter === -1
-        ? ""
-        : `${tail}${visible.text.slice(0, lastDelimiter + 1)}`;
-    const url = preferredAuthUrl(completed);
-    const userCode = userCodeFromOutput(completed);
-    const nextTail =
-      lastDelimiter === -1
-        ? `${tail}${visible.text}`
-        : visible.text.slice(lastDelimiter + 1);
-    if (stream === "stdout") {
-      this.#stdoutAuthUrl ??= url;
-      this.#stdoutUserCode ??= userCode;
-      this.#stdoutInstructionTail = nextTail;
-      this.#stdoutTerminalState = visible.state;
-    } else {
-      this.#stderrAuthUrl ??= url;
-      this.#stderrUserCode ??= userCode;
-      this.#stderrInstructionTail = nextTail;
-      this.#stderrTerminalState = visible.state;
-    }
+      lastDelimiter === -1 ? "" : output.slice(0, lastDelimiter + 1);
+    this.#urls[stream] ??= preferredAuthUrl(completed);
+    this.#codes[stream] ??= userCodeFromOutput(completed);
+    this.#tails[stream] =
+      lastDelimiter === -1 ? output : output.slice(lastDelimiter + 1);
     this.#notifyInstructions();
   }
 
   #flushInstructionTails(): void {
-    this.#stdoutAuthUrl ??= preferredAuthUrl(this.#stdoutInstructionTail);
-    this.#stdoutUserCode ??= userCodeFromOutput(this.#stdoutInstructionTail);
-    this.#stderrAuthUrl ??= preferredAuthUrl(this.#stderrInstructionTail);
-    this.#stderrUserCode ??= userCodeFromOutput(this.#stderrInstructionTail);
+    for (const stream of ["stdout", "stderr"] as const) {
+      this.#urls[stream] ??= preferredAuthUrl(this.#tails[stream]);
+      this.#codes[stream] ??= userCodeFromOutput(this.#tails[stream]);
+    }
   }
 
   #notifyInstructions(): void {
-    if (!this.#urlReadySettled && this.authUrl !== null) {
-      this.#urlReadySettled = true;
-      this.#resolveUrlReady();
-    }
-    if (
-      !this.#deviceReadySettled &&
-      this.verificationUrl !== null &&
-      this.userCode !== null
-    ) {
-      this.#deviceReadySettled = true;
-      this.#resolveDeviceReady();
-    }
+    if (this.authUrl !== null) this.#urlReady.resolve();
+    if (this.verificationUrl !== null && this.userCode !== null)
+      this.#deviceReady.resolve();
   }
 
   #settleInstructionWaiters(result: LoginResult): void {
     this.#notifyInstructions();
     if (result.success) {
-      if (!this.#urlReadySettled) {
-        this.#urlReadySettled = true;
-        this.#resolveUrlReady();
-      }
-      if (!this.#deviceReadySettled) {
-        this.#deviceReadySettled = true;
-        this.#resolveDeviceReady();
-      }
+      this.#urlReady.resolve();
+      this.#deviceReady.resolve();
       return;
     }
     const error = new PluginBootstrapError(
@@ -269,14 +173,8 @@ export class CodexLoginHandle {
         ? "Codex login was canceled."
         : `Codex login exited before authentication instructions were available: ${result.stderr.trim() || result.stdout.trim() || result.exitCode || "unknown error"}`,
     );
-    if (!this.#urlReadySettled) {
-      this.#urlReadySettled = true;
-      this.#rejectUrlReady(error);
-    }
-    if (!this.#deviceReadySettled) {
-      this.#deviceReadySettled = true;
-      this.#rejectDeviceReady(error);
-    }
+    this.#urlReady.reject(error);
+    this.#deviceReady.reject(error);
   }
 }
 
@@ -289,7 +187,7 @@ export async function loginApiKey(
   if (apiKey.trim().length === 0) {
     throw new PluginBootstrapError("The API key must be non-empty.");
   }
-  return await runCodex(
+  return await runCodexCommand(
     command,
     ["login", "--with-api-key"],
     environment,
@@ -303,7 +201,7 @@ export async function accountStatus(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<AccountStatus> {
-  const result = await runCodex(
+  const result = await runCodexCommand(
     command,
     ["login", "status"],
     environment,
@@ -325,7 +223,7 @@ export async function logout(
   environment: ProcessEnvironment,
   signal?: AbortSignal,
 ): Promise<void> {
-  const result = await runCodex(
+  const result = await runCodexCommand(
     command,
     ["logout"],
     environment,
@@ -337,81 +235,6 @@ export async function logout(
       `Codex logout failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
     );
   }
-}
-
-export async function runCodex(
-  command: CodexCommand,
-  args: readonly string[],
-  environment: ProcessEnvironment,
-  input?: string,
-  signal?: AbortSignal,
-): Promise<LoginResult> {
-  const child = spawn(command.command, [...command.prefixArgs, ...args], {
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    signal,
-  });
-  let stdout = "";
-  let stderr = "";
-  let processError: Error | null = null;
-  let forcedTermination: ReturnType<typeof setTimeout> | undefined;
-  const terminate = (): void => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      child.stdin.destroy();
-      child.stdout.destroy();
-      child.stderr.destroy();
-      return;
-    }
-    child.kill("SIGTERM");
-    if (forcedTermination !== undefined) return;
-    forcedTermination = setTimeout(() => {
-      forcedTermination = undefined;
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-      }
-      child.stdin.destroy();
-      child.stdout.destroy();
-      child.stderr.destroy();
-    }, LOGIN_CHILD_TERMINATION_GRACE_MS);
-  };
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  const completion = new Promise<LoginResult>((resolve, reject) => {
-    child.once("error", (error) => {
-      processError ??= error;
-      terminate();
-    });
-    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-      // A short-lived command can close stdin before Node flushes the input.
-      // Its exit status remains authoritative; the stream error must not escape
-      // as an uncaught exception.
-      if (
-        error.code !== "EPIPE" &&
-        error.code !== "ECONNRESET" &&
-        error.code !== "EOF" &&
-        error.code !== "ERR_STREAM_DESTROYED"
-      ) {
-        processError ??= error;
-      }
-    });
-    child.once("close", (exitCode) => {
-      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
-      if (processError !== null) {
-        reject(processError);
-      } else {
-        resolve({ success: exitCode === 0, exitCode, stdout, stderr });
-      }
-    });
-  });
-  child.stdin.end(input);
-  return await completion;
 }
 
 function preferredAuthUrl(value: string): string | null {
@@ -455,45 +278,4 @@ function plainTerminalText(value: string): string {
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
-}
-
-function visibleTerminalChunk(
-  value: string,
-  initialState: TerminalEscapeState,
-): { text: string; state: TerminalEscapeState } {
-  let state = initialState;
-  let text = "";
-  for (const character of value) {
-    if (state === "text") {
-      if (character === "\u001b") {
-        state = "escape";
-      } else {
-        text += character === "\r" ? "\n" : character;
-      }
-      continue;
-    }
-    if (state === "escape") {
-      if (character === "[") {
-        state = "csi";
-      } else if (character === "]") {
-        state = "osc";
-      } else {
-        text += `\u001b${character}`;
-        state = "text";
-      }
-      continue;
-    }
-    if (state === "csi") {
-      if (character >= "@" && character <= "~") state = "text";
-      continue;
-    }
-    if (state === "osc") {
-      if (character === "\u0007") state = "text";
-      else if (character === "\u001b") state = "osc-escape";
-      continue;
-    }
-    if (character === "\\" || character === "\u0007") state = "text";
-    else if (character !== "\u001b") state = "osc";
-  }
-  return { text, state };
 }
