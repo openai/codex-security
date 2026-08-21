@@ -20,11 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         node: ["22.13.0"]
         include:
-          - os: windows-latest
-            node: "24"
           - os: ubuntu-latest
             node: "24.0.0"
           - os: ubuntu-latest
@@ -70,33 +68,17 @@ jobs:
       - name: Typecheck
         run: pnpm --dir sdk/typescript run types
 
-      - name: Prepare private Windows test root
-        if: runner.os == 'Windows'
-        id: windows-temp
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $path = Join-Path $env:USERPROFILE '.codex-security-ci-temp'
-          New-Item -ItemType Directory -Path $path -Force | Out-Null
-          $sid = (whoami /user /fo csv /nh | ConvertFrom-Csv -Header Name, Sid).Sid
-          & icacls $path /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Could not secure the Windows test root' }
-          "path=$path" >> $env:GITHUB_OUTPUT
-
       - name: Test
         timeout-minutes: 10
         env:
-          TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
-          TMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
-          TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}
-          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: ${{ runner.environment == 'github-hosted' && runner.os == 'Windows' && 'true' || 'false' }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
         run: pnpm --dir sdk/typescript run test
 
       - name: Check formatting
         run: pnpm --dir sdk/typescript run format
-
-      - name: Build
-        run: pnpm --dir sdk/typescript run build
 
       - name: Pack
         working-directory: sdk/typescript
@@ -121,3 +103,139 @@ jobs:
           '
           node bin/codex-security.mjs --version
           node bin/codex-security.mjs --help
+
+  windows-test:
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.13.0", "24"]
+        shard: [1, 2, 3, 4, 5, 6, 7]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Set up pnpm
+        run: npm install --global pnpm@11.9.0 --no-audit --no-fund
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        working-directory: sdk/typescript
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare private Windows test root
+        id: windows-temp
+        shell: pwsh
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+
+      - name: Test shard ${{ matrix.shard }}
+        timeout-minutes: 10
+        env:
+          TEMP: ${{ steps.windows-temp.outputs.path }}
+          TMP: ${{ steps.windows-temp.outputs.path }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+        run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}
+
+      - name: Test machine-wide PowerShell policy
+        if: matrix.shard == 3 && runner.environment == 'github-hosted'
+        timeout-minutes: 5
+        working-directory: sdk/typescript
+        env:
+          TEMP: ${{ steps.windows-temp.outputs.path }}
+          TMP: ${{ steps.windows-temp.outputs.path }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
+        run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
+
+      - name: Typecheck
+        if: matrix.shard == 7
+        working-directory: sdk/typescript
+        run: pnpm run types
+
+      - name: Check formatting
+        if: matrix.shard == 7
+        working-directory: sdk/typescript
+        run: pnpm run format
+
+  windows-verify:
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.13.0", "24"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - name: Set up pnpm
+        run: npm install --global pnpm@11.9.0 --no-audit --no-fund
+
+      - name: Install dependencies
+        working-directory: sdk/typescript
+        run: pnpm install --frozen-lockfile
+
+      - name: Pack
+        working-directory: sdk/typescript
+        run: pnpm pack --pack-destination ../../dist
+
+      - name: Inspect package
+        working-directory: sdk/typescript
+        shell: bash
+        run: pnpm run check:package ../../dist/*.tgz
+
+      - name: Smoke-test Node.js runtime
+        working-directory: sdk/typescript
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module --eval '
+            import { CodexSecurity } from "@openai/codex-security";
+
+            if (typeof CodexSecurity !== "function") {
+              throw new Error("The SDK does not export CodexSecurity.");
+            }
+          '
+          node bin/codex-security.mjs --version
+          node bin/codex-security.mjs --help
+
+  windows:
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [windows-test, windows-verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.13.0", "24"]
+
+    steps:
+      - name: Require every Windows coverage job
+        if: needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
+        run: exit 1

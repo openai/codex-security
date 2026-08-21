@@ -16,11 +16,11 @@ If the user explicitly provides a different path for a required input or output,
 If a required input is still missing, stop and ask the user for it before continuing.
 Use the shared scan artifact path conventions in `../../references/scan-artifacts.md`.
 
-### Compact Deep Candidate Mode
+Standard scans and Deep Scan workers assess attack paths within their ordinary Standard scan workflow; neither invokes this separate phase skill.
 
-When `$deep-security-scan` invokes this skill, load the per-scan threat model and read the validated candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`. Analyze every `reportable` or `deferred` candidate in one invocation. Record one nested attack-path decision per eligible candidate with `record_candidate_attack_paths({ scanId, attackPaths: [{ candidateId, attackPath }] })`, using the Deep candidate shape in `../../references/scan-artifacts.md` and preserving every discovery and validation field and the original candidate order. Standard scans assess attack paths in their parent and do not invoke this skill.
+### Compact Workbench-Backed Diff Mode
 
-In this mode, the tool atomically records the nested decision in place of a per-finding attack-path report or receipt. Submit all eligible attack-path decisions together; submit `attackPaths: []` when no candidate enters this phase. Keep attack-path facts, counterevidence, severity calibration, and policy adjustment as separate reasoning steps even though their output is compact. All reachability, instance-preservation, and evidence requirements still apply; only the artifact packaging changes.
+When a workbench-backed `$security-diff-scan` has a `scanId`, load the per-scan threat model and read the validated candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`. Analyze every `reportable` or `deferred` candidate, preserve every discovery and validation field and the original candidate order, and submit all decisions together with one `record_candidate_attack_paths({ scanId, attackPaths: [{ candidateId, attackPath }] })` call. Submit `attackPaths: []` when no candidate enters this phase. The existing tool atomically updates the stored candidates; do not create per-finding reports, receipts, or manual candidate ledgers in this compact diff mode. Keep attack-path facts, counterevidence, severity calibration, and policy adjustment as separate reasoning steps. Other scan and standalone workflows retain their existing artifact behavior.
 
 ## Workflow
 
@@ -37,9 +37,8 @@ In this mode, the tool atomically records the nested decision in place of a per-
 4. Before finalizing scope or reportability-driving facts, identify the strongest repository counterevidence against the key scoping fields and explain why it is or is not dispositive.
 5. Calibrate impact and likelihood from the repository evidence.
 6. Apply a separate final policy-adjustment pass mechanically using those facts and the calibrated severity.
-7. Record final policy decision `ignore` explicitly. Outside compact Deep candidate mode, drop it from the surviving finding set; in compact mode, retain the ledger row for coverage mapping.
-8. In compact Deep candidate mode, call `record_candidate_attack_paths` once with the nested attack-path decision for every eligible candidate; the tool atomically updates the stored candidates.
-9. Outside compact Deep candidate mode, save that finding's visible attack-path report and append one attack-path receipt per candidate id at the default paths from `../../references/scan-artifacts.md`. The receipt must record the candidate id, attack-path reportability decision, attack-path facts or exact proof gap, and attack-path artifact/report reference for that candidate finding.
+7. Record final policy decision `ignore` explicitly; in compact diff mode, retain its candidate record for coverage, and otherwise drop it from the surviving finding set.
+8. For a durable diff scan, submit the nested decision for every eligible candidate in the single compact tool call. Otherwise, save that finding's visible attack-path report and append one attack-path receipt per candidate id at the default paths from `../../references/scan-artifacts.md`. The receipt must record the candidate id, attack-path reportability decision, attack-path facts or exact proof gap, and attack-path artifact/report reference for that candidate finding.
 
 ## Scope and Attack Path Checklist
 
@@ -82,9 +81,7 @@ Apply severity and policy calibration using `references/severity-policy.md`.
 
 ## Output Contract
 
-In compact Deep candidate mode, submit the nested record defined in `../../references/scan-artifacts.md` using `record_candidate_attack_paths`. Every candidate with validation disposition `reportable` or `deferred` must receive exactly one attack-path decision. The recorded result is the phase closure; do not also create a narrative report or receipt.
-
-Outside compact Deep candidate mode, use the following report contract.
+In compact diff mode, every candidate with validation disposition `reportable` or `deferred` must receive exactly one nested attack-path decision. The recorded decisions are the complete phase output; do not also create narrative reports or receipts. Otherwise, use the following report contract.
 
 For each surviving finding include:
 
@@ -104,13 +101,13 @@ Render attack-path facts using `references/attack-path-facts.md`.
 
 - Use repository evidence and explicitly supplied context. Access the network only when the user has expressly authorized that access; an offline scan never accesses the network.
 - Do not invent attack chains that the code does not support.
-- Do not leave candidate coverage implicit. In compact Deep candidate mode, every candidate that reaches attack-path analysis must receive a nested `attack_path` record, even when the final policy decision is `ignore` or `deferred`. In other modes, every such candidate must leave an attack-path receipt in its candidate-ledger path from `../../references/scan-artifacts.md`.
+- Do not leave candidate coverage implicit. In compact diff mode, record a nested attack-path decision for every eligible candidate, even when the final policy decision is `ignore` or `deferred`. Otherwise, every candidate that reaches attack-path analysis must leave an attack-path receipt in its candidate-ledger path from `../../references/scan-artifacts.md`.
 - Do not drop exact affected locations while converting validated findings into attack paths. Repository-wide seeded/root-control rows that survive validation must keep their root-control file:line even when a wrapper, route, or transport is easier to explain.
 - Do not skip a reportable validation row because a neighboring same-family finding has a cleaner story. Either produce attack-path facts for that exact row or make an explicit final policy decision with repository counterevidence.
 - Missing public-ingress evidence is not by itself dispositive counterevidence.
 - Keep attack-path analysis, severity calibration, and final policy suppression as separate sub-stages.
 - Use the final policy-adjustment matrix mechanically rather than re-arguing severity from scratch after the facts are set.
-- Outside compact Deep candidate mode, save a final visible report for each candidate finding using that finding's attack-path analysis report path from `../../references/scan-artifacts.md`. Deep scans use the nested phase record instead.
+- Outside compact diff mode, save a final visible report for each candidate finding using that finding's attack-path analysis report path from `../../references/scan-artifacts.md`.
 
 -- Considerations for attack path --
 - A bug matters if evidence shows an attacker could exploit it.
