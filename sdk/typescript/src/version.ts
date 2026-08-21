@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import semverGt from "semver/functions/gt.js";
 
 const PACKAGE_VERSIONS = packageVersions(
   new URL("../package.json", import.meta.url),
@@ -11,8 +12,6 @@ export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
 export const BUNDLED_PLUGIN_VERSION = "0.1.22" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
-const VERSION_PATTERN =
-  /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
 
 export interface UpdateNotice {
   readonly currentVersion: string;
@@ -116,7 +115,7 @@ export async function checkForUpdate({
       manifest === null ||
       !("version" in manifest) ||
       typeof manifest.version !== "string" ||
-      !isNewerVersion(manifest.version, currentVersion)
+      !semverGt(manifest.version, currentVersion)
     ) {
       return undefined;
     }
@@ -144,46 +143,6 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
     `╰${"─".repeat(width + 2)}╯`,
     "",
   ].join("\n");
-}
-
-function isNewerVersion(latest: string, current: string): boolean {
-  const candidate = VERSION_PATTERN.exec(latest);
-  const installed = VERSION_PATTERN.exec(current);
-  if (candidate === null || installed === null) return false;
-
-  for (let index = 1; index <= 3; index += 1) {
-    const difference = Number(candidate[index]) - Number(installed[index]);
-    if (difference !== 0) return difference > 0;
-  }
-
-  if (candidate[4] === installed[4]) return false;
-  if (candidate[4] === undefined) return true;
-  if (installed[4] === undefined) return false;
-  return comparePrerelease(candidate[4], installed[4]) > 0;
-}
-
-/** Compare two SemVer prerelease identifiers according to spec precedence. */
-function comparePrerelease(latest: string, current: string): number {
-  const candidate = latest.split(".");
-  const installed = current.split(".");
-  const length = Math.max(candidate.length, installed.length);
-  for (let index = 0; index < length; index += 1) {
-    const candidateId = candidate[index];
-    const installedId = installed[index];
-    if (candidateId === undefined) return -1;
-    if (installedId === undefined) return 1;
-    const candidateNumeric = /^\d+$/u.test(candidateId);
-    const installedNumeric = /^\d+$/u.test(installedId);
-    if (candidateNumeric && installedNumeric) {
-      const difference = Number(candidateId) - Number(installedId);
-      if (difference !== 0) return Math.sign(difference);
-    } else if (candidateNumeric !== installedNumeric) {
-      return candidateNumeric ? -1 : 1;
-    } else if (candidateId !== installedId) {
-      return candidateId < installedId ? -1 : 1;
-    }
-  }
-  return 0;
 }
 
 function packageVersions(url: URL): {

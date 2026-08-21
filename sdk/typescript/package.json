@@ -68,6 +68,7 @@
     "papaparse": "5.5.3",
     "pdfjs-dist": "6.2.108",
     "react": "19.2.4",
+    "semver": "7.8.5",
     "smol-toml": "1.6.1"
   },
   "devDependencies": {
@@ -76,6 +77,7 @@
     "@types/node": "22.19.17",
     "@types/papaparse": "5.3.15",
     "@types/react": "19.2.14",
+    "@types/semver": "7.8.0",
     "fast-check": "4.9.0",
     "ink-testing-library": "4.0.0",
     "json-schema-to-typescript": "15.0.4",

@@ -50,6 +50,9 @@ importers:
       react:
         specifier: 19.2.4
         version: 19.2.4
+      semver:
+        specifier: 7.8.5
+        version: 7.8.5
       smol-toml:
         specifier: 1.6.1
         version: 1.6.1
@@ -69,6 +72,9 @@ importers:
       '@types/react':
         specifier: 19.2.14
         version: 19.2.14
+      '@types/semver':
+        specifier: 7.8.0
+        version: 7.8.0
       fast-check:
         specifier: 4.9.0
         version: 4.9.0
@@ -618,6 +624,9 @@ packages:
 
   '@types/react@19.2.14':
     resolution: {integrity: sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w==}
+
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
 
   '@types/yauzl@2.10.3':
     resolution: {integrity: sha512-oJoftv0LSuaDZE3Le4DbKX+KS9G36NzOeSap90UIK0yMA/NhKJhqlSGtNDORNRaIbQfzjXDrQa0ytJ6mNRGz/Q==}
@@ -1927,6 +1936,8 @@ snapshots:
   '@types/react@19.2.14':
     dependencies:
       csstype: 3.2.3
+
+  '@types/semver@7.8.0': {}
 
   '@types/yauzl@2.10.3':
     dependencies:
