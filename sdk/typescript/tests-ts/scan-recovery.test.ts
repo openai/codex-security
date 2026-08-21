@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   cp,
   mkdir,
@@ -116,8 +117,21 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
   );
 }
 
+function fixtureGit(repository: string, ...args: string[]): string {
+  const result = spawnSync("git", ["-C", repository, ...args], {
+    encoding: "utf8",
+  });
+  expect(result.status, result.stderr).toBe(0);
+  return result.stdout.trim();
+}
+
 async function startDraftScan(
-  repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
+  repositoryKind:
+    | "directory"
+    | "clean"
+    | "dirty"
+    | "nested"
+    | "committed" = "directory",
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -131,6 +145,7 @@ async function startDraftScan(
   await mkdir(join(target, "src"), { recursive: true });
   await writeFile(join(target, "src", "extract.py"), "# fixture\n");
   await mkdir(scanDir, { mode: 0o700 });
+  let committedDiff: { base: string; head: string } | undefined;
 
   if (repositoryKind !== "directory") {
     for (const args of [
@@ -151,6 +166,26 @@ async function startDraftScan(
     ]) {
       const result = spawnSync("git", args, { encoding: "utf8" });
       expect(result.status, result.stderr).toBe(0);
+    }
+    if (repositoryKind === "committed") {
+      const base = fixtureGit(target, "rev-parse", "HEAD");
+      await writeFile(join(target, "src", "extract.py"), "# changed fixture\n");
+      fixtureGit(target, "add", "--", "src/extract.py");
+      fixtureGit(
+        target,
+        "-c",
+        "user.name=Codex Security",
+        "-c",
+        "user.email=codex-security@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "committed changes",
+      );
+      committedDiff = {
+        base,
+        head: fixtureGit(target, "rev-parse", "HEAD"),
+      };
     }
     if (repositoryKind === "dirty") {
       await writeFile(join(target, "src", "extract.py"), "# changed fixture\n");
@@ -185,7 +220,10 @@ async function startDraftScan(
       config: {},
       mode: "standard",
       repository: target,
-      target: { kind: "repository", paths: [] },
+      target:
+        committedDiff === undefined
+          ? { kind: "repository", paths: [] }
+          : { kind: "refs", paths: [], ...committedDiff },
     }),
   ]);
   fixture.scanId = String(registration["scanId"]);
@@ -198,30 +236,84 @@ async function startDraftScan(
   const manifest = await readJson<{
     scan: {
       id: string;
-      target: { kind: string };
+      target: { kind: string } & Record<string, unknown>;
       sealedAt?: string;
       artifacts?: unknown[];
     };
   }>(manifestPath);
   manifest.scan.id = fixture.scanId;
-  manifest.scan.target.kind =
-    repositoryKind === "directory"
-      ? "directory_snapshot"
-      : repositoryKind === "clean"
-        ? "git_revision"
-        : "git_worktree";
+  if (committedDiff === undefined) {
+    manifest.scan.target.kind =
+      repositoryKind === "directory"
+        ? "directory_snapshot"
+        : repositoryKind === "clean"
+          ? "git_revision"
+          : "git_worktree";
+  } else {
+    manifest.scan.target = {
+      kind: "git_diff",
+      targetId: manifest.scan.target["targetId"],
+      displayName: manifest.scan.target["displayName"],
+      baseRevision: committedDiff.base,
+      headRevision: committedDiff.head,
+    };
+  }
   delete manifest.scan.sealedAt;
   delete manifest.scan.artifacts;
   await writeJson(manifestPath, manifest);
 
   for (const name of ["findings.json", "coverage.json"] as const) {
     const path = join(scanDir, name);
-    const document = await readJson<{ scanId: string }>(path);
+    const document = await readJson<{ scanId: string; mode?: string }>(path);
     document.scanId = fixture.scanId;
+    if (committedDiff !== undefined && name === "coverage.json") {
+      document.mode = "branch_diff";
+    }
     await writeJson(path, document);
   }
   await writeFile(join(scanDir, "report.md"), "# Draft report\n");
   return fixture;
+}
+
+function committedDiffTarget(fixture: ScanFixture): {
+  baseRevision: string;
+  headRevision: string;
+  contentDigest: string;
+} {
+  const contract = fixture.registration["contract"] as {
+    diffTarget: {
+      baseRevision: string;
+      headRevision: string;
+      contentDigest: string;
+    };
+  };
+  expect(contract.diffTarget.contentDigest).toMatch(
+    /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
+  );
+  return contract.diffTarget;
+}
+
+async function replaceCommittedDiffHead(fixture: ScanFixture): Promise<void> {
+  const { headRevision } = committedDiffTarget(fixture);
+  await writeFile(
+    join(fixture.repository, "src", "extract.py"),
+    "# substituted after selection\n",
+  );
+  fixtureGit(fixture.repository, "add", "--", "src/extract.py");
+  fixtureGit(
+    fixture.repository,
+    "-c",
+    "user.name=Codex Security",
+    "-c",
+    "user.email=codex-security@example.invalid",
+    "commit",
+    "--quiet",
+    "-m",
+    "replacement",
+  );
+  const replacement = fixtureGit(fixture.repository, "rev-parse", "HEAD");
+  fixtureGit(fixture.repository, "reset", "--hard", headRevision);
+  fixtureGit(fixture.repository, "replace", "-f", headRevision, replacement);
 }
 
 async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
@@ -434,6 +526,579 @@ describe("malformed scan artifact recovery", () => {
         );
         expect(copied.status, copied.stderr).toBe(0);
       }
+    }
+  });
+
+  test("seals a committed diff with its registered content digest", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+
+    expect((await completeScan(fixture)).progress.status).toBe("complete");
+
+    const sealed = await readJson<{
+      scan: {
+        target: {
+          kind: string;
+          baseRevision: string;
+          headRevision: string;
+          snapshotDigest: string;
+        };
+      };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(sealed.scan.target).toMatchObject({
+      kind: "git_diff",
+      baseRevision: selected.baseRevision,
+      headRevision: selected.headRevision,
+      snapshotDigest: selected.contentDigest,
+    });
+  });
+
+  test("rejects committed diff replacements before the selected scan starts", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    await replaceCommittedDiffHead(fixture);
+
+    await expect(
+      workbench(fixture, [
+        "inspect-setup",
+        "--target-path",
+        fixture.repository,
+        "--scope",
+        ".",
+        "--mode",
+        "diff",
+        "--diff-target-kind",
+        "range",
+        "--diff-base-revision",
+        selected.baseRevision,
+        "--diff-head-revision",
+        selected.headRevision,
+        "--diff-content-digest",
+        selected.contentDigest,
+      ]),
+    ).rejects.toThrow("no longer produce the same diff");
+  });
+
+  test("rejects replaced Git blob contents in a committed diff", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    const original = fixtureGit(
+      fixture.repository,
+      "rev-parse",
+      `${selected.headRevision}:src/extract.py`,
+    );
+    const replacement = spawnSync(
+      "git",
+      ["-C", fixture.repository, "hash-object", "-w", "--stdin"],
+      { encoding: "utf8", input: "# replaced blob contents\n" },
+    );
+    expect(replacement.status, replacement.stderr).toBe(0);
+    fixtureGit(
+      fixture.repository,
+      "replace",
+      "-f",
+      original,
+      replacement.stdout.trim(),
+    );
+
+    await expect(
+      workbench(fixture, [
+        "inspect-setup",
+        "--target-path",
+        fixture.repository,
+        "--scope",
+        ".",
+        "--mode",
+        "diff",
+        "--diff-target-kind",
+        "range",
+        "--diff-base-revision",
+        selected.baseRevision,
+        "--diff-head-revision",
+        selected.headRevision,
+        "--diff-content-digest",
+        selected.contentDigest,
+      ]),
+    ).rejects.toThrow("no longer produce the same diff");
+  });
+
+  test.each(["workspace", "cli"] as const)(
+    "rejects committed diff replacements during %s scan registration",
+    async (scenario) => {
+      const fixture = await startDraftScan("committed");
+      const selected = committedDiffTarget(fixture);
+      await replaceCommittedDiffHead(fixture);
+      const replacement = fixtureGit(
+        fixture.repository,
+        "rev-parse",
+        `refs/replace/${selected.headRevision}`,
+      );
+      fixtureGit(fixture.repository, "replace", "-d", selected.headRevision);
+
+      const workspaceId = randomUUID();
+      const scanDirectory = join(fixture.stateDir, "registration-race-scan");
+      await mkdir(scanDirectory, { mode: 0o700 });
+      if (scenario === "workspace") {
+        await workbench(fixture, [
+          "create-workspace",
+          "--workspace-id",
+          workspaceId,
+        ]);
+        await workbench(fixture, [
+          "save-workspace",
+          "--workspace-id",
+          workspaceId,
+          "--target-path",
+          fixture.repository,
+          "--scope",
+          ".",
+          "--mode",
+          "diff",
+          "--diff-target-kind",
+          "range",
+          "--diff-base-revision",
+          selected.baseRevision,
+          "--diff-head-revision",
+          selected.headRevision,
+          "--diff-content-digest",
+          selected.contentDigest,
+        ]);
+      }
+
+      const probe = spawnSync(
+        fixture.python,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import argparse, json, subprocess, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "import workbench_db as workbench",
+            "repository = Path(sys.argv[2])",
+            "head, replacement, workspace_id = sys.argv[3:6]",
+            "scan_directory, scenario, base = sys.argv[6:9]",
+            "original_count = workbench.directory_snapshot_regular_file_count",
+            "def replace_during_count(path):",
+            "    count = original_count(path)",
+            "    subprocess.run(['git', '-C', str(repository), 'replace', '-f', head, replacement], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)",
+            "    return count",
+            "workbench.directory_snapshot_regular_file_count = replace_during_count",
+            "if scenario == 'workspace':",
+            "    arguments = argparse.Namespace(workspace_id=workspace_id, scan_root=None, model=None, reasoning_effort=None)",
+            "    start = workbench.start_scan",
+            "else:",
+            "    recipe = {'config': {}, 'mode': 'standard', 'repository': str(repository), 'target': {'kind': 'refs', 'paths': [], 'base': base, 'head': head}}",
+            "    arguments = argparse.Namespace(repository=str(repository), scan_dir=scan_directory, recipe_json=json.dumps(recipe), archive_existing=False, archived_scan_dir=None, parent_scan_id=None)",
+            "    start = workbench.register_cli_scan",
+            "with workbench.connect() as connection:",
+            "    previous = connection.execute('SELECT COUNT(*) FROM scans').fetchone()[0]",
+            "    try:",
+            "        start(connection, arguments)",
+            "    except SystemExit as exception:",
+            "        error = str(exception)",
+            "    else:",
+            "        error = None",
+            "    created = connection.execute('SELECT COUNT(*) FROM scans').fetchone()[0] - previous",
+            "print(json.dumps({'error': error, 'createdScans': created}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          fixture.repository,
+          selected.headRevision,
+          replacement,
+          workspaceId,
+          scanDirectory,
+          scenario,
+          selected.baseRevision,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            PATH: process.env["PATH"],
+            CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+          },
+        },
+      );
+
+      expect(probe.status, probe.stderr).toBe(0);
+      expect(JSON.parse(probe.stdout)).toMatchObject({
+        error: expect.stringContaining("no longer produce the same diff"),
+        createdScans: 0,
+      });
+    },
+  );
+
+  test("warns when committed diff contents change before scan completion", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    await replaceCommittedDiffHead(fixture);
+
+    const warning =
+      "Committed changes changed while the scan was running; results were saved for the original snapshot.";
+    const completed = await workbench(fixture, [
+      "complete-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+
+    expect(completed["targetWarnings"]).toEqual([warning]);
+    expect((completed["scan"] as ScanSummary).warnings).toContain(warning);
+    const sealed = await readJson<{
+      scan: { target: { snapshotDigest: string } };
+    }>(join(fixture.scanDir, "scan-manifest.json"));
+    expect(sealed.scan.target.snapshotDigest).toBe(selected.contentDigest);
+  });
+
+  test("keeps committed snapshots stable when Git diff rendering settings change", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+
+    for (const [setting, value] of [
+      ["diff.noprefix", "true"],
+      ["diff.mnemonicprefix", "true"],
+      ["diff.relative", "true"],
+      ["diff.renames", "true"],
+      ["diff.algorithm", "histogram"],
+      ["diff.indentheuristic", "true"],
+      ["diff.context", "9"],
+      ["diff.interhunkcontext", "5"],
+      ["diff.suppressblankempty", "true"],
+      ["diff.submodule", "log"],
+      ["core.quotepath", "false"],
+      ["color.ui", "always"],
+    ] as const) {
+      fixtureGit(fixture.repository, "config", setting, value);
+    }
+
+    const inspected = await workbench(fixture, [
+      "inspect-setup",
+      "--target-path",
+      fixture.repository,
+      "--scope",
+      ".",
+      "--mode",
+      "diff",
+      "--diff-target-kind",
+      "range",
+      "--diff-base-revision",
+      selected.baseRevision,
+      "--diff-head-revision",
+      selected.headRevision,
+      "--diff-content-digest",
+      selected.contentDigest,
+    ]);
+
+    expect(inspected["diffTarget"]).toMatchObject({
+      contentDigest: selected.contentDigest,
+    });
+    expect((await completeScan(fixture)).warnings).toEqual([]);
+  });
+
+  test("keeps committed snapshots stable when Git attribute sources change", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    await writeFile(
+      join(fixture.repository, ".gitattributes"),
+      "src/extract.py binary\n",
+    );
+    const globalAttributes = join(fixture.stateDir, "global.attributes");
+    await writeFile(globalAttributes, "src/extract.py binary\n");
+    fixtureGit(
+      fixture.repository,
+      "config",
+      "core.attributesFile",
+      globalAttributes,
+    );
+    await writeFile(
+      join(fixture.repository, ".git", "info", "attributes"),
+      "src/extract.py binary\n",
+    );
+
+    const inspected = await workbench(fixture, [
+      "inspect-setup",
+      "--target-path",
+      fixture.repository,
+      "--scope",
+      ".",
+      "--mode",
+      "diff",
+      "--diff-target-kind",
+      "range",
+      "--diff-base-revision",
+      selected.baseRevision,
+      "--diff-head-revision",
+      selected.headRevision,
+      "--diff-content-digest",
+      selected.contentDigest,
+    ]);
+
+    expect(inspected["diffTarget"]).toMatchObject({
+      contentDigest: selected.contentDigest,
+    });
+    expect((await completeScan(fixture)).warnings).toEqual([]);
+  });
+
+  test("hashes committed diffs without newer Git attribute-source options", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "repository, base, head = Path(sys.argv[2]), sys.argv[3], sys.argv[4]",
+          "commands = []",
+          "original = target.git_command",
+          "def supported_git(where, *args, **options):",
+          "    if any(argument.startswith('--attr-source') for argument in args):",
+          "        raise AssertionError('Git 2.39 does not support --attr-source')",
+          "    commands.append(args)",
+          "    return original(where, *args, **options)",
+          "target.git_command = supported_git",
+          "digest = target.committed_diff_content_digest(repository, base, head)",
+          "print(json.dumps({'digest': digest, 'commands': commands}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        selected.baseRevision,
+        selected.headRevision,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(probe.status, probe.stderr).toBe(0);
+    const result = JSON.parse(probe.stdout) as {
+      digest: string;
+      commands: string[][];
+    };
+    expect(result.digest).toBe(selected.contentDigest);
+    expect(result.commands.some((command) => command.includes("diff"))).toBe(
+      true,
+    );
+  });
+
+  test("keeps committed snapshots stable when named Git diff drivers change", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    await writeFile(
+      join(fixture.repository, ".gitattributes"),
+      "src/extract.py diff=special\n",
+    );
+    fixtureGit(fixture.repository, "add", "--", ".gitattributes");
+    fixtureGit(
+      fixture.repository,
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "versioned diff driver",
+    );
+    const headRevision = fixtureGit(fixture.repository, "rev-parse", "HEAD");
+    const arguments_ = [
+      "inspect-setup",
+      "--target-path",
+      fixture.repository,
+      "--scope",
+      ".",
+      "--mode",
+      "diff",
+      "--diff-target-kind",
+      "range",
+      "--diff-base-revision",
+      selected.baseRevision,
+      "--diff-head-revision",
+      headRevision,
+    ];
+    const original = await workbench(fixture, arguments_);
+    const contentDigest = (original["diffTarget"] as { contentDigest: string })
+      .contentDigest;
+
+    fixtureGit(fixture.repository, "config", "diff.special.binary", "true");
+    const inspected = await workbench(fixture, [
+      ...arguments_,
+      "--diff-content-digest",
+      contentDigest,
+    ]);
+
+    expect(inspected["diffTarget"]).toMatchObject({ contentDigest });
+  });
+
+  test("hashes committed diff output without buffering the Git patch", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import hashlib, io, json, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "repository, base, head = Path(sys.argv[2]), sys.argv[3], sys.argv[4]",
+          "calls = []",
+          "original = target.git_bytes",
+          "def record(where, *args, **options):",
+          "    calls.append(args)",
+          "    return original(where, *args, **options)",
+          "target.git_bytes = record",
+          "streamed = target.committed_diff_content_digest(repository, base, head)",
+          "target.git_bytes = original",
+          "root, pathspec = target.git_worktree_context(repository)",
+          "metadata = original(root, *target.committed_diff_arguments(base, head, pathspec))",
+          "requests = io.BytesIO()",
+          "target.write_committed_diff_object_requests(io.BytesIO(metadata), requests)",
+          "objects = target.git_command(root, 'cat-file', '--batch', text=False, input_data=requests.getvalue()).stdout",
+          "digest = hashlib.sha256()",
+          "target.update_digest_field(digest, b'format', b'codex-security-snapshot/v1')",
+          "target.update_digest_field(digest, b'tracked-diff', metadata)",
+          "target.update_digest_field(digest, b'tracked-objects', objects)",
+          "print(json.dumps({'streamed': streamed, 'buffered': 'codex-security-snapshot/v1:sha256:' + digest.hexdigest(), 'bufferedDiffCalls': [args for args in calls if 'diff' in args]}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        selected.baseRevision,
+        selected.headRevision,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual({
+      streamed: selected.contentDigest,
+      buffered: selected.contentDigest,
+      bufferedDiffCalls: [],
+    });
+  });
+
+  test("keeps committed diff spooling in the approved workbench state directory", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "repository, base, head = Path(sys.argv[2]), sys.argv[3], sys.argv[4]",
+          "approved = Path(sys.argv[5]).resolve()",
+          "directories = []",
+          "original = target.tempfile.TemporaryFile",
+          "def restricted_temporary(*args, **options):",
+          "    directory = options.get('dir')",
+          "    if directory is None or Path(directory).resolve() != approved:",
+          "        raise PermissionError('temporary files outside the workbench state directory are denied')",
+          "    directories.append(str(Path(directory).resolve()))",
+          "    return original(*args, **options)",
+          "target.tempfile.TemporaryFile = restricted_temporary",
+          "digest = target.committed_diff_content_digest(repository, base, head)",
+          "print(json.dumps({'digest': digest, 'spoolDirectories': directories}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        selected.baseRevision,
+        selected.headRevision,
+        fixture.stateDir,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual({
+      digest: selected.contentDigest,
+      spoolDirectories: [fixture.stateDir, fixture.stateDir, fixture.stateDir],
+    });
+  });
+
+  test("selects root commits in SHA-1 and supported SHA-256 repositories", async () => {
+    const fixture = await startDraftScan("committed");
+    const emptyTrees = {
+      sha1: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      sha256:
+        "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+    };
+
+    for (const objectFormat of ["sha1", "sha256"] as const) {
+      const repository = join(fixture.stateDir, `root-${objectFormat}`);
+      await mkdir(repository, { recursive: true });
+      const initialized = spawnSync(
+        "git",
+        ["init", "--quiet", `--object-format=${objectFormat}`, repository],
+        { encoding: "utf8" },
+      );
+      if (objectFormat === "sha256" && initialized.status !== 0) continue;
+      expect(initialized.status, initialized.stderr).toBe(0);
+      await writeFile(join(repository, "source.txt"), "root fixture\n");
+      fixtureGit(repository, "add", "--", "source.txt");
+      fixtureGit(
+        repository,
+        "-c",
+        "user.name=Codex Security",
+        "-c",
+        "user.email=codex-security@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "root",
+      );
+      const headRevision = fixtureGit(repository, "rev-parse", "HEAD");
+      const inspected = await workbench(fixture, [
+        "inspect-setup",
+        "--target-path",
+        repository,
+        "--scope",
+        ".",
+        "--mode",
+        "diff",
+        "--diff-target-kind",
+        "commit",
+        "--diff-head-revision",
+        headRevision,
+      ]);
+
+      expect(inspected["diffTarget"]).toMatchObject({
+        kind: "commit",
+        baseRevision: emptyTrees[objectFormat],
+        headRevision,
+        contentDigest: expect.stringMatching(
+          /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
+        ),
+      });
     }
   });
 

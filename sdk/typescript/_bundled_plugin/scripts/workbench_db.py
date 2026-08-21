@@ -76,6 +76,7 @@ from workbench_constants import (
     FINDINGS_RESULT_LIMIT,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
+    workbench_state_directory,
 )
 from workbench_feedback import get_scan_feedback
 from workbench_remediation import remediation_claim_is_active
@@ -100,10 +101,12 @@ from workbench_schema import (
 from workbench_source_excerpt import finding_source_excerpt, safe_source_path
 from workbench_target import (
     clean_worktree_content_digest,
+    committed_diff_content_digest,
     copy_directory_excluding,
     copy_git_worktree_files,
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    empty_git_tree,
     git_command,
     git_output,
     git_revision,
@@ -147,11 +150,7 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
 
 
 def state_dir() -> Path:
-    state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
-    if state_dir:
-        return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
+    return workbench_state_directory()
 
 
 def database_path() -> Path:
@@ -282,6 +281,35 @@ def resolve_git_commit(target: Path, revision: str, label: str) -> str:
     return resolved
 
 
+def require_committed_diff_digest(
+    target: Path,
+    base: str,
+    head: str,
+    selected_digest: str | None,
+) -> str:
+    current_digest = committed_diff_content_digest(target, base, head)
+    if selected_digest and selected_digest != current_digest:
+        raise SystemExit(
+            "The committed changes selected for review no longer produce the same "
+            "diff. Select the changes to review again."
+        )
+    return current_digest
+
+
+def revalidate_committed_diff_target(
+    target: Path,
+    diff_target: dict[str, str] | None,
+) -> None:
+    if diff_target is None or diff_target["kind"] == "working_tree":
+        return
+    require_committed_diff_digest(
+        target,
+        diff_target["baseRevision"],
+        diff_target["headRevision"],
+        diff_target.get("contentDigest"),
+    )
+
+
 def require_diff_target(
     target: Path,
     kind: str | None,
@@ -322,7 +350,7 @@ def require_diff_target(
             None,
         )
         if parent_line is None:
-            parent = EMPTY_GIT_TREE
+            parent = empty_git_tree(target)
         else:
             parent = resolve_git_commit(
                 target,
@@ -337,12 +365,22 @@ def require_diff_target(
             )
             if supplied_base != parent:
                 raise SystemExit("Commit base revision must match the selected commit's parent.")
-        return {"kind": kind, "baseRevision": parent, "headRevision": head}
+        return {
+            "kind": kind,
+            "baseRevision": parent,
+            "headRevision": head,
+            "contentDigest": require_committed_diff_digest(target, parent, head, content_digest),
+        }
     base = resolve_git_commit(target, base_revision or "", "Base revision")
     head = resolve_git_commit(target, head_revision or "", "Head revision")
     if base == head:
         raise SystemExit("Base and head revisions must identify different commits.")
-    return {"kind": kind, "baseRevision": base, "headRevision": head}
+    return {
+        "kind": kind,
+        "baseRevision": base,
+        "headRevision": head,
+        "contentDigest": require_committed_diff_digest(target, base, head, content_digest),
+    }
 
 
 def inspect_setup_values(
@@ -504,7 +542,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
+        if scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -574,11 +612,11 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
             )
         if (
             scan["diff_target_kind"] == "working_tree"
-            and target.get("snapshotDigest") != scan["diff_content_digest"]
-        ):
+            or scan["diff_content_digest"] is not None
+        ) and target.get("snapshotDigest") != scan["diff_content_digest"]:
             raise SystemExit(
                 "scan-manifest.json target snapshotDigest must match the selected "
-                "working-tree contents."
+                "reviewed contents."
             )
     scope = manifest_scan.get("scope")
     if not isinstance(scope, dict):
@@ -885,6 +923,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        revalidate_committed_diff_target(current_target, diff_target)
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -1040,6 +1079,7 @@ def _start_prompt_driven_scan(
             ),
         )
         workspace = require_workspace(connection, workspace_id)
+        revalidate_committed_diff_target(target, diff_target)
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -1624,6 +1664,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if head != current_head:
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
+        else:
+            diff_target["contentDigest"] = committed_diff_content_digest(repository, base, head)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
@@ -1675,6 +1717,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             ),
         )
         workspace = require_workspace(connection, workspace_id)
+        revalidate_committed_diff_target(repository, diff_target)
         insert_running_scan(
             connection,
             scan_id=scan_id,

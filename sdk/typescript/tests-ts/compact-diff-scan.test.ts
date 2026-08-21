@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -459,7 +459,13 @@ describe("compact diff scan", () => {
         diffTarget: { kind: "range", baseRevision, headRevision },
       };
       const opened = await call("open_codex_security_workspace", selection);
-      const sessionId = (opened["workspace"] as JsonObject)["id"] as string;
+      const openedWorkspace = opened["workspace"] as JsonObject;
+      const selectedDiffTarget = openedWorkspace["diffTarget"] as JsonObject;
+      const contentDigest = selectedDiffTarget["contentDigest"] as string;
+      expect(contentDigest).toMatch(
+        /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
+      );
+      const sessionId = openedWorkspace["id"] as string;
       await call("submit_codex_security_setup", { ...selection, sessionId });
       const started = await call("start_codex_security_scan", { sessionId });
       const results = (started["workspace"] as JsonObject)[
@@ -730,17 +736,7 @@ describe("compact diff scan", () => {
       const target = (
         (completed["manifest"] as JsonObject)["scan"] as JsonObject
       )["target"] as JsonObject;
-      const digest = createHash("sha256")
-        .update("codex-security-diff/v1\0")
-        .update("range")
-        .update("\0")
-        .update(baseRevision)
-        .update("\0")
-        .update(headRevision)
-        .digest("hex");
-      expect(target["snapshotDigest"]).toBe(
-        `codex-security-snapshot/v1:sha256:${digest}`,
-      );
+      expect(target["snapshotDigest"]).toBe(contentDigest);
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",
       );

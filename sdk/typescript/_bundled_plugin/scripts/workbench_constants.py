@@ -1,6 +1,8 @@
 """Shared constants for the Codex Security workbench."""
 
 import argparse
+import os
+from pathlib import Path
 
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
@@ -68,6 +70,18 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_WORK_TREE",
 )
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+EMPTY_GIT_TREES = {
+    "sha1": EMPTY_GIT_TREE,
+    "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+}
+
+
+def workbench_state_directory() -> Path:
+    configured = os.environ.get("CODEX_SECURITY_STATE_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    return (codex_home / "state" / "plugins" / "codex-security").resolve()
 
 
 def main() -> None:
