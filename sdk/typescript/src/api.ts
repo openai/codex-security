@@ -1041,6 +1041,7 @@ export class CodexSecurity {
               scanId,
               pluginRoot: runtime.plugin.installedRoot,
               prompt: options.validationPrompt,
+              falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
                 if (scopeFileCount !== null)

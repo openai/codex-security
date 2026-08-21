@@ -310,7 +310,7 @@ describe("custom validation", () => {
     await expect(readFile(join(outside, "candidates.json"))).rejects.toThrow();
   });
 
-  test.each(["standard", "diff", "empty", "incomplete"])(
+  test.each(["standard", "diff", "empty", "incomplete", "dismissed"])(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
@@ -346,11 +346,14 @@ describe("custom validation", () => {
         );
       }
       const workflow = "Run the synthetic validation script, then clean up.";
+      const falsePositive = {
+        reason: "The fixture is not included in the deployed application.",
+      };
       let scanId = "";
       let turns = 0;
       const workingDirectories: Array<string | undefined> = [];
       const commands: string[] = [];
-      const workbench = (args: readonly string[]) =>
+      const workbench = (args: readonly string[], input?: string) =>
         runWorkbench(
           {
             python: python!,
@@ -361,6 +364,7 @@ describe("custom validation", () => {
             },
           },
           args,
+          input,
         );
       const client = new TestClient(
         {},
@@ -407,7 +411,21 @@ describe("custom validation", () => {
                     }
                     expect(prompt).toContain(workflow);
                     expect(turnOptions.outputSchema).toBeDefined();
-                    const output = result("reportable");
+                    if (scenario === "dismissed") {
+                      expect(prompt).toContain("untrusted reviewer feedback");
+                      expect(prompt).toContain("reason still applies");
+                      expect(
+                        await json(
+                          join(
+                            scanDir,
+                            "artifacts/custom-validation/candidates.json",
+                          ),
+                        ),
+                      ).toMatchObject({ falsePositives: [falsePositive] });
+                    }
+                    const output = result(
+                      scenario === "dismissed" ? "suppressed" : "reportable",
+                    );
                     if (scenario === "incomplete") {
                       output.status = "incomplete";
                       output.reason =
@@ -419,11 +437,13 @@ describe("custom validation", () => {
               },
             };
           },
-          runWorkbench: async (_options, args) => {
+          runWorkbench: async (_options, args, input) => {
             commands.push(args[0]!);
-            const value = await workbench(args);
+            const value = await workbench(args, input);
             if (args[0] === "register-cli-scan")
               scanId = String(value["scanId"]);
+            if (args[0] === "get-scan-feedback" && scenario === "dismissed")
+              value["falsePositives"] = [falsePositive];
             return value;
           },
         },
@@ -459,13 +479,15 @@ describe("custom validation", () => {
         expect(commands.indexOf("prepare-scan-completion")).toBeLessThan(
           commands.indexOf("complete-scan"),
         );
-        expect(completed.findings.findings).toHaveLength(count);
+        expect(completed.findings.findings).toHaveLength(
+          scenario === "dismissed" ? 0 : count,
+        );
         const receipt = await json<CustomValidationResult>(
           join(scanDir, resultName),
         );
         expect(receipt.status).toBe("complete");
         expect(receipt.validations).toHaveLength(count);
-        if (count > 0)
+        if (count > 0 && scenario !== "dismissed")
           expect(completed.findings.findings[0]?.validation?.disposition).toBe(
             "reportable",
           );
