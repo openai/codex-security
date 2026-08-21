@@ -4428,7 +4428,7 @@ async function runSkill(
         : {}),
     },
     options.environment,
-    patch ? undefined : prompt,
+    appServer ? undefined : prompt,
   );
 }
 

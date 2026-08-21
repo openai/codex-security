@@ -54,6 +54,7 @@ describe("CLI skill commands", () => {
               onCodex: (args, output, _environment, input) => {
                 invocation = args;
                 prompt = output?.appServer?.prompt ?? input ?? "";
+                expect(input).toBe(command === "patch" ? undefined : prompt);
                 return status;
               },
             }),
@@ -930,14 +931,14 @@ describe("CLI skill commands", () => {
   });
 
   test("streams oversized skill prompts to a real child process", async () => {
-    const input = "x".repeat(1024 * 1024 + 1);
+    const input = "é日本語".repeat(256 * 1024 + 1);
     const stdout = capture();
     const stderr = capture();
     const source = [
       "let input = ''",
       "process.stdin.setEncoding('utf8')",
       "process.stdin.on('data', (chunk) => { input += chunk })",
-      "process.stdin.on('end', () => process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:String(input.length)}}) + '\\n'))",
+      "process.stdin.on('end', () => process.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:input}}) + '\\n'))",
     ].join(";");
 
     await expect(
@@ -949,7 +950,7 @@ describe("CLI skill commands", () => {
         input,
       ),
     ).resolves.toBe(0);
-    expect(stdout.text()).toBe(`${input.length}\n`);
+    expect(stdout.text()).toBe(`${input}\n`);
     expect(stderr.text()).toBe("");
   });
 
