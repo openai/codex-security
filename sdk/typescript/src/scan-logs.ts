@@ -3,7 +3,11 @@ import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
-import { isScanArtifactDirectory, sessionStartedAt } from "./scan-sessions.js";
+import {
+  isScanArtifactDirectory,
+  sessionParentThreadId,
+  sessionStartedAt,
+} from "./scan-sessions.js";
 
 interface ScanLogOptions {
   scanId: string;
@@ -31,15 +35,9 @@ export async function readScanLogs(options: ScanLogOptions) {
       const metadata = first["payload"];
       const threadId = metadata["id"];
       if (typeof threadId !== "string") break;
-      const source = metadata["source"];
-      const subagent = isRecord(source) ? source["subagent"] : undefined;
-      const spawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
-      const parent =
-        metadata["parent_thread_id"] ??
-        (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
       logs.set(threadId, {
         threadId,
-        parentThreadId: typeof parent === "string" ? parent : null,
+        parentThreadId: sessionParentThreadId(metadata),
         startedAt: sessionStartedAt(metadata["timestamp"]),
         workingDirectory:
           typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,

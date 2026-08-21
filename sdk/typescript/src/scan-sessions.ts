@@ -6,6 +6,22 @@ export function sessionStartedAt(timestamp: unknown): number | null {
   return Number.isFinite(startedAt) ? startedAt : null;
 }
 
+export function sessionParentThreadId(
+  metadata: Readonly<Record<string, unknown>>,
+): string | null {
+  const source = metadata["source"];
+  const subagent = isRecord(source) ? source["subagent"] : undefined;
+  const spawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
+  for (const parent of [
+    isRecord(spawn) ? spawn["parent_thread_id"] : undefined,
+    metadata["parent_thread_id"],
+    metadata["forked_from_id"],
+  ]) {
+    if (typeof parent === "string" && parent !== "") return parent;
+  }
+  return null;
+}
+
 export function isScanArtifactDirectory(
   scanDirectory: string,
   workingDirectory: string,
@@ -22,4 +38,8 @@ export function isScanArtifactDirectory(
     components[0] !== ".." &&
     relative(join(workers, components[0]!, "output"), workingDirectory) === ""
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -10,7 +10,11 @@ import {
   scanActivityFromSessionEvent,
   type ScanActivity,
 } from "./scan-activity.js";
-import { isScanArtifactDirectory, sessionStartedAt } from "./scan-sessions.js";
+import {
+  isScanArtifactDirectory,
+  sessionParentThreadId,
+  sessionStartedAt,
+} from "./scan-sessions.js";
 import {
   scanProgressUpdatesFromEvent,
   type ScanProgress,
@@ -462,13 +466,7 @@ function readSessionEvent(
       session.workingDirectory = payload["cwd"];
     }
     session.startedAt = sessionStartedAt(payload["timestamp"]);
-    const source = payload["source"];
-    const subagent = isRecord(source) ? source["subagent"] : undefined;
-    const spawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
-    const parent =
-      payload["parent_thread_id"] ??
-      (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
-    if (typeof parent === "string") session.parentThreadId = parent;
+    session.parentThreadId = sessionParentThreadId(payload);
     session.events?.push(event);
     return;
   }
