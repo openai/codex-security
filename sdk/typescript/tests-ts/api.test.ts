@@ -1896,6 +1896,12 @@ describe("CodexSecurity orchestration", () => {
     expect(scanStarted).toBe(true);
     expect(warnings).toEqual([completionWarning, recoveryWarning]);
     expect(warningDetails).toEqual([{ kind: "target_changed" }, undefined]);
+    // A stale-tree warning is invisible to CI unless the machine-readable result carries it.
+    expect(result.warnings).toEqual([completionWarning, recoveryWarning]);
+    expect(result.toJSON()["warnings"]).toEqual([
+      completionWarning,
+      recoveryWarning,
+    ]);
     expect(reconnects).toEqual([[2, 5]]);
     const startedAt = (codexOptions as CodexOptions | null)?.env?.[
       "CODEX_SECURITY_STARTED_AT"
@@ -4119,6 +4125,75 @@ describe("CodexSecurity orchestration", () => {
 
     const database = await readFile(join(stateDirectory, "workbench.sqlite3"));
     expect(database.toString("latin1")).not.toContain("SYNTHETIC");
+    await client.close();
+  });
+
+  test("redacts recorded scan warnings without changing the observer stream", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const drift =
+      "Repository HEAD changed while the scan was running; results were saved for the original revision.";
+    const observed: string[] = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ) => {
+          if (args[0] === "register-cli-scan")
+            return mockScanRegistration(args, input);
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          if (args[0] === "complete-scan") {
+            return {
+              scan: { warnings: [`${drift} ${SYNTHETIC_CREDENTIALS}`] },
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    const result = await client.run(repository, {
+      onWarning: (warning) => {
+        observed.push(warning);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // The observer stream is unchanged: it is a callback inside the caller's own
+    // process, so it keeps the message the run reported.
+    expect(observed).toEqual([`${drift} ${SYNTHETIC_CREDENTIALS}`]);
+    // The result is printed by `scan --json` and archived by CI, so the copy it
+    // carries is redacted the same way the stored fail-scan message is.
+    expect(result.warnings).toEqual(["[redacted]"]);
+    expect(JSON.stringify(result.toJSON())).not.toContain("SYNTHETIC");
     await client.close();
   });
 

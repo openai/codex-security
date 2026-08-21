@@ -78,8 +78,40 @@ describe("ScanResult", () => {
       scanDir: "/scan",
       threadId: "thread",
       cost: null,
+      warnings: [],
       repositoryFindings: [repositoryFinding],
     });
+  });
+
+  test("carries run warnings into machine-readable results", () => {
+    const warning =
+      "Repository HEAD changed while the scan was running; results were saved for the original revision.";
+    const result = new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/scan",
+      threadId: "thread",
+      turnResult: { id: "turn", status: "completed" },
+      repositoryFindings: [],
+    });
+
+    expect(result.warnings).toEqual([]);
+    expect(result.withWarnings([])).toBe(result);
+
+    const warned = result.withWarnings([warning]);
+    expect(warned).not.toBe(result);
+    expect(warned.warnings).toEqual([warning]);
+    expect(warned.toJSON()["warnings"]).toEqual([warning]);
+    expect(warned.withWarnings(["later"]).warnings).toEqual([warning, "later"]);
+    expect(result.warnings).toEqual([]);
+    expect(warned.toJSON()).toMatchObject({
+      scanDir: result.scanDir,
+      threadId: result.threadId,
+      sarifPath: result.sarifPath,
+      repositoryFindings: [],
+    });
+    expect(warned.repositoryFindings).toEqual([]);
     expect(result.findings).toBe(findings);
   });
 

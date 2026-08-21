@@ -4290,6 +4290,45 @@ describe("CLI", () => {
     }
   });
 
+  test("prints scan completion warnings without failing the scan", async () => {
+    const warning =
+      "Repository HEAD changed while the scan was running; results were saved for the original revision.";
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onWarning?.(warning);
+        return fakeResult().withWarnings([warning]);
+      },
+      close: async () => {},
+      preflight: async () => fakePreflight(),
+    });
+
+    expect(
+      await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
+    ).toBe(0);
+    // A CI job reads stdout, not stderr, so the warning has to survive into --json.
+    expect(JSON.parse(stdout.text())).toEqual(
+      fakeResult().withWarnings([warning]).toJSON(),
+    );
+    expect(JSON.parse(stdout.text())["warnings"]).toEqual([warning]);
+    expect(stderr.text()).toContain(`codex-security: warning: ${warning}`);
+  });
+
+  test("reports no scan warnings as an empty machine-readable list", async () => {
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())["warnings"]).toEqual([]);
+  });
+
   test("fails stale scans and includes target warnings in machine-readable results", async () => {
     for (const warning of [
       "Repository HEAD changed while the scan was running; results were saved for the original revision.",

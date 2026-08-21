@@ -41,6 +41,7 @@ export interface ScanResultOptions {
   threadId: string;
   turnResult: TurnResultMetadata;
   sarifPath?: string | null;
+  warnings?: readonly string[];
   repositoryFindings?: readonly RepositoryFinding[];
 }
 
@@ -53,6 +54,7 @@ export class ScanResult {
   public readonly turnResult: Readonly<TurnResultMetadata>;
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
+  public readonly warnings: readonly string[];
   public repositoryFindings: readonly RepositoryFinding[] | undefined;
 
   public constructor(options: ScanResultOptions) {
@@ -62,6 +64,7 @@ export class ScanResult {
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
+    this.warnings = options.warnings ?? [];
     this.repositoryFindings = options.repositoryFindings;
     this.cost = estimateScanCost(
       options.turnResult.model,
@@ -111,6 +114,25 @@ export class ScanResult {
     return join(this.scanDir, "artifacts");
   }
 
+  /**
+   * Returns this result with `warnings` appended. A run keeps reporting warnings
+   * after its result is collected, so they are attached once the run is over.
+   */
+  public withWarnings(warnings: readonly string[]): ScanResult {
+    if (warnings.length === 0) return this;
+    return new ScanResult({
+      manifest: this.manifest,
+      findings: this.findings,
+      coverage: this.coverage,
+      scanDir: this.scanDir,
+      threadId: this.threadId,
+      turnResult: this.turnResult,
+      sarifPath: this.sarifPath,
+      warnings: [...this.warnings, ...warnings],
+      repositoryFindings: this.repositoryFindings,
+    });
+  }
+
   public toJSON(): Record<string, unknown> {
     return {
       manifest: this.manifest,
@@ -123,6 +145,9 @@ export class ScanResult {
       artifactsDir: this.artifactsDir,
       sarifPath: this.sarifPath,
       cost: this.cost,
+      // Always present, empty when the run reported nothing, so a machine consumer
+      // can test it without distinguishing "no warnings" from "an older result".
+      warnings: this.warnings,
       turn: this.turnResult,
     };
   }
