@@ -91,6 +91,32 @@ export interface CodexCommand {
   command: string;
 }
 
+export interface PermissionProfileCatalogEntry {
+  id: string;
+  allowed: boolean;
+}
+
+export interface CodexConfigInspection {
+  config: JsonObject;
+  requirements: JsonObject | null;
+  permissionProfiles: PermissionProfileCatalogEntry[];
+}
+
+export type CodexConfigInspectionFailureKind =
+  | "unsupported"
+  | "launch"
+  | "exit"
+  | "protocol";
+
+export class CodexConfigInspectionError extends CodexSecurityError {
+  public constructor(
+    public readonly kind: CodexConfigInspectionFailureKind,
+    options?: ErrorOptions,
+  ) {
+    super("Codex could not inspect permission configuration.", options);
+  }
+}
+
 interface CodexCommandResult {
   success: boolean;
   exitCode: number | null;
@@ -2384,6 +2410,211 @@ export async function runCodexCommand(
   });
   child.stdin.end(input);
   return await completion;
+}
+
+export async function inspectCodexConfig(
+  command: CodexCommand,
+  environment: ProcessEnvironment,
+  cwd: string,
+  configOverrides: readonly string[],
+  signal?: AbortSignal,
+): Promise<CodexConfigInspection> {
+  const child = spawn(
+    command.command,
+    [
+      ...configOverrides.flatMap((override) => ["--config", override]),
+      "app-server",
+      "--disable",
+      "plugins",
+    ],
+    {
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      signal,
+    },
+  );
+  let processError: Error | undefined;
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", () => undefined);
+  child.once("error", (error) => {
+    processError = error;
+  });
+  child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+    if (
+      !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
+        error.code ?? "",
+      )
+    ) {
+      processError = error;
+    }
+  });
+  const completion = new Promise<number | null>((resolve) => {
+    child.once("close", (exitCode) => resolve(exitCode));
+  });
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const send = (request: JsonObject): void => {
+    child.stdin.write(`${JSON.stringify(request)}\n`);
+  };
+  const fail = (kind: CodexConfigInspectionFailureKind = "protocol"): never => {
+    throw new CodexConfigInspectionError(kind);
+  };
+  let config: JsonObject | undefined;
+  let requirements: JsonObject | null | undefined;
+  const permissionProfiles: PermissionProfileCatalogEntry[] = [];
+  const profileCursors = new Set<string>();
+  const requestPermissionProfiles = (cursor?: string): void => {
+    send({
+      id: 4,
+      method: "permissionProfile/list",
+      params: {
+        cwd,
+        ...(cursor === undefined ? {} : { cursor }),
+      },
+    });
+  };
+
+  try {
+    send({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codex-security", version: "preflight" },
+        capabilities: null,
+      },
+    });
+    for await (const line of lines) {
+      if (line.trim().length === 0) continue;
+      let message: unknown;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        fail();
+      }
+      if (!isRecord(message)) continue;
+      if (message["id"] === 1) {
+        if (message["error"] !== undefined) {
+          fail(
+            rpcMethodUnsupported(message["error"], "initialize")
+              ? "unsupported"
+              : "protocol",
+          );
+        }
+        send({ method: "initialized" });
+        send({ id: 2, method: "config/read", params: { cwd } });
+        continue;
+      }
+      if (message["id"] === 2) {
+        if (message["error"] !== undefined) {
+          fail(
+            rpcMethodUnsupported(message["error"], "config/read")
+              ? "unsupported"
+              : "protocol",
+          );
+        }
+        const result = message["result"];
+        const inspectedConfig = isRecord(result) ? result["config"] : undefined;
+        if (!isRecord(inspectedConfig)) fail();
+        config = inspectedConfig as JsonObject;
+        send({ id: 3, method: "configRequirements/read" });
+        continue;
+      }
+      if (message["id"] === 3) {
+        if (message["error"] !== undefined) {
+          fail(
+            rpcMethodUnsupported(message["error"], "configRequirements/read")
+              ? "unsupported"
+              : "protocol",
+          );
+        }
+        const result = message["result"];
+        if (!isRecord(result)) {
+          fail();
+        }
+        const inspectedRequirements = (result as Record<string, unknown>)[
+          "requirements"
+        ];
+        if (
+          inspectedRequirements !== null &&
+          !isRecord(inspectedRequirements)
+        ) {
+          fail();
+        }
+        requirements = inspectedRequirements as JsonObject | null;
+        requestPermissionProfiles();
+        continue;
+      }
+      if (message["id"] !== 4) continue;
+      if (message["error"] !== undefined) {
+        fail(
+          rpcMethodUnsupported(message["error"], "permissionProfile/list")
+            ? "unsupported"
+            : "protocol",
+        );
+      }
+      const result = message["result"];
+      const data = isRecord(result) ? result["data"] : undefined;
+      const nextCursor = isRecord(result) ? result["nextCursor"] : undefined;
+      if (
+        !Array.isArray(data) ||
+        (nextCursor !== null && typeof nextCursor !== "string") ||
+        data.some(
+          (entry) =>
+            !isRecord(entry) ||
+            typeof entry["id"] !== "string" ||
+            typeof entry["allowed"] !== "boolean",
+        )
+      ) {
+        fail();
+      }
+      permissionProfiles.push(
+        ...(data as Record<string, unknown>[]).map((entry) => ({
+          id: entry["id"] as string,
+          allowed: entry["allowed"] as boolean,
+        })),
+      );
+      if (typeof nextCursor === "string") {
+        if (profileCursors.has(nextCursor)) fail();
+        profileCursors.add(nextCursor);
+        requestPermissionProfiles(nextCursor);
+        continue;
+      }
+      if (config === undefined || requirements === undefined) {
+        fail();
+      }
+      return {
+        config: config as JsonObject,
+        requirements: requirements as JsonObject | null,
+        permissionProfiles,
+      };
+    }
+    const exitCode = await completion;
+    if (processError !== undefined) {
+      throw new CodexConfigInspectionError("launch", {
+        cause: processError,
+      });
+    }
+    if (exitCode !== 0) {
+      throw new CodexConfigInspectionError("exit");
+    }
+    fail();
+  } finally {
+    lines.close();
+    child.stdin.end();
+    if (!child.killed) child.kill();
+  }
+  throw new CodexSecurityError(
+    "Codex could not inspect permission configuration.",
+  );
+}
+
+function rpcMethodUnsupported(error: unknown, method: string): boolean {
+  if (!isRecord(error)) return false;
+  if (error["code"] === -32601) return true;
+  const message = error["message"];
+  if (typeof message !== "string") return false;
+  if (/\b(?:method not found|unknown method)\b/iu.test(message)) return true;
+  return /\bunknown variant\b/iu.test(message) && message.includes(method);
 }
 
 async function runPluginCommand(

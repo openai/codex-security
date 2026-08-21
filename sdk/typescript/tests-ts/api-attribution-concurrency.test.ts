@@ -52,6 +52,42 @@ describe("delegated scan attribution", () => {
               resolvePluginPython: async () => "/managed/python",
               prepareOutputDir: async () => scanDirectory,
               repositoryRevision: async () => "deadbeef",
+              inspectCodexConfig: async (
+                _command: unknown,
+                _environment: unknown,
+                _cwd: string,
+                overrides: readonly string[],
+              ) => {
+                if (overrides.length === 0) {
+                  return {
+                    config: {},
+                    requirements: null,
+                    permissionProfiles: [],
+                  };
+                }
+                const prefix = "permissions.codex_security_scan.filesystem=";
+                const override = overrides.find((value) =>
+                  value.startsWith(prefix),
+                );
+                if (override === undefined) {
+                  throw new Error("missing scan filesystem override");
+                }
+                const filesystem = parseToml(
+                  "filesystem = " + override.slice(prefix.length),
+                )["filesystem"];
+                return {
+                  config: {
+                    default_permissions: "codex_security_scan",
+                    permissions: {
+                      codex_security_scan: { filesystem },
+                    },
+                  },
+                  requirements: null,
+                  permissionProfiles: [
+                    { id: "codex_security_scan", allowed: true },
+                  ],
+                };
+              },
               runWorkbench: async (
                 _options: unknown,
                 args: readonly string[],
