@@ -1433,10 +1433,12 @@ def complete_scan_locked(
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
         verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
+        completion_warnings = json.loads(scan["completion_warnings_json"])
         try:
             manifest, _, _ = finalize_scan(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
+                warnings=completion_warnings,
             )
         except ContractError as exc:
             raise SystemExit(str(exc)) from exc
@@ -3368,9 +3370,11 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         require_recorded_manifest_digest(scan, scan_dir)
         verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
+        completion_warnings = json.loads(scan["completion_warnings_json"])
         manifest, findings_document, _ = finalize_scan(
             scan_dir,
             expected_coverage_mode=expected_coverage_mode(scan),
+            warnings=completion_warnings,
         )
         verify_manifest_binding(scan, manifest)
         manifest_digest = published_manifest_digest(scan_dir, manifest)
