@@ -61,6 +61,7 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
+  ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
   errorMessage,
@@ -113,6 +114,7 @@ import {
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
+  runCodexCommand,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -165,6 +167,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  safetyIdentifier?: string;
   runtime: PreparedRuntime;
   runtimeHome: string;
   effectiveConfig: JsonObject;
@@ -195,6 +198,8 @@ export interface DeepScanOptions {
 
 export interface ScanOptions extends DeepScanOptions {
   auth?: ScanAuthMode;
+  /** Stable, privacy-preserving end-user ID for this scan's model requests. */
+  safetyIdentifier?: string;
   target?: ScanTarget;
   mode?: ScanMode;
   knowledgeBasePaths?: string[];
@@ -326,6 +331,7 @@ interface ClientDependencies {
   prepareOutputDir?: typeof prepareOutputDir;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  runCodexCommand?: typeof runCodexCommand;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindings;
 }
@@ -336,6 +342,7 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
@@ -387,7 +394,9 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
-    return await this.#trackOperation(() => this.#run(repository, options));
+    return await this.#trackOperation(() =>
+      this.#run(repository, { ...options }),
+    );
   }
 
   public async preflight(
@@ -1561,7 +1570,7 @@ export class CodexSecurity {
       apiKey,
       sessionConfig,
     } = session;
-    const environment = {
+    const environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
@@ -1574,6 +1583,13 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
     };
+    for (const name of Object.keys(environment)) {
+      if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
+        delete environment[name];
+    }
+    if (session.safetyIdentifier !== undefined) {
+      environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
+    }
     const sdkCodexConfig = { ...sessionConfig };
     // Projects and permissions already live in generated TOML files; the SDK
     // cannot safely encode their path and selector keys as dotted overrides.
@@ -1612,6 +1628,7 @@ export class CodexSecurity {
     options: Pick<
       ScanOptions,
       | "auth"
+      | "safetyIdentifier"
       | "expectedPluginVersion"
       | "onAuthentication"
       | "onWarning"
@@ -1690,6 +1707,32 @@ export class CodexSecurity {
       }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      if (options.safetyIdentifier !== undefined) {
+        const help = await (
+          this.#dependencies.runCodexCommand ?? runCodexCommand
+        )(
+          this.#codexCommand(),
+          ["exec", "--help"],
+          runtime.environment,
+          undefined,
+          signal,
+        );
+        if (!help.success || !help.stdout.includes("--safety-identifier")) {
+          throw new ConfigurationError(
+            "This Codex runtime does not support safetyIdentifier. Use a runtime with native --safety-identifier support through CODEX_CLI_PATH.",
+          );
+        }
+        if (
+          !(await pluginForwardsEnvironment(
+            runtime.plugin.installedRoot,
+            SAFETY_IDENTIFIER_ENV,
+          ))
+        ) {
+          throw new ConfigurationError(
+            "This Codex Security plugin does not forward safetyIdentifier to workers. Update the plugin.",
+          );
+        }
+      }
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
         stateDirectory,
@@ -1757,6 +1800,18 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
+      if (
+        options.safetyIdentifier !== undefined &&
+        authentication.method !== "api_key" &&
+        !(
+          authentication.method === "stored_credentials" &&
+          authentication.credentialType === "api_key"
+        )
+      ) {
+        throw new ConfigurationError(
+          "safetyIdentifier requires API-key authentication.",
+        );
+      }
       notifyObserver(
         "onAuthentication",
         options.onAuthentication,
@@ -1774,6 +1829,7 @@ export class CodexSecurity {
       checkOpen();
       return {
         runtime,
+        safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
         preflightConfig,
@@ -1873,7 +1929,10 @@ export class CodexSecurity {
     );
     runtime.deepScanConfigPath =
       runtime.bootstrapWorkspace !== undefined &&
-      (await pluginSupportsIsolatedDeepScanConfig(runtime.plugin.pluginRoot))
+      (await pluginForwardsEnvironment(
+        runtime.plugin.pluginRoot,
+        DEEP_SCAN_CONFIG_PATH_ENVIRONMENT,
+      ))
         ? join(runtime.bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
     runtime.effectiveConfig = mergedConfig;
@@ -1885,6 +1944,18 @@ export class CodexSecurity {
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
     deepScanOptions(options);
+    const identifier = options.safetyIdentifier;
+    if (
+      identifier !== undefined &&
+      (typeof identifier !== "string" ||
+        identifier.trim().length === 0 ||
+        identifier.includes("\0") ||
+        [...identifier].length > 64)
+    ) {
+      throw new ConfigurationError(
+        "safetyIdentifier must contain 1 to 64 characters, must not be blank, and must not contain NUL.",
+      );
+    }
     if (
       options.maxCostUsd !== undefined &&
       (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)
@@ -2001,8 +2072,9 @@ export class CodexSecurity {
         environment: withoutCodexHome(processEnvironment),
         signal,
       });
-      const deepScanConfigPath = (await pluginSupportsIsolatedDeepScanConfig(
+      const deepScanConfigPath = (await pluginForwardsEnvironment(
         plugin.pluginRoot,
+        DEEP_SCAN_CONFIG_PATH_ENVIRONMENT,
       ))
         ? join(bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
@@ -3200,27 +3272,19 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   return result;
 }
 
-async function pluginSupportsIsolatedDeepScanConfig(
+async function pluginForwardsEnvironment(
   pluginRoot: string,
+  variable: string,
 ): Promise<boolean> {
-  let configuration: unknown;
   try {
-    configuration = JSON.parse(
+    const configuration = JSON.parse(
       await readFile(join(pluginRoot, ".mcp.json"), "utf8"),
     );
+    const environment = configuration?.mcpServers?.["codex-security"]?.env_vars;
+    return Array.isArray(environment) && environment.includes(variable);
   } catch {
     return false;
   }
-  if (!isRecord(configuration)) return false;
-  const servers = configuration["mcpServers"];
-  if (!isRecord(servers)) return false;
-  const server = servers["codex-security"];
-  if (!isRecord(server)) return false;
-  const environment = server["env_vars"];
-  return (
-    Array.isArray(environment) &&
-    environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
-  );
 }
 
 function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {

@@ -103,6 +103,7 @@ export async function matchScanFindingsInternal(
   const codex =
     options.codex ??
     new Codex({
+      codexPathOverride: resolveCodexCommand(options.environment).command,
       env: await comparisonEnvironment(
         options.environment,
         accountStatus,
