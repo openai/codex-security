@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { resolvePluginPython } from "../src/runtime.js";
+import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 test("loads each scan's matching findings once across historical batches", async () => {
@@ -96,13 +96,15 @@ test("loads oversized comparison matches from stdin", async () => {
     uncertain: [],
   });
 
-  const result = spawnSync(
-    python,
+  const result = await runCodexCommand(
+    { command: python },
     ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
-    { encoding: "utf8", input: payload, timeout: 10_000, windowsHide: true },
+    process.env,
+    payload,
+    AbortSignal.timeout(10_000),
   );
 
-  expect(result.status, result.stderr || result.error?.message).toBe(0);
+  expect(result.exitCode, result.stderr).toBe(0);
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toEqual({ saved: true });
 });
