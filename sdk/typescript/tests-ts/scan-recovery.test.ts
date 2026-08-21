@@ -1064,6 +1064,233 @@ describe("malformed scan artifact recovery", () => {
     }
   });
 
+  test("backfills a missing taxonomy.cwe instead of discarding the finding", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+
+    const missingCwe = structuredClone(document.findings[0]!);
+    missingCwe.identity.anchor = "missing-cwe";
+    const taxonomy = (missingCwe as Record<string, unknown>)[
+      "taxonomy"
+    ] as Partial<{ cwe: string[] }>;
+    delete taxonomy.cwe;
+    document.findings.push(missingCwe);
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(2);
+    expect(completed.warnings).toHaveLength(1);
+    expect(
+      completed.warnings.some(
+        (warning) =>
+          warning.includes("Recovered finding") &&
+          warning.includes("backfilled missing taxonomy.cwe"),
+      ),
+    ).toBe(true);
+
+    const recovered = (await readJson<FindingsDocument>(path)).findings.find(
+      (finding) => finding?.identity.anchor === "missing-cwe",
+    );
+    expect(recovered).toBeDefined();
+    expect((recovered as Record<string, unknown>)?.["taxonomy"]).toMatchObject({
+      cwe: [],
+    });
+  });
+
+  test("drops schema-invalid codeEvidence and prunes the rootCause references it strands", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+
+    const malformedEvidence = structuredClone(document.findings[0]!);
+    malformedEvidence.identity.anchor = "malformed-evidence";
+    (malformedEvidence as Record<string, unknown>)["codeEvidence"] = [
+      // Missing the required `explanation` field, so the JSON-schema pass
+      // rejects it while the hand-rolled validator would accept it.
+      {
+        id: "ev1",
+        label: "sink",
+        path: "src/extract.py",
+        startLine: 1,
+        code: "x = 1",
+      },
+    ];
+    (malformedEvidence as Record<string, unknown>)["rootCause"] = {
+      summary: "Dangling reference regression check.",
+      evidenceRefs: ["ev1"],
+    };
+    document.findings.push(malformedEvidence);
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(2);
+    expect(completed.warnings).toHaveLength(2);
+    expect(
+      completed.warnings.filter((warning) =>
+        warning.startsWith("Skipped malformed codeEvidence for finding"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      completed.warnings.some(
+        (warning) =>
+          warning.includes("Recovered finding") &&
+          warning.includes("dropped dangling rootCause.evidenceRefs"),
+      ),
+    ).toBe(true);
+
+    const recovered = (await readJson<FindingsDocument>(path)).findings.find(
+      (finding) => finding?.identity.anchor === "malformed-evidence",
+    );
+    expect(recovered).toBeDefined();
+    expect(recovered).not.toHaveProperty("codeEvidence");
+    expect((recovered as Record<string, unknown>)?.["rootCause"]).toMatchObject(
+      { evidenceRefs: [] },
+    );
+  });
+
+  test("drops duplicate codeEvidence ids and prunes nested attackPath references", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+
+    // Duplicate ids are caught by the hand-rolled validator rather than the
+    // JSON-schema pass, so this exercises the other detection path. The
+    // stranded references also live in the nested
+    // `attackPath.dataflow.evidenceRefs` location, not just the top level.
+    const duplicateEvidence = structuredClone(document.findings[0]!);
+    duplicateEvidence.identity.anchor = "duplicate-evidence";
+    (duplicateEvidence as Record<string, unknown>)["codeEvidence"] = [
+      {
+        id: "ev1",
+        label: "a",
+        path: "src/extract.py",
+        startLine: 1,
+        code: "x = 1",
+        explanation: "first",
+      },
+      {
+        id: "ev1",
+        label: "b",
+        path: "src/extract.py",
+        startLine: 2,
+        code: "y = 2",
+        explanation: "second",
+      },
+    ];
+    (duplicateEvidence as Record<string, unknown>)["attackPath"] = {
+      summary: "Nested dangling reference regression check.",
+      dataflow: {
+        summary: "source -> sink",
+        source: "input",
+        sink: "output",
+        outcome: "impact",
+        evidenceRefs: ["ev1"],
+      },
+      evidenceRefs: ["ev1"],
+    };
+    document.findings.push(duplicateEvidence);
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(2);
+    expect(completed.warnings).toHaveLength(3);
+    expect(
+      completed.warnings.filter((warning) =>
+        warning.startsWith("Skipped malformed codeEvidence for finding"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      completed.warnings.some(
+        (warning) =>
+          warning.includes("Recovered finding") &&
+          warning.includes("dropped dangling attackPath.evidenceRefs"),
+      ),
+    ).toBe(true);
+    expect(
+      completed.warnings.some(
+        (warning) =>
+          warning.includes("Recovered finding") &&
+          warning.includes("dropped dangling attackPath.dataflow.evidenceRefs"),
+      ),
+    ).toBe(true);
+
+    const recovered = (await readJson<FindingsDocument>(path)).findings.find(
+      (finding) => finding?.identity.anchor === "duplicate-evidence",
+    );
+    expect(recovered).toBeDefined();
+    expect(recovered).not.toHaveProperty("codeEvidence");
+    expect(
+      (recovered as Record<string, unknown>)?.["attackPath"],
+    ).toMatchObject({
+      evidenceRefs: [],
+      dataflow: { evidenceRefs: [] },
+    });
+  });
+
+  test("prunes non-string evidenceRefs entries instead of crashing recovery", async () => {
+    const fixture = await startDraftScan();
+    const path = join(fixture.scanDir, "findings.json");
+    const document = await readJson<FindingsDocument>(path);
+    const valid = document.findings[0]!;
+
+    // codeEvidence is malformed so it gets stripped, and evidenceRefs mixes a
+    // valid string with unhashable (object/array) and non-string (number)
+    // garbage that a malfunctioning producer could emit. Recovery must prune
+    // these rather than crash when testing set membership.
+    const garbageRefs = structuredClone(valid);
+    garbageRefs.identity.anchor = "garbage-evidence-refs";
+    (garbageRefs as Record<string, unknown>)["codeEvidence"] = [
+      {
+        id: "ev1",
+        label: "sink",
+        path: "src/extract.py",
+        startLine: 1,
+        code: "x = 1",
+      },
+    ];
+    (garbageRefs as Record<string, unknown>)["rootCause"] = {
+      summary: "Non-string evidenceRefs regression check.",
+      evidenceRefs: ["ev1", { nested: "garbage" }, ["nested", "garbage"], 42],
+    };
+
+    document.findings.push(garbageRefs);
+    await writeJson(path, document);
+
+    const completed = await completeScan(fixture);
+
+    expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(2);
+    expect(
+      completed.warnings.some((warning) =>
+        warning.startsWith("Skipped malformed codeEvidence for finding"),
+      ),
+    ).toBe(true);
+    expect(
+      completed.warnings.some(
+        (warning) =>
+          warning.includes("Recovered finding") &&
+          warning.includes("dropped dangling rootCause.evidenceRefs"),
+      ),
+    ).toBe(true);
+
+    const recovered = (await readJson<FindingsDocument>(path)).findings;
+    const garbageRefsRecovered = recovered.find(
+      (finding) => finding?.identity.anchor === "garbage-evidence-refs",
+    );
+    expect(garbageRefsRecovered).toBeDefined();
+    expect(garbageRefsRecovered).not.toHaveProperty("codeEvidence");
+    expect(
+      (garbageRefsRecovered as Record<string, unknown>)?.["rootCause"],
+    ).toMatchObject({ evidenceRefs: [] });
+  });
+
   test("keeps verified coverage receipts and downgrades invalid coverage", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "coverage.json");
