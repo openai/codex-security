@@ -1,0 +1,365 @@
+name: node-release-pr
+
+on:
+  workflow_run:
+    workflows: ["node-ci", "node-github-release"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check whether a patch release PR is needed without creating one
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: node-release-pr
+  queue: max
+
+jobs:
+  propose:
+    if: >-
+      github.repository == 'openai/codex-security' &&
+      ((github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.name == 'node-github-release' ||
+      (github.event.workflow_run.name == 'node-ci' &&
+      github.event.workflow_run.event == 'push'))))
+    name: propose patch release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Create release App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-actions: read
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout current main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/heads/main
+          token: ${{ steps.release-app-token.outputs.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+
+      - name: Propose the next patch release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          RELEASE_APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+
+          package_path="sdk/typescript/package.json"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+
+          package_version() {
+            node --input-type=module --eval '
+              import { readFileSync } from "node:fs";
+              const manifest = JSON.parse(readFileSync(0, "utf8"));
+              const version = manifest.version;
+              if (manifest.name !== "@openai/codex-security" ||
+                  typeof version !== "string" ||
+                  !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(version)) {
+                throw new Error("The release package must have its expected name and a stable X.Y.Z version.");
+              }
+              process.stdout.write(version);
+            '
+          }
+
+          version_is_greater() {
+            node --input-type=module --eval '
+              import { compareReleaseVersions } from "./sdk/typescript/scripts/release-automation.mjs";
+              process.exit(compareReleaseVersions(process.argv[1], process.argv[2]) > 0 ? 0 : 1);
+            ' "$1" "$2"
+          }
+
+          find_higher_version_pr() {
+            local current_version="$1"
+            local candidate_version manifest number open_prs sha
+            open_prs="$(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&per_page=100" \
+                --jq ".[] | select(.head.repo.full_name == \"$GITHUB_REPOSITORY\") | [.number, .head.sha] | @tsv"
+            )" || return
+
+            while IFS=$'\t' read -r number sha; do
+              [[ -n "$number" && -n "$sha" ]] || continue
+              manifest="$(
+                # shellcheck disable=SC2016
+                gh api graphql \
+                  -f query='query($owner: String!, $name: String!, $expression: String!) {
+                    repository(owner: $owner, name: $name) {
+                      object(expression: $expression) { ... on Blob { text } }
+                    }
+                  }' \
+                  -f owner="$GITHUB_REPOSITORY_OWNER" \
+                  -f name="$repository_name" \
+                  -f expression="$sha:$package_path" \
+                  --jq '.data.repository.object.text // empty'
+              )" || return
+              [[ -n "$manifest" ]] || continue
+              if ! candidate_version="$(
+                printf '%s' "$manifest" | package_version 2>/dev/null
+              )"; then
+                continue
+              fi
+              if version_is_greater "$candidate_version" "$current_version"; then
+                printf '%s\t%s\n' "$number" "$candidate_version"
+                return 0
+              fi
+            done <<< "$open_prs"
+            return 0
+          }
+
+          git fetch origin main --tags
+          base_sha="$(git rev-parse origin/main)"
+          git switch --detach "$base_sha"
+
+          ci_runs="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/node-ci.yml/runs?branch=main&event=push&status=success&head_sha=$base_sha&per_page=100"
+          )"
+          if ! jq -e --arg sha "$base_sha" \
+            'any(.workflow_runs[]; .head_sha == $sha and .conclusion == "success")' \
+            <<< "$ci_runs" >/dev/null; then
+            echo "Current main has not completed node-ci successfully." >&2
+            exit 1
+          fi
+
+          current_version="$(
+            node sdk/typescript/scripts/release-automation.mjs \
+              version "$package_path"
+          )"
+          release_tag="npm-v$current_version"
+          if ! release_sha="$(git rev-parse --verify "$release_tag^{commit}")"; then
+            echo "Waiting for release tag $release_tag."
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "$release_sha" "$base_sha"; then
+            echo "Release tag $release_tag is not an ancestor of current main." >&2
+            exit 1
+          fi
+          tagged_version="$(git show "$release_sha:$package_path" | package_version)"
+          if [[ "$tagged_version" != "$current_version" ]]; then
+            echo "Release tag $release_tag does not match the package version." >&2
+            exit 1
+          fi
+
+          release="$(
+            # shellcheck disable=SC2016
+            gh api graphql \
+              -f query='query($owner: String!, $name: String!, $tag: String!) {
+                repository(owner: $owner, name: $name) {
+                  release(tagName: $tag) { tagName isDraft isPrerelease }
+                }
+              }' \
+              -f owner="$GITHUB_REPOSITORY_OWNER" \
+              -f name="$repository_name" \
+              -f tag="$release_tag"
+          )"
+          if jq -e '.data.repository.release == null' \
+            <<< "$release" >/dev/null; then
+            echo "Waiting for GitHub Release $release_tag."
+            exit 0
+          fi
+          if ! jq -e --arg tag "$release_tag" \
+            '.data.repository.release |
+            (.tagName == $tag and .isDraft == false and .isPrerelease == false)' \
+            <<< "$release" >/dev/null; then
+            echo "Release tag $release_tag is not a published stable GitHub Release." >&2
+            exit 1
+          fi
+
+          published_versions="$(
+            npm view @openai/codex-security versions \
+              --json \
+              --registry=https://registry.npmjs.org/
+          )"
+          release_mode="$(
+            printf '%s\n' "$published_versions" |
+              node sdk/typescript/scripts/release-automation.mjs \
+                release-mode "$current_version"
+          )"
+          if [[ "$release_mode" == "publish" ]]; then
+            echo "Waiting for npm publication of $current_version."
+            exit 0
+          fi
+
+          package_changed=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              sdk/typescript/package.json|sdk/typescript/pnpm-lock.yaml|sdk/typescript/tsconfig.json|sdk/typescript/tsconfig.build.json|sdk/typescript/README.md|sdk/typescript/LICENSE|sdk/typescript/.gitignore|sdk/typescript/.npmignore|sdk/typescript/src/*|sdk/typescript/bin/*|sdk/typescript/_bundled_plugin/*)
+                package_changed=true
+                break
+                ;;
+            esac
+          done < <(
+            git diff --name-only -z --no-renames "$release_sha" "$base_sha" --
+          )
+          if [[ "$package_changed" != true ]]; then
+            echo "No packaged TypeScript files changed after $release_tag."
+            exit 0
+          fi
+
+          next_version="$(
+            node --input-type=module --eval '
+              const [major, minor, patch] = process.argv[1].split(".").map(BigInt);
+              process.stdout.write([major, minor, patch + 1n].join("."));
+            ' "$current_version"
+          )"
+          next_tag="npm-v$next_version"
+          branch="release/patch-$next_version"
+
+          closed_proposals="$(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/pulls?state=closed&base=main&head=$GITHUB_REPOSITORY_OWNER:$branch&per_page=100" \
+              --jq '.[] | select(.merged_at == null) | .number'
+          )"
+          if [[ -n "$closed_proposals" ]]; then
+            closed_proposal="${closed_proposals%%$'\n'*}"
+            echo "Preserving intentionally closed release PR #$closed_proposal."
+            exit 0
+          fi
+          existing_pr="$(find_higher_version_pr "$current_version")"
+          if [[ -n "$existing_pr" ]]; then
+            IFS=$'\t' read -r number version <<< "$existing_pr"
+            echo "Preserving existing same-repository release PR #$number for $version."
+            exit 0
+          fi
+          if git rev-parse --verify --quiet "refs/tags/$next_tag" >/dev/null; then
+            echo "Release tag $next_tag already exists." >&2
+            exit 1
+          fi
+          remote_branch="$(git ls-remote --heads origin "refs/heads/$branch")"
+          if [[ -n "$remote_branch" ]]; then
+            echo "Branch $branch already exists. Inspect and delete it before rerunning." >&2
+            exit 1
+          fi
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "A patch release PR for $next_version is eligible."
+            exit 0
+          fi
+
+          pr_body="$RUNNER_TEMP/patch-release-pr.md"
+          CURRENT_VERSION="$current_version" NEXT_VERSION="$next_version" \
+            PR_BODY="$pr_body" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const current = process.env.CURRENT_VERSION;
+          const next = process.env.NEXT_VERSION;
+          const replacements = [
+            [
+              "<!-- Describe the technical problem and outcome without identifying customers or private systems. -->",
+              `Propose Codex Security ${next} after the current release completed and package files changed on main.`,
+            ],
+            [
+              "<!-- Summarize the specific changes that reviewers should understand. -->",
+              `- Update only the TypeScript package version from ${current} to ${next}.\n- Leave tagging, npm publication, provenance verification, and GitHub Release creation to the existing protected workflows.`,
+            ],
+            [
+              "<!-- List the checks you actually ran and their results, or explain why testing was unnecessary. -->",
+              "- The source main commit completed node-ci successfully.\n- The current npm tag, package version, and stable GitHub Release were verified.\n- The generated commit changes one line in sdk/typescript/package.json.",
+            ],
+            [
+              "<!-- Describe compatibility, security, operational, or release considerations. -->",
+              "This PR does not publish or tag a release. It still requires public-disclosure review, approval, and the normal required checks before merge.",
+            ],
+          ];
+          let body = readFileSync(".github/PULL_REQUEST_TEMPLATE.md", "utf8");
+          for (const [marker, value] of replacements) {
+            if (!body.includes(marker)) throw new Error("The pull request template changed.");
+            body = body.replace(marker, value);
+          }
+          writeFileSync(process.env.PR_BODY, body);
+          NODE
+
+          CURRENT_VERSION="$current_version" NEXT_VERSION="$next_version" \
+            PACKAGE_PATH="$package_path" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const path = process.env.PACKAGE_PATH;
+          const current = process.env.CURRENT_VERSION;
+          const next = process.env.NEXT_VERSION;
+          const source = readFileSync(path, "utf8");
+          const expected = `"version": "${current}"`;
+          if (source.indexOf(expected) < 0 || source.indexOf(expected) !== source.lastIndexOf(expected)) {
+            throw new Error("Expected exactly one top-level package version field.");
+          }
+          writeFileSync(path, source.replace(expected, `"version": "${next}"`));
+          NODE
+
+          mapfile -t changed_files < <(git diff --name-only)
+          if [[ "${#changed_files[@]}" != 1 ||
+                "${changed_files[0]}" != "$package_path" ||
+                "$(git diff --numstat -- "$package_path")" != $'1\t1\t'"$package_path" ]]; then
+            echo "The proposed release commit must change only the package version line." >&2
+            exit 1
+          fi
+          git diff --check
+
+          release_app_user="${RELEASE_APP_SLUG}[bot]"
+          release_app_user_id="$(gh api "users/$release_app_user" --jq .id)"
+          git config user.name "$release_app_user"
+          git config user.email "$release_app_user_id+$release_app_user@users.noreply.github.com"
+          git switch -c "$branch"
+          git add "$package_path"
+          git commit -m "release: bump Codex Security to $next_version"
+          release_commit="$(git rev-parse HEAD)"
+
+          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$base_sha" ]]; then
+            echo "Main changed before the release branch was pushed. Rerun the workflow." >&2
+            exit 1
+          fi
+
+          gh auth setup-git --hostname github.com
+          git push \
+            --force-with-lease="refs/heads/$branch:" \
+            origin \
+            "HEAD:refs/heads/$branch"
+
+          pr_url="$(
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$branch" \
+              --title "release: bump Codex Security to $next_version" \
+              --body-file "$pr_body"
+          )"
+          pr="$(gh pr view "$pr_url" --repo "$GITHUB_REPOSITORY" --json number,headRefOid,baseRefName,state)"
+          if ! jq -e --arg sha "$release_commit" \
+            '.headRefOid == $sha and .baseRefName == "main" and .state == "OPEN"' \
+            <<< "$pr" >/dev/null; then
+            echo "The created PR does not match the expected release commit." >&2
+            exit 1
+          fi
+          pr_number="$(jq -r .number <<< "$pr")"
+          gh pr comment "$pr_number" --repo "$GITHUB_REPOSITORY" \
+            --body "@codex review
+
+          Please review exact head $release_commit."
+          echo "Created $pr_url at $release_commit."

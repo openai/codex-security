@@ -47,3 +47,25 @@ Maintainers update package dependencies and the committed lockfile in the
 canonical repository. The public release workflow installs that locked graph,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
+
+The `node-release-pr` workflow can propose the next patch version after `main`
+passes `node-ci` and the current npm and GitHub releases are complete. It
+preserves any same-repository pull request that already proposes a newer stable
+version. Otherwise, when package files changed after the current release, it
+creates a one-line version commit and a pull request with an unchecked public
+disclosure checklist. It does not merge, tag, publish, or dispatch another
+workflow.
+
+The workflow requires a GitHub App installation with access to this repository
+and Actions read, Contents write, and Pull requests write permissions. Its token
+is scoped to this repository. Set `RELEASE_APP_CLIENT_ID` to the App's client ID
+and `RELEASE_APP_PRIVATE_KEY` to its private key. The workflow has no
+`GITHUB_TOKEN` fallback and does not need npm credentials or OIDC permissions.
+
+The workflow will not recreate an intentionally closed proposal or reuse an
+orphan `release/patch-X.Y.Z` branch. If a write or exact-head review request
+fails, inspect the public branch and pull request, then finish or remove them
+before rerunning. Maintainers must review every generated public artifact,
+complete the disclosure checklist, and satisfy the normal approval and CI
+requirements. To check eligibility without writing, run `node-release-pr`
+manually from `main` with `dry_run` enabled.
