@@ -53,6 +53,7 @@ describe("CLI", () => {
     ).toEqual({
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
+      PYTHONUTF8: "1",
       TMPDIR: "/tmp",
     });
   });

@@ -2028,6 +2028,7 @@ describe("plugin runtime preparation", () => {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
+    expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     const globalCodex = spawnSync("codex", ["--version"], {
       encoding: "utf8",
       env: workerEnvironment,
@@ -2059,6 +2060,7 @@ describe("plugin runtime preparation", () => {
       CODEX_CLI_PATH: configured,
       PATH: "",
       PYTHON: "/managed/python",
+      PYTHONUTF8: "1",
     });
     expect(
       pluginExecutionEnvironment("/managed/python", {
@@ -3928,7 +3930,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert os.environ.get('OPENROUTER_API_KEY') is None",
         "assert os.environ.get('FIREWORKS_API_KEY') is None",
         "payload = sys.stdin.read()",
-        "print(json.dumps({'ok': True, 'inputLength': len(payload), 'details': 'x' * (5 * 1024 * 1024)}))",
+        "print(json.dumps({'ok': True, 'label': '出力', 'inputLength': len(payload), 'details': 'x' * (5 * 1024 * 1024)}, ensure_ascii=False))",
       ].join("\n"),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -3949,6 +3951,7 @@ describe("runtime directories and plugin Python boundary", () => {
       "x".repeat(64 * 1024),
     );
     expect(result["ok"]).toBe(true);
+    expect(result["label"]).toBe("出力");
     expect(result["inputLength"]).toBe(64 * 1024);
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
@@ -4892,6 +4895,48 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(await realpath(interpreter!));
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "runs plugin helpers with UTF-8 standard streams",
+    async () => {
+      const root = await temporaryDirectory("codex-security-python-utf8-");
+      const repository = join(root, "repository");
+      const output = join(root, "出力.jsonl");
+      await mkdir(repository);
+      await writeFile(join(repository, "source.py"), "value = 1\n");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const result = spawnSync(
+        python!,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-rank-input",
+          "--repo",
+          repository,
+          "--out",
+          output,
+        ],
+        {
+          encoding: "utf8",
+          env: pluginExecutionEnvironment(python!, {
+            ...process.env,
+            pythonutf8: "0",
+          }),
+        },
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("出力.jsonl");
+      expect(
+        (await readFile(output, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((row) => (JSON.parse(row) as { path: string }).path),
+      ).toEqual(["source.py"]);
+    },
+  );
+
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
     const configured = join(root, "configured-python");
@@ -4938,6 +4983,7 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,
+      PYTHONUTF8: "1",
       CODEX_CLI_PATH: resolveCodexCommand().command,
     });
     await expect(
