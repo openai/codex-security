@@ -190,6 +190,7 @@ test("recovers an interrupted copied Deep Scan publication", async () => {
 test.each([
   ["supplied", "  Review café authentication.\r\n\t"],
   ["absent", undefined],
+  ["large", "  --café\r\n".repeat(30_000)],
 ] as const)(
   "preserves %s scan instructions from registration through the Deep worker prompt",
   async (_label, scanPrompt) => {
@@ -225,16 +226,17 @@ test.each([
         repository,
         "--scan-dir",
         scanDir,
-        "--recipe-json",
-        JSON.stringify({
+        "--registration-json-stdin",
+      ],
+      JSON.stringify({
+        recipe: {
           config: {},
           mode: "deep",
           repository,
           target: { kind: "repository", paths: [] },
-        }),
-        ...(scanPrompt === undefined ? [] : ["--user-context-stdin"]),
-      ],
-      scanPrompt,
+        },
+        userContext: scanPrompt,
+      }),
     );
     const scanId = registration["scanId"] as string;
     const context = await command(["get-scan", "--scan-id", scanId]);
@@ -280,6 +282,53 @@ test.each([
 );
 
 describe("deep scan workbench ownership", () => {
+  test("starts a Deep Scan with oversized stdin user context", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-context-stdin-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const stateDir = join(root, "state");
+    await mkdir(repository);
+    await writeFile(join(repository, "source.py"), "# source fixture\n");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const userContext = "deep security focus".repeat(4_000);
+
+    const result = Bun.spawnSync(
+      [
+        python!,
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+        "begin-deep-scan",
+        "--thread-id",
+        "deep-context-stdin-owner",
+        "--target-path",
+        repository,
+        "--scope",
+        ".",
+        "--user-context-stdin",
+        "--scan-root",
+        join(root, "scans"),
+        "--available-parallelism",
+        "4",
+      ],
+      {
+        env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir },
+        stdin: Buffer.from(userContext),
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    const started = JSON.parse(
+      new TextDecoder().decode(result.stdout),
+    ) as Record<string, Record<string, unknown>>;
+    expect(started["deepScan"]?.["userContext"]).toBe(userContext);
+  }, 30_000);
+
   test("rejects completion before an SDK-created Deep Scan finishes", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-deep-completion-guard-")),

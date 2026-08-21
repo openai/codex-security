@@ -346,7 +346,6 @@ const DEEP_SCAN_SETTINGS = [
   ["maxDiscoveryRuns", "max_discovery_runs", 1],
   ["maxTimeHours", "max_time_hours", 0],
 ] as const;
-
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
@@ -759,9 +758,7 @@ export class CodexSecurity {
           repo,
           "--scan-dir",
           scanDir,
-          "--recipe-json",
-          JSON.stringify(recipe),
-          ...(options.scanPrompt === undefined ? [] : ["--user-context-stdin"]),
+          "--registration-json-stdin",
           ...(options.archiveExisting === true ? ["--archive-existing"] : []),
           ...(archivedScanDir === null
             ? []
@@ -770,7 +767,7 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        options.scanPrompt,
+        JSON.stringify({ recipe, userContext: options.scanPrompt }),
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
@@ -1164,8 +1161,8 @@ export class CodexSecurity {
         }
       }
       try {
-        const runWorkbench = (args: readonly string[]) =>
-          workbench(workbenchOptions, args);
+        const runWorkbench = (args: readonly string[], input?: string) =>
+          workbench(workbenchOptions, args, input);
         const previousFindings = await listRepositoryFindings(
           runWorkbench,
           targetId,
