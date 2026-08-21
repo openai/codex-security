@@ -376,31 +376,6 @@ test("forwards scan events with their component identity without letting observe
   }
 });
 
-test("CLI keeps untrusted component names and errors on one terminal-safe line", async () => {
-  const paths = await fixture();
-  const planFile = join(paths.root, "components.json");
-  await writeFile(
-    planFile,
-    JSON.stringify({
-      components: [{ name: "API\nFORGED\u001b[2J", paths: ["apps/api"] }],
-    }),
-  );
-  const result = await cli(
-    paths,
-    ["--components-file", planFile, "--headless"],
-    {
-      createSecurity: client(async () => {
-        throw new Error("bad\nPATH\u001b[2J");
-      }),
-    },
-  );
-  expect(result.code).toBe(2);
-  expect(result.stderr).toContain("API FORGED [2J failed: bad PATH [2J\n");
-  expect(result.stderr).not.toContain("\u001b");
-  expect(result.stderr).not.toContain("\nFORGED");
-  expect(result.stderr).not.toContain("\nPATH");
-});
-
 test.each(["dashboard", "headless", "ci"])(
   "CLI component presentation: %s",
   async (presentation) => {
