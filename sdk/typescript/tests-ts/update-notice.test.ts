@@ -123,8 +123,10 @@ describe("CLI update notice", () => {
   test("ignores current, older, invalid, and lower prerelease versions", async () => {
     for (const [current, latest, available] of [
       ["0.1.0", "0.1.0", false],
+      ["0.1.0+local", "0.1.0+registry", false],
       ["0.2.0", "0.1.0", false],
       ["0.2.0", "not-a-version", false],
+      ["not-a-version", "0.2.0", false],
       ["0.2.0", "0.2.0-beta.1", false],
       ["0.2.0-beta.2", "0.2.0-beta.1", false],
       ["0.2.0-beta.1", "0.2.0-beta.2", true],
