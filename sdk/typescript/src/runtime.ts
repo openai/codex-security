@@ -1,6 +1,12 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, readdirSync, type Stats } from "node:fs";
+import {
+  constants,
+  existsSync,
+  readdirSync,
+  type BigIntStats,
+  type Stats,
+} from "node:fs";
 import {
   chmod,
   cp,
@@ -22,7 +28,16 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -33,12 +48,19 @@ import { parse } from "smol-toml";
 import {
   CodexSecurityError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
+  OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  type ProtectedScanPathKind,
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  isWindowsUnsafePathComponent,
+  windowsUnsafePathComponent,
+} from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -54,6 +76,7 @@ const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
+const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 
 export interface PluginInstall {
@@ -112,10 +135,21 @@ export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
   const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
-  if (configured !== undefined) return resolve(expandHome(configured));
-  const codexHome =
-    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
-  return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
+  const path =
+    configured !== undefined
+      ? resolve(expandHome(configured, environment))
+      : resolve(
+          expandHome(
+            environmentValue(environment, "CODEX_HOME") ??
+              join(homedir(), ".codex"),
+            environment,
+          ),
+          "state",
+          "plugins",
+          "codex-security",
+        );
+  requireModelSafeOutputDir(path);
+  return path;
 }
 
 export function codexSecurityCredentialHome(
@@ -148,7 +182,7 @@ export async function prepareCodexSecurityCredentialHome(
       throw error;
     }
     if ((process.umask() & 0o700) !== 0) await chmod(path, 0o700);
-    const metadata = await lstat(path);
+    const metadata = await lstat(path, { bigint: true });
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
       throw new OutputDirectoryError(
         `Codex Security credential home is not a directory: ${path}`,
@@ -183,17 +217,17 @@ export async function requireSecureCredentialHome(
   options: {
     platform?: NodeJS.Platform;
     secureWindowsHome?: (path: string) => Promise<void>;
-    metadata?: Stats;
-    expectedDevice?: number;
-    expectedInode?: number;
+    metadata?: BigIntStats;
+    expectedDevice?: bigint;
+    expectedInode?: bigint;
     validateWindowsAcl?: boolean;
   } = {},
-): Promise<Stats> {
+): Promise<BigIntStats> {
   const platform = options.platform ?? process.platform;
   let metadata = options.metadata;
   if (metadata === undefined) {
     try {
-      metadata = await lstat(path);
+      metadata = await lstat(path, { bigint: true });
     } catch (error) {
       throw new OutputDirectoryError(
         `Unable to inspect the Codex Security credential home: ${path}`,
@@ -208,7 +242,7 @@ export async function requireSecureCredentialHome(
   }
   const canonical = await realpath(path);
   requireModelSafeOutputDir(canonical);
-  const canonicalMetadata = await lstat(canonical);
+  const canonicalMetadata = await lstat(canonical, { bigint: true });
   if (
     canonicalMetadata.dev !== metadata.dev ||
     canonicalMetadata.ino !== metadata.ino
@@ -233,17 +267,19 @@ export async function requireSecureCredentialHome(
       `Codex Security credential home was replaced: ${canonical}`,
     );
   }
-  if (platform === "win32") {
-    if (options.validateWindowsAcl !== false) {
-      await requirePrivateCredentialHome(metadata, canonical, {
+  if (platform !== "win32" || options.validateWindowsAcl !== false) {
+    await requirePrivateCredentialHome(
+      { mode: Number(metadata.mode), uid: Number(metadata.uid) },
+      canonical,
+      {
         platform,
         secureWindowsHome: options.secureWindowsHome,
-      });
-    }
-    return metadata;
+      },
+    );
   }
-  await requirePrivateCredentialHome(metadata, canonical, { platform });
-  await requireSecureOutputAncestry(canonical);
+  if (platform !== "win32") {
+    await requireSecureOutputAncestry(canonical);
+  }
   return metadata;
 }
 
@@ -824,7 +860,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
     "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Security\\Get-Acl | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } }",
   ].join("; ");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
@@ -1105,9 +1141,17 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
     }
   }
 
-  if (isRecord(owner) && typeof owner["pid"] === "number") {
+  // Only positive signed-32-bit PIDs identify an owner. Other values can name
+  // process groups or fail argument validation, so use the stale-age check.
+  const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
+  if (
+    typeof ownerPid === "number" &&
+    Number.isInteger(ownerPid) &&
+    ownerPid > 0 &&
+    ownerPid <= MAX_PROCESS_ID
+  ) {
     try {
-      process.kill(owner["pid"], 0);
+      process.kill(ownerPid, 0);
       return false;
     } catch (error) {
       if (nodeErrorCode(error) !== "ESRCH") {
@@ -1268,18 +1312,54 @@ export async function preserveCodexSecurityPluginRegistration(
   };
 }
 
-export async function preparePersistentScanRoot(
+export function requireOutputOutsideRepository(
+  repository: string,
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  const outputRelative = relative(repository, outputDirectory);
+  const repositoryRelative = relative(outputDirectory, repository);
+  if (
+    outputRelative === "" ||
+    (outputRelative !== ".." &&
+      !outputRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(outputRelative)) ||
+    (pathKind === "output" &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(repositoryRelative))
+  ) {
+    throw new OutputInsideProtectedRootError(
+      outputDirectory,
+      repository,
+      pathKind,
+    );
+  }
+}
+
+export function requireOutputOutsideRepositories(
+  repositories: readonly string[],
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  for (const repository of repositories)
+    requireOutputOutsideRepository(repository, outputDirectory, pathKind);
+}
+
+export async function preparePersistentOutputRoot(
   stateDirectory: string,
+  category: "scans" | "policies",
   repositoryName: string,
 ): Promise<string> {
+  requireModelSafeOutputDir(stateDirectory);
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   let root = await realpath(stateDirectory);
-  for (const directory of ["scans", safePrefix(repositoryName)]) {
+  for (const directory of [category, safePrefix(repositoryName)]) {
     root = join(root, directory);
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (!(await lstat(root)).isDirectory()) {
       throw new OutputDirectoryError(
-        `Persistent scan output must use real directories: ${root}`,
+        `Persistent ${category === "scans" ? "scan" : "policy"} output must use real directories: ${root}`,
       );
     }
   }
@@ -1289,11 +1369,21 @@ export async function preparePersistentScanRoot(
 export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
+  input?: string,
 ): Promise<JsonObject> {
   let stdout: string;
   try {
-    ({ stdout } = await execFile(
-      options.python,
+    const environment = Object.fromEntries(
+      Object.entries(options.environment).filter(
+        ([name]) =>
+          name.toUpperCase() !== "OPENAI_API_KEY" &&
+          name.toUpperCase() !== "CODEX_API_KEY" &&
+          name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+          name.toUpperCase() !== "FIREWORKS_API_KEY",
+      ),
+    );
+    const result = await runCodexCommand(
+      { command: options.python },
       [
         "-I",
         "-X",
@@ -1302,24 +1392,18 @@ export async function runWorkbench(
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
-      {
-        env: pythonUtf8Environment(
-          Object.fromEntries(
-            Object.entries(options.environment).filter(
-              ([name]) =>
-                name.toUpperCase() !== "OPENAI_API_KEY" &&
-                name.toUpperCase() !== "CODEX_API_KEY" &&
-                name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-                name.toUpperCase() !== "FIREWORKS_API_KEY",
-            ),
-          ),
-        ),
-        encoding: "utf8",
-        maxBuffer: Infinity,
-        windowsHide: true,
-        signal: options.signal,
-      },
-    ));
+      pythonUtf8Environment(environment),
+      input,
+      options.signal,
+    );
+    if (!result.success) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Workbench exited with status ${result.exitCode}.`,
+      );
+    }
+    stdout = result.stdout;
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
@@ -1402,9 +1486,7 @@ export async function validateOutputDir(
         );
       }
       if (!archiveExisting && (await readdir(path)).length !== 0) {
-        throw new OutputDirectoryError(
-          `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
-        );
+        throw new OutputDirectoryNotEmptyError(path);
       }
       requirePrivateOutputDirectory(metadata, path);
       await requireSecureOutputAncestry(path);
@@ -1466,6 +1548,31 @@ export function requireModelSafeOutputDir(path: string): void {
     throw new OutputDirectoryError(
       "Scan output directory must not contain control or line-separator characters.",
     );
+  }
+  const ambiguous =
+    process.platform === "win32" ? windowsUnsafePathComponent(path) : undefined;
+  if (ambiguous !== undefined) {
+    throw new OutputDirectoryError(
+      `Codex Security paths must not contain Windows-ambiguous components: ${ambiguous}`,
+    );
+  }
+}
+
+export async function canonicalizeModelSafePath(
+  input: string,
+): Promise<string> {
+  const path = resolve(expandHome(input));
+  requireModelSafeOutputDir(path);
+  for (let ancestor = path; ; ancestor = dirname(ancestor)) {
+    try {
+      const canonicalAncestor = resolve(ancestor, await realpath(ancestor));
+      const canonical = resolve(canonicalAncestor, relative(ancestor, path));
+      requireModelSafeOutputDir(canonical);
+      return canonical;
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT") throw error;
+      if (dirname(ancestor) === ancestor) throw error;
+    }
   }
 }
 
@@ -1982,11 +2089,13 @@ export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
   const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  const expanded =
+    configured === undefined ? undefined : expandHome(configured, environment);
   if (
-    configured &&
-    (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(configured))
+    expanded &&
+    (process.platform !== "win32" || /\.(?:exe|com)$/iu.test(expanded))
   ) {
-    return { command: resolve(configured) };
+    return { command: resolve(expanded) };
   }
 
   const platform = process.platform === "android" ? "linux" : process.platform;
@@ -2211,7 +2320,7 @@ export async function resolvePluginPython(
   }
 
   for (const candidate of process.platform === "win32"
-    ? ["python", "python3"]
+    ? ["python", "python3", "py"]
     : ["python3", "python"]) {
     const resolved = await usablePython(
       candidate,
@@ -2223,7 +2332,7 @@ export async function resolvePluginPython(
   }
   throw new PluginPythonUnavailableError(
     "The bundled Codex Security plugin requires Python 3.10 or later (Python 3.10 also requires tomli), but no usable interpreter was found. " +
-      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python to PATH.",
+      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python (py on Windows) to PATH.",
   );
 }
 
@@ -2245,7 +2354,8 @@ export function pythonUtf8Environment(
   for (const name of Object.keys(normalized)) {
     if (name.toUpperCase() === "PYTHONUTF8") delete normalized[name];
   }
-  return { ...normalized, PYTHONUTF8: "1" };
+  normalized["PYTHONUTF8"] = "1";
+  return normalized;
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {
@@ -2414,7 +2524,7 @@ function safeArchivePath(value: string): string {
     parts.includes("..") ||
     value.includes("\\") ||
     value.includes("\0") ||
-    parts.some((part) => part.includes(":")) ||
+    parts.some(isWindowsUnsafePathComponent) ||
     normalized.length === 0
   ) {
     throw new PluginBootstrapError(
@@ -2451,7 +2561,9 @@ async function usablePython(
   signal?: AbortSignal,
 ): Promise<string | null> {
   const command = await resolveTrustedExecutable(
-    isPythonPathCandidate(candidate) ? expandHome(candidate) : candidate,
+    isPythonPathCandidate(candidate)
+      ? expandHome(candidate, environment)
+      : candidate,
     environment,
     protectedRoot,
   );
@@ -2504,9 +2616,10 @@ async function isRegularFile(path: string): Promise<boolean> {
 
 async function sameFile(left: string, right: string): Promise<boolean> {
   try {
+    // NTFS file IDs can exceed JavaScript's safe integer range.
     const [leftMetadata, rightMetadata] = await Promise.all([
-      stat(left),
-      stat(right),
+      stat(left, { bigint: true }),
+      stat(right, { bigint: true }),
     ]);
     return (
       leftMetadata.dev === rightMetadata.dev &&
@@ -2517,10 +2630,20 @@ async function sameFile(left: string, right: string): Promise<boolean> {
   }
 }
 
-export function expandHome(value: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return join(homedir(), value.slice(2));
+export function expandHome(
+  value: string,
+  environment: ProcessEnvironment = process.env,
+): string {
+  const home =
+    (process.platform === "win32"
+      ? environmentValue(environment, "USERPROFILE") ??
+        environmentValue(environment, "HOME")
+      : environmentValue(environment, "HOME") ??
+        environmentValue(environment, "USERPROFILE")) ?? homedir();
+  if (value === "~") return home;
+  if (value.startsWith("~/")) return join(home, value.slice(2));
+  if (value.startsWith("~\\")) {
+    return join(home, ...value.slice(2).split("\\"));
   }
   return value;
 }

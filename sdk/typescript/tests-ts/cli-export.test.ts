@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -16,7 +17,11 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, test } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
-import { CodexSecurityError } from "../src/index.js";
+import {
+  CodexSecurityError,
+  type CoverageDocument,
+  type ScanManifest,
+} from "../src/index.js";
 import {
   SYNTHETIC_CREDENTIALS,
   capture,
@@ -339,10 +344,45 @@ describe("CLI", () => {
     30_000,
   );
 
-  test("writes exported findings to the requested file", async () => {
+  test.each([
+    ["complete", false],
+    ["partial", true],
+    ["unknown", true],
+    ["partial", false],
+    ["unknown", false],
+  ] as const)("exports %s, deferred: %j", async (completeness, hasDeferred) => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
     try {
       const scan = await copyCompletedScan(directory);
+      const manifestPath = join(scan, "scan-manifest.json");
+      const manifest = JSON.parse(
+        await readFile(manifestPath, "utf8"),
+      ) as ScanManifest;
+      const coveragePath = join(scan, manifest.scan.coverageRef);
+      const coverage = JSON.parse(
+        await readFile(coveragePath, "utf8"),
+      ) as CoverageDocument;
+      coverage.completeness = completeness;
+      coverage.deferred = hasDeferred
+        ? [
+            { id: "review", reason: "Source review did not finish." },
+            { id: "validation", reason: "Validation did not finish." },
+          ]
+        : [];
+      const coverageBytes = JSON.stringify(coverage);
+      await writeFile(coveragePath, coverageBytes);
+      manifest.scan.artifacts.find(
+        (artifact) => artifact.path === manifest.scan.coverageRef,
+      )!.sha256 = createHash("sha256").update(coverageBytes).digest("hex");
+      await writeFile(manifestPath, JSON.stringify(manifest));
+
+      const paths = [
+        manifestPath,
+        join(scan, manifest.scan.findingsRef),
+        coveragePath,
+      ];
+      const before = await Promise.all(paths.map((path) => readFile(path)));
+      const source = JSON.parse(before[1]!.toString()).findings[0];
       for (const [format, filename] of [
         ["csv", "findings.csv"],
         ["json", "findings.json"],
@@ -366,15 +406,119 @@ describe("CLI", () => {
             documentType: "codex-security.findings",
           });
         } else {
-          expect(JSON.parse(contents)).toMatchObject({ version: "2.1.0" });
+          const sarif = JSON.parse(contents);
+          expect(sarif.version).toBe("2.1.0");
+          const run = sarif.runs[0];
+          expect(run.invocations).toHaveLength(1);
+          const invocation = run.invocations[0];
+          expect(invocation.executionSuccessful).toBe(
+            completeness === "complete",
+          );
+          expect(run.properties.codexSecurityCoverageCompleteness).toBe(
+            completeness === "complete" ? undefined : completeness,
+          );
+          if (completeness === "complete") {
+            expect(invocation.toolExecutionNotifications).toBeUndefined();
+          } else {
+            const reasons = hasDeferred
+              ? coverage.deferred.map((item) => item.reason)
+              : [expect.stringContaining(completeness)];
+            expect(invocation.toolExecutionNotifications).toEqual(
+              reasons.map((text) => ({
+                level: "warning",
+                message: { text },
+              })),
+            );
+          }
+          expect(run.tool.driver.rules[0]).toMatchObject({
+            id: source.ruleId,
+            help: { markdown: expect.stringContaining(source.remediation) },
+            properties: {
+              "security-severity": "8.1",
+              tags: expect.arrayContaining([
+                "security",
+                "external/cwe/cwe-022",
+              ]),
+            },
+          });
+          expect(run.results).toHaveLength(1);
+          expect(run.results[0]).toMatchObject({
+            ruleId: source.ruleId,
+            message: { text: expect.stringContaining(source.remediation) },
+            partialFingerprints: {
+              "codexSecurity/v1": source.fingerprints.primary,
+            },
+          });
         }
         if (process.platform !== "win32")
           expect((await stat(output)).mode & 0o777).toBe(0o600);
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toBe(`${format.toUpperCase()}: ${output}\n`);
       }
+      expect(manifest.scan.status).toBe("completed");
+      expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
+        before,
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("expands home-relative export paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-export-home-"));
+    const home = join(root, "home");
+    const currentDirectory = join(root, "current");
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    try {
+      await mkdir(home);
+      await mkdir(currentDirectory);
+      const scan = await copyCompletedScan(home);
+      const sourceRoot = join(home, "source");
+      await mkdir(sourceRoot);
+      process.env["HOME"] = home;
+      process.env["USERPROFILE"] = home;
+
+      const exports: Array<{
+        scanDir: string;
+        output: string;
+        sourceRoot?: string;
+      }> = [];
+      const deps = dependencies({ currentDirectory });
+      deps.exportFindings = async (arguments_) => {
+        exports.push(arguments_);
+        return undefined;
+      };
+      expect(
+        await main(
+          [
+            "export",
+            "~/scan",
+            "--export-format",
+            "sarif",
+            "--output",
+            "~/findings.sarif",
+            "--source-root",
+            "~/source",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(exports).toEqual([
+        expect.objectContaining({
+          scanDir: await realpath(scan),
+          output: join(await realpath(home), "findings.sarif"),
+          sourceRoot,
+        }),
+      ]);
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
+      await rm(root, { recursive: true, force: true });
     }
   });
 
