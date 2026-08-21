@@ -62,6 +62,44 @@ Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
 
+### Validate an existing finding
+
+Use `security.validate()` to assess one finding without running a repository
+scan or invoking the Codex Security CLI:
+
+```ts
+const security = new CodexSecurity();
+try {
+  const result = await security.validate({
+    repositoryPath: "/path/to/repository",
+    finding: {
+      title: "Possible SQL injection",
+      location: "src/query.ts:42",
+    },
+    outputDir: "/path/outside/repository/validation",
+  });
+  console.log(result.disposition);
+  console.log(result.report);
+} finally {
+  await security.close();
+}
+```
+
+`finding` accepts literal text or a JSON-serializable object, never a file
+path. Read files explicitly. Validation uses the CLI's validation skill and
+the client's settings and authentication. It leaves repository files unchanged
+and does not add a scan to scan history.
+
+The result contains `disposition` (`reportable`, `suppressed`, `not_applicable`,
+or `deferred`), a Markdown `report`, `threadId`, and `outputDir` for evidence.
+The report explains root cause, exploitability, evidence, and proof gaps.
+`reportable` can rely on static analysis; `deferred` means insufficient evidence.
+
+`outputDir` must be empty and outside the enclosing Git worktree. It defaults
+to the Codex Security state directory's `validations/` folder. Pass `auth` to
+select authentication or `signal` to cancel. Failed, incomplete, or malformed
+responses reject the promise.
+
 ### SDK configuration and scan options
 
 Pass runtime configuration to the `CodexSecurity` constructor:

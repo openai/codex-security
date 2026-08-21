@@ -12,6 +12,8 @@ export type {
   ScanReconnectDetails,
   ScanTrustedAccessStatus,
   ScanWarningDetails,
+  ValidationOptions,
+  ValidationResult,
 } from "./api.js";
 export type {
   ScanPhase,
