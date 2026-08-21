@@ -1691,10 +1691,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scan_dir=scan_dir,
         )
         connection.execute(
-            "UPDATE scans SET recipe_json = ?, parent_scan_id = ? WHERE id = ?",
+            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
             (
                 json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
                 parent_scan_id,
+                args.user_context,
                 scan_id,
             ),
         )

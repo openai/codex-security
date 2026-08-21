@@ -143,6 +143,7 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--scan-dir", required=True)
     register_cli_scan.add_argument("--repository", required=True)
     register_cli_scan.add_argument("--recipe-json", required=True)
+    register_cli_scan.add_argument("--user-context")
     register_cli_scan.add_argument("--parent-scan-id")
     register_cli_scan.add_argument("--archive-existing", action="store_true")
     register_cli_scan.add_argument("--archived-scan-dir")
@@ -314,7 +315,7 @@ def parse_args(description: str) -> argparse.Namespace:
         if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
             parser.error("pass exactly one user-context transport")
         index = arguments.index("--user-context-stdin")
-        arguments[index : index + 1] = ["--user-context", sys.stdin.read()]
+        arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
     return parser.parse_args(arguments)
 
 

@@ -2096,7 +2096,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (_options, args): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] !== "register-cli-scan") {
             return {
               scanId: "scan_example_001",
@@ -2104,6 +2104,8 @@ describe("CodexSecurity orchestration", () => {
               falsePositives: [],
             };
           }
+          expect(args).not.toContain("--user-context-stdin");
+          expect(input).toBeUndefined();
           recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
           return mockScanRegistration(args);
         },
@@ -3748,6 +3750,7 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("provides authoritative knowledge-base context without retaining its documents", async () => {
+    const scanPrompt = "Review the synthetic authorization boundary.";
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3771,7 +3774,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (_options, args): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] === "get-scan-feedback") {
             return {
               scanId: "scan_example_001",
@@ -3780,6 +3783,8 @@ describe("CodexSecurity orchestration", () => {
             };
           }
           if (args[0] !== "register-cli-scan") return {};
+          expect(args).toContain("--user-context-stdin");
+          expect(input).toBe(scanPrompt);
           recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
           return mockScanRegistration(args);
         },
@@ -3803,7 +3808,10 @@ describe("CodexSecurity orchestration", () => {
     );
 
     await expect(
-      client.run(repository, { knowledgeBasePaths: [knowledgeBase] }),
+      client.run(repository, {
+        knowledgeBasePaths: [knowledgeBase],
+        scanPrompt,
+      }),
     ).resolves.toMatchObject({ threadId: "thread-1" });
     expect(existsSync(knowledgeDirectory)).toBe(false);
     expect(prompt).toContain(

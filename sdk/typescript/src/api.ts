@@ -751,22 +751,27 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      const registration = await workbench(workbenchOptions, [
-        "register-cli-scan",
-        "--repository",
-        repo,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify(recipe),
-        ...(options.archiveExisting === true ? ["--archive-existing"] : []),
-        ...(archivedScanDir === null
-          ? []
-          : ["--archived-scan-dir", archivedScanDir]),
-        ...(options.parentScanId === undefined
-          ? []
-          : ["--parent-scan-id", options.parentScanId]),
-      ]);
+      const registration = await workbench(
+        workbenchOptions,
+        [
+          "register-cli-scan",
+          "--repository",
+          repo,
+          "--scan-dir",
+          scanDir,
+          "--recipe-json",
+          JSON.stringify(recipe),
+          ...(options.scanPrompt === undefined ? [] : ["--user-context-stdin"]),
+          ...(options.archiveExisting === true ? ["--archive-existing"] : []),
+          ...(archivedScanDir === null
+            ? []
+            : ["--archived-scan-dir", archivedScanDir]),
+          ...(options.parentScanId === undefined
+            ? []
+            : ["--parent-scan-id", options.parentScanId]),
+        ],
+        options.scanPrompt,
+      );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
       const contract = registration["contract"];
