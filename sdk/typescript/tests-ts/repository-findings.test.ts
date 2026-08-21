@@ -1,7 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { resolvePluginPython } from "../src/runtime.js";
+import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 test("combines repository findings without reviving dismissed aliases", async () => {
@@ -62,14 +61,14 @@ result["ordered"] = findings("first")
 print(json.dumps(result))
 `;
 
-  const execution = spawnSync(
-    python,
+  const execution = await runCodexCommand(
+    { command: python },
     ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts")],
-    { input: probe, encoding: "utf8", timeout: 10_000, windowsHide: true },
+    process.env,
+    probe,
+    AbortSignal.timeout(10_000),
   );
-  expect(execution.status, execution.stderr || execution.error?.message).toBe(
-    0,
-  );
+  expect(execution.exitCode, execution.stderr).toBe(0);
 
   const result = JSON.parse(execution.stdout) as Record<
     string,
