@@ -32,6 +32,11 @@ import {
   type AccountStatus,
 } from "./auth.js";
 import {
+  jsonForPrompt,
+  pluginPythonCommand,
+  shellEnvironmentReference,
+} from "./codex-prompt.js";
+import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
@@ -58,8 +63,6 @@ import {
   CodexSecurityError,
   IncompleteScanError,
   OutputDirectoryError,
-  OutputInsideProtectedRootError,
-  type ProtectedScanPathKind,
   errorMessage,
   safeErrorMessage,
   ScanCostLimitExceededError,
@@ -97,14 +100,16 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
   planOutputArchive,
   prepareOutputDir,
-  preparePersistentScanRoot,
+  preparePersistentOutputRoot,
   requireModelSafeOutputDir,
+  requireOutputOutsideRepository,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -221,7 +226,8 @@ export interface ScanOptions extends DeepScanOptions {
   signal?: AbortSignal;
 }
 
-export type ScanAuthMode = "auto" | "chatgpt" | "api-key";
+export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
+export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 
 export type ScanAuthentication =
   | {
@@ -340,7 +346,6 @@ const DEEP_SCAN_SETTINGS = [
   ["maxDiscoveryRuns", "max_discovery_runs", 1],
   ["maxTimeHours", "max_time_hours", 0],
 ] as const;
-
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
@@ -548,7 +553,11 @@ export class CodexSecurity {
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
-          ? await preparePersistentScanRoot(stateDirectory, basename(repo))
+          ? await preparePersistentOutputRoot(
+              stateDirectory,
+              "scans",
+              basename(repo),
+            )
           : temporaryRoot;
       if (scanOutputRoot !== undefined) {
         requireOutputOutsideRepository(
@@ -741,22 +750,25 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      const registration = await workbench(workbenchOptions, [
-        "register-cli-scan",
-        "--repository",
-        repo,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
+      const registration = await workbench(
+        workbenchOptions,
+        [
+          "register-cli-scan",
+          "--repository",
+          repo,
+          "--scan-dir",
+          scanDir,
+          "--recipe-json-stdin",
+          ...(options.archiveExisting === true ? ["--archive-existing"] : []),
+          ...(archivedScanDir === null
+            ? []
+            : ["--archived-scan-dir", archivedScanDir]),
+          ...(options.parentScanId === undefined
+            ? []
+            : ["--parent-scan-id", options.parentScanId]),
+        ],
         JSON.stringify(recipe),
-        ...(options.archiveExisting === true ? ["--archive-existing"] : []),
-        ...(archivedScanDir === null
-          ? []
-          : ["--archived-scan-dir", archivedScanDir]),
-        ...(options.parentScanId === undefined
-          ? []
-          : ["--parent-scan-id", options.parentScanId]),
-      ]);
+      );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
       const contract = registration["contract"];
@@ -937,12 +949,7 @@ export class CodexSecurity {
         approvalPolicy,
       });
       const serializedPaths =
-        normalized.kind === "paths"
-          ? JSON.stringify(normalized.paths)
-              .replaceAll("\u0085", "\\u0085")
-              .replaceAll("\u2028", "\\u2028")
-              .replaceAll("\u2029", "\\u2029")
-          : null;
+        normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
       checkOpen();
       if (serializedPaths !== null && targetPathsFile !== null) {
         await writeFile(targetPathsFile, `${serializedPaths}\n`, {
@@ -1154,8 +1161,8 @@ export class CodexSecurity {
         }
       }
       try {
-        const runWorkbench = (args: readonly string[]) =>
-          workbench(workbenchOptions, args);
+        const runWorkbench = (args: readonly string[], input?: string) =>
+          workbench(workbenchOptions, args, input);
         const previousFindings = await listRepositoryFindings(
           runWorkbench,
           targetId,
@@ -2098,8 +2105,10 @@ async function prepareDeepScanConfig(
   options: DeepScanOptions,
   signal: AbortSignal,
 ): Promise<void> {
-  const ambientHome =
-    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
+  const ambientHome = expandHome(
+    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex"),
+    environment,
+  );
   const source = join(ambientHome, "codex-security", "config.toml");
   let configured: TomlTable = {};
   try {
@@ -2125,14 +2134,15 @@ async function prepareDeepScanConfig(
     const value = options[name];
     if (value !== undefined) overrides[key] = value;
   }
+  const sharedConfig = await sameExistingPath(source, destination);
   const hasOverrides = Object.keys(overrides).length > 0;
   if (existing === undefined && !hasOverrides) {
-    if (destination !== source) {
+    if (!sharedConfig) {
       await rm(destination, { force: true });
     }
     return;
   }
-  if (destination === source && !hasOverrides) return;
+  if (sharedConfig && !hasOverrides) return;
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   await writeFile(
     destination,
@@ -2142,6 +2152,15 @@ async function prepareDeepScanConfig(
     }),
     { mode: 0o600, signal },
   );
+}
+
+async function sameExistingPath(left: string, right: string): Promise<boolean> {
+  if (left === right) return true;
+  const [canonicalLeft, canonicalRight] = await Promise.all([
+    realpath(left).catch(() => null),
+    realpath(right).catch(() => null),
+  ]);
+  return canonicalLeft !== null && canonicalLeft === canonicalRight;
 }
 
 export function createSecurity(
@@ -2543,7 +2562,7 @@ function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
 ): string {
-  const python = `${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")}`;
+  const python = pluginPythonCommand();
   return [
     `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
     "Run this Codex Security scan non-interactively.",
@@ -2618,11 +2637,6 @@ function scanPrompt(
       ? ["Additional scan instructions:", additionalPrompt]
       : []),
   ].join("\n");
-}
-
-function shellEnvironmentReference(name: string, suffix = ""): string {
-  const prefix = process.platform === "win32" ? "$env:" : "$";
-  return `"${prefix}${name}${suffix}"`;
 }
 
 function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
@@ -2759,6 +2773,11 @@ export function scanAuthentication(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
 ): ScanAuthentication {
+  if (!SCAN_AUTH_MODES.includes(auth)) {
+    throw new TypeError(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+  }
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -3202,31 +3221,6 @@ async function pluginSupportsIsolatedDeepScanConfig(
     Array.isArray(environment) &&
     environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
   );
-}
-
-function requireOutputOutsideRepository(
-  repository: string,
-  outputDirectory: string,
-  pathKind: ProtectedScanPathKind = "output",
-): void {
-  const outputRelative = relative(repository, outputDirectory);
-  const repositoryRelative = relative(outputDirectory, repository);
-  if (
-    outputRelative === "" ||
-    (outputRelative !== ".." &&
-      !outputRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(outputRelative)) ||
-    (pathKind === "output" &&
-      repositoryRelative !== ".." &&
-      !repositoryRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(repositoryRelative))
-  ) {
-    throw new OutputInsideProtectedRootError(
-      outputDirectory,
-      repository,
-      pathKind,
-    );
-  }
 }
 
 function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {

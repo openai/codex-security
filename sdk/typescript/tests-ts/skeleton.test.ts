@@ -1,6 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
-import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
+import { parse } from "smol-toml";
+import {
+  type AttackPathDataflow,
+  type AttackPathReachability,
+  CodexSecurity,
+  CodexSecurityError,
+  VERSION,
+} from "../src/index.js";
 import { main } from "../src/cli.js";
 
 interface WorkflowStep {
@@ -54,6 +61,22 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("exports typed attack-path aliases", () => {
+    const dataflow: AttackPathDataflow = {
+      transformations: ["decode archive entry"],
+    };
+    const reachability: AttackPathReachability = {
+      attacker: "authenticated uploader",
+      entrypoint: "archive upload endpoint",
+      preconditions: ["archive extraction is enabled"],
+    };
+    const transformations: string[] | undefined = dataflow.transformations;
+    const attacker: string | undefined = reachability.attacker;
+
+    expect(transformations).toEqual(["decode archive entry"]);
+    expect(attacker).toBe("authenticated uploader");
+  });
+
   test("advertises the tested Node.js 22, 24, and 26 release lines", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -104,15 +127,19 @@ describe("TypeScript package skeleton", () => {
     ]);
   });
 
-  test("keeps the default and Windows CI test timeouts", async () => {
+  test("randomizes tests and keeps the default and Windows CI timeouts", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
     const { jobs } = await workflow("node-ci.yml");
+    const bunConfig = parse(
+      await readFile(new URL("../bunfig.toml", import.meta.url), "utf8"),
+    );
 
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
+    expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain(
       `${packageJson.scripts.test} `,
     );
