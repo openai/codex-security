@@ -935,7 +935,7 @@ describe("malformed scan artifact recovery", () => {
     );
     expect(sarif.runs[0]?.invocations).toEqual([
       {
-        executionSuccessful: true,
+        executionSuccessful: false,
         toolExecutionNotifications: [
           { level: "warning", message: { text: completed.warnings[0]! } },
         ],

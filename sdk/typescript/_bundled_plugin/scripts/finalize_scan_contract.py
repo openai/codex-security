@@ -2289,19 +2289,17 @@ def build_sarif_projection(
             raise ContractError("source root: expected an existing directory")
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
-    if coverage["completeness"] != "complete":
-        run = sarif["runs"][0]
-        run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
-        if coverage["deferred"]:
-            run["invocations"] = [
-                {
-                    "executionSuccessful": True,
-                    "toolExecutionNotifications": [
-                        {"level": "warning", "message": {"text": item["reason"]}}
-                        for item in coverage["deferred"]
-                    ],
-                }
-            ]
+    run = sarif["runs"][0]
+    completeness = coverage["completeness"]
+    run["invocations"] = [{"executionSuccessful": completeness == "complete"}]
+    if completeness != "complete":
+        run["properties"]["codexSecurityCoverageCompleteness"] = completeness
+        reasons = [item["reason"] for item in coverage["deferred"]] or [
+            f"Scan coverage is {completeness}; results may be incomplete."
+        ]
+        run["invocations"][0]["toolExecutionNotifications"] = [
+            {"level": "warning", "message": {"text": reason}} for reason in reasons
+        ]
     _validate_sarif(sarif)
     return sarif
 
