@@ -639,20 +639,19 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         ],
         check=True,
         capture_output=True,
-        text=True,
     )
-    fields = result.stdout.split("\0")
+    fields = result.stdout.split(b"\0")
     if fields and not fields[-1]:
         fields.pop()
 
     changed: list[tuple[Path, str]] = []
     index = 0
     while index < len(fields):
-        status = fields[index][0]
+        status = chr(fields[index][0])
         index += 1
         if status in {"C", "R"}:
             index += 1
-        path = repo / fields[index]
+        path = repo / os.fsdecode(fields[index])
         index += 1
         changed.append((path, status))
     return changed
@@ -667,14 +666,13 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         untracked = subprocess.run(
             ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
             capture_output=True,
-            text=True,
             check=True,
         )
         combined = dict(staged)
         combined.update(unstaged)
         combined.update(
-            (repo / relative, "A")
-            for relative in untracked.stdout.split("\0")
+            (repo / os.fsdecode(relative), "A")
+            for relative in untracked.stdout.split(b"\0")
             if relative
         )
         return sorted(combined.items())

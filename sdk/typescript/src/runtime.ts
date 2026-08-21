@@ -1386,11 +1386,13 @@ export async function runWorkbench(
       { command: options.python },
       [
         "-I",
+        "-X",
+        "utf8",
         "-B",
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
-      environment,
+      pythonUtf8Environment(environment),
       input,
       options.signal,
     );
@@ -2339,10 +2341,21 @@ export function pluginExecutionEnvironment(
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
   return {
-    ...environment,
+    ...pythonUtf8Environment(environment),
     PYTHON: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
+}
+
+export function pythonUtf8Environment(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  const normalized = { ...environment };
+  for (const name of Object.keys(normalized)) {
+    if (name.toUpperCase() === "PYTHONUTF8") delete normalized[name];
+  }
+  normalized["PYTHONUTF8"] = "1";
+  return normalized;
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {
