@@ -6,7 +6,7 @@
   "completeness": "complete",
   "inventoryStrategy": "repository",
   "includePaths": [
-    "src/"
+    "."
   ],
   "excludePaths": [],
   "surfaces": [

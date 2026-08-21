@@ -23,6 +23,8 @@ def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
     if not isinstance(claimed_at, str):
         return True
     try:
+        if claimed_at.endswith(("Z", "z")):
+            claimed_at = claimed_at[:-1] + "+00:00"
         parsed = datetime.fromisoformat(claimed_at)
         if parsed.tzinfo is None:
             return True

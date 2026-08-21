@@ -1,7 +1,11 @@
 import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { McpToolCallItem, ThreadEvent } from "@openai/codex-sdk";
+import {
+  Codex,
+  type McpToolCallItem,
+  type ThreadEvent,
+} from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runScanEvents } from "../src/api.js";
 import {
@@ -70,6 +74,7 @@ async function* tacEvents(
     usage: {
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 1,
     },
@@ -111,6 +116,53 @@ describe("one-shot scan events", () => {
       outputTokens: 3,
       estimatedUsd: 0.000131,
     });
+  });
+
+  test.each([null, undefined])(
+    "preserves completed scans when the real Codex SDK receives %p token usage",
+    async (usage) => {
+      const scanDir = await copyCompletedScan(await temporaryDirectory());
+      const thread = new Codex({
+        codexPathOverride: process.execPath,
+      }).startThread();
+      const executable = thread as unknown as {
+        _exec: { run(): AsyncGenerator<string> };
+      };
+      executable._exec.run = async function* () {
+        yield JSON.stringify({ type: "thread.started", thread_id: "thread-1" });
+        yield JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "message-1",
+            type: "agent_message",
+            text: "scan complete",
+          },
+        });
+        yield JSON.stringify({ type: "turn.completed", usage });
+      };
+
+      const { events } = await thread.runStreamed("Scan the repository.");
+      const result = await runEvents(scanDir, events);
+
+      expect(result.threadId).toBe("thread-1");
+      expect(result.turnResult).toMatchObject({
+        status: "completed",
+        finalResponse: "scan complete",
+      });
+      expect(result.cost).toBeNull();
+    },
+  );
+
+  test("does not suppress unrelated SDK stream failures", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      throw new TypeError("Cannot read properties of null (reading 'message')");
+    }
+
+    await expect(runEvents(scanDir, failedEvents())).rejects.toThrow(
+      "reading 'message'",
+    );
   });
 
   test("reports granted trusted cyber access once without a warning", async () => {
@@ -451,6 +503,7 @@ describe("one-shot scan events", () => {
         expect(usage).toMatchObject({
           input_tokens: 10,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
           output_tokens: 3,
         });
         expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(false);
@@ -580,6 +633,7 @@ describe("one-shot scan events", () => {
           usage: {
             input_tokens: 1,
             cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
             output_tokens: 1,
             reasoning_output_tokens: 0,
           },
@@ -640,6 +694,7 @@ describe("one-shot scan events", () => {
           usage: {
             input_tokens: 10,
             cached_input_tokens: 2,
+            cache_write_input_tokens: 0,
             output_tokens: 3,
             reasoning_output_tokens: 1,
           },
@@ -689,6 +744,7 @@ describe("one-shot scan events", () => {
     const usage = {
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 1,
     };
@@ -720,6 +776,7 @@ describe("one-shot scan events", () => {
     const usage = {
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 1,
     };
@@ -739,8 +796,6 @@ describe("one-shot scan events", () => {
       message: "retry budget exhausted",
     });
 
-    // A bare string is deliberately NOT reused: it was never surfaced before, and
-    // this message is stored by fail-scan without redaction.
     await expect(
       runEvents(
         await copyCompletedScan(await temporaryDirectory()),
@@ -957,6 +1012,7 @@ describe("one-shot scan events", () => {
         usage: {
           input_tokens: 10,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
           output_tokens: 3,
           reasoning_output_tokens: 1,
         },
@@ -1001,6 +1057,7 @@ describe("one-shot scan events", () => {
         usage: {
           input_tokens: 10,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
           output_tokens: 3,
           reasoning_output_tokens: 1,
         },
@@ -1052,6 +1109,7 @@ describe("one-shot scan events", () => {
         usage: {
           input_tokens: 10,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
           output_tokens: 3,
           reasoning_output_tokens: 1,
         },
@@ -1103,6 +1161,7 @@ describe("one-shot scan events", () => {
         usage: {
           input_tokens: 10,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
           output_tokens: 3,
           reasoning_output_tokens: 1,
         },
@@ -1150,6 +1209,7 @@ describe("one-shot scan events", () => {
         usage: {
           input_tokens: 10,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
           output_tokens: 3,
           reasoning_output_tokens: 1,
         },

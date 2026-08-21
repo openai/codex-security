@@ -130,6 +130,13 @@ export interface FindingsDocument {
       explanation: string;
       [k: string]: unknown;
     }[];
+    code_evidence?:
+      | {
+          id: string;
+          code: string;
+          [k: string]: unknown;
+        }[]
+      | null;
     rootCause?:
       | {
           summary: string;
@@ -139,11 +146,110 @@ export interface FindingsDocument {
           [k: string]: unknown;
         }
       | string;
+    root_cause?:
+      | {
+          summary?: string;
+          evidenceRefs?: string[];
+          evidence_refs?: string[];
+          code?: string;
+          language?: string;
+          [k: string]: unknown;
+        }
+      | string
+      | null;
     remediation: string;
     validation?: {
+      assertions?: string[];
+      counterEvidence?: string[];
+      evidence?: string | string[];
+      evidenceRefs?: string[];
+      evidence_refs?: string[];
+      limitations?: string[];
+      method?: string;
+      status?: string | null;
+      summary?: string;
+      disposition?: string | null;
+      result?: string | null;
       [k: string]: unknown;
     } | null;
     attackPath?: {
+      assumptions?: string[];
+      blindspots?: string[];
+      controls?: string[];
+      dataFlow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            transformations?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      data_flow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            transformations?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      dataflow?:
+        | string
+        | {
+            summary?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            transformations?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      evidenceRefs?: string[];
+      evidence_refs?: string[];
+      impact?:
+        | string
+        | {
+            level?: string;
+            rationale?: string;
+            why?: string;
+            [k: string]: unknown;
+          }
+        | null;
+      likelihood?:
+        | string
+        | {
+            level?: string;
+            rationale?: string;
+            why?: string;
+            [k: string]: unknown;
+          }
+        | null;
+      limitations?: string[];
+      preconditions?: string[];
+      reachability?:
+        | string
+        | {
+            summary?: string;
+            attacker?: string;
+            entrypoint?: string;
+            source?: string;
+            sink?: string;
+            outcome?: string;
+            preconditions?: string[];
+            evidenceRefs?: string[];
+            evidence_refs?: string[];
+            [k: string]: unknown;
+          };
+      steps?: string[];
+      summary?: string;
       [k: string]: unknown;
     } | null;
     remediationTests?: string[];
@@ -264,9 +370,15 @@ export type FindingValidation = NonNullable<Finding["validation"]>;
 
 export type FindingAttackPath = NonNullable<Finding["attackPath"]>;
 
-export type AttackPathDataflow = ContractObject;
+export type AttackPathDataflow = Extract<
+  NonNullable<FindingAttackPath["dataFlow"]>,
+  object
+>;
 
-export type AttackPathReachability = ContractObject;
+export type AttackPathReachability = Extract<
+  NonNullable<FindingAttackPath["reachability"]>,
+  object
+>;
 
 export type FindingProvenance = Finding["provenance"];
 

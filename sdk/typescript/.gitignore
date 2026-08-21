@@ -1,4 +1,6 @@
 /dist/
 /node_modules
+/reports/
+/.stryker-tmp/
 /private_release/dist/
 /*.tsbuildinfo
