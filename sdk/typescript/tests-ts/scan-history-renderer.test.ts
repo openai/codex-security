@@ -317,3 +317,125 @@ describe("scan history renderer", () => {
     }
   });
 });
+
+describe("scan history renderer resilience", () => {
+  // The workbench response is only checked for being a JSON object
+  // (src/runtime.ts runWorkbench), so a plugin or database that drifts from the
+  // shape this renderer expects must degrade instead of crashing the command.
+  const plain = (
+    result: Parameters<typeof renderScanHistory>[0],
+    command: Parameters<typeof renderScanHistory>[1],
+    options = {},
+  ) =>
+    stripVTControlCharacters(
+      renderScanHistory(result, command, { color: false, ...options }),
+    );
+
+  test("renders comparison findings with a missing or null severity", () => {
+    for (const severity of [undefined, null]) {
+      const text = plain(
+        {
+          beforeScanId: "before-scan",
+          afterScanId: "after-scan",
+          coverage: { afterCompleteness: "complete" },
+          summary: { resolved: 1 },
+          findings: [
+            {
+              ...(severity === undefined ? {} : { severity }),
+              status: "resolved",
+              title: "Reflected XSS in the search handler",
+              locations: [{ path: "src/search.ts", startLine: 10 }],
+            },
+          ],
+        },
+        "compare",
+      );
+      expect(text).toContain("Reflected XSS in the search handler");
+      expect(text).toContain("src/search.ts:10");
+    }
+  });
+
+  test("sorts an unrecognized severity below every known severity", () => {
+    const text = plain(
+      {
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        coverage: { afterCompleteness: "complete" },
+        summary: { new: 2 },
+        findings: [
+          {
+            status: "new",
+            severity: "not-a-severity",
+            title: "Unknown severity finding",
+            path: "a.ts",
+          },
+          {
+            status: "new",
+            severity: "critical",
+            title: "Critical severity finding",
+            path: "b.ts",
+          },
+        ],
+      },
+      "compare",
+    );
+    expect(text.indexOf("Critical severity finding")).toBeLessThan(
+      text.indexOf("Unknown severity finding"),
+    );
+  });
+
+  test("lists scans that carry no progress record", () => {
+    const text = plain(
+      {
+        scans: [
+          {
+            scanId: "11111111-1111-4111-8111-111111111111",
+            targetPath: "/repo",
+            mode: "standard",
+            startedAt: "2026-07-01T00:00:00Z",
+            findingCount: 3,
+          },
+        ],
+      },
+      "list",
+    );
+    expect(text).toContain("11111111-1111-4111-8111-111111111111");
+    expect(text).toContain("UNKNOWN");
+  });
+
+  test("falls back to the raw value for an unparsable knownSince", () => {
+    const text = plain(
+      {
+        scanId: "scan-1",
+        targetPath: "/repo",
+        mode: "standard",
+        progress: { status: "complete" },
+        findings: [
+          {
+            severity: { level: "high" },
+            title: "Path traversal",
+            knownSince: "not-a-timestamp",
+            matches: [
+              {
+                scanId: "older-scan",
+                title: "Path traversal",
+                reason: "same sink",
+              },
+            ],
+            locations: [{ path: "src/fs.ts", startLine: 22 }],
+          },
+        ],
+      },
+      "show",
+      { showLinkedFindings: true },
+    );
+    expect(text).toContain("Known since not-a-timestamp");
+    expect(text).toContain("Path traversal");
+  });
+
+  test("renders every command from an empty payload", () => {
+    for (const command of ["list", "show", "compare", "match-all"] as const) {
+      expect(() => plain({}, command)).not.toThrow();
+    }
+  });
+});
