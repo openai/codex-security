@@ -159,12 +159,31 @@ function isNewerVersion(latest: string, current: string): boolean {
   if (candidate[4] === installed[4]) return false;
   if (candidate[4] === undefined) return true;
   if (installed[4] === undefined) return false;
-  return (
-    new Intl.Collator("en", { numeric: true }).compare(
-      candidate[4],
-      installed[4],
-    ) > 0
-  );
+  return comparePrerelease(candidate[4], installed[4]) > 0;
+}
+
+/** Compare two SemVer prerelease identifiers according to spec precedence. */
+function comparePrerelease(latest: string, current: string): number {
+  const candidate = latest.split(".");
+  const installed = current.split(".");
+  const length = Math.max(candidate.length, installed.length);
+  for (let index = 0; index < length; index += 1) {
+    const candidateId = candidate[index];
+    const installedId = installed[index];
+    if (candidateId === undefined) return -1;
+    if (installedId === undefined) return 1;
+    const candidateNumeric = /^\d+$/u.test(candidateId);
+    const installedNumeric = /^\d+$/u.test(installedId);
+    if (candidateNumeric && installedNumeric) {
+      const difference = Number(candidateId) - Number(installedId);
+      if (difference !== 0) return Math.sign(difference);
+    } else if (candidateNumeric !== installedNumeric) {
+      return candidateNumeric ? -1 : 1;
+    } else if (candidateId !== installedId) {
+      return candidateId < installedId ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
 function packageVersions(url: URL): {

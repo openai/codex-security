@@ -2,12 +2,11 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import { resolvePluginPython } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-test("loads each scan's matching findings once across historical batches", () => {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  expect(python).not.toBeNull();
-  if (python === null) throw new Error("A Python interpreter is required.");
+test("loads each scan's matching findings once across historical batches", async () => {
+  const python = await resolvePluginPython();
 
   const probe = [
     "import argparse, json, sqlite3, sys",
@@ -39,15 +38,14 @@ test("loads each scan's matching findings once across historical batches", () =>
     [
       "-I",
       "-B",
-      "-c",
-      probe,
+      "-",
       join(PLUGIN_ROOT, "scripts"),
       join(tmpdir(), "codex-security-matching-fixture"),
     ],
-    { encoding: "utf8", timeout: 10_000 },
+    { input: probe, encoding: "utf8", timeout: 10_000, windowsHide: true },
   );
 
-  expect(result.status).toBe(0);
+  expect(result.status, result.stderr || result.error?.message).toBe(0);
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toMatchObject({
     backfilled: ["scan-0", "scan-1", "scan-2"],

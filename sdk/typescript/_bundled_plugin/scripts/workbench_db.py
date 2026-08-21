@@ -110,6 +110,7 @@ from workbench_target import (
     git_submodule_paths,
     git_target_metadata,
     git_worktree_context,
+    remediation_checkout_snapshot,
     require_git_worktree_head,
     require_remediation_target,
     require_scan_target_identity,
@@ -602,17 +603,15 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
 
 def require_scope(scope: str, mode: str, target: Path) -> str:
     value = scope.strip() or "."
-    if "\\" in value:
+    requested_scope = Path(value)
+    if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
         raise SystemExit("Scan scope must use repository-relative POSIX paths.")
-    parsed = PurePosixPath(value)
-    if ".." in parsed.parts:
+    if ".." in requested_scope.parts:
         raise SystemExit("Scan scope must stay inside the scanned target.")
     try:
         resolved_scope = (
-            Path(parsed.as_posix()).resolve()
-            if parsed.is_absolute()
-            else (target / parsed.as_posix()).resolve()
-        )
+            requested_scope if requested_scope.is_absolute() else target / requested_scope
+        ).resolve()
         relative_scope = resolved_scope.relative_to(target)
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("Scan scope must stay inside the scanned target.") from exc
@@ -2842,24 +2841,6 @@ def require_pending_remediation_action(current: sqlite3.Row, requested: str) -> 
         )
 
 
-def remediation_checkout_snapshot(
-    scan: sqlite3.Row, *, expected_revision: str | None = None
-) -> tuple[str, str | None]:
-    target = require_scan_target_identity(scan)
-    revision = git_revision(target)
-    required_revision = expected_revision or scan["target_revision"]
-    if revision != required_revision:
-        raise SystemExit(
-            "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
-        )
-    content_digest = (
-        worktree_content_digest(target)
-        if revision != "unversioned"
-        else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
-    )
-    return revision, content_digest
-
-
 def require_reviewed_patch_applied(
     scan: sqlite3.Row, remediation: sqlite3.Row, patch_path: str
 ) -> str | None:
@@ -2924,6 +2905,14 @@ def require_reviewed_patch_applied(
                 work_tree=checkout_root,
             )
         )
+        if reverted_digest != remediation["base_content_digest"] and unversioned:
+            checkout = Path(temporary) / "checkout-lf"
+            copy_directory_excluding(target, checkout, excluded)
+            applied_without_conversion = git_command(
+                checkout, "-c", "core.autocrlf=input", *arguments, text=True
+            )
+            if applied_without_conversion.returncode == 0:
+                reverted_digest = directory_content_digest(checkout)
         if reverted_digest != remediation["base_content_digest"]:
             raise SystemExit(
                 "The selected checkout contains changes outside the reviewed patch. Remove them before recording the patch as applied."
