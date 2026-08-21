@@ -8,13 +8,31 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse, sep } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
+import {
+  estimateScanCost,
+  ScanCostTracker,
+  type ScanSessionEvent,
+} from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
+import { readScanLogs } from "../src/scan-logs.js";
+import { sessionParentThreadId } from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 
 const temporaryDirectories: string[] = [];
+const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
+type SessionParentField = (typeof parentFields)[number];
+
+function parentMetadata(parentThreadId: string, field: SessionParentField) {
+  return field === "source"
+    ? {
+        source: {
+          subagent: { thread_spawn: { parent_thread_id: parentThreadId } },
+        },
+      }
+    : { [field]: parentThreadId };
+}
 
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -47,6 +65,7 @@ async function writeSession(
   parentThreadId?: string,
   workingDirectory?: string,
   timestamp?: string,
+  parentField: SessionParentField = "source",
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
@@ -62,13 +81,7 @@ async function writeSession(
           ...(timestamp === undefined ? {} : { timestamp }),
           ...(parentThreadId === undefined
             ? {}
-            : {
-                source: {
-                  subagent: {
-                    thread_spawn: { parent_thread_id: parentThreadId },
-                  },
-                },
-              }),
+            : parentMetadata(parentThreadId, parentField)),
         },
       }),
       JSON.stringify({
@@ -114,6 +127,47 @@ function progressMessage(
     ],
   };
 }
+
+test.each([
+  [
+    "prefers the spawned parent over legacy parent fields",
+    {
+      source: {
+        subagent: { thread_spawn: { parent_thread_id: "spawn-parent" } },
+      },
+      parent_thread_id: "direct-parent",
+      forked_from_id: "fork-parent",
+    },
+    "spawn-parent",
+  ],
+  [
+    "prefers the direct parent over fork ancestry",
+    { parent_thread_id: "direct-parent", forked_from_id: "fork-parent" },
+    "direct-parent",
+  ],
+  [
+    "falls back from an empty spawned parent to the direct parent",
+    {
+      source: { subagent: { thread_spawn: { parent_thread_id: "" } } },
+      parent_thread_id: "direct-parent",
+    },
+    "direct-parent",
+  ],
+  [
+    "falls back from an empty direct parent to fork ancestry",
+    { parent_thread_id: "", forked_from_id: "fork-parent" },
+    "fork-parent",
+  ],
+  [
+    "ignores a non-string direct parent when fork ancestry is present",
+    { parent_thread_id: null, forked_from_id: "fork-parent" },
+    "fork-parent",
+  ],
+  ["recognizes independent CLI sessions", { source: "cli" }, null],
+  ["treats an empty parent as missing", { forked_from_id: "" }, null],
+] as const)("session parent metadata %s", (_name, metadata, expected) => {
+  expect(sessionParentThreadId(metadata)).toBe(expected);
+});
 
 describe("scan cost", () => {
   test.each([
@@ -180,6 +234,8 @@ describe("scan cost", () => {
     for (const [model, expectedUsd] of [
       ["openai.gpt-5.6", 35],
       ["openai.gpt-5.6-sol", 35],
+      ["openai.gpt-daybreak-blue-latest", 35],
+      ["openai.gpt-daybreak-red-latest", 87.5],
       ["openai.gpt-5.6-terra", 14],
       ["openai.gpt-5.6-luna", 1.4],
     ] as const) {
@@ -192,8 +248,10 @@ describe("scan cost", () => {
     expect(estimateScanCost("openai.unknown-model", usage)).toBeNull();
   });
 
-  test("uses current Terra and Luna input, cache, and output rates", () => {
+  test("uses current input, cache, and output rates", () => {
     for (const [model, input, cached, write, output] of [
+      ["gpt-daybreak-blue-latest", 5, 0.5, 6.25, 30],
+      ["gpt-daybreak-red-latest", 12.5, 1.25, 15.625, 75],
       ["gpt-5.6-terra", 2, 0.2, 2.5, 12],
       ["gpt-5.6-luna", 0.2, 0.02, 0.25, 1.2],
     ] as const) {
@@ -419,14 +477,14 @@ describe("live scan cost tracking", () => {
 
   test("counts the scan and delegated workers without including other scans", async () => {
     const home = await codexHome();
-    await writeSession(home, "scan-thread", {
+    const parent = await writeSession(home, "scan-thread", {
       input_tokens: 1_000,
       cached_input_tokens: 100,
       cache_write_input_tokens: 200,
       output_tokens: 10,
       reasoning_output_tokens: 2,
     });
-    await writeSession(
+    const worker = await writeSession(
       home,
       "worker-thread",
       {
@@ -441,11 +499,24 @@ describe("live scan cost tracking", () => {
       input_tokens: 1_000_000,
       output_tokens: 1_000_000,
     });
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
+    await waitFor(() => events.length === 4);
+    await appendFile(
+      parent,
+      `${JSON.stringify({ type: "turn_context", payload: { instructions: "Check authorization" } })}\n`,
+    );
+    await appendSessionItem(worker, {
+      type: "function_call",
+      name: "spawn_agent",
+    });
+    await tracker.refresh();
+    await tracker.refresh();
 
     expect(await tracker.stop()).toEqual({
       usage: {
@@ -465,267 +536,576 @@ describe("live scan cost tracking", () => {
         estimatedUsd: 0.006275,
       },
     });
+    expect(
+      events.map(({ threadId, parentThreadId, event }) => [
+        threadId,
+        parentThreadId,
+        event["type"],
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        ["scan-thread", null, "session_meta"],
+        ["scan-thread", null, "event_msg"],
+        ["worker-thread", "scan-thread", "session_meta"],
+        ["worker-thread", "scan-thread", "event_msg"],
+        ["scan-thread", null, "turn_context"],
+        ["worker-thread", "scan-thread", "response_item"],
+      ]),
+    );
+    expect(events).toHaveLength(6);
   });
 
-  test("counts independent Deep workers inside the scan directory only", async () => {
-    const home = await codexHome();
-    const scanDirectory = join(home, "scans", "current");
-    await writeSession(
-      home,
-      "scan-thread",
-      { input_tokens: 1_000, output_tokens: 10 },
-      undefined,
-      scanDirectory,
-      "2026-07-26T12:00:00Z",
-    );
-    await writeSession(
-      home,
-      "deep-worker",
-      { input_tokens: 250, output_tokens: 2 },
-      undefined,
-      join(
+  test.each(["parent", "main"] as const)(
+    "replays early worker events when the %s session arrives later",
+    async (missing) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scan");
+      const usage = { input_tokens: 10, output_tokens: 1 };
+      const writeMain = () =>
+        writeSession(
+          home,
+          "scan-thread",
+          usage,
+          undefined,
+          scanDirectory,
+          "2026-07-26T12:00:00Z",
+        );
+      if (missing === "parent") await writeMain();
+      const worker = await writeSession(
+        home,
+        "worker-thread",
+        usage,
+        missing === "parent" ? "parent-worker" : undefined,
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "one",
+          "output",
+        ),
+        "2026-07-26T12:01:00Z",
+      );
+      const message = (text: string) => ({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      });
+      await appendSessionItem(worker, message("Early worker output."));
+      const unrelated = await writeSession(home, "unrelated-thread", usage);
+      await appendSessionItem(unrelated, message("Unrelated output."));
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
         scanDirectory,
-        "artifacts",
+        model: "gpt-5.6-sol",
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      expect(events.some((event) => event.threadId === "worker-thread")).toBe(
+        false,
+      );
+
+      if (missing === "parent") {
+        await writeSession(home, "parent-worker", usage, "scan-thread");
+      } else {
+        await writeMain();
+      }
+      await appendSessionItem(worker, message("Late worker output."));
+      await tracker.refresh();
+      await tracker.refresh();
+      await tracker.stop();
+
+      const workerEvents = events.filter(
+        (event) => event.threadId === "worker-thread",
+      );
+      expect(workerEvents.map((event) => event.event)).toEqual([
+        expect.objectContaining({ type: "session_meta" }),
+        expect.objectContaining({ type: "event_msg" }),
+        { type: "response_item", payload: message("Early worker output.") },
+        { type: "response_item", payload: message("Late worker output.") },
+      ]);
+      expect(new Set(workerEvents.map((event) => event.worker))).toEqual(
+        new Set([1]),
+      );
+      expect(
+        events.some((event) => event.threadId === "unrelated-thread"),
+      ).toBe(false);
+    },
+  );
+
+  test.each([...parentFields])(
+    "counts independent Deep workers and %s descendants",
+    async (parentField) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scans", "current");
+      const artifacts = join(scanDirectory, "artifacts");
+      const workerDirectory = join(
+        artifacts,
         "deep_discovery",
         "workers",
         "worker",
         "output",
-      ),
-      "2026-07-26T12:01:00Z",
-    );
-    await writeSession(
-      home,
-      "deep-reducer",
-      { input_tokens: 125, output_tokens: 1 },
-      undefined,
-      join(scanDirectory, "artifacts"),
-      "2026-07-26T12:02:00Z",
-    );
-    await writeSession(
-      home,
-      "deep-worker-child",
-      { input_tokens: 50, output_tokens: 1 },
-      "deep-worker",
-    );
-    await writeSession(
-      home,
-      "unrelated-thread",
-      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-      undefined,
-      `${scanDirectory}-other`,
-    );
-    await writeSession(
-      home,
-      "previous-scan",
-      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-      undefined,
-      join(scanDirectory, "artifacts", "deep_discovery", "previous-worker"),
-      "2026-07-26T11:59:00Z",
-    );
-    await writeSession(
-      home,
-      "unknown-start",
-      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-      undefined,
-      join(
+      );
+      await writeSession(
+        home,
+        "scan-thread",
+        { input_tokens: 1_000, output_tokens: 10 },
+        undefined,
         scanDirectory,
-        "artifacts",
-        "deep_discovery",
-        "workers",
-        "stale",
-        "output",
-      ),
-    );
-    await writeSession(
-      home,
-      "nested-scan",
-      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        "2026-07-26T12:00:00.900Z",
+      );
+      await writeSession(
+        home,
+        "deep-worker",
+        { input_tokens: 250, output_tokens: 2 },
+        undefined,
+        process.platform === "win32"
+          ? workerDirectory.toUpperCase()
+          : workerDirectory,
+        "2026-07-26T12:00:00.900Z",
+      );
+      await writeSession(
+        home,
+        "deep-reducer",
+        { input_tokens: 125, output_tokens: 1 },
+        undefined,
+        (process.platform === "win32" ? artifacts.toUpperCase() : artifacts) +
+          sep,
+        "2026-07-26T12:02:00Z",
+      );
+      await writeSession(
+        home,
+        "deep-worker-child",
+        { input_tokens: 50, output_tokens: 1 },
+        "deep-worker",
+        undefined,
+        undefined,
+        parentField,
+      );
+      await writeSession(
+        home,
+        "unrelated-thread",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        undefined,
+        `${scanDirectory}-other`,
+      );
+      await writeSession(
+        home,
+        "previous-scan",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        undefined,
+        join(scanDirectory, "artifacts", "deep_discovery", "previous-worker"),
+        "2026-07-26T11:59:00Z",
+      );
+      await writeSession(
+        home,
+        "unknown-start",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        undefined,
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "stale",
+          "output",
+        ),
+      );
+      await writeSession(
+        home,
+        "nested-scan",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        undefined,
+        join(scanDirectory, "nested", "artifacts"),
+        "2026-07-26T12:03:00Z",
+      );
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        scanDirectory,
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+
+      expect((await tracker.stop()).usage).toMatchObject({
+        input_tokens: 1_425,
+        output_tokens: 14,
+      });
+      const labels = new Map(
+        events.map(({ threadId, worker }) => [threadId, worker]),
+      );
+      expect(new Set(labels.keys())).toEqual(
+        new Set([
+          "scan-thread",
+          "deep-worker",
+          "deep-reducer",
+          "deep-worker-child",
+        ]),
+      );
+      expect(labels.get("scan-thread")).toBeUndefined();
+      expect(
+        [...labels.values()].filter((worker) => worker !== undefined).sort(),
+      ).toEqual([1, 2, 3]);
+      const logs = await readScanLogs({
+        scanId: "scan-example",
+        threadId: "scan-thread",
+        codexHome: home,
+        scanDirectory,
+      });
+      expect(new Set(logs.sessions.map(({ threadId }) => threadId))).toEqual(
+        new Set(labels.keys()),
+      );
+    },
+  );
+
+  test.each([
+    [
+      "sessions beside the deep worker output directories",
+      (scan: string) => join(scan, "artifacts", "deep_discovery", "output"),
+      "2026-07-26T12:02:00Z",
       undefined,
-      join(scanDirectory, "nested", "artifacts"),
-      "2026-07-26T12:03:00Z",
-    );
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      model: "gpt-5.6-sol",
-      scanDirectory,
-    });
-    tracker.start("scan-thread");
+      "source",
+    ],
+    [
+      "sessions on another Windows drive",
+      (scan: string) =>
+        parse(scan).root.toLowerCase().startsWith("c:")
+          ? "D:\\output"
+          : "C:\\output",
+      "2026-07-26T12:02:00Z",
+      undefined,
+      "source",
+    ],
+    [
+      "sessions earlier in the same second",
+      (scan: string) => join(scan, "artifacts"),
+      "2026-07-26T12:00:00.100Z",
+      undefined,
+      "source",
+    ],
+    [
+      "sessions with an invalid timestamp",
+      (scan: string) => join(scan, "artifacts"),
+      "not-a-timestamp",
+      undefined,
+      "source",
+    ],
+    [
+      "sessions with an unrelated parent",
+      (scan: string) => join(scan, "artifacts"),
+      "2026-07-26T12:02:00Z",
+      "unrelated-parent",
+      "source",
+    ],
+    [
+      "sessions with an unrelated direct parent",
+      (scan: string) => join(scan, "artifacts"),
+      "2026-07-26T12:02:00Z",
+      "unrelated-parent",
+      "parent_thread_id",
+    ],
+    [
+      "sessions forked from an unrelated parent",
+      (scan: string) => join(scan, "artifacts"),
+      "2026-07-26T12:02:00Z",
+      "unrelated-parent",
+      "forked_from_id",
+    ],
+  ] as const)(
+    "excludes %s from scan cost and logs",
+    async (_name, workingDirectory, timestamp, parentThreadId, parentField) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scans", "current");
+      await writeSession(
+        home,
+        "scan-thread",
+        { input_tokens: 1_000, output_tokens: 10 },
+        undefined,
+        scanDirectory,
+        "2026-07-26T12:00:00.900Z",
+      );
+      await writeSession(
+        home,
+        "deep-worker",
+        { input_tokens: 250, output_tokens: 2 },
+        undefined,
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "worker",
+          "output",
+        ),
+        "2026-07-26T12:00:00.950Z",
+      );
+      await writeSession(
+        home,
+        "bystander",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        parentThreadId,
+        workingDirectory(scanDirectory),
+        timestamp,
+        parentField,
+      );
+      await writeSession(
+        home,
+        "bystander-child",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        "bystander",
+      );
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        scanDirectory,
+        maxCostUsd: 0.01,
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
 
-    expect((await tracker.stop()).usage).toMatchObject({
-      input_tokens: 1_425,
-      output_tokens: 14,
-    });
-  });
+      const snapshot = await tracker.stop();
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 1_250,
+        output_tokens: 12,
+      });
+      expect(snapshot.cost?.estimatedUsd).toBe(0.00661);
+      const included = [
+        ...new Set(events.map(({ threadId }) => threadId)),
+      ].sort();
+      expect(included).toEqual(["deep-worker", "scan-thread"]);
+      const logs = await readScanLogs({
+        scanId: "scan-example",
+        threadId: "scan-thread",
+        codexHome: home,
+        scanDirectory,
+      });
+      expect(logs.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        included,
+      );
+    },
+  );
 
-  test("ignores replayed parent history in forked worker sessions", async () => {
-    const home = await codexHome();
-    const inherited = {
-      input_tokens: 1_000,
-      cached_input_tokens: 500,
-      cache_write_input_tokens: 100,
-      output_tokens: 100,
-      reasoning_output_tokens: 20,
-    };
-    await writeSession(home, "scan-thread", inherited);
-    const worker = await writeSession(home, "worker-thread", inherited);
-    const command =
-      'rg "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"';
+  test.each([undefined, "not-a-timestamp"])(
+    "does not infer independent workers when the scan timestamp is %s",
+    async (timestamp) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scan");
+      await writeSession(
+        home,
+        "scan-thread",
+        { input_tokens: 1_000, output_tokens: 10 },
+        undefined,
+        scanDirectory,
+        timestamp,
+      );
+      await writeSession(
+        home,
+        "independent-worker",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        undefined,
+        join(scanDirectory, "artifacts"),
+        "2026-07-26T12:01:00Z",
+      );
+      await writeSession(
+        home,
+        "child-worker",
+        { input_tokens: 250, output_tokens: 2 },
+        "scan-thread",
+      );
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        scanDirectory,
+      });
+      tracker.start("scan-thread");
+      expect((await tracker.stop()).usage).toMatchObject({
+        input_tokens: 1_250,
+        output_tokens: 12,
+      });
+    },
+  );
 
-    await writeFile(
-      worker,
-      [
-        {
-          type: "session_meta",
-          payload: {
-            id: "worker-thread",
-            timestamp: "2026-07-26T12:02:00.250Z",
-            source: {
-              subagent: {
-                thread_spawn: { parent_thread_id: "scan-thread" },
+  test.each([...parentFields])(
+    "ignores replayed parent history in %s worker sessions",
+    async (parentField) => {
+      const home = await codexHome();
+      const inherited = {
+        input_tokens: 1_000,
+        cached_input_tokens: 500,
+        cache_write_input_tokens: 100,
+        output_tokens: 100,
+        reasoning_output_tokens: 20,
+      };
+      await writeSession(home, "scan-thread", inherited);
+      const worker = await writeSession(home, "worker-thread", inherited);
+      const command =
+        'rg "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"';
+
+      await writeFile(
+        worker,
+        [
+          {
+            type: "session_meta",
+            payload: {
+              id: "worker-thread",
+              timestamp: "2026-07-26T12:02:00.250Z",
+              ...parentMetadata("scan-thread", parentField),
+            },
+          },
+          {
+            type: "session_meta",
+            payload: {
+              id: "scan-thread",
+              timestamp: "2026-07-26T12:00:00.000Z",
+              source: "exec",
+            },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "task_started", started_at: 1_785_067_200 },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "agent_message",
+              message: "Inherited parent commentary.",
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "function_call",
+              name: "exec_command",
+              call_id: "inherited-search",
+              arguments: JSON.stringify({ cmd: command }),
+            },
+          },
+          { type: "response_item", payload: progressMessage(7) },
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: { total_token_usage: inherited },
+            },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "task_started", started_at: 1_785_067_320 },
+          },
+          {
+            type: "event_msg",
+            timestamp: "2026-07-26T12:02:01.000Z",
+            payload: {
+              type: "agent_message",
+              message: "Reviewing the login query.",
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "function_call",
+              name: "exec_command",
+              call_id: "worker-search",
+              arguments: JSON.stringify({ cmd: command }),
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "function_call_output",
+              call_id: "worker-search",
+              output:
+                "Batch reviewed.\n" +
+                'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+            },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: 1_300,
+                  cached_input_tokens: 650,
+                  cache_write_input_tokens: 150,
+                  output_tokens: 130,
+                  reasoning_output_tokens: 30,
+                },
               },
             },
           },
-        },
-        {
-          type: "session_meta",
-          payload: {
-            id: "scan-thread",
-            timestamp: "2026-07-26T12:00:00.000Z",
-            source: "exec",
-          },
-        },
-        {
-          type: "event_msg",
-          payload: { type: "task_started", started_at: 1_785_067_200 },
-        },
-        {
-          type: "event_msg",
-          payload: {
-            type: "agent_message",
-            message: "Inherited parent commentary.",
-          },
-        },
-        {
-          type: "response_item",
-          payload: {
-            type: "function_call",
-            name: "exec_command",
-            call_id: "inherited-search",
-            arguments: JSON.stringify({ cmd: command }),
-          },
-        },
-        { type: "response_item", payload: progressMessage(7) },
-        {
-          type: "event_msg",
-          payload: {
-            type: "token_count",
-            info: { total_token_usage: inherited },
-          },
-        },
-        {
-          type: "event_msg",
-          payload: { type: "task_started", started_at: 1_785_067_320 },
-        },
-        {
-          type: "event_msg",
-          timestamp: "2026-07-26T12:02:01.000Z",
-          payload: {
-            type: "agent_message",
-            message: "Reviewing the login query.",
-          },
-        },
-        {
-          type: "response_item",
-          payload: {
-            type: "function_call",
-            name: "exec_command",
-            call_id: "worker-search",
-            arguments: JSON.stringify({ cmd: command }),
-          },
-        },
-        {
-          type: "response_item",
-          payload: {
-            type: "function_call_output",
-            call_id: "worker-search",
-            output:
-              "Batch reviewed.\n" +
-              'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-          },
-        },
-        {
-          type: "event_msg",
-          payload: {
-            type: "token_count",
-            info: {
-              total_token_usage: {
-                input_tokens: 1_300,
-                cached_input_tokens: 650,
-                cache_write_input_tokens: 150,
-                output_tokens: 130,
-                reasoning_output_tokens: 30,
-              },
-            },
-          },
-        },
-      ]
-        .map((event) => JSON.stringify(event))
-        .join("\n") + "\n",
-    );
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
 
-    const activities: ScanActivity[] = [];
-    const progress: ScanProgress[] = [];
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      model: "gpt-5.6-terra",
-      repository: "/code/juice-shop",
-      expectedFilesTotal: 8,
-      onActivity: (activity) => activities.push(activity),
-      onProgress: (update) => progress.push(update),
-    });
-    tracker.start("scan-thread");
-
-    expect(await tracker.stop()).toEqual({
-      usage: {
-        input_tokens: 1_300,
-        cached_input_tokens: 650,
-        cache_write_input_tokens: 150,
-        output_tokens: 130,
-        reasoning_output_tokens: 30,
-        total_tokens: 1_430,
-      },
-      cost: {
+      const activities: ScanActivity[] = [];
+      const progress: ScanProgress[] = [];
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
         model: "gpt-5.6-terra",
-        inputTokens: 1_300,
-        cachedInputTokens: 650,
-        cacheWriteInputTokens: 150,
-        outputTokens: 130,
-        estimatedUsd: 0.003065,
-      },
-    });
-    expect(activities).toEqual([
-      expect.objectContaining({
-        kind: "message",
-        description: "Reviewing the login query.",
-        worker: 1,
-      }),
-      expect.objectContaining({
-        id: "worker-thread:worker-search",
-        kind: "command",
-        status: "running",
-        worker: 1,
-      }),
-      expect.objectContaining({
-        id: "worker-thread:worker-search",
-        kind: "command",
-        status: "completed",
-        worker: 1,
-      }),
-    ]);
-    expect(progress).toEqual([
-      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
-    ]);
-  });
+        repository: "/code/juice-shop",
+        expectedFilesTotal: 8,
+        onActivity: (activity) => activities.push(activity),
+        onProgress: (update) => progress.push(update),
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+
+      expect(await tracker.stop()).toEqual({
+        usage: {
+          input_tokens: 1_300,
+          cached_input_tokens: 650,
+          cache_write_input_tokens: 150,
+          output_tokens: 130,
+          reasoning_output_tokens: 30,
+          total_tokens: 1_430,
+        },
+        cost: {
+          model: "gpt-5.6-terra",
+          inputTokens: 1_300,
+          cachedInputTokens: 650,
+          cacheWriteInputTokens: 150,
+          outputTokens: 130,
+          estimatedUsd: 0.003065,
+        },
+      });
+      expect(activities).toEqual([
+        expect.objectContaining({
+          kind: "message",
+          description: "Reviewing the login query.",
+          worker: 1,
+        }),
+        expect.objectContaining({
+          id: "worker-thread:worker-search",
+          kind: "command",
+          status: "running",
+          worker: 1,
+        }),
+        expect.objectContaining({
+          id: "worker-thread:worker-search",
+          kind: "command",
+          status: "completed",
+          worker: 1,
+        }),
+      ]);
+      expect(progress).toEqual([
+        { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
+      ]);
+      const workerEvents = events.filter(
+        ({ threadId }) => threadId === "worker-thread",
+      );
+      expect(workerEvents).toHaveLength(6);
+      expect(JSON.stringify(workerEvents)).not.toContain(
+        "Inherited parent commentary.",
+      );
+    },
+  );
 
   test("forwards actions from this scan's delegated workers only", async () => {
     const home = await codexHome();
@@ -759,11 +1139,13 @@ describe("live scan cost tracking", () => {
     }
 
     const activities: ScanActivity[] = [];
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
       repository: "/code/juice-shop",
       onActivity: (activity) => activities.push(activity),
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
     await tracker.stop();
@@ -786,6 +1168,14 @@ describe("live scan cost tracking", () => {
         worker: 1,
       },
     ]);
+    expect(
+      new Map(events.map(({ threadId, worker }) => [threadId, worker])),
+    ).toEqual(
+      new Map([
+        ["scan-thread", undefined],
+        ["worker-thread", 1],
+      ]),
+    );
   });
 
   test("forwards genuine worker reasoning and transcript text", async () => {
@@ -1513,9 +1903,11 @@ describe("live scan cost tracking", () => {
       input_tokens: 100,
       output_tokens: 10,
     });
+    const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
+      onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
     await tracker.refresh();
@@ -1532,9 +1924,12 @@ describe("live scan cost tracking", () => {
     const padding = " ".repeat(128 * 1_024);
     await appendFile(path, `${padding}${event.slice(0, 40)}`);
     expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+    expect(events).toHaveLength(2);
 
     await appendFile(path, `${event.slice(40)}\n`);
     expect((await tracker.stop()).cost?.inputTokens).toBe(250);
+    expect(events).toHaveLength(3);
+    expect(events.at(-1)?.event).toEqual(JSON.parse(event));
   });
 
   test("reads session events larger than 16 MiB", async () => {

@@ -1,5 +1,5 @@
 {
-  "include": ["src/**/*.ts", "tests-ts/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "tests-ts/**/*.ts"],
   "exclude": ["dist", "node_modules", "tests-ts/package.test.ts"],
   "compilerOptions": {
     "allowJs": false,
@@ -9,6 +9,7 @@
     "forceConsistentCasingInFileNames": true,
     "incremental": true,
     "isolatedModules": true,
+    "jsx": "react-jsx",
     "lib": ["esnext"],
     "module": "esnext",
     "moduleResolution": "bundler",
