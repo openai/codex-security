@@ -1,4 +1,4 @@
-import { formatUsd, type ScanCost } from "./cost.js";
+import { formatUsd, type ScanCost } from "./cost-model.js";
 
 /** Returns the original error message without altering its contents. */
 export function errorMessage(error: unknown): string {

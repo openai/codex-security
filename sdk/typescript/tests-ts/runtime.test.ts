@@ -14,6 +14,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -2358,6 +2359,39 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(lock)).toBe(true);
     await release();
     expect(existsSync(lock)).toBe(false);
+  });
+
+  test("recovers credential-home locks whose owner names no process", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    for (const pid of [0, -1, 0.5, 2 ** 31, 2 ** 53]) {
+      await mkdir(lock, { mode: 0o700 });
+      await writeFile(
+        join(lock, "owner.json"),
+        `${JSON.stringify({ pid, token: "unidentifiable-owner" })}\n`,
+        { mode: 0o600 },
+      );
+      const aged = new Date(Date.now() - 10 * 60_000);
+      await utimes(lock, aged, aged);
+
+      // Bound acquisition so a false live-owner result cannot hang the test.
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 5_000);
+      try {
+        const release = await acquireCodexSecurityCredentialHomeLock(
+          home,
+          abort.signal,
+        );
+        expect(existsSync(lock)).toBe(true);
+        await release();
+      } finally {
+        clearTimeout(timer);
+      }
+      expect(existsSync(lock)).toBe(false);
+    }
   });
 
   test("prevents ambient credential imports after an explicit logout", async () => {

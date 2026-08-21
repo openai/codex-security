@@ -42,7 +42,15 @@ Use this guidance whenever reproducing the finding, running tests, or validating
 - Do not stop a progressing command merely because it is slow. Inspect process state, logs, artifacts, or resource use first.
 - If runtime validation remains unavailable, use the strongest targeted static or harness-based artifact that preserves the real integration boundary. Do not substitute a simplified harness that removes the behavior being protected. Record every unrun check as unknown.
 
-## Workflow
+## Pre-Patch Investigation
+
+The parent agent owns the patch and independently traces the reported path. Before editing, launch one fresh read-only agent with `fork_turns: "none"` when delegation is available. If delegation is unavailable, perform the same perspective as a separate pass:
+
+- **Security-boundary and compatibility investigator:** Independently trace the source-to-sink path and identify the shared enforcement boundary, affected entry points, alternate representations or lifecycle states, parser and validation-to-use transitions, concrete sibling paths, and source-backed bypass risks. Establish the legitimate workflows and public behavior that must remain, then inspect callers, implementations, optional modes, errors, side effects, repository conventions, existing helpers, and focused validation commands for integration constraints.
+
+The investigation requires repository-relative evidence and a clear separation between facts, inferences, and unresolved questions. When it completes, reconcile its findings with the parent's investigation and choose the patch boundary.
+
+## Implementation Workflow
 
 1. Revalidate and scope the finding.
    - Inspect repository instructions, affected code, direct callers, and only the context needed to prove the vulnerable path.
@@ -75,6 +83,14 @@ Use this guidance whenever reproducing the finding, running tests, or validating
    - Confirm the regression check would fail if the security change were removed, when practical.
    - Treat a failed earlier gate as disqualifying. Revise only the candidate changes or return `blocked`; never compensate for failed security closure or behavior preservation with style, smaller scope, or additional reporting.
 6. Report the outcome with exact commands, results, changed files, and remaining risk.
+
+## Patch Candidate Review
+
+After implementing and running focused checks, launch one fresh read-only agent with `fork_turns: "none"` when delegation is available. Give it only the finding, repository root, authorized scope, repository policy, and current candidate diff; do not provide the patch rationale, investigator report, or claims that tests passed. If delegation is unavailable, perform the same review perspective as a separate pass before final verification. In either case, use the following assignment:
+
+- **Bypass and regression reviewer:** Reconstruct the invariant and look for a concrete surviving route through affected entry points, equivalent representations, parser boundaries, aliases, backend or platform variants, and validation-to-use gaps. Trace changed conditions and direct callers for concrete breakage of legitimate inputs, public contracts, errors, side effects, state transitions, optional modes, compatibility, resource behavior, and repository conventions.
+
+The reviewer must not edit or delegate. Report only concrete, source-backed bypasses or regressions and explain how each can be verified. Treat reviewer findings as hypotheses: confirm them against the source or focused execution before revising the implementation. Address only confirmed issues within the finding and compatibility boundary; do not broaden into speculative concerns or redesign. Then rerun relevant verification and ensure no temporary or unrelated changes remain. Perform only one review cycle.
 
 ## Workbench Remediation Stages
 
