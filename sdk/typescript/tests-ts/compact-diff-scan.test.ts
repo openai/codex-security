@@ -434,7 +434,7 @@ describe("compact diff scan", () => {
       const scanId = (started["scan"] as JsonObject)["scanId"] as string;
       const preflightChecks = Array.from({ length: 32 }, (_, index) => ({
         capability: `windows_process_boundary_${index}`,
-        reason: "x".repeat(1_200),
+        reason: "é".repeat(1_200),
         severity: "warn",
         status: "fail",
       }));
@@ -452,13 +452,13 @@ describe("compact diff scan", () => {
     }
   });
 
-  test("streams oversized user context through the MCP workbench", async () => {
+  test("streams oversized option-like user context through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
     mkdirSync(join(root, "scans"));
     mkdirSync(join(root, "state"));
     const client = await startMcp(root);
-    const userContext = "x".repeat(64 * 1_024);
+    const userContext = `--${"é".repeat(64 * 1_024)}`;
 
     try {
       const selection = {

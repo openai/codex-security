@@ -321,13 +321,7 @@ def parse_args(description: str) -> argparse.Namespace:
         publication.add_argument("--input-file", required=True)
 
     subparsers.add_parser("database-info")
-    arguments = sys.argv[1:]
-    if "--user-context-stdin" in arguments:
-        if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
-            parser.error("pass exactly one user-context transport")
-        index = arguments.index("--user-context-stdin")
-        arguments[index : index + 1] = ["--user-context", sys.stdin.read()]
-    return parser.parse_args(arguments)
+    return parser.parse_args()
 
 
 def non_negative_int(value: str) -> int:

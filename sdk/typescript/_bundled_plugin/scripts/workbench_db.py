@@ -3808,6 +3808,8 @@ def reject_non_finite_json(value: str) -> None:
 
 
 def main() -> None:
+    # Workbench callers send UTF-8 even when Windows uses a legacy code page.
+    sys.stdin.reconfigure(encoding="utf-8")
     args = parse_args(__doc__)
     deep_scan.configure(
         deep_scan.DeepScanDependencies(

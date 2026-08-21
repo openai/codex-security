@@ -133,7 +133,10 @@ async function startDraftScan(
     process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
 
-  const target = join(root, "repository");
+  const target = join(
+    root,
+    recipeFromStdin ? "répository-日本語" : "repository",
+  );
   const scanDir = join(root, "scan");
   await mkdir(join(target, "src"), { recursive: true });
   await writeFile(join(target, "src", "extract.py"), "# fixture\n");
@@ -247,12 +250,18 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
-  test("registers a scan recipe delivered through stdin", async () => {
+  test("registers a Unicode scan recipe delivered through stdin", async () => {
     const fixture = await startDraftScan("directory", true);
     expect(fixture.registration).toMatchObject({
       scanDir: fixture.scanDir,
       targetRevision: "unversioned",
     });
+    const saved = await workbench(fixture, [
+      "get-scan-recipe",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect(saved["recipe"]).toMatchObject({ repository: fixture.repository });
   });
 
   test("rejoins a headless scan after its stdin context is cleared", async () => {
