@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -33,8 +32,8 @@ test("loads each scan's matching findings once across historical batches", async
     "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': sum('FROM finding_occurrences AS occurrences' in query for query in queries)}))",
   ].join("\n");
 
-  const result = spawnSync(
-    python,
+  const result = await runCodexCommand(
+    { command: python },
     [
       "-I",
       "-B",
@@ -42,10 +41,12 @@ test("loads each scan's matching findings once across historical batches", async
       join(PLUGIN_ROOT, "scripts"),
       join(tmpdir(), "codex-security-matching-fixture"),
     ],
-    { input: probe, encoding: "utf8", timeout: 10_000, windowsHide: true },
+    process.env,
+    probe,
+    AbortSignal.timeout(10_000),
   );
 
-  expect(result.status, result.stderr || result.error?.message).toBe(0);
+  expect(result.exitCode, result.stderr).toBe(0);
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toMatchObject({
     backfilled: ["scan-0", "scan-1", "scan-2"],
