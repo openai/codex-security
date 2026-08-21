@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
+import type { ScanActivity } from "../src/scan-activity.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -135,12 +136,17 @@ async function fixture(count = 1) {
   };
 }
 
-async function* responseEvents(value: unknown): AsyncGenerator<ThreadEvent> {
+async function* responseEvents(
+  value: unknown,
+  activity?: string,
+): AsyncGenerator<ThreadEvent> {
   for await (const event of completedEvents()) {
     if (
       event.type === "item.completed" &&
       event.item.type === "agent_message"
     ) {
+      if (activity !== undefined)
+        yield { ...event, item: { ...event.item, text: activity } };
       yield { ...event, item: { ...event.item, text: JSON.stringify(value) } };
     } else yield event;
   }
@@ -353,6 +359,8 @@ describe("custom validation", () => {
       let turns = 0;
       const workingDirectories: Array<string | undefined> = [];
       const commands: string[] = [];
+      const activities: ScanActivity[] = [];
+      const validationActivity = "Synthetic validation activity.";
       const workbench = (args: readonly string[], input?: string) =>
         runWorkbench(
           {
@@ -431,7 +439,63 @@ describe("custom validation", () => {
                       output.reason =
                         "The validation environment did not start.";
                     }
-                    return { events: responseEvents(output) };
+                    if (scenario === "standard") {
+                      await mkdir(join(codexHome, "sessions"), {
+                        recursive: true,
+                      });
+                      for (const [id, cwd] of [
+                        ["thread-1", scanDir],
+                        ["validation-thread", join(scanDir, "artifacts")],
+                      ]) {
+                        const records = [
+                          {
+                            type: "session_meta",
+                            payload: {
+                              id,
+                              cwd,
+                              timestamp: "2026-08-21T00:00:00Z",
+                            },
+                          },
+                          {
+                            type: "event_msg",
+                            payload: {
+                              type: "token_count",
+                              info: {
+                                total_token_usage: {
+                                  input_tokens: 10,
+                                  output_tokens: 3,
+                                },
+                              },
+                            },
+                          },
+                          ...(id === "validation-thread"
+                            ? [
+                                {
+                                  type: "event_msg",
+                                  payload: {
+                                    type: "agent_message",
+                                    message: validationActivity,
+                                  },
+                                },
+                              ]
+                            : []),
+                        ];
+                        await writeFile(
+                          join(codexHome, "sessions", `rollout-${id}.jsonl`),
+                          records
+                            .map((record) => JSON.stringify(record))
+                            .join("\n") + "\n",
+                        );
+                      }
+                    }
+                    return {
+                      events: responseEvents(
+                        output,
+                        scenario === "standard"
+                          ? validationActivity
+                          : undefined,
+                      ),
+                    };
                   },
                 };
               },
@@ -451,6 +515,7 @@ describe("custom validation", () => {
       try {
         const pending = client.run(repository, {
           validationPrompt: workflow,
+          onActivity: (activity) => activities.push(activity),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
         if (scenario === "incomplete") {
@@ -472,6 +537,14 @@ describe("custom validation", () => {
           return;
         }
         const completed = await pending;
+        if (scenario === "standard") {
+          expect(
+            activities.filter(
+              ({ description }) => description === validationActivity,
+            ),
+          ).toHaveLength(1);
+          expect(completed.cost?.inputTokens).toBe(20);
+        }
         expect(turns).toBe(count === 0 ? 1 : 2);
         expect(workingDirectories).toEqual(
           count === 0 ? [scanDir] : [scanDir, join(scanDir, "artifacts")],

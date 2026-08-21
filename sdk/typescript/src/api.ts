@@ -1063,19 +1063,6 @@ export class CodexSecurity {
                       signal,
                     })
                   ).events,
-                  onEvent: (event) => {
-                    for (const activity of scanActivitiesFromEvent(
-                      event,
-                      repo,
-                    )) {
-                      notifyObserver(
-                        "onActivity",
-                        options.onActivity,
-                        options.onObserverError,
-                        activity,
-                      );
-                    }
-                  },
                   onReconnect: (message, attempts) =>
                     notifyObserver(
                       "onReconnect",
