@@ -14,6 +14,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -2360,6 +2361,39 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
+  test("recovers credential-home locks whose owner names no process", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    for (const pid of [0, -1, 0.5, 2 ** 31, 2 ** 53]) {
+      await mkdir(lock, { mode: 0o700 });
+      await writeFile(
+        join(lock, "owner.json"),
+        `${JSON.stringify({ pid, token: "unidentifiable-owner" })}\n`,
+        { mode: 0o600 },
+      );
+      const aged = new Date(Date.now() - 10 * 60_000);
+      await utimes(lock, aged, aged);
+
+      // Bound acquisition so a false live-owner result cannot hang the test.
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 5_000);
+      try {
+        const release = await acquireCodexSecurityCredentialHomeLock(
+          home,
+          abort.signal,
+        );
+        expect(existsSync(lock)).toBe(true);
+        await release();
+      } finally {
+        clearTimeout(timer);
+      }
+      expect(existsSync(lock)).toBe(false);
+    }
+  });
+
   test("prevents ambient credential imports after an explicit logout", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({
@@ -3893,7 +3927,8 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert os.environ.get('CODEX_API_KEY') is None",
         "assert os.environ.get('OPENROUTER_API_KEY') is None",
         "assert os.environ.get('FIREWORKS_API_KEY') is None",
-        "print(json.dumps({'ok': True, 'details': 'x' * (5 * 1024 * 1024)}))",
+        "payload = sys.stdin.read()",
+        "print(json.dumps({'ok': True, 'inputLength': len(payload), 'details': 'x' * (5 * 1024 * 1024)}))",
       ].join("\n"),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -3911,8 +3946,10 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       },
       ["test-command"],
+      "x".repeat(64 * 1024),
     );
     expect(result["ok"]).toBe(true);
+    expect(result["inputLength"]).toBe(64 * 1024);
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 

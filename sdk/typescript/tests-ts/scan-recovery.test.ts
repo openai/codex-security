@@ -102,7 +102,11 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value)}\n`);
 }
 
-async function workbench(fixture: ScanFixture, args: readonly string[]) {
+async function workbench(
+  fixture: ScanFixture,
+  args: readonly string[],
+  input?: string,
+) {
   return runWorkbench(
     {
       python: fixture.python,
@@ -113,20 +117,26 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
       },
     },
     args,
+    input,
   );
 }
 
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
+  recipeFromStdin = false,
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
   );
   temporaryDirectories.push(root);
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python =
+    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
 
-  const target = join(root, "repository");
+  const target = join(
+    root,
+    recipeFromStdin ? "répository-日本語" : "repository",
+  );
   const scanDir = join(root, "scan");
   await mkdir(join(target, "src"), { recursive: true });
   await writeFile(join(target, "src", "extract.py"), "# fixture\n");
@@ -174,20 +184,26 @@ async function startDraftScan(
     scanId: "",
     registration: {},
   };
-  const registration = await workbench(fixture, [
-    "register-cli-scan",
-    "--repository",
-    target,
-    "--scan-dir",
-    scanDir,
-    "--recipe-json",
-    JSON.stringify({
-      config: {},
-      mode: "standard",
-      repository: target,
-      target: { kind: "repository", paths: [] },
-    }),
-  ]);
+  const recipe = JSON.stringify({
+    config: {},
+    mode: "standard",
+    repository: target,
+    target: { kind: "repository", paths: [] },
+  });
+  const registration = await workbench(
+    fixture,
+    [
+      "register-cli-scan",
+      "--repository",
+      target,
+      "--scan-dir",
+      scanDir,
+      ...(recipeFromStdin
+        ? ["--recipe-json-stdin"]
+        : ["--recipe-json", recipe]),
+    ],
+    recipeFromStdin ? recipe : undefined,
+  );
   fixture.scanId = String(registration["scanId"]);
   fixture.registration = registration;
 
@@ -234,9 +250,24 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
-  test("rejoins a headless scan after its running context changes", async () => {
+  test("registers a Unicode scan recipe delivered through stdin", async () => {
+    const fixture = await startDraftScan("directory", true);
+    expect(fixture.registration).toMatchObject({
+      scanDir: fixture.scanDir,
+      targetRevision: "unversioned",
+    });
+    const saved = await workbench(fixture, [
+      "get-scan-recipe",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect(saved["recipe"]).toMatchObject({ repository: fixture.repository });
+  });
+
+  test("rejoins a headless scan after its stdin context is cleared", async () => {
     const fixture = await startDraftScan();
     const threadId = "context-rejoin-regression";
+    const originalContext = "original security focus".repeat(3_000);
     const startArguments = [
       "start-headless-standard-scan",
       "--thread-id",
@@ -245,42 +276,46 @@ describe("malformed scan artifact recovery", () => {
       fixture.repository,
       "--scope",
       ".",
-      "--user-context",
-      "original security focus",
+      "--user-context-stdin",
     ];
-    const created = await workbench(fixture, startArguments);
+    const created = await workbench(fixture, startArguments, originalContext);
     const scan = created["scan"] as {
       scanId: string;
       handoffClaimToken: string;
       userContext: string;
     };
 
-    const updated = await workbench(fixture, [
-      "update-scan-context",
-      "--scan-id",
-      scan.scanId,
-      "--user-context",
-      "updated security focus",
-      "--thread-id",
-      threadId,
-      "--claim-token",
-      scan.handoffClaimToken,
-    ]);
+    expect(scan.userContext).toBe(originalContext);
+
+    const updated = await workbench(
+      fixture,
+      [
+        "update-scan-context",
+        "--scan-id",
+        scan.scanId,
+        "--user-context-stdin",
+        "--thread-id",
+        threadId,
+        "--claim-token",
+        scan.handoffClaimToken,
+      ],
+      "",
+    );
     expect(updated["scan"]).toMatchObject({
       scanId: scan.scanId,
-      userContext: "updated security focus",
+      userContext: null,
     });
     expect(updated["workspace"]).toMatchObject({
-      userContext: "updated security focus",
+      userContext: null,
     });
 
-    const retried = await workbench(fixture, startArguments);
+    const retried = await workbench(fixture, startArguments, originalContext);
     expect(retried["startDisposition"]).toBe("joined");
     expect(retried["scan"]).toMatchObject({
       scanId: scan.scanId,
-      userContext: "updated security focus",
+      userContext: null,
     });
-  });
+  }, 30_000);
 
   test("returns the authoritative directory snapshot contract at registration", async () => {
     const fixture = await startDraftScan();
@@ -649,6 +684,81 @@ describe("malformed scan artifact recovery", () => {
     );
   });
 
+  test.each(
+    (["rootCause", "root_cause"] as const).flatMap((section) =>
+      (["evidenceRefs", "evidence_refs"] as const).flatMap((refsKey) =>
+        [true, false].map((includeEvidence) => ({
+          section,
+          refsKey,
+          includeEvidence,
+        })),
+      ),
+    ),
+  )(
+    "recovers $section refs $refsKey with evidence catalog: $includeEvidence",
+    async ({ section, refsKey, includeEvidence }) => {
+      const fixture = await startDraftScan();
+      const path = join(fixture.scanDir, "findings.json");
+      const document = await readJson<FindingsDocument>(path);
+      const finding = document.findings[0]!;
+      if (includeEvidence) {
+        finding.codeEvidence = [
+          {
+            id: "canonical-source",
+            label: "Synthetic source",
+            path: "src/extract.py",
+            startLine: 41,
+            code: "canonical_source()",
+            explanation: "Synthetic evidence for reference recovery.",
+          },
+        ];
+        finding["code_evidence"] = [
+          { id: "legacy-source", code: "legacy_source()" },
+        ];
+      }
+      finding[section] = {
+        summary: "The destination is not constrained to the extraction root.",
+        [refsKey]: ["legacy-source", "src/extract.py:41", "canonical-source"],
+      };
+      await writeJson(path, document);
+      const original = await readFile(path, "utf8");
+
+      const strict = spawnSync(
+        fixture.python,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          fixture.scanDir,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(strict.status).not.toBe(0);
+      expect(strict.stderr).toContain("unknown code-evidence ids");
+      expect(await readFile(path, "utf8")).toBe(original);
+
+      const completed = await completeScan(fixture);
+
+      expect(completed.progress.status).toBe("complete");
+      expect(completed.findingCount).toBe(1);
+      expect(completed.warnings).toEqual([
+        "Recovered finding 1: normalized legacy finding details.",
+      ]);
+      const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
+      expect(recovered[section]).toEqual({
+        summary: "The destination is not constrained to the extraction root.",
+        [refsKey]: includeEvidence ? ["legacy-source", "canonical-source"] : [],
+      });
+      expect(recovered.codeEvidence).toEqual(finding.codeEvidence);
+      expect(recovered["code_evidence"]).toEqual(finding["code_evidence"]);
+      const coverage = await readJson<CoverageDocument>(
+        join(fixture.scanDir, "coverage.json"),
+      );
+      expect(coverage.completeness).toBe("complete");
+    },
+  );
+
   test("preserves recovery warnings across prepared scan completion", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
@@ -753,10 +863,27 @@ describe("malformed scan artifact recovery", () => {
     unsafeLocation.locations[0]!.path = "../outside.py";
     const missingIdentity = structuredClone(valid);
     delete (missingIdentity as Partial<Finding>).identity;
+    const invalidEvidenceId = structuredClone(valid);
+    invalidEvidenceId.identity.anchor = "invalid-evidence-id";
+    invalidEvidenceId.codeEvidence = [
+      {
+        id: "src/extract.py:41",
+        label: "Synthetic source",
+        path: "src/extract.py",
+        startLine: 41,
+        code: "synthetic_source()",
+        explanation: "The evidence identifier is intentionally malformed.",
+      },
+    ];
+    invalidEvidenceId["rootCause"] = {
+      summary: "Synthetic root cause.",
+      evidenceRefs: ["src/extract.py:41"],
+    };
     document.findings.push(
       missingSummary,
       unsafeLocation,
       missingIdentity,
+      invalidEvidenceId,
       structuredClone(valid),
       null,
     );
@@ -766,7 +893,7 @@ describe("malformed scan artifact recovery", () => {
 
     expect(completed.progress.status).toBe("complete");
     expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(5);
+    expect(completed.warnings).toHaveLength(6);
     expect(
       completed.warnings.every((warning) =>
         warning.startsWith("Skipped malformed finding"),
@@ -776,6 +903,7 @@ describe("malformed scan artifact recovery", () => {
       "summary",
       "safe repository-relative",
       "identity",
+      "codeEvidence[0].id",
       "duplicate logical finding",
       "expected an object",
     ]) {
@@ -791,7 +919,7 @@ describe("malformed scan artifact recovery", () => {
     expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
       "needs_follow_up",
     );
-    expect(coverage.deferred).toHaveLength(4);
+    expect(coverage.deferred).toHaveLength(5);
   });
 
   test.each([
@@ -935,7 +1063,7 @@ describe("malformed scan artifact recovery", () => {
     );
     expect(sarif.runs[0]?.invocations).toEqual([
       {
-        executionSuccessful: true,
+        executionSuccessful: false,
         toolExecutionNotifications: [
           { level: "warning", message: { text: completed.warnings[0]! } },
         ],

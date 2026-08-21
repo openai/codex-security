@@ -76,6 +76,7 @@ const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
+const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 
 export interface PluginInstall {
@@ -1140,9 +1141,17 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
     }
   }
 
-  if (isRecord(owner) && typeof owner["pid"] === "number") {
+  // Only positive signed-32-bit PIDs identify an owner. Other values can name
+  // process groups or fail argument validation, so use the stale-age check.
+  const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
+  if (
+    typeof ownerPid === "number" &&
+    Number.isInteger(ownerPid) &&
+    ownerPid > 0 &&
+    ownerPid <= MAX_PROCESS_ID
+  ) {
     try {
-      process.kill(owner["pid"], 0);
+      process.kill(ownerPid, 0);
       return false;
     } catch (error) {
       if (nodeErrorCode(error) !== "ESRCH") {
@@ -1360,33 +1369,39 @@ export async function preparePersistentOutputRoot(
 export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
+  input?: string,
 ): Promise<JsonObject> {
   let stdout: string;
   try {
-    ({ stdout } = await execFile(
-      options.python,
+    const environment = Object.fromEntries(
+      Object.entries(options.environment).filter(
+        ([name]) =>
+          name.toUpperCase() !== "OPENAI_API_KEY" &&
+          name.toUpperCase() !== "CODEX_API_KEY" &&
+          name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+          name.toUpperCase() !== "FIREWORKS_API_KEY",
+      ),
+    );
+    const result = await runCodexCommand(
+      { command: options.python },
       [
         "-I",
         "-B",
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
-      {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY" &&
-              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-              name.toUpperCase() !== "FIREWORKS_API_KEY",
-          ),
-        ),
-        encoding: "utf8",
-        maxBuffer: Infinity,
-        windowsHide: true,
-        signal: options.signal,
-      },
-    ));
+      environment,
+      input,
+      options.signal,
+    );
+    if (!result.success) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Workbench exited with status ${result.exitCode}.`,
+      );
+    }
+    stdout = result.stdout;
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
