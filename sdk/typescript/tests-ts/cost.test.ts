@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse, sep } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   estimateScanCost,
@@ -16,6 +16,7 @@ import {
   type ScanSessionEvent,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
+import { readScanLogs } from "../src/scan-logs.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 
 const temporaryDirectories: string[] = [];
@@ -547,7 +548,7 @@ describe("live scan cost tracking", () => {
       const events: ScanSessionEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
-        scanDirectory: missing === "main" ? scanDirectory : undefined,
+        scanDirectory,
         model: "gpt-5.6-sol",
         onSessionEvent: (event) => events.push(event),
       });
@@ -588,35 +589,39 @@ describe("live scan cost tracking", () => {
   test("counts independent Deep workers inside the scan directory only", async () => {
     const home = await codexHome();
     const scanDirectory = join(home, "scans", "current");
+    const artifacts = join(scanDirectory, "artifacts");
+    const workerDirectory = join(
+      artifacts,
+      "deep_discovery",
+      "workers",
+      "worker",
+      "output",
+    );
     await writeSession(
       home,
       "scan-thread",
       { input_tokens: 1_000, output_tokens: 10 },
       undefined,
       scanDirectory,
-      "2026-07-26T12:00:00Z",
+      "2026-07-26T12:00:00.900Z",
     );
     await writeSession(
       home,
       "deep-worker",
       { input_tokens: 250, output_tokens: 2 },
       undefined,
-      join(
-        scanDirectory,
-        "artifacts",
-        "deep_discovery",
-        "workers",
-        "worker",
-        "output",
-      ),
-      "2026-07-26T12:01:00Z",
+      process.platform === "win32"
+        ? workerDirectory.toUpperCase()
+        : workerDirectory,
+      "2026-07-26T12:00:00.900Z",
     );
     await writeSession(
       home,
       "deep-reducer",
       { input_tokens: 125, output_tokens: 1 },
       undefined,
-      join(scanDirectory, "artifacts"),
+      (process.platform === "win32" ? artifacts.toUpperCase() : artifacts) +
+        sep,
       "2026-07-26T12:02:00Z",
     );
     await writeSession(
@@ -692,54 +697,153 @@ describe("live scan cost tracking", () => {
     ).toEqual([1, 2, 3]);
   });
 
-  test("excludes sessions beside the deep worker output directories", async () => {
-    const home = await codexHome();
-    const scanDirectory = join(home, "scans", "current");
-    await writeSession(
-      home,
-      "scan-thread",
-      { input_tokens: 1_000, output_tokens: 10 },
-      undefined,
-      scanDirectory,
-      "2026-07-26T12:00:00Z",
-    );
-    await writeSession(
-      home,
-      "deep-worker",
-      { input_tokens: 250, output_tokens: 2 },
-      undefined,
-      join(
-        scanDirectory,
-        "artifacts",
-        "deep_discovery",
-        "workers",
-        "worker",
-        "output",
-      ),
-      "2026-07-26T12:01:00Z",
-    );
-    // A session running in a directory that sits beside workers/ under
-    // deep_discovery is not a worker output directory and must not be counted.
-    await writeSession(
-      home,
-      "bystander",
-      { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-      undefined,
-      join(scanDirectory, "artifacts", "deep_discovery", "output"),
+  test.each([
+    [
+      "sessions beside the deep worker output directories",
+      (scan: string) => join(scan, "artifacts", "deep_discovery", "output"),
       "2026-07-26T12:02:00Z",
-    );
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      model: "gpt-5.6-sol",
-      scanDirectory,
-    });
-    tracker.start("scan-thread");
+      undefined,
+    ],
+    [
+      "sessions on another Windows drive",
+      (scan: string) =>
+        parse(scan).root.toLowerCase().startsWith("c:")
+          ? "D:\\output"
+          : "C:\\output",
+      "2026-07-26T12:02:00Z",
+      undefined,
+    ],
+    [
+      "sessions earlier in the same second",
+      (scan: string) => join(scan, "artifacts"),
+      "2026-07-26T12:00:00.100Z",
+      undefined,
+    ],
+    [
+      "sessions with an invalid timestamp",
+      (scan: string) => join(scan, "artifacts"),
+      "not-a-timestamp",
+      undefined,
+    ],
+    [
+      "sessions with an unrelated parent",
+      (scan: string) => join(scan, "artifacts"),
+      "2026-07-26T12:02:00Z",
+      "unrelated-parent",
+    ],
+  ] as const)(
+    "excludes %s from scan cost and logs",
+    async (_name, workingDirectory, timestamp, parentThreadId) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scans", "current");
+      await writeSession(
+        home,
+        "scan-thread",
+        { input_tokens: 1_000, output_tokens: 10 },
+        undefined,
+        scanDirectory,
+        "2026-07-26T12:00:00.900Z",
+      );
+      await writeSession(
+        home,
+        "deep-worker",
+        { input_tokens: 250, output_tokens: 2 },
+        undefined,
+        join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "worker",
+          "output",
+        ),
+        "2026-07-26T12:00:00.950Z",
+      );
+      await writeSession(
+        home,
+        "bystander",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        parentThreadId,
+        workingDirectory(scanDirectory),
+        timestamp,
+      );
+      await writeSession(
+        home,
+        "bystander-child",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        "bystander",
+      );
+      const events: ScanSessionEvent[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        scanDirectory,
+        maxCostUsd: 0.01,
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
 
-    expect((await tracker.stop()).usage).toMatchObject({
-      input_tokens: 1_250,
-      output_tokens: 12,
-    });
-  });
+      const snapshot = await tracker.stop();
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 1_250,
+        output_tokens: 12,
+      });
+      expect(snapshot.cost?.estimatedUsd).toBe(0.00661);
+      const included = [
+        ...new Set(events.map(({ threadId }) => threadId)),
+      ].sort();
+      expect(included).toEqual(["deep-worker", "scan-thread"]);
+      const logs = await readScanLogs({
+        scanId: "scan-example",
+        threadId: "scan-thread",
+        codexHome: home,
+        scanDirectory,
+      });
+      expect(logs.sessions.map(({ threadId }) => threadId).sort()).toEqual(
+        included,
+      );
+    },
+  );
+
+  test.each([undefined, "not-a-timestamp"])(
+    "does not infer independent workers when the scan timestamp is %s",
+    async (timestamp) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scan");
+      await writeSession(
+        home,
+        "scan-thread",
+        { input_tokens: 1_000, output_tokens: 10 },
+        undefined,
+        scanDirectory,
+        timestamp,
+      );
+      await writeSession(
+        home,
+        "independent-worker",
+        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        undefined,
+        join(scanDirectory, "artifacts"),
+        "2026-07-26T12:01:00Z",
+      );
+      await writeSession(
+        home,
+        "child-worker",
+        { input_tokens: 250, output_tokens: 2 },
+        "scan-thread",
+      );
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        scanDirectory,
+      });
+      tracker.start("scan-thread");
+      expect((await tracker.stop()).usage).toMatchObject({
+        input_tokens: 1_250,
+        output_tokens: 12,
+      });
+    },
+  );
 
   test("ignores replayed parent history in forked worker sessions", async () => {
     const home = await codexHome();

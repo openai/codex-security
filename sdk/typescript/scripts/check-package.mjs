@@ -187,6 +187,7 @@ const distFiles = new Set(
     "scan-dashboard",
     "scan-history-renderer",
     "scan-logs",
+    "scan-sessions",
     "targets",
     "trusted-executable",
     "version",

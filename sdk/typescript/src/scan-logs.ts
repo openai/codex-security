@@ -1,8 +1,9 @@
 import { createReadStream } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
+import { isScanArtifactDirectory, sessionStartedAt } from "./scan-sessions.js";
 
 interface ScanLogOptions {
   scanId: string;
@@ -36,14 +37,10 @@ export async function readScanLogs(options: ScanLogOptions) {
       const parent =
         metadata["parent_thread_id"] ??
         (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
-      const startedAt =
-        typeof metadata["timestamp"] === "string"
-          ? Date.parse(metadata["timestamp"])
-          : Number.NaN;
       logs.set(threadId, {
         threadId,
         parentThreadId: typeof parent === "string" ? parent : null,
-        startedAt: Number.isFinite(startedAt) ? startedAt : null,
+        startedAt: sessionStartedAt(metadata["timestamp"]),
         workingDirectory:
           typeof metadata["cwd"] === "string" ? metadata["cwd"] : null,
         path,
@@ -149,20 +146,7 @@ function belongsToScan(
   }
 
   for (const directoryRoot of roots) {
-    const artifacts = join(directoryRoot, "artifacts");
-    if (relative(artifacts, session.workingDirectory) === "") return true;
-    const workers = join(artifacts, "deep_discovery", "workers");
-    const directory = relative(workers, session.workingDirectory);
-    const components = directory.split(sep);
-    if (
-      !isAbsolute(directory) &&
-      components.length === 2 &&
-      components[0] !== ".." &&
-      relative(
-        join(workers, components[0]!, "output"),
-        session.workingDirectory,
-      ) === ""
-    ) {
+    if (isScanArtifactDirectory(directoryRoot, session.workingDirectory)) {
       return true;
     }
   }

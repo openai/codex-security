@@ -1,5 +1,5 @@
 import { open, readdir } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { join } from "node:path";
 import {
   estimateScanCost,
   tokenUsage,
@@ -10,6 +10,7 @@ import {
   scanActivityFromSessionEvent,
   type ScanActivity,
 } from "./scan-activity.js";
+import { isScanArtifactDirectory, sessionStartedAt } from "./scan-sessions.js";
 import {
   scanProgressUpdatesFromEvent,
   type ScanProgress,
@@ -210,6 +211,7 @@ export class ScanCostTracker {
       for (const session of this.#sessions.values()) {
         if (
           session.threadId === null ||
+          session.parentThreadId !== null ||
           session.workingDirectory === null ||
           scanStartedAt === null ||
           session.startedAt === null ||
@@ -217,22 +219,11 @@ export class ScanCostTracker {
         ) {
           continue;
         }
-        const artifactsDirectory = join(
-          this.#options.scanDirectory,
-          "artifacts",
-        );
-        const workers = join(artifactsDirectory, "deep_discovery", "workers");
-        const workerDirectory = relative(workers, session.workingDirectory);
-        const components = workerDirectory.split(sep);
         if (
-          relative(artifactsDirectory, session.workingDirectory) === "" ||
-          (!isAbsolute(workerDirectory) &&
-            components.length === 2 &&
-            components[0] !== ".." &&
-            relative(
-              join(workers, components[0]!, "output"),
-              session.workingDirectory,
-            ) === "")
+          isScanArtifactDirectory(
+            this.#options.scanDirectory,
+            session.workingDirectory,
+          )
         ) {
           included.add(session.threadId);
         }
@@ -470,9 +461,7 @@ function readSessionEvent(
     if (typeof payload["cwd"] === "string") {
       session.workingDirectory = payload["cwd"];
     }
-    if (typeof payload["timestamp"] === "string") {
-      session.startedAt = Math.floor(Date.parse(payload["timestamp"]) / 1_000);
-    }
+    session.startedAt = sessionStartedAt(payload["timestamp"]);
     const source = payload["source"];
     const subagent = isRecord(source) ? source["subagent"] : undefined;
     const spawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
@@ -493,7 +482,7 @@ function readSessionEvent(
       payload["type"] === "task_started" &&
       typeof payload["started_at"] === "number" &&
       session.startedAt !== null &&
-      payload["started_at"] >= session.startedAt
+      payload["started_at"] >= Math.floor(session.startedAt / 1_000)
     ) {
       session.replaying = false;
       session.events?.push(event);
