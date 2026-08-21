@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH
+
+launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+server_path=$launcher_dir/../mcp/server.mjs
+cache_root=${XDG_CACHE_HOME:-${HOME:-}/.cache}
+codex_resources=
+case "${CODEX_CLI_PATH:-}" in
+  */*) codex_resources=${CODEX_CLI_PATH%/*} ;;
+esac
+
+for candidate in \
+  "${CODEX_MCP_NODE_PATH:-}" \
+  "${CODEX_BROWSER_USE_NODE_PATH:-}" \
+  "${CODEX_ELECTRON_RESOURCES_PATH:-}/cua_node/bin/node" \
+  "$codex_resources/cua_node/bin/node" \
+  "$cache_root/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
+do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    exec "$candidate" "$server_path" "$@"
+  fi
+done
+
+if command -v node >/dev/null 2>&1; then
+  exec node "$server_path" "$@"
+fi
+
+printf '%s\n' 'Codex Security could not find a Node runtime. Reinstall or update Codex, or set CODEX_MCP_NODE_PATH to an executable Node runtime.' >&2
+exit 127

@@ -50,7 +50,9 @@ export async function prepareKnowledgeBase(
     }
 
     const source = await realpath(path);
-    const selected = metadata.isDirectory() ? await discover(source) : [source];
+    const selected = metadata.isDirectory()
+      ? await discover(source, signal)
+      : [source];
     if (selected.length === 0) {
       throw new Error(
         `Knowledge base directory contains no supported documents: ${path}`,
@@ -112,14 +114,22 @@ export async function prepareKnowledgeBase(
   };
 }
 
-async function discover(directory: string): Promise<string[]> {
+async function discover(
+  directory: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  signal?.throwIfAborted();
   const documents: string[] = [];
   const entries = await readdir(directory, { withFileTypes: true });
+  signal?.throwIfAborted();
   for (const entry of entries) {
+    signal?.throwIfAborted();
     const path = join(directory, entry.name);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      documents.push(...(await discover(path)));
+      for (const document of await discover(path, signal)) {
+        documents.push(document);
+      }
     } else if (
       entry.isFile() &&
       SUPPORTED_EXTENSIONS.has(extname(path).toLowerCase())

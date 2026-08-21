@@ -13,6 +13,7 @@ import { accountStatus } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityCredentialHome,
+  expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
 } from "./runtime.js";
@@ -50,7 +51,10 @@ interface CompletedScanMatchingOptions
   previousFindings: readonly Record<string, unknown>[];
   falsePositives: readonly Record<string, unknown>[];
   findings: readonly Finding[];
-  workbench(args: readonly string[]): Promise<Record<string, unknown>>;
+  workbench(
+    args: readonly string[],
+    input?: string,
+  ): Promise<Record<string, unknown>>;
   matchFindings?: typeof matchScanFindings;
 }
 
@@ -258,15 +262,17 @@ export async function matchCompletedScan(
           !matchedAfter.has(afterOccurrenceId),
       ) ?? [];
     if (semanticComparison === undefined && scanMatches.length === 0) continue;
-    await options.workbench([
-      "save-scan-comparison",
-      "--before-scan-id",
-      scanId,
-      "--after-scan-id",
-      options.scanId,
-      "--matches-json",
+    await options.workbench(
+      [
+        "save-scan-comparison",
+        "--before-scan-id",
+        scanId,
+        "--after-scan-id",
+        options.scanId,
+        "--matches-json-stdin",
+      ],
       JSON.stringify({ matches: scanMatches, uncertain: scanUncertain }),
-    ]);
+    );
   }
 }
 
@@ -287,6 +293,7 @@ export async function comparisonEnvironment(
   source: NodeJS.ProcessEnv = process.env,
   nativeAccountStatus: typeof accountStatus = accountStatus,
   signal?: AbortSignal,
+  prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
   const environment = Object.fromEntries(
@@ -294,7 +301,9 @@ export async function comparisonEnvironment(
       (entry): entry is [string, string] => entry[1] !== undefined,
     ),
   );
-  if (environment["CODEX_SECURITY_SCAN_ID"] !== undefined) return environment;
+  if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
+    return environment;
+  }
   if (
     Object.entries(environment).some(
       ([name, value]) =>
@@ -306,32 +315,29 @@ export async function comparisonEnvironment(
   }
   const credentialHome = codexSecurityCredentialHome(source);
   if (existsSync(credentialHome)) {
-    const canonicalCredentialHome =
-      await prepareCodexSecurityCredentialHome(source);
+    const canonicalCredentialHome = await prepareCredentialHome(source);
     signal?.throwIfAborted();
-    const storedEnvironment: Record<string, string> = {
-      ...environment,
-      CODEX_HOME: canonicalCredentialHome,
-    };
+    const storedEnvironment: Record<string, string> = { ...environment };
     for (const key of Object.keys(storedEnvironment)) {
-      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
+      if (
+        ["CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY"].includes(
+          key.toUpperCase(),
+        )
+      ) {
         delete storedEnvironment[key];
       }
     }
+    storedEnvironment["CODEX_HOME"] = canonicalCredentialHome;
     const status = await nativeAccountStatus(
-      resolveCodexCommand(),
+      resolveCodexCommand(source),
       storedEnvironment,
       signal,
     );
     if (status.authenticated) return storedEnvironment;
   }
-  const configuredHome = environment["CODEX_HOME"]?.trim();
+  const configuredHome = environmentEntry(environment, "CODEX_HOME")?.trim();
   const codexHome = configuredHome
-    ? configuredHome === "~"
-      ? homedir()
-      : configuredHome.startsWith("~/")
-        ? join(homedir(), configuredHome.slice(2))
-        : configuredHome
+    ? expandHome(configuredHome, environment)
     : join(homedir(), ".codex");
   if (existsSync(join(codexHome, "auth.json"))) {
     for (const key of Object.keys(environment)) {
@@ -341,6 +347,18 @@ export async function comparisonEnvironment(
     }
   }
   return environment;
+}
+
+function environmentEntry(
+  environment: Record<string, string>,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested];
+  if (exact !== undefined || process.platform !== "win32") return exact;
+  const upper = requested.toUpperCase();
+  return Object.entries(environment).find(
+    ([name]) => name.toUpperCase() === upper,
+  )?.[1];
 }
 
 function validateComparison(

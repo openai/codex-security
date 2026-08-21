@@ -181,6 +181,250 @@
       ],
       "additionalProperties": true
     },
+    "legacyCodeEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/text"
+        },
+        "code": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "id",
+        "code"
+      ],
+      "additionalProperties": true
+    },
+    "findingAssessment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/text"
+            },
+            "rationale": {
+              "$ref": "#/$defs/text"
+            },
+            "why": {
+              "$ref": "#/$defs/text"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "textOrSummary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/text"
+            },
+            "source": {
+              "$ref": "#/$defs/text"
+            },
+            "sink": {
+              "$ref": "#/$defs/text"
+            },
+            "outcome": {
+              "$ref": "#/$defs/text"
+            },
+            "transformations": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidenceRefs": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidence_refs": {
+              "$ref": "#/$defs/textList"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "findingReachability": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/text"
+            },
+            "attacker": {
+              "$ref": "#/$defs/text"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/text"
+            },
+            "source": {
+              "$ref": "#/$defs/text"
+            },
+            "sink": {
+              "$ref": "#/$defs/text"
+            },
+            "outcome": {
+              "$ref": "#/$defs/text"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidenceRefs": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidence_refs": {
+              "$ref": "#/$defs/textList"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "findingValidation": {
+      "type": "object",
+      "properties": {
+        "assertions": {
+          "$ref": "#/$defs/textList"
+        },
+        "counterEvidence": {
+          "$ref": "#/$defs/textList"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "$ref": "#/$defs/textList"
+            }
+          ]
+        },
+        "evidenceRefs": {
+          "$ref": "#/$defs/textList"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/textList"
+        },
+        "limitations": {
+          "$ref": "#/$defs/textList"
+        },
+        "method": {
+          "$ref": "#/$defs/text"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/text"
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "findingAttackPath": {
+      "type": "object",
+      "properties": {
+        "assumptions": {
+          "$ref": "#/$defs/textList"
+        },
+        "blindspots": {
+          "$ref": "#/$defs/textList"
+        },
+        "controls": {
+          "$ref": "#/$defs/textList"
+        },
+        "dataFlow": {
+          "$ref": "#/$defs/textOrSummary"
+        },
+        "data_flow": {
+          "$ref": "#/$defs/textOrSummary"
+        },
+        "dataflow": {
+          "$ref": "#/$defs/textOrSummary"
+        },
+        "evidenceRefs": {
+          "$ref": "#/$defs/textList"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/textList"
+        },
+        "impact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/findingAssessment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "likelihood": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/findingAssessment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limitations": {
+          "$ref": "#/$defs/textList"
+        },
+        "preconditions": {
+          "$ref": "#/$defs/textList"
+        },
+        "reachability": {
+          "$ref": "#/$defs/findingReachability"
+        },
+        "steps": {
+          "$ref": "#/$defs/textList"
+        },
+        "summary": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "additionalProperties": true
+    },
     "finding": {
       "type": "object",
       "properties": {
@@ -236,6 +480,12 @@
             "$ref": "#/$defs/codeEvidence"
           }
         },
+        "code_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/legacyCodeEvidence"
+          }
+        },
         "rootCause": {
           "anyOf": [
             {
@@ -245,6 +495,12 @@
               "type": "object",
               "properties": {
                 "summary": {
+                  "$ref": "#/$defs/text"
+                },
+                "code": {
+                  "$ref": "#/$defs/text"
+                },
+                "language": {
                   "$ref": "#/$defs/text"
                 },
                 "evidenceRefs": {
@@ -258,14 +514,41 @@
             }
           ]
         },
+        "root_cause": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "$ref": "#/$defs/text"
+                },
+                "code": {
+                  "$ref": "#/$defs/text"
+                },
+                "language": {
+                  "$ref": "#/$defs/text"
+                },
+                "evidenceRefs": {
+                  "$ref": "#/$defs/textList"
+                },
+                "evidence_refs": {
+                  "$ref": "#/$defs/textList"
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
         "remediation": {
           "$ref": "#/$defs/text"
         },
         "validation": {
           "anyOf": [
             {
-              "type": "object",
-              "additionalProperties": true
+              "$ref": "#/$defs/findingValidation"
             },
             {
               "type": "null"
@@ -275,8 +558,7 @@
         "attackPath": {
           "anyOf": [
             {
-              "type": "object",
-              "additionalProperties": true
+              "$ref": "#/$defs/findingAttackPath"
             },
             {
               "type": "null"

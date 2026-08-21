@@ -1,6 +1,6 @@
 export { CodexSecurity, createSecurity } from "./api.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost } from "./cost.js";
+export type { ScanCost, ScanSessionEvent } from "./cost.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export type {
   CodexSecurityMetadata,
@@ -30,6 +30,7 @@ export {
   IncompleteScanError,
   InvalidTargetError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
@@ -46,6 +47,12 @@ export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
+export { publishScan } from "./publish.js";
+export type {
+  PublishScanOptions,
+  PublishScanProgress,
+  PublishScanResult,
+} from "./publish.js";
 export { ScanResult } from "./result.js";
 export type {
   RepositoryFinding,

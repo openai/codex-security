@@ -164,14 +164,8 @@ function derChildren(bytes, element) {
   let cursor = element.start;
   while (cursor < element.end) {
     const child = derElement(bytes, cursor, element.end);
-    if (child.end <= cursor) {
-      throw invalidSigningCertificate();
-    }
     children.push(child);
     cursor = child.end;
-  }
-  if (cursor !== element.end) {
-    throw invalidSigningCertificate();
   }
   return children;
 }
