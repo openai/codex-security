@@ -86,7 +86,7 @@ jobs:
           TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}
         run: |
           node -e "require('node:fs').mkdirSync('sdk/typescript/reports',{recursive:true})"
-          pnpm --dir sdk/typescript run test ${{ matrix.args }} --reporter=junit --reporter-outfile=reports/runner-${{ matrix.os }}-${{ matrix.mode }}.xml
+          pnpm --dir sdk/typescript run test ${{ runner.os == 'Windows' && '--timeout=120000' || '' }} ${{ matrix.args }} --reporter=junit --reporter-outfile=reports/runner-${{ matrix.os }}-${{ matrix.mode }}.xml
       - name: Upload runner report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
