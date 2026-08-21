@@ -230,7 +230,9 @@ test.each([
       ],
       JSON.stringify({
         recipe: {
-          config: {},
+          config: {
+            developer_instructions: "Synthetic context. ".repeat(4_000),
+          },
           mode: "deep",
           repository,
           target: { kind: "repository", paths: [] },
