@@ -71,18 +71,18 @@ const producerRemoteProbe = [
   "import json, sys",
   "sys.path.insert(0, sys.argv[1])",
   "import finalize_scan_contract as finalizer",
-  "verdicts = {}",
+  "verdicts = []",
   "for remote in json.load(sys.stdin):",
   "    try:",
   "        finalizer._validate_remote(remote, 'scan.target.remote')",
   "    except finalizer.ContractError as error:",
-  "        verdicts[remote] = str(error)",
+  "        verdicts.append([remote, str(error)])",
   "    else:",
-  "        verdicts[remote] = ''",
+  "        verdicts.append([remote, ''])",
   "print(json.dumps(verdicts))",
 ].join("\n");
 
-function producerRemoteVerdicts(remotes: string[]): Record<string, string> {
+function producerRemoteVerdicts(remotes: string[]): Array<[string, string]> {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(python).not.toBeNull();
   if (python === null) {
@@ -107,9 +107,8 @@ function producerRemoteVerdicts(remotes: string[]): Record<string, string> {
   );
   expect(new TextDecoder().decode(result.stderr)).toBe("");
   expect(result.exitCode).toBe(0);
-  return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
-    string,
-    string
+  return JSON.parse(new TextDecoder().decode(result.stdout)) as Array<
+    [string, string]
   >;
 }
 
@@ -1134,14 +1133,16 @@ describe("canonical scan contract", () => {
       "https://[2001:db8::1]/example/repo.git",
       "https://example.com/example/re%20po.git",
     ];
-    const producer = producerRemoteVerdicts([...unsafeRemotes, ...safeRemotes]);
+    const remotes = [...unsafeRemotes, ...safeRemotes];
+    const producer = producerRemoteVerdicts(remotes);
+    expect(producer.map(([remote]) => remote)).toEqual(remotes);
 
-    for (const remote of unsafeRemotes) {
-      expect(producer[remote]).toContain("canonical absolute URL");
+    for (const [index, remote] of unsafeRemotes.entries()) {
+      expect(producer[index]?.[1]).toContain("canonical absolute URL");
       expect(await loaderAcceptsRemote(remote)).toBe(false);
     }
-    for (const remote of safeRemotes) {
-      expect(producer[remote]).toBe("");
+    for (const [index, remote] of safeRemotes.entries()) {
+      expect(producer[index + unsafeRemotes.length]?.[1]).toBe("");
       expect(await loaderAcceptsRemote(remote)).toBe(true);
     }
   });
