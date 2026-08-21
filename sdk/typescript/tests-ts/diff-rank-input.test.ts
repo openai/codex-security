@@ -131,7 +131,7 @@ test("diff previews stay inside the selected repository", () => {
   );
 });
 
-test("preserves Unicode Git paths independently of the Windows ANSI locale", () => {
+test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   const root = realpathSync(
     mkdtempSync(join(tmpdir(), "codex-security-diff-rank-unicode-")),
   );
@@ -148,6 +148,19 @@ test("preserves Unicode Git paths independently of the Windows ANSI locale", () 
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "変更");
   const head = git(repository, "rev-parse", "HEAD");
+  const legacyMessage = join(root, "legacy-message");
+  writeFileSync(legacyMessage, Buffer.from("café\n", "latin1"));
+  git(
+    repository,
+    "-c",
+    "i18n.commitEncoding=ISO-8859-1",
+    "commit",
+    "--allow-empty",
+    "-q",
+    "-F",
+    legacyMessage,
+  );
+  const legacyHead = git(repository, "rev-parse", "HEAD");
 
   const python = pythonExecutable();
   expect(python).not.toBeNull();
@@ -174,14 +187,24 @@ test("preserves Unicode Git paths independently of the Windows ANSI locale", () 
     "import json, pathlib, sys",
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_target as target",
+    "import workbench_db as db",
     "repo = pathlib.Path(sys.argv[2])",
     "root, pathspec = target.git_worktree_context(repo)",
     "metadata = target.git_target_metadata(repo)",
-    "print(json.dumps({'root': str(root), 'pathspec': pathspec, 'subject': metadata['commitSubject']}))",
+    "diff = db.require_diff_target(repo, 'commit', None, sys.argv[3], None)",
+    "print(json.dumps({'root': str(root), 'pathspec': pathspec, 'subject': metadata['commitSubject'], 'diff': diff}))",
   ].join("\n");
   const probe = spawnSync(
     python!,
-    ["-I", "-B", "-c", probeSource, join(PLUGIN_ROOT, "scripts"), repository],
+    [
+      "-I",
+      "-B",
+      "-c",
+      probeSource,
+      join(PLUGIN_ROOT, "scripts"),
+      repository,
+      legacyHead,
+    ],
     { encoding: "utf8" },
   );
 
@@ -198,10 +221,12 @@ test("preserves Unicode Git paths independently of the Windows ANSI locale", () 
     root: string;
     pathspec: string;
     subject: string;
+    diff: { kind: string; baseRevision: string; headRevision: string };
   };
   expect(basename(target.root)).toBe("repository-漢字");
   expect(target).toMatchObject({
     pathspec: ".",
-    subject: "変更",
+    subject: "café",
+    diff: { kind: "commit", baseRevision: head, headRevision: legacyHead },
   });
 });
