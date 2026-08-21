@@ -751,15 +751,10 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
 
 async function readPromptFiles(
   directory: string,
-  {
-    scanPromptFile,
-    validationPromptFile,
-    postScanPromptFile,
-  }: Pick<
-    ScanArguments,
-    "scanPromptFile" | "validationPromptFile" | "postScanPromptFile"
-  >,
+  scanPromptFile?: string,
+  postScanPromptFile?: string,
   repository = directory,
+  validationPromptFile?: string,
 ): Promise<
   Pick<ScanOptions, "scanPrompt" | "validationPrompt" | "postScanPrompt">
 > {
@@ -2640,7 +2635,13 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
-          const prompts = await readPromptFiles(currentDirectory, options);
+          const prompts = await readPromptFiles(
+            currentDirectory,
+            options.scanPromptFile,
+            options.postScanPromptFile,
+            currentDirectory,
+            options.validationPromptFile,
+          );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
@@ -5059,8 +5060,10 @@ async function executeScan(
     const target = targetFromArguments(arguments_);
     const prompts = await readPromptFiles(
       directory,
-      arguments_,
+      arguments_.scanPromptFile,
+      arguments_.postScanPromptFile,
       resolve(directory, repository),
+      arguments_.validationPromptFile,
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
