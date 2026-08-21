@@ -1223,6 +1223,32 @@ describe("CLI", () => {
     );
   });
 
+  test("does not emit an ok: true envelope for a failed structured history command", async () => {
+    for (const argv of [
+      ["scans", "show", "--json"],
+      ["scans", "list", "--json"],
+      ["scans", "compare", "before", "after", "--json"],
+      ["scans", "match", "before", "after", "--json"],
+    ]) {
+      const stdout = capture();
+      const stderr = capture();
+      const result = await main(argv, stdout.stream, stderr.stream, {
+        ...dependencies({
+          onWorkbench: () => {
+            throw new Error(
+              "Scan ID prefixes must be at least eight characters.",
+            );
+          },
+        }),
+      });
+      expect(result).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Scan ID prefixes must be at least eight characters.",
+      );
+    }
+  });
+
   test("shows finding history and optionally reveals linked findings", async () => {
     const findings: JsonObject[] = [
       {

@@ -236,7 +236,8 @@ export interface ScanOptions extends DeepScanOptions {
   signal?: AbortSignal;
 }
 
-export type ScanAuthMode = "auto" | "chatgpt" | "api-key";
+export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
+export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 
 export type ScanAuthentication =
   | {
@@ -355,7 +356,6 @@ const DEEP_SCAN_SETTINGS = [
   ["maxDiscoveryRuns", "max_discovery_runs", 1],
   ["maxTimeHours", "max_time_hours", 0],
 ] as const;
-
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
@@ -775,22 +775,25 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      const registration = await workbench(workbenchOptions, [
-        "register-cli-scan",
-        "--repository",
-        repo,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
+      const registration = await workbench(
+        workbenchOptions,
+        [
+          "register-cli-scan",
+          "--repository",
+          repo,
+          "--scan-dir",
+          scanDir,
+          "--recipe-json-stdin",
+          ...(options.archiveExisting === true ? ["--archive-existing"] : []),
+          ...(archivedScanDir === null
+            ? []
+            : ["--archived-scan-dir", archivedScanDir]),
+          ...(options.parentScanId === undefined
+            ? []
+            : ["--parent-scan-id", options.parentScanId]),
+        ],
         JSON.stringify(recipe),
-        ...(options.archiveExisting === true ? ["--archive-existing"] : []),
-        ...(archivedScanDir === null
-          ? []
-          : ["--archived-scan-dir", archivedScanDir]),
-        ...(options.parentScanId === undefined
-          ? []
-          : ["--parent-scan-id", options.parentScanId]),
-      ]);
+      );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
       const contract = registration["contract"];
@@ -1254,8 +1257,8 @@ export class CodexSecurity {
         }
       }
       try {
-        const runWorkbench = (args: readonly string[]) =>
-          workbench(workbenchOptions, args);
+        const runWorkbench = (args: readonly string[], input?: string) =>
+          workbench(workbenchOptions, args, input);
         const previousFindings = await listRepositoryFindings(
           runWorkbench,
           targetId,
@@ -2893,7 +2896,7 @@ export function scanAuthentication(
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
 ): ScanAuthentication {
-  if (auth !== "auto" && auth !== "chatgpt" && auth !== "api-key") {
+  if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
       "Scan authentication mode must be auto, chatgpt, or api-key.",
     );

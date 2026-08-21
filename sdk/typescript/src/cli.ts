@@ -46,6 +46,7 @@ import {
   CodexSecurity,
   createSecurityInternal,
   listRepositoryFindings,
+  SCAN_AUTH_MODES,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -101,6 +102,7 @@ import {
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
+  canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   expandHome,
@@ -260,7 +262,7 @@ const PROVIDER_OPTION = z
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
-  .describe("Create a GitHub pull request after verified patches.");
+  .describe("Create a draft GitHub pull request after verified patches.");
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -991,7 +993,7 @@ interface CliDependencies {
   ): Promise<string>;
   bulkScan?: BulkScanDiscoveryDependencies;
   linearClient?: LinearClientFactory;
-  runWorkbench(args: readonly string[]): Promise<JsonObject>;
+  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
@@ -1136,7 +1138,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
-  runWorkbench: async (args) => {
+  runWorkbench: async (args, input) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -1150,6 +1152,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
+      input,
     );
   },
   matchFindings: (input, options) =>
@@ -1408,13 +1411,13 @@ export async function main(
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
-  ): Promise<JsonObject | undefined> => {
+  ): Promise<JsonObject> => {
     try {
       return await select(await dependencies.runWorkbench(args));
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
-      return undefined;
+      throw error;
     }
   };
   const latestScans = async (
@@ -1460,19 +1463,21 @@ export async function main(
       ],
       async ({ matchingCached, matchingInputs, ...comparison }) => {
         if (matchingCached && !force) return comparison;
-        return await dependencies.runWorkbench([
-          "save-scan-comparison",
-          "--before-scan-id",
-          beforeId,
-          "--after-scan-id",
-          afterId,
-          "--matches-json",
+        return await dependencies.runWorkbench(
+          [
+            "save-scan-comparison",
+            "--before-scan-id",
+            beforeId,
+            "--after-scan-id",
+            afterId,
+            "--matches-json-stdin",
+          ],
           JSON.stringify(
             await dependencies.matchFindings(
               matchingInputs as JsonObject & ScanComparisonInput,
             ),
           ),
-        ]);
+        );
       },
     );
   const presentHistory = (
@@ -1605,7 +1610,11 @@ export async function main(
         const scanRoot =
           options.scanRoot === undefined
             ? undefined
-            : resolveCliPath(directory, options.scanRoot);
+            : process.platform === "win32"
+              ? await canonicalizeModelSafePath(
+                  resolveCliPath(directory, options.scanRoot),
+                )
+              : resolveCliPath(directory, options.scanRoot);
         const repository =
           scanRoot !== undefined && args.repository === undefined
             ? undefined
@@ -1814,7 +1823,7 @@ export async function main(
         } catch (error) {
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
           exitCode = 2;
-          return undefined;
+          throw error;
         }
       },
     })
@@ -2212,7 +2221,7 @@ export async function main(
       options: z
         .object({
           auth: z
-            .enum(["auto", "chatgpt", "api-key"])
+            .enum(SCAN_AUTH_MODES)
             .default("auto")
             .describe(
               "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
@@ -3817,15 +3826,17 @@ async function matchAllScans(
       return { scanId, matches, uncertain };
     });
     for (const { scanId, matches, uncertain } of comparisons) {
-      await dependencies.runWorkbench([
-        "save-scan-comparison",
-        "--before-scan-id",
-        scanId,
-        "--after-scan-id",
-        afterScanId,
-        "--matches-json",
+      await dependencies.runWorkbench(
+        [
+          "save-scan-comparison",
+          "--before-scan-id",
+          scanId,
+          "--after-scan-id",
+          afterScanId,
+          "--matches-json-stdin",
+        ],
         JSON.stringify({ matches, uncertain }),
-      ]);
+      );
       matchedPairs += 1;
       findingMatches += matches.reduce(
         (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
@@ -4050,6 +4061,7 @@ async function publishPatchBranch(
       url = await run("gh", [
         "pr",
         "create",
+        "--draft",
         "--head",
         branch,
         "--title",
@@ -4130,7 +4142,9 @@ async function createPatchPullRequest(
   const branch = `codex-security/patch-${selected.scanId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const run = (command: "git" | "gh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, selected.repository);
-  stderr.write("Creating a GitHub pull request for verified patches...\n");
+  stderr.write(
+    "Creating a draft GitHub pull request for verified patches...\n",
+  );
   await run("git", ["switch", "-c", branch]);
   await run("git", ["--literal-pathspecs", "add", "--", ...files]);
   await run("git", [
@@ -5542,6 +5556,16 @@ async function executeScan(
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
   const incomplete = result.coverage.completeness !== "complete";
+  let deepScanStop: DeepScanStop | undefined;
+  if (arguments_.mode === "deep") {
+    deepScanStop = (await readDeepScanStop(
+      result,
+      arguments_.maxCostUsd,
+      dependencies.runWorkbench,
+    ).catch(() => undefined)) ?? {
+      reason: "Stop reason unavailable. See the report for details.",
+    };
+  }
   progress?.stage(`Scan complete · ${result.manifest.scan.id.slice(0, 8)}`);
   printScanSummary(
     result,
@@ -5550,6 +5574,7 @@ async function executeScan(
     progress?.interactive === true &&
       dependencies.environment["NO_COLOR"] === undefined &&
       dependencies.environment["TERM"] !== "dumb",
+    deepScanStop,
   );
   const completedScan = (exitCode: number): ScanOutcome => {
     diagnostic("scan.completed", {
@@ -5811,11 +5836,81 @@ function scanPhase(value: ScanWorkerPhase | ScanPhase): string {
   }[value];
 }
 
+interface DeepScanStop {
+  reason: string;
+  nextStep?: string;
+}
+
+async function readDeepScanStop(
+  result: ScanResult,
+  maxCostUsd: number | undefined,
+  runWorkbench: CliDependencies["runWorkbench"],
+): Promise<DeepScanStop | undefined> {
+  if (
+    maxCostUsd !== undefined &&
+    result.cost !== null &&
+    result.cost.estimatedUsd > maxCostUsd
+  ) {
+    return {
+      reason: `Reached the ${formatUsd(maxCostUsd)} cost limit. More issues may remain.`,
+      nextStep: "To scan further, rerun with a higher --max-cost.",
+    };
+  }
+  const response = await runWorkbench([
+    "get-deep-scan",
+    "--scan-id",
+    result.manifest.scan.id,
+    "--thread-id",
+    result.threadId,
+  ]);
+  const state = response["deepScan"] as
+    | {
+        terminalReason: string;
+        dispatchedCount: number;
+        completionSequence: number;
+        noNewStreak: number;
+        config: Required<DeepScanOptions>;
+        createdAt: string;
+        completedAt: string;
+      }
+    | undefined;
+  if (state?.terminalReason === "saturated") {
+    return {
+      reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
+    };
+  }
+  if (state?.terminalReason !== "capped") return undefined;
+  const { maxDiscoveryRuns, maxTimeHours } = state.config;
+  if (state.dispatchedCount >= maxDiscoveryRuns) {
+    const stillFindingIssues =
+      state.completionSequence > 0 && state.noNewStreak === 0;
+    return {
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${stillFindingIssues ? "The latest review still found new issues." : "More issues may remain."}`,
+      nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
+    };
+  }
+  const elapsedHours =
+    (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
+  if (elapsedHours >= maxTimeHours) {
+    return {
+      reason: `Reached the ${maxTimeHours}-hour time limit. More issues may remain.`,
+      nextStep:
+        maxTimeHours < 96
+          ? "To scan further, rerun with a higher --max-time-hours."
+          : "To scan a smaller part of the repository, rerun with --path.",
+    };
+  }
+  return {
+    reason: "Stopped before the review finished. See the report for details.",
+  };
+}
+
 function printScanSummary(
   result: ScanResult,
   progress: Progress | null,
   errorOutput: Writable,
   color: boolean,
+  deepScanStop?: DeepScanStop,
 ): void {
   const paint = (value: string, code: number | string): string =>
     color ? `\u001B[${code}m${value}\u001B[0m` : value;
@@ -5866,6 +5961,9 @@ function printScanSummary(
     `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
       `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
+      (deepScanStop === undefined
+        ? ""
+        : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +
       `  ${paint("ELAPSED", 1)}   ${duration}\n`,
   );
 
@@ -5881,6 +5979,9 @@ function printScanSummary(
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
+  if (deepScanStop?.nextStep !== undefined) {
+    errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
+  }
 }
 
 function formatTokenUsage(usage: unknown): string | null {

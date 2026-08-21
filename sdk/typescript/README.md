@@ -352,11 +352,11 @@ ask whether to open a color-coded finding browser with complete finding details
 and a separate patch-instructions panel. Use the arrow keys to
 browse, `Tab` to inspect details, `Space` to select individual findings, `i` to
 edit instructions for the focused finding, `1`–`4` to select by severity, and
-`r` to optionally create a GitHub pull request after patching. Press `Enter` to
-patch or `q` to keep the checkout unchanged. Each selected finding runs in its
-own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
+`r` to optionally create a draft GitHub pull request after patching. Press
+`Enter` to patch or `q` to keep the checkout unchanged. Each selected finding
+runs in its own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
 saved-finding `patch` command to commit only verified patch files and open a
-pull request with `gh`. If the push or pull request fails, run the printed
+draft pull request with `gh`. If the push or pull request fails, run the printed
 `patch --resume-pr BRANCH` command from the same repository. It uses the saved
 commit without running Codex again and refuses to publish if the branch changed.
 JSON scan results include `patchSeverity`. Scan and

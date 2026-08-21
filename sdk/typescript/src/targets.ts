@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { InvalidTargetError } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { windowsUnsafePathComponent } from "./windows-path.js";
 
 const execFile = promisify(execFileCallback);
 const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
@@ -111,6 +112,7 @@ export async function normalizeRepository(
   signal?: AbortSignal,
 ): Promise<string> {
   const candidate = resolveRepositoryPath(repository);
+  requirePortableWindowsRepositoryPath(candidate);
   let canonical: string;
   try {
     canonical = await abortable(() => realpath(candidate), signal);
@@ -126,11 +128,22 @@ export async function normalizeRepository(
       },
     );
   }
+  requirePortableWindowsRepositoryPath(canonical);
   return canonical;
 }
 
 export function resolveRepositoryPath(repository: string): string {
   return resolve(expandHome(repository));
+}
+
+function requirePortableWindowsRepositoryPath(path: string): void {
+  if (process.platform !== "win32") return;
+  const ambiguous = windowsUnsafePathComponent(path);
+  if (ambiguous !== undefined) {
+    throw new InvalidTargetError(
+      `Repository paths must not contain Windows-ambiguous components: ${ambiguous}`,
+    );
+  }
 }
 
 export async function enclosingGitWorktreeRoot(
@@ -274,6 +287,14 @@ export async function normalizeTarget(
     ) {
       throw new InvalidTargetError(
         `Path target is outside the repository: ${value}`,
+      );
+    }
+    if (
+      process.platform === "win32" &&
+      relativePath.split(sep).some((part) => part.includes(":"))
+    ) {
+      throw new InvalidTargetError(
+        `Path target contains an unsupported colon component: ${value}`,
       );
     }
     const normalized = relativePath.split(sep).join("/") || ".";
