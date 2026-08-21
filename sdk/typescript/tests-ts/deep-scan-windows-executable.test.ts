@@ -15,21 +15,11 @@ import { loadBundledRuntime } from "./plugin-root.js";
 
 async function bundledResolver() {
   const runtime = await loadBundledRuntime();
-  const source = [
-    "resolveCodexPath",
-    "isWindowsAppsPath",
-    "resolveWindowsCachedBinary",
-    "resolveWindowsPackageBinary",
-  ]
-    .map((name) => {
-      const definition = new RegExp(
-        `function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`,
-        "u",
-      ).exec(runtime)?.[0];
-      if (!definition) throw new Error(`Missing bundled function: ${name}`);
-      return definition;
-    })
-    .join("\n");
+  const start = runtime.indexOf("function resolveCodexPath(");
+  const end = runtime.indexOf("\n// server.ts", start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const source = runtime.slice(start, end);
   const imports = [
     ...new Set(source.match(/import_node_(?:fs|path|module)\d*/gu)),
   ];
@@ -100,8 +90,10 @@ test("uses the newest relocated Windows executable when WindowsApps is inaccessi
         "x64",
       ),
     ).toBe("C:\\Tools\\codex.exe");
-    expect(resolve({ PATH: "" }, "win32", "x64")).toBe("codex.exe");
-    expect(resolve({}, "linux", "x64")).toBe("codex");
+    expect(resolve({ PATH: "" }, "win32", "x64")).toBe(
+      path.resolve("codex.exe"),
+    );
+    expect(resolve({}, "linux", "x64")).toBe(path.resolve("codex"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
