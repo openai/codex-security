@@ -231,7 +231,7 @@ describe("CodexSecurity orchestration", () => {
             input?: string,
           ): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
-              recipe = JSON.parse(input!);
+              recipe = JSON.parse(input!).recipe;
             }
             return mockWorkbench(args, input);
           },
@@ -1080,7 +1080,7 @@ describe("CodexSecurity orchestration", () => {
           input?: string,
         ): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
-            savedRecipe = JSON.parse(input!);
+            savedRecipe = JSON.parse(input!).recipe;
           }
           return mockWorkbench(args, input);
         },
@@ -1934,6 +1934,10 @@ describe("CodexSecurity orchestration", () => {
       "Codex_Home",
     );
     expect(prompt).toContain("$codex-security:security-scan");
+    expect(prompt).not.toContain("SDK-owned discovery workflow");
+    expect(
+      (codexOptions as CodexOptions | null)?.config?.["mcp_servers"],
+    ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
     expect(prompt).toContain("do not finalize or seal them");
@@ -1980,8 +1984,11 @@ describe("CodexSecurity orchestration", () => {
       "Additional scan instructions:\nFocus on authentication and authorization.",
     );
     expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
-    expect(commands[0]).toContain("--recipe-json-stdin");
-    expect(JSON.parse(registrationInput!)).toMatchObject({
+    expect(commands[0]).toContain("--registration-json-stdin");
+    expect(JSON.parse(registrationInput!).userContext).toBe(
+      "Focus on authentication and authorization.",
+    );
+    expect(JSON.parse(registrationInput!).recipe).toMatchObject({
       repository,
       target: { kind: "repository", paths: [] },
       mode: "standard",
@@ -2128,7 +2135,8 @@ describe("CodexSecurity orchestration", () => {
               falsePositives: [],
             };
           }
-          recipe = JSON.parse(input!);
+          expect(JSON.parse(input!).userContext).toBeUndefined();
+          recipe = JSON.parse(input!).recipe;
           return mockScanRegistration(args, input);
         },
         createCodex: () => ({
@@ -3847,6 +3855,7 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("provides authoritative knowledge-base context without retaining its documents", async () => {
+    const scanPrompt = "Review the synthetic authorization boundary.";
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3883,7 +3892,8 @@ describe("CodexSecurity orchestration", () => {
             };
           }
           if (args[0] !== "register-cli-scan") return {};
-          recipe = JSON.parse(input!);
+          expect(JSON.parse(input!).userContext).toBe(scanPrompt);
+          recipe = JSON.parse(input!).recipe;
           return mockScanRegistration(args, input);
         },
         createCodex: (options: CodexOptions) => ({
@@ -3906,7 +3916,10 @@ describe("CodexSecurity orchestration", () => {
     );
 
     await expect(
-      client.run(repository, { knowledgeBasePaths: [knowledgeBase] }),
+      client.run(repository, {
+        knowledgeBasePaths: [knowledgeBase],
+        scanPrompt,
+      }),
     ).resolves.toMatchObject({ threadId: "thread-1" });
     expect(existsSync(knowledgeDirectory)).toBe(false);
     expect(prompt).toContain(

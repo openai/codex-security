@@ -68,6 +68,7 @@ export interface MultiscanOptions {
   maxAttempts: number;
   maxCostUsd?: number;
   scanPrompt?: string;
+  validationPrompt?: string;
   postScanPrompt?: string;
   config: CodexSecurityConfig;
   createSecurity(
@@ -111,6 +112,12 @@ export async function runMultiscan(
     dirname(resolve(options.inputPath)),
     options.mode,
   );
+  if (
+    options.validationPrompt !== undefined &&
+    tasks.some((task) => task.mode === "deep")
+  ) {
+    throw new Error("Custom validation is not supported for Deep scans.");
+  }
   const requestedOutput = resolve(options.outputDir);
   const output = await ensureOutputDirectory(requestedOutput);
   await requireSecureOutputAncestry(output);
@@ -256,6 +263,9 @@ async function runCampaign(
             mode: task.mode,
             outputDir: scanDir,
             ...(scanPrompt ? { scanPrompt } : {}),
+            ...(options.validationPrompt === undefined
+              ? {}
+              : { validationPrompt: options.validationPrompt }),
             ...(options.postScanPrompt === undefined
               ? {}
               : { postScanPrompt: options.postScanPrompt }),
@@ -621,7 +631,7 @@ async function ensureManifest(
   tasks: MultiscanTask[],
   options: Pick<
     MultiscanOptions,
-    "scanPrompt" | "postScanPrompt" | "maxCostUsd"
+    "scanPrompt" | "validationPrompt" | "postScanPrompt" | "maxCostUsd"
   >,
 ): Promise<void> {
   const expected = `${JSON.stringify(
@@ -631,6 +641,9 @@ async function ensureManifest(
       ...(options.scanPrompt === undefined
         ? {}
         : { scanPrompt: options.scanPrompt }),
+      ...(options.validationPrompt === undefined
+        ? {}
+        : { validationPrompt: options.validationPrompt }),
       ...(options.postScanPrompt === undefined
         ? {}
         : { postScanPrompt: options.postScanPrompt }),

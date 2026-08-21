@@ -1610,7 +1610,13 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
 
-    recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
+    user_context = None
+    if args.registration_json_stdin:
+        registration = json.load(sys.stdin)
+        recipe_json = json.dumps(registration["recipe"], ensure_ascii=False, separators=(",", ":"))
+        user_context = registration.get("userContext")
+    else:
+        recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
@@ -1696,10 +1702,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scan_dir=scan_dir,
         )
         connection.execute(
-            "UPDATE scans SET recipe_json = ?, parent_scan_id = ? WHERE id = ?",
+            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
             (
                 json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
                 parent_scan_id,
+                user_context,
                 scan_id,
             ),
         )

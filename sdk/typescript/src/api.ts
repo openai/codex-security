@@ -50,6 +50,7 @@ import {
 import {
   estimateScanCost,
   ScanCostTracker,
+  sumTokenUsage,
   type ScanCost,
   type ScanSessionEvent,
 } from "./cost.js";
@@ -58,6 +59,14 @@ import {
   requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
+import {
+  runCustomValidation,
+  writeCustomValidationStatus,
+} from "./custom-validation.js";
+import {
+  customDiscoveryPrompt,
+  customValidationConfig,
+} from "./custom-validation-prompt.js";
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
@@ -199,6 +208,7 @@ export interface ScanOptions extends DeepScanOptions {
   mode?: ScanMode;
   knowledgeBasePaths?: string[];
   scanPrompt?: string;
+  validationPrompt?: string;
   postScanPrompt?: string;
   outputDir?: string;
   archiveExisting?: boolean;
@@ -466,6 +476,7 @@ export class CodexSecurity {
     let costTracker: ScanCostTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
+    let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -609,6 +620,18 @@ export class CodexSecurity {
         );
       }
       const skillName = skillNameFor(normalized, mode);
+      const discoveryPrompt =
+        options.validationPrompt === undefined
+          ? undefined
+          : await customDiscoveryPrompt(
+              runtime.plugin.installedRoot,
+              skillName,
+            );
+      if (discoveryPrompt !== undefined)
+        session.sessionConfig = await customValidationConfig(
+          session.sessionConfig,
+          runtime.plugin.installedRoot,
+        );
       const skillPath = join(shellPluginRoot, "skills", skillName, "SKILL.md");
       const skillMetadata = await lstat(skillPath).catch(() => null);
       if (
@@ -736,6 +759,8 @@ export class CodexSecurity {
         options.maxCostUsd,
         deepScanOptions(options),
       );
+      if (options.validationPrompt !== undefined)
+        recipe["validationMode"] = "custom";
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
@@ -758,7 +783,7 @@ export class CodexSecurity {
           repo,
           "--scan-dir",
           scanDir,
-          "--recipe-json-stdin",
+          "--registration-json-stdin",
           ...(options.archiveExisting === true ? ["--archive-existing"] : []),
           ...(archivedScanDir === null
             ? []
@@ -767,7 +792,7 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        JSON.stringify(recipe),
+        JSON.stringify({ recipe, userContext: options.scanPrompt }),
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
@@ -836,6 +861,13 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (options.validationPrompt !== undefined) {
+        await writeCustomValidationStatus(
+          scanDir,
+          { scanId, status: "pending" },
+          signal,
+        );
+      }
       checkOpen();
       const basePrompt = scanPrompt(
         normalized,
@@ -846,6 +878,7 @@ export class CodexSecurity {
         knowledgeBase !== null,
         options.scanPrompt,
         options.maxCostUsd !== undefined,
+        discoveryPrompt,
       );
       checkOpen();
       const feedback = await workbench(
@@ -1000,6 +1033,57 @@ export class CodexSecurity {
           }
         },
         onFinalize: async (usage) => {
+          if (options.validationPrompt !== undefined) {
+            await runCustomValidation({
+              repository: repo,
+              target: normalized,
+              scanDir,
+              scanId,
+              pluginRoot: runtime.plugin.installedRoot,
+              prompt: options.validationPrompt,
+              falsePositives: falsePositiveExamples,
+              signal,
+              run: async (validationPrompt, outputSchema) => {
+                if (scopeFileCount !== null)
+                  reportProgress({
+                    phase: "validation",
+                    filesCompleted: reviewedFileCount,
+                    filesTotal: scopeFileCount,
+                  });
+                const validationThread = codex.startThread({
+                  workingDirectory: join(scanDir, "artifacts"),
+                  skipGitRepoCheck: true,
+                  approvalPolicy,
+                });
+                const turn = await readCodexTurn({
+                  thread: validationThread,
+                  events: (
+                    await validationThread.runStreamed(validationPrompt, {
+                      outputSchema,
+                      signal,
+                    })
+                  ).events,
+                  onReconnect: (message, attempts) =>
+                    notifyObserver(
+                      "onReconnect",
+                      options.onReconnect,
+                      options.onObserverError,
+                      ...attempts,
+                      reconnectDetails(message),
+                    ),
+                });
+                checkOpen();
+                if (turn.status !== "completed")
+                  throw new IncompleteScanError(
+                    turn.lastStreamError ??
+                      "The custom validation turn did not complete.",
+                  );
+                usage = sumTokenUsage(usage, turn.usage);
+                return turn.finalResponse;
+              },
+            });
+            customValidationComplete = true;
+          }
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             reportTrackingError(error);
@@ -1289,6 +1373,16 @@ export class CodexSecurity {
         } catch {}
       }
       if (activeScan !== null) {
+        if (
+          options.validationPrompt !== undefined &&
+          !customValidationComplete
+        ) {
+          await writeCustomValidationStatus(scanDir, {
+            scanId: activeScan.id,
+            status: "incomplete",
+            reason: safeErrorMessage(failure),
+          }).catch(() => undefined);
+        }
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
             "fail-scan",
@@ -1902,6 +1996,20 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const mode = options.mode ?? "standard";
     validateMode(normalized, mode);
+    if (options.validationPrompt !== undefined) {
+      if (
+        typeof options.validationPrompt !== "string" ||
+        !options.validationPrompt.trim()
+      ) {
+        throw new CodexSecurityError(
+          "The validation prompt must not be empty.",
+        );
+      }
+      if (mode === "deep")
+        throw new CodexSecurityError(
+          "Custom validation is not supported for Deep scans.",
+        );
+    }
     await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
     const protectedRoot =
@@ -2561,16 +2669,19 @@ function scanPrompt(
   hasKnowledgeBase = false,
   additionalPrompt?: string,
   enforceCostLimit = false,
+  discoveryPrompt?: string,
 ): string {
   const python = pluginPythonCommand();
+  const customValidation = discoveryPrompt !== undefined;
   return [
-    `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
+    discoveryPrompt ??
+      `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
     "Run this Codex Security scan non-interactively.",
     ...(mode === "deep"
       ? [
           `The SDK has already registered this scan. Call start_codex_security_deep_scan with ${JSON.stringify({ scanId })}; never pass targetPath or create another scan.`,
         ]
-      : skillName === "security-scan"
+      : skillName === "security-scan" || customValidation
         ? [
             `The SDK has already registered this scan. Use exactly ${JSON.stringify(scanId)} and ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR")}; never call a scan-start or completion tool, and leave finalization to the SDK.`,
           ]
@@ -2622,7 +2733,7 @@ function scanPrompt(
       : []),
     "Runtime paths are environment-backed; keep them quoted in POSIX shells and use the corresponding $env: names in PowerShell. Do not copy or reparse their values.",
     targetInstruction(target, python),
-    ...(skillName === "security-scan" || enforceCostLimit
+    ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [
           "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
         ]
