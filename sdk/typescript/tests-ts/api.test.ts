@@ -2014,6 +2014,61 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("warns before completion when the registered repository HEAD drifts", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    let revisionReads = 0;
+    const warnings: string[] = [];
+    const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
+
+    const client = new TestClient(
+      {},
+      {
+        environment: { PATH: "/usr/bin", OPENAI_API_KEY: "" },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: { CODEX_HOME: codexHome, PATH: "/usr/bin" },
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => {
+          revisionReads += 1;
+          return revisionReads === 1 ? "before" : "after";
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    try {
+      await client.run(repository, {
+        onWarning: (warning, details) => {
+          warnings.push(warning);
+          warningDetails.push(details);
+        },
+      });
+      expect(warnings).toContain(
+        "Repository HEAD changed while the scan was running; results remain bound to the original revision.",
+      );
+      expect(warningDetails).toContainEqual({ kind: "target_changed" });
+      expect(revisionReads).toBeGreaterThanOrEqual(2);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("passes the workbench snapshot contract to dirty Git scans", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
