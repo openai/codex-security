@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
+import { regularTarListingLines } from "./package-tar-listing.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
   packageSmokeTimeouts().processTimeoutMs;
@@ -168,6 +169,7 @@ const distFiles = new Set(
     "config",
     "contract",
     "cost",
+    "cost-model",
     "errors",
     "index",
     "knowledge-base",
@@ -186,6 +188,7 @@ const distFiles = new Set(
     "scan-dashboard",
     "scan-history-renderer",
     "scan-logs",
+    "scan-sessions",
     "targets",
     "trusted-executable",
     "version",
@@ -217,12 +220,7 @@ for (const file of files) {
 }
 
 const listing = tar(["-tvzf", archive], "utf8");
-if (/^[^d-]/mu.test(listing)) {
-  throw new Error(
-    "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
-  );
-}
-const listingLines = listing.split(/\r?\n/u).filter(Boolean);
+const listingLines = regularTarListingLines(listing);
 if (
   listingLines.length !== entries.length ||
   listingLines.some(

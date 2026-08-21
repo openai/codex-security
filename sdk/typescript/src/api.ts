@@ -736,7 +736,6 @@ export class CodexSecurity {
         options.maxCostUsd,
         deepScanOptions(options),
       );
-      const serializedRecipe = JSON.stringify(recipe);
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
@@ -768,7 +767,7 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        serializedRecipe,
+        JSON.stringify(recipe),
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];

@@ -101,7 +101,7 @@ describe("interactive patch finding browser", () => {
     expect(app.lastFrame()).toContain("PATCH INSTRUCTIONS");
     expect(app.lastFrame()).toContain("Add instructions for this finding.");
     expect(app.lastFrame()).toContain(
-      "[ ] Create GitHub pull request after patching",
+      "[ ] Create draft GitHub pull request after patching",
     );
     expect(app.lastFrame()).toContain("3/3 selected");
     expect(app.lastFrame()).toContain("SUMMARY");
@@ -304,7 +304,7 @@ describe("interactive patch finding browser", () => {
     ]);
   });
 
-  test("optionally creates a pull request after selected patches", async () => {
+  test("optionally creates a draft pull request after selected patches", async () => {
     const selected: (PatchSelection | null)[] = [];
     const app = render(
       createElement(PatchTui, {
@@ -316,12 +316,12 @@ describe("interactive patch finding browser", () => {
     );
 
     expect(app.lastFrame()).toContain(
-      "[ ] Create GitHub pull request after patching",
+      "[ ] Create draft GitHub pull request after patching",
     );
     app.stdin.write("r");
     await settle();
     expect(app.lastFrame()).toContain(
-      "[✓] Create GitHub pull request after patching",
+      "[✓] Create draft GitHub pull request after patching",
     );
     app.stdin.write("\r");
     await settle();
