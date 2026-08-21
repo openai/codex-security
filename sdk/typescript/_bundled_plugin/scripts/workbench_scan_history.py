@@ -470,8 +470,9 @@ def save_scan_comparison(
     read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
+    matches_json = sys.stdin.read() if args.matches_json_stdin else args.matches_json
     try:
-        payload = json.loads(args.matches_json)
+        payload = json.loads(matches_json)
     except (TypeError, ValueError) as exc:
         raise SystemExit("Scan comparison matches must be a valid JSON object.") from exc
     if not isinstance(payload, dict) or set(payload) != {"matches", "uncertain"}:

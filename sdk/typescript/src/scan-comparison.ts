@@ -51,7 +51,10 @@ interface CompletedScanMatchingOptions
   previousFindings: readonly Record<string, unknown>[];
   falsePositives: readonly Record<string, unknown>[];
   findings: readonly Finding[];
-  workbench(args: readonly string[]): Promise<Record<string, unknown>>;
+  workbench(
+    args: readonly string[],
+    input?: string,
+  ): Promise<Record<string, unknown>>;
   matchFindings?: typeof matchScanFindings;
 }
 
@@ -259,15 +262,17 @@ export async function matchCompletedScan(
           !matchedAfter.has(afterOccurrenceId),
       ) ?? [];
     if (semanticComparison === undefined && scanMatches.length === 0) continue;
-    await options.workbench([
-      "save-scan-comparison",
-      "--before-scan-id",
-      scanId,
-      "--after-scan-id",
-      options.scanId,
-      "--matches-json",
+    await options.workbench(
+      [
+        "save-scan-comparison",
+        "--before-scan-id",
+        scanId,
+        "--after-scan-id",
+        options.scanId,
+        "--matches-json-stdin",
+      ],
       JSON.stringify({ matches: scanMatches, uncertain: scanUncertain }),
-    ]);
+    );
   }
 }
 
