@@ -320,6 +320,8 @@ try {
       "--no-audit",
       "--no-fund",
       archive,
+      `typescript@${packageManifest.devDependencies.typescript}`,
+      `@types/node@${packageManifest.devDependencies["@types/node"]}`,
     ],
     { cwd: consumer },
   );
@@ -355,28 +357,21 @@ try {
     join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
     join(consumer, "consumer.ts"),
   );
-  await writeFile(
-    join(consumer, "tsconfig.json"),
-    JSON.stringify({
-      files: ["consumer.ts"],
-      compilerOptions: {
-        target: "ES2022",
-        lib: ["ESNext"],
-        module: "NodeNext",
-        moduleResolution: "NodeNext",
-        strict: true,
-        noEmit: true,
-        types: ["node"],
-        typeRoots: [join(packageRoot, "node_modules", "@types")],
-      },
-    }),
-  );
   run(
     process.execPath,
     [
-      join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
-      "--project",
-      join(consumer, "tsconfig.json"),
+      join(consumer, "node_modules", "typescript", "bin", "tsc"),
+      "--strict",
+      "--noEmit",
+      "--target",
+      "ES2022",
+      "--lib",
+      "ESNext",
+      "--module",
+      "NodeNext",
+      "--types",
+      "node",
+      "consumer.ts",
     ],
     { cwd: consumer },
   );

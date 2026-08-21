@@ -133,7 +133,6 @@ const BEDROCK_AUTHENTICATION_CASES = [
   ],
   ["default AWS credential chain", {}, "default_credential_chain"],
 ] as const;
-
 function nodeCodex(script: string): {
   command: { command: string };
   environment: Record<string, string>;
@@ -229,11 +228,12 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
+            input?: string,
           ): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
-              recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+              recipe = JSON.parse(input!);
             }
-            return mockWorkbench(args);
+            return mockWorkbench(args, input);
           },
           createCodex: () => ({
             startThread: (options: Record<string, unknown>) => {
@@ -678,6 +678,35 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects unsupported authentication modes before runtime initialization", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment: { OPENAI_API_KEY: "synthetic-openai-key" },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime should not initialize");
+        },
+      },
+    );
+    const options = {
+      auth: "unsupported",
+    } as unknown as ScanOptions;
+
+    await expect(client.preflight(repository, options)).rejects.toThrow(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+    await expect(client.run(repository, options)).rejects.toThrow(
+      "Scan authentication mode must be auto, chatgpt, or api-key.",
+    );
+    expect(runtimeStarted).toBe(false);
+    await client.close();
+  });
+
   test("rejects explicit API-key authentication without a configured key before runtime initialization", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1048,11 +1077,12 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
-            savedRecipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
+            savedRecipe = JSON.parse(input!);
           }
-          return mockWorkbench(args);
+          return mockWorkbench(args, input);
         },
         resolveCodexCommand: () => {
           throw new Error("The Bedrock profile must not sign in to OpenAI");
@@ -1338,6 +1368,7 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           if (args[0] === "get-scan-feedback") {
             return {
@@ -1348,7 +1379,7 @@ describe("CodexSecurity orchestration", () => {
           }
           if (args[0] !== "register-cli-scan") return {};
           registration = args;
-          return mockScanRegistration(args);
+          return mockScanRegistration(args, input);
         },
         createCodex: () => ({
           startThread: () => ({
@@ -1757,6 +1788,7 @@ describe("CodexSecurity orchestration", () => {
     const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
     const reconnects: Array<[number, number]> = [];
     const commands: Array<readonly string[]> = [];
+    let registrationInput: string | undefined;
     const completionWarning =
       "Repository HEAD changed while the scan was running; results were saved for the original revision.";
     const recoveryWarning =
@@ -1791,10 +1823,12 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args);
+            registrationInput = input;
+            return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -1946,9 +1980,8 @@ describe("CodexSecurity orchestration", () => {
       "Additional scan instructions:\nFocus on authentication and authorization.",
     );
     expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
-    expect(
-      JSON.parse(commands[0]![commands[0]!.indexOf("--recipe-json") + 1]!),
-    ).toMatchObject({
+    expect(commands[0]).toContain("--recipe-json-stdin");
+    expect(JSON.parse(registrationInput!)).toMatchObject({
       repository,
       target: { kind: "repository", paths: [] },
       mode: "standard",
@@ -2002,10 +2035,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
             return {
-              ...mockScanRegistration(args),
+              ...mockScanRegistration(args, input),
               targetRevision: "cafebabe",
               contract: {
                 target: {
@@ -2085,6 +2119,7 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           if (args[0] !== "register-cli-scan") {
             return {
@@ -2093,8 +2128,8 @@ describe("CodexSecurity orchestration", () => {
               falsePositives: [],
             };
           }
-          recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
-          return mockScanRegistration(args);
+          recipe = JSON.parse(input!);
+          return mockScanRegistration(args, input);
         },
         createCodex: () => ({
           startThread: () => ({
@@ -2138,6 +2173,57 @@ describe("CodexSecurity orchestration", () => {
     });
     await client.close();
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "loads deep scan settings from a backslash home-relative CODEX_HOME",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const ambientHome = join(root, "ambient-home");
+      const codexHome = join(root, "runtime-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(join(ambientHome, "codex-security"), { recursive: true });
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "codex-security", "config.toml"),
+        "[deep_scan]\nworkers = 5\n",
+      );
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_HOME: "~\\ambient-home",
+            USERPROFILE: root,
+          },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      expect(
+        await readFile(
+          join(codexHome, "codex-security", "config.toml"),
+          "utf8",
+        ),
+      ).toContain("workers = 5");
+      await client.close();
+    },
+  );
 
   test.each([
     "removed",
@@ -2264,6 +2350,47 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "preserves ambient configuration when the same Windows home uses different casing",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const configPath = join(codexHome, "codex-security", "config.toml");
+      const originalConfiguration = "[other]\nenabled = true\n";
+      await mkdir(repository);
+      await mkdir(join(codexHome, "codex-security"), { recursive: true });
+      await writeFile(configPath, originalConfiguration);
+      await mkdir(scanDir, { mode: 0o700 });
+
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_HOME: codexHome.toUpperCase() },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+      await client.close();
+    },
+  );
+
   test("rejects a scan registration without an authoritative target contract", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -2284,10 +2411,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> =>
           args[0] === "register-cli-scan"
             ? {
-                ...mockScanRegistration(args),
+                ...mockScanRegistration(args, input),
                 contract: { target: { allowedKinds: [] } },
               }
             : {},
@@ -2324,10 +2452,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args[0]!);
           if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args);
+            return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -2391,9 +2520,10 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
+            input?: string,
           ): Promise<JsonObject> => {
             commands.push(args[0]!);
-            return mockWorkbench(args);
+            return mockWorkbench(args, input);
           },
           createCodex: () => ({
             startThread: () => ({
@@ -2446,10 +2576,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> =>
           args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args), scopeFileCount: 4_207 }
-            : mockWorkbench(args),
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 4_207 }
+            : mockWorkbench(args, input),
         createCodex: () => ({
           startThread: () => ({
             id: null,
@@ -2527,10 +2658,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> =>
           args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args), scopeFileCount: 1_258 }
-            : mockWorkbench(args),
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 1_258 }
+            : mockWorkbench(args, input),
         createCodex: () => ({
           startThread: () => ({
             id: null,
@@ -2668,10 +2800,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args);
+            return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -2779,10 +2912,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args[0]!);
           return args[0] === "register-cli-scan"
-            ? mockScanRegistration(args)
+            ? mockScanRegistration(args, input)
             : {};
         },
       },
@@ -2823,9 +2957,10 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
+            input?: string,
           ): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
-              return { ...mockScanRegistration(args), scanId };
+              return { ...mockScanRegistration(args, input), scanId };
             }
             if (args[0] === "get-scan-feedback") {
               return {
@@ -2911,6 +3046,7 @@ describe("CodexSecurity orchestration", () => {
       const commands: (readonly string[])[] = [];
       let modelCalled = false;
       let matched = false;
+      let savedComparisonInput: string | undefined;
       const client = new TestClient(
         {},
         {
@@ -2922,6 +3058,7 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
+            input?: string,
           ): Promise<JsonObject> => {
             commands.push(args);
             if (args[0] === "get-scan-feedback") {
@@ -2960,8 +3097,11 @@ describe("CodexSecurity orchestration", () => {
                     : [{ findingId: "another-open-finding" }],
               };
             }
-            if (args[0] === "save-scan-comparison") matched = true;
-            return mockWorkbench(args);
+            if (args[0] === "save-scan-comparison") {
+              matched = true;
+              savedComparisonInput = input;
+            }
+            return mockWorkbench(args, input);
           },
           async matchFindings() {
             modelCalled = true;
@@ -3016,6 +3156,17 @@ describe("CodexSecurity orchestration", () => {
       expect(
         commands.some(([command]) => command === "list-global-findings"),
       ).toBe(true);
+      if (failure === "dismissed") {
+        expect(JSON.parse(savedComparisonInput!)).toMatchObject({
+          matches: [
+            {
+              beforeOccurrenceIds: [previous.occurrenceId],
+              afterOccurrenceIds: [current.occurrenceId],
+            },
+          ],
+          uncertain: [],
+        });
+      }
       await client.close();
     },
   );
@@ -3054,9 +3205,10 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
+            input?: string,
           ): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
-              return mockScanRegistration(args);
+              return mockScanRegistration(args, input);
             }
             return args[0] === "get-scan-feedback" ? feedback : {};
           },
@@ -3073,7 +3225,12 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("uses selected profile pricing for live and persisted scan cost", async () => {
+  const pricedModels = [
+    "gpt-5.6-terra",
+    "gpt-daybreak-blue-latest",
+    "gpt-daybreak-red-latest",
+  ];
+  test.each(pricedModels)("tracks live and saved %s costs", async (model) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3089,7 +3246,7 @@ describe("CodexSecurity orchestration", () => {
       output_tokens: 3,
       reasoning_output_tokens: 1,
     };
-    const expectedCost = estimateScanCost("gpt-5.6-terra", usage);
+    const expectedCost = estimateScanCost(model, usage);
     expect(expectedCost).not.toBeNull();
     if (expectedCost === null) throw new Error("Missing selected-model price");
 
@@ -3103,7 +3260,7 @@ describe("CodexSecurity orchestration", () => {
           model_reasoning_effort: "low",
           profiles: {
             review: {
-              model: "gpt-5.6-terra",
+              model,
               model_reasoning_effort: "high",
             },
           },
@@ -3118,10 +3275,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args);
+            return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -3149,7 +3307,7 @@ describe("CodexSecurity orchestration", () => {
       onCost: (cost) => costs.push({ ...cost }),
     });
 
-    expect(result.turnResult.model).toBe("gpt-5.6-terra");
+    expect(result.turnResult.model).toBe(model);
     expect(result.cost).toEqual(expectedCost);
     expect(costs).toEqual([expectedCost]);
 
@@ -3187,9 +3345,10 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
-          return mockWorkbench(args);
+          return mockWorkbench(args, input);
         },
         createCodex: () => ({
           startThread: () => ({
@@ -3357,10 +3516,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args);
+            return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -3489,10 +3649,11 @@ describe("CodexSecurity orchestration", () => {
           runWorkbench: async (
             _options: unknown,
             args: readonly string[],
+            input?: string,
           ): Promise<JsonObject> => {
             commands.push(args);
             if (args[0] !== "complete-budget-exhausted-scan") {
-              return mockWorkbench(args);
+              return mockWorkbench(args, input);
             }
             if (completion === "unavailable") {
               throw new Error("Deep Scan discovery has not completed.");
@@ -3624,10 +3785,11 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args);
+            return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
             return {
@@ -3711,6 +3873,7 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           if (args[0] === "get-scan-feedback") {
             return {
@@ -3720,8 +3883,8 @@ describe("CodexSecurity orchestration", () => {
             };
           }
           if (args[0] !== "register-cli-scan") return {};
-          recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
-          return mockScanRegistration(args);
+          recipe = JSON.parse(input!);
+          return mockScanRegistration(args, input);
         },
         createCodex: (options: CodexOptions) => ({
           startThread: () => ({
@@ -3834,9 +3997,10 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           options: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
-          const result = await runWorkbench(options, args);
+          const result = await runWorkbench(options, args, input);
           if (args[0] === "fail-scan") {
             throw new Error("failure recording also failed");
           }
@@ -3912,9 +4076,10 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           options: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
+          input?: string,
         ): Promise<JsonObject> => {
           commands.push(args);
-          return await runWorkbench(options, args);
+          return await runWorkbench(options, args, input);
         },
         createCodex: () => ({
           startThread: () => ({
@@ -4238,7 +4403,7 @@ describe("CodexSecurity orchestration", () => {
 
     try {
       const results = await Promise.allSettled(
-        clients.map((client) => client.run(repository)),
+        clients.map((client) => client.run(repository).finally(releaseScans)),
       );
       for (const result of results) {
         expect(result).toMatchObject({
@@ -4250,6 +4415,7 @@ describe("CodexSecurity orchestration", () => {
       }
       expect(scansStarted).toBe(2);
     } finally {
+      releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
@@ -6044,20 +6210,17 @@ setInterval(() => {}, 1000);
     );
     const login = client.loginApiKey("secret-key");
     void login.catch(() => undefined);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const started = await import("node:fs/promises").then(({ stat }) =>
-        stat(ready).catch(() => null),
-      );
-      if (started !== null) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(ready) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(existsSync(ready), "the fake login process started").toBe(true);
+      await client.close();
+      await expect(login).rejects.toThrow();
+      await expect(stat(codexHome)).resolves.toBeDefined();
+    } finally {
+      await client.close();
     }
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(ready)),
-    ).resolves.toBeDefined();
-    await client.close();
-    await expect(login).rejects.toThrow();
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(codexHome)),
-    ).resolves.toBeDefined();
-  });
+  }, 30_000);
 });

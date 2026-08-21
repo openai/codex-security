@@ -1,20 +1,26 @@
+import { open, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   estimateScanCost,
   tokenUsage,
   type ScanCost,
   type ScanTokenUsage,
 } from "./cost-model.js";
-export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
-import { open, readdir } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
 import {
   scanActivityFromSessionEvent,
   type ScanActivity,
 } from "./scan-activity.js";
 import {
+  isScanArtifactDirectory,
+  sessionParentThreadId,
+  sessionStartedAt,
+} from "./scan-sessions.js";
+import {
   scanProgressUpdatesFromEvent,
   type ScanProgress,
 } from "./worker-progress.js";
+
+export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
 export interface ScanSessionEvent {
   threadId: string;
@@ -209,6 +215,7 @@ export class ScanCostTracker {
       for (const session of this.#sessions.values()) {
         if (
           session.threadId === null ||
+          session.parentThreadId !== null ||
           session.workingDirectory === null ||
           scanStartedAt === null ||
           session.startedAt === null ||
@@ -216,17 +223,11 @@ export class ScanCostTracker {
         ) {
           continue;
         }
-        const artifactsDirectory = join(
-          this.#options.scanDirectory,
-          "artifacts",
-        );
-        const workerDirectory = relative(
-          join(artifactsDirectory, "deep_discovery", "workers"),
-          session.workingDirectory,
-        ).split(sep);
         if (
-          session.workingDirectory === artifactsDirectory ||
-          (workerDirectory.length === 2 && workerDirectory[1] === "output")
+          isScanArtifactDirectory(
+            this.#options.scanDirectory,
+            session.workingDirectory,
+          )
         ) {
           included.add(session.threadId);
         }
@@ -464,16 +465,8 @@ function readSessionEvent(
     if (typeof payload["cwd"] === "string") {
       session.workingDirectory = payload["cwd"];
     }
-    if (typeof payload["timestamp"] === "string") {
-      session.startedAt = Math.floor(Date.parse(payload["timestamp"]) / 1_000);
-    }
-    const source = payload["source"];
-    const subagent = isRecord(source) ? source["subagent"] : undefined;
-    const spawn = isRecord(subagent) ? subagent["thread_spawn"] : undefined;
-    const parent =
-      payload["parent_thread_id"] ??
-      (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
-    if (typeof parent === "string") session.parentThreadId = parent;
+    session.startedAt = sessionStartedAt(payload["timestamp"]);
+    session.parentThreadId = sessionParentThreadId(payload);
     session.events?.push(event);
     return;
   }
@@ -487,7 +480,7 @@ function readSessionEvent(
       payload["type"] === "task_started" &&
       typeof payload["started_at"] === "number" &&
       session.startedAt !== null &&
-      payload["started_at"] >= session.startedAt
+      payload["started_at"] >= Math.floor(session.startedAt / 1_000)
     ) {
       session.replaying = false;
       session.events?.push(event);

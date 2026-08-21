@@ -17,10 +17,8 @@ pnpm run test:package
 For CI's full archive inspection, pass the exact `.tgz` path printed by
 `pnpm pack` to `pnpm run check:package`.
 
-The local test commands pass a 30-second per-test timeout explicitly. Windows
-CI and the Windows runner experiment allow 120 seconds for slower native
-credential and document checks. `test:ci` writes `reports/junit.xml` and
-`coverage/lcov.info`. Coverage measures loaded
+The test commands pass a 30-second per-test timeout explicitly. `test:ci` writes
+`reports/junit.xml` and `coverage/lcov.info`. Coverage measures loaded
 JavaScript and TypeScript, not the Python helpers or child processes. It is
 diagnostic for now. Use several successful CI runs to establish a baseline
 before proposing a coverage floor.

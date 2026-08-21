@@ -41,12 +41,14 @@ accepted and rejected inputs, and each real bug or security boundary.
 From the SDK directory, run a focused test while iterating, then run the package checks:
 
 ```bash
-bun test tests-ts/<module>.test.ts
-bun test --randomize --seed 12345
+bun test --timeout 30000 tests-ts/<module>.test.ts
+pnpm run test --seed 12345
 pnpm run types
 pnpm run format
 pnpm run test
 ```
+
+Tests run in random order by default. To reproduce a failure, use the seed printed in Bun's test summary.
 
 After the implementation is verified, keep the test in the final change only
 when it provides meaningful, durable regression coverage. If it is merely

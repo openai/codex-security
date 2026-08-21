@@ -8,6 +8,8 @@ const rates = [
   ["gpt-5.6-sol", 5000n, 500n, 6250n, 30000n],
   ["gpt-5.6-terra", 2000n, 200n, 2500n, 12000n],
   ["gpt-5.6-luna", 200n, 20n, 250n, 1200n],
+  ["gpt-daybreak-blue-latest", 5000n, 500n, 6250n, 30000n],
+  ["gpt-daybreak-red-latest", 12500n, 1250n, 15625n, 75000n],
 ] as const;
 const count = fc.integer({ min: 0, max: 1_000_000_000 });
 const usageParts = fc.record({
@@ -45,36 +47,36 @@ describe("cost-model invariants", () => {
 
   test("matches an integer nanodollar oracle for every priced model", () => {
     fc.assert(
-      fc.property(
-        usageParts,
-        fc.constantFrom(...rates),
-        fc.boolean(),
-        (
-          parts,
-          [model, inputRate, cachedRate, writeRate, outputRate],
-          prefixed,
-        ) => {
-          const selected = prefixed ? `openai.${model}` : model;
-          const tokens = usage(parts);
+      fc.property(usageParts, (parts) => {
+        const tokens = usage(parts);
+        expect(tokenUsage(tokens)).toEqual({
+          ...tokens,
+          total_tokens: tokens.input_tokens + tokens.output_tokens,
+        });
+        for (const [
+          model,
+          inputRate,
+          cachedRate,
+          writeRate,
+          outputRate,
+        ] of rates) {
           const nanos =
             BigInt(parts.uncached) * inputRate +
             BigInt(parts.cached) * cachedRate +
             BigInt(parts.written) * writeRate +
             BigInt(parts.output) * outputRate;
-          expect(estimateScanCost(selected, tokens)).toEqual({
-            model: selected,
-            inputTokens: tokens.input_tokens,
-            cachedInputTokens: parts.cached,
-            cacheWriteInputTokens: parts.written,
-            outputTokens: parts.output,
-            estimatedUsd: Number(nanos) / 1_000_000_000,
-          });
-          expect(tokenUsage(tokens)).toEqual({
-            ...tokens,
-            total_tokens: tokens.input_tokens + tokens.output_tokens,
-          });
-        },
-      ),
+          for (const selected of [model, `openai.${model}`]) {
+            expect(estimateScanCost(selected, tokens)).toEqual({
+              model: selected,
+              inputTokens: tokens.input_tokens,
+              cachedInputTokens: parts.cached,
+              cacheWriteInputTokens: parts.written,
+              outputTokens: parts.output,
+              estimatedUsd: Number(nanos) / 1_000_000_000,
+            });
+          }
+        }
+      }),
       propertyOptions,
     );
   });
