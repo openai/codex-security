@@ -684,6 +684,81 @@ describe("malformed scan artifact recovery", () => {
     );
   });
 
+  test.each(
+    (["rootCause", "root_cause"] as const).flatMap((section) =>
+      (["evidenceRefs", "evidence_refs"] as const).flatMap((refsKey) =>
+        [true, false].map((includeEvidence) => ({
+          section,
+          refsKey,
+          includeEvidence,
+        })),
+      ),
+    ),
+  )(
+    "recovers $section refs $refsKey with evidence catalog: $includeEvidence",
+    async ({ section, refsKey, includeEvidence }) => {
+      const fixture = await startDraftScan();
+      const path = join(fixture.scanDir, "findings.json");
+      const document = await readJson<FindingsDocument>(path);
+      const finding = document.findings[0]!;
+      if (includeEvidence) {
+        finding.codeEvidence = [
+          {
+            id: "canonical-source",
+            label: "Synthetic source",
+            path: "src/extract.py",
+            startLine: 41,
+            code: "canonical_source()",
+            explanation: "Synthetic evidence for reference recovery.",
+          },
+        ];
+        finding["code_evidence"] = [
+          { id: "legacy-source", code: "legacy_source()" },
+        ];
+      }
+      finding[section] = {
+        summary: "The destination is not constrained to the extraction root.",
+        [refsKey]: ["legacy-source", "src/extract.py:41", "canonical-source"],
+      };
+      await writeJson(path, document);
+      const original = await readFile(path, "utf8");
+
+      const strict = spawnSync(
+        fixture.python,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          fixture.scanDir,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(strict.status).not.toBe(0);
+      expect(strict.stderr).toContain("unknown code-evidence ids");
+      expect(await readFile(path, "utf8")).toBe(original);
+
+      const completed = await completeScan(fixture);
+
+      expect(completed.progress.status).toBe("complete");
+      expect(completed.findingCount).toBe(1);
+      expect(completed.warnings).toEqual([
+        "Recovered finding 1: normalized legacy finding details.",
+      ]);
+      const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
+      expect(recovered[section]).toEqual({
+        summary: "The destination is not constrained to the extraction root.",
+        [refsKey]: includeEvidence ? ["legacy-source", "canonical-source"] : [],
+      });
+      expect(recovered.codeEvidence).toEqual(finding.codeEvidence);
+      expect(recovered["code_evidence"]).toEqual(finding["code_evidence"]);
+      const coverage = await readJson<CoverageDocument>(
+        join(fixture.scanDir, "coverage.json"),
+      );
+      expect(coverage.completeness).toBe("complete");
+    },
+  );
+
   test("preserves recovery warnings across prepared scan completion", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
@@ -788,10 +863,27 @@ describe("malformed scan artifact recovery", () => {
     unsafeLocation.locations[0]!.path = "../outside.py";
     const missingIdentity = structuredClone(valid);
     delete (missingIdentity as Partial<Finding>).identity;
+    const invalidEvidenceId = structuredClone(valid);
+    invalidEvidenceId.identity.anchor = "invalid-evidence-id";
+    invalidEvidenceId.codeEvidence = [
+      {
+        id: "src/extract.py:41",
+        label: "Synthetic source",
+        path: "src/extract.py",
+        startLine: 41,
+        code: "synthetic_source()",
+        explanation: "The evidence identifier is intentionally malformed.",
+      },
+    ];
+    invalidEvidenceId["rootCause"] = {
+      summary: "Synthetic root cause.",
+      evidenceRefs: ["src/extract.py:41"],
+    };
     document.findings.push(
       missingSummary,
       unsafeLocation,
       missingIdentity,
+      invalidEvidenceId,
       structuredClone(valid),
       null,
     );
@@ -801,7 +893,7 @@ describe("malformed scan artifact recovery", () => {
 
     expect(completed.progress.status).toBe("complete");
     expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(5);
+    expect(completed.warnings).toHaveLength(6);
     expect(
       completed.warnings.every((warning) =>
         warning.startsWith("Skipped malformed finding"),
@@ -811,6 +903,7 @@ describe("malformed scan artifact recovery", () => {
       "summary",
       "safe repository-relative",
       "identity",
+      "codeEvidence[0].id",
       "duplicate logical finding",
       "expected an object",
     ]) {
@@ -826,7 +919,7 @@ describe("malformed scan artifact recovery", () => {
     expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
       "needs_follow_up",
     );
-    expect(coverage.deferred).toHaveLength(4);
+    expect(coverage.deferred).toHaveLength(5);
   });
 
   test.each([

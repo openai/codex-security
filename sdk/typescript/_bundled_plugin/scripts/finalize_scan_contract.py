@@ -1619,6 +1619,7 @@ def _legacy_sealed_findings_for_validation(findings: dict[str, Any]) -> dict[str
             and evidence["id"]
         }
         for section_name, list_fields in (
+            ("rootCause", ("evidenceRefs", "evidence_refs")),
             ("root_cause", ("evidenceRefs", "evidence_refs")),
             (
                 "validation",
