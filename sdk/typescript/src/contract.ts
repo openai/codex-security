@@ -39,6 +39,10 @@ const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
   "coverage",
   "scope",
 ]);
+// Mirrors runtime.ts's MODEL_UNSAFE_PATH: the WHATWG URL parser silently
+// strips ASCII tab/newline/CR before parsing, so a `remote` carrying one
+// would validate against a different string than the one callers receive.
+const REMOTE_UNSAFE_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 interface CheckedScanFile {
   path: string;
   metadata: Stats;
@@ -416,6 +420,11 @@ function validateCanonicalContract(
 ): void {
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
+    if (REMOTE_UNSAFE_CHARACTERS.test(remote)) {
+      throw new ContractValidationError(
+        "scan.target.remote: expected a sanitized canonical absolute URL.",
+      );
+    }
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
       remote,
     )?.[1];

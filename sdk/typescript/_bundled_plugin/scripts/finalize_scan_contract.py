@@ -59,6 +59,10 @@ SARIF_SECURITY_SCORES = {
     "informational": 0.0,
 }
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
+# Mirrors REMOTE_UNSAFE_CHARACTERS in sdk/typescript/src/contract.ts: urlsplit strips
+# ASCII tab/newline/CR before parsing, exactly like the WHATWG URL parser the SDK
+# loader uses, so a remote carrying one would be sealed here and rejected there.
+REMOTE_UNSAFE_CHARACTERS_RE = re.compile(r"[\u0000-\u001f\u007f-\u009f\u2028\u2029]")
 RFC3339_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
 )
@@ -584,6 +588,8 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 
 
 def _validate_remote(remote: str, context: str) -> None:
+    if REMOTE_UNSAFE_CHARACTERS_RE.search(remote):
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
     parsed = urlsplit(remote)
     if not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
