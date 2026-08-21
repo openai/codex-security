@@ -180,25 +180,26 @@ describe("CLI authentication", () => {
         `Effective scan authentication: API key from ${expectedSource}.`,
       );
       expect(stderr.text()).toContain(
-        "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.",
+        "To use a ChatGPT sign-in, remove OPENAI_API_KEY and CODEX_API_KEY " +
+          "from the environment, then run the command again.",
       );
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
 
-  test("explains interactive choice and how to unset every shadowing key after ChatGPT login", async () => {
-    for (const [argv, environment, source, unsetCommand] of [
+  test("explains interactive choice and how to remove every shadowing key after ChatGPT login", async () => {
+    for (const [argv, environment, source, removeVariables] of [
       [
         ["login"],
         { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY",
+        "OPENAI_API_KEY",
       ],
       [
         ["login", "--device-auth"],
         { Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" },
         "CODEX_API_KEY",
-        "unset Codex_Api_Key",
+        "Codex_Api_Key",
       ],
       [
         ["login"],
@@ -207,7 +208,7 @@ describe("CLI authentication", () => {
           CODEX_API_KEY: "sk-proj-SYNTHETIC_SECRET_456",
         },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY CODEX_API_KEY",
+        "OPENAI_API_KEY and CODEX_API_KEY",
       ],
     ] as const) {
       const stdout = capture();
@@ -229,22 +230,24 @@ describe("CLI authentication", () => {
         `noninteractive scans will use ${source}.`,
       );
       expect(stderr.text()).toContain("--auth chatgpt");
-      expect(stderr.text()).toContain(`'${unsetCommand}'`);
+      expect(stderr.text()).toContain(
+        `remove ${removeVariables} from the environment, then run the command again.`,
+      );
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
     }
   });
 
   test("warns when an environment API key overrides a successful access-token login", async () => {
-    for (const [environment, source, unsetCommand] of [
+    for (const [environment, source, removeVariables] of [
       [
         { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY",
+        "OPENAI_API_KEY",
       ],
       [
         { Codex_Api_Key: "sk-proj-SYNTHETIC_SECRET_456" },
         "CODEX_API_KEY",
-        "unset Codex_Api_Key",
+        "Codex_Api_Key",
       ],
       [
         {
@@ -252,7 +255,7 @@ describe("CLI authentication", () => {
           CODEX_API_KEY: "sk-proj-SYNTHETIC_SECRET_456",
         },
         "OPENAI_API_KEY",
-        "unset OPENAI_API_KEY CODEX_API_KEY",
+        "OPENAI_API_KEY and CODEX_API_KEY",
       ],
     ] as const) {
       const stdout = capture();
@@ -271,11 +274,50 @@ describe("CLI authentication", () => {
         `Access-token login succeeded, but noninteractive scans will use ${source}.`,
       );
       expect(stderr.text()).toContain(
-        "To use your stored credentials, pass '--auth chatgpt' or run ",
+        "To use your stored credentials, pass '--auth chatgpt' or remove ",
       );
-      expect(stderr.text()).toContain(`'${unsetCommand}'`);
+      expect(stderr.text()).toContain(
+        `remove ${removeVariables} from the environment, then run the command again.`,
+      );
       expect(stderr.text()).not.toContain("ChatGPT login succeeded");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+    }
+  });
+
+  test("uses shell-neutral guidance when an API key overrides the stored login", async () => {
+    const posixOnlyShellCommands = [/\bunset\b/, /\bexport\s+\w+=/, /\$env:/i];
+
+    const statusStdout = capture();
+    const statusStderr = capture();
+    expect(
+      await main(
+        ["login", "status"],
+        statusStdout.stream,
+        statusStderr.stream,
+        dependencies({ environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC" } }),
+      ),
+    ).toBe(0);
+    for (const pattern of posixOnlyShellCommands) {
+      expect(statusStderr.text()).not.toMatch(pattern);
+    }
+
+    const loginStdout = capture();
+    const loginStderr = capture();
+    expect(
+      await main(
+        ["login"],
+        loginStdout.stream,
+        loginStderr.stream,
+        dependencies({
+          environment: {
+            OPENAI_API_KEY: "sk-proj-SYNTHETIC_123",
+            CODEX_API_KEY: "sk-proj-SYNTHETIC_456",
+          },
+        }),
+      ),
+    ).toBe(0);
+    for (const pattern of posixOnlyShellCommands) {
+      expect(loginStderr.text()).not.toMatch(pattern);
     }
   });
 

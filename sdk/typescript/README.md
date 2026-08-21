@@ -182,11 +182,17 @@ for existing CI and unattended scans. The SDK accepts the same selection as
 `security.run(repository, { auth: "chatgpt" })` and
 `security.preflight(repository, { auth: "chatgpt" })`.
 
-To make the stored ChatGPT sign-in the automatic default instead, unset any
-configured API-key variables:
+To make the stored ChatGPT sign-in the automatic default instead, remove any
+configured API-key variables from the environment:
 
 ```bash
 unset OPENAI_API_KEY CODEX_API_KEY
+```
+
+On Windows, remove the API-key variables in PowerShell:
+
+```powershell
+Remove-Item Env:OPENAI_API_KEY, Env:CODEX_API_KEY -ErrorAction SilentlyContinue
 ```
 
 The interactive choice applies only to the current scan and is not persisted.
