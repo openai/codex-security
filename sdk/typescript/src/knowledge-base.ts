@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
+import { ConfigurationError, errorMessage } from "./errors.js";
 import { expandHome } from "./runtime.js";
 
 const SUPPORTED_EXTENSIONS = new Set([
@@ -28,6 +29,18 @@ export interface PreparedKnowledgeBase {
 }
 
 export async function prepareKnowledgeBase(
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<PreparedKnowledgeBase> {
+  try {
+    return await stageKnowledgeBase(paths, signal);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new ConfigurationError(errorMessage(error), { cause: error });
+  }
+}
+
+async function stageKnowledgeBase(
   paths: readonly string[],
   signal?: AbortSignal,
 ): Promise<PreparedKnowledgeBase> {

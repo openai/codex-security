@@ -29,6 +29,7 @@ export {
   ContractValidationError,
   IncompleteScanError,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,

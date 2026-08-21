@@ -34,6 +34,7 @@ export class CodexSecurityError extends Error {
 export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
+export class LocalPluginBootstrapError extends PluginBootstrapError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
 export class InvalidTargetError extends CodexSecurityError {}
 export class OutputDirectoryError extends CodexSecurityError {}

@@ -47,6 +47,7 @@ import extractZip from "extract-zip";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
@@ -2021,6 +2022,21 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  try {
+    return await resolveLocalPluginPath(pluginPath, workspace, signal);
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError) {
+      throw error;
+    }
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
+  }
+}
+
+async function resolveLocalPluginPath(
+  pluginPath: string | undefined,
+  workspace: string,
+  signal?: AbortSignal,
+): Promise<string> {
   if (pluginPath === undefined) {
     return await bundledPluginRoot();
   }
@@ -2044,6 +2060,21 @@ export async function resolvePluginPath(
 }
 
 export async function createMarketplace(
+  codexHome: string,
+  pluginRoot: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    return await stageMarketplace(codexHome, pluginRoot, signal);
+  } catch (error) {
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError) {
+      throw error;
+    }
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
+  }
+}
+
+async function stageMarketplace(
   codexHome: string,
   pluginRoot: string,
   signal?: AbortSignal,
@@ -2160,7 +2191,7 @@ export async function bootstrapPlugin(
     throw error;
   });
   if (existing !== null && !existing.isDirectory()) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
@@ -2246,18 +2277,19 @@ export async function pluginMetadata(
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
-    throw new PluginBootstrapError(`Invalid Codex plugin directory: ${root}`, {
-      cause: error,
-    });
+    throw new LocalPluginBootstrapError(
+      `Invalid Codex plugin directory: ${root}`,
+      { cause: error },
+    );
   }
   if (!isRecord(manifest) || manifest["name"] !== PLUGIN_NAME) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have name 'codex-security'.",
     );
   }
   const version = manifest["version"];
   if (typeof version !== "string" || version.trim().length === 0) {
-    throw new PluginBootstrapError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have a non-empty version.",
     );
   }
