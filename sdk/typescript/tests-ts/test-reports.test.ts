@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
+import { testBash } from "./support/test-subprocess.js";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -81,7 +82,7 @@ describe("JUnit inventory comparison", () => {
     )!.run!;
     const expected = [
       ...["ubuntu-latest", "windows-latest"].flatMap((os) =>
-        ["isolated", "parallel", "randomized"].map(
+        ["isolated", "parallel"].map(
           (mode) => `reports/runner-${os}-${mode}.xml`,
         ),
       ),
@@ -95,7 +96,7 @@ describe("JUnit inventory comparison", () => {
     for (const failedReport of ["", expected[0]!]) {
       await writeFile(summary, "");
       const result = spawnSync(
-        "bash",
+        testBash(),
         ["-e", "-o", "pipefail", "-c", `${mock}\n${script}`],
         {
           cwd: fixture.root,
@@ -124,7 +125,6 @@ describe("JUnit inventory comparison", () => {
     await fixture.report("shard-2.xml", [passed]);
     const result = await compare(baseline, join(fixture.root, "shard-*.xml"));
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("Identical test inventory and outcomes");
     expect(result.stdout).toContain("combined test time: 2.50s");
   });
 
@@ -147,6 +147,23 @@ describe("JUnit inventory comparison", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("duplicate test identity");
     }
+  });
+
+  test("reports every shard's timing even when an earlier shard fails", async () => {
+    const fixture = await fixtures();
+    const first = testcase("first");
+    const second = testcase("second");
+    const baseline = await fixture.report("baseline.xml", [first, second]);
+    const failed = await fixture.report("shard-1.xml", [
+      testcase("first", "<failure/>"),
+    ]);
+    const passed = await fixture.report("shard-2.xml", [second]);
+    const result = await compare(baseline, failed, passed);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("test run failed");
+    expect(result.stdout).toContain("shard-1.xml");
+    expect(result.stdout).toContain("shard-2.xml");
   });
 
   test("rejects dropped, duplicated, skipped, failed, or incomplete results", async () => {

@@ -142,7 +142,7 @@ describe("SARIF presentation", () => {
     ["high", 0, undefined],
     ["high", 6.25, "6.25"],
     ["critical", 10, "10"],
-  ] as const)("maps %s severity with score %s", (level, score, expected) => {
+  ] as const)("maps %s severity with score %p", (level, score, expected) => {
     const severity =
       score === undefined
         ? { level }

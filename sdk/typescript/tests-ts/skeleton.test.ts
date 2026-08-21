@@ -23,15 +23,12 @@ interface WorkflowStep {
 interface WorkflowJob {
   name?: string;
   needs?: string[];
+  env?: Record<string, unknown>;
   strategy?: { matrix: Record<string, unknown> };
   steps: WorkflowStep[];
 }
 
-async function workflow(name: string): Promise<{
-  on: Record<string, unknown>;
-  env?: Record<string, unknown>;
-  jobs: Record<string, WorkflowJob>;
-}> {
+async function workflow(name: string) {
   return Bun.YAML.parse(
     await readFile(
       new URL(`../../../.github/workflows/${name}`, import.meta.url),
@@ -140,9 +137,7 @@ describe("TypeScript package skeleton", () => {
       "bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
-    expect(packageJson.scripts["test:ci"]).toContain(
-      `${packageJson.scripts.test} `,
-    );
+    expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({
         run: "node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
@@ -217,18 +212,23 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("keeps runner modes distinct and report uploads rerunnable", async () => {
+  test("keeps runner modes reproducible and report uploads rerunnable", async () => {
     const ci = await workflow("node-ci.yml");
     const quality = await workflow("test-quality.yml");
     const runner = quality.jobs["runner"]!;
     const seed =
       "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
-    expect(quality.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
+    expect(quality.env).not.toHaveProperty("CODEX_SECURITY_PROPERTY_SEED");
+    expect(runner.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
+    expect(runner.strategy?.matrix["mode"]).toEqual([
+      "baseline",
+      "isolated",
+      "parallel",
+    ]);
     for (const [mode, args] of [
       ["baseline", ""],
       ["isolated", "--isolate"],
       ["parallel", "--parallel=2"],
-      ["randomized", `--isolate --randomize --seed=${seed}`],
     ] as const) {
       expect(runner.strategy?.matrix["include"]).toContainEqual({
         mode,
@@ -242,7 +242,7 @@ describe("TypeScript package skeleton", () => {
       "${{ runner.os == 'Windows' && '--timeout=120000' || '' }}",
     );
     expect(command).toContain("${{ matrix.args }}");
-    expect(command).not.toContain("--seed=");
+    expect(command).toContain("--seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }}");
 
     const uploads = [...Object.values(ci.jobs), ...Object.values(quality.jobs)]
       .flatMap((job) => job.steps)

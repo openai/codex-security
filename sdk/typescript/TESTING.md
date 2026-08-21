@@ -1,7 +1,7 @@
 # Testing the SDK and CLI
 
-Use the pnpm version in `package.json` and Bun 1.3.14, matching CI. Run these
-commands from `sdk/typescript`:
+Use the pnpm version in `package.json` and Bun 1.3.14, matching required CI.
+Run these commands from `sdk/typescript`:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -16,6 +16,9 @@ pnpm run test:package
 
 For CI's full archive inspection, pass the exact `.tgz` path printed by
 `pnpm pack` to `pnpm run check:package`.
+
+Tests run in random order by default. To replay a failure, pass the seed from
+Bun's summary to `pnpm run test --seed 12345`.
 
 The local test commands pass a 30-second per-test timeout explicitly. Windows
 CI and the Windows runner experiment allow 120 seconds for slower native
@@ -63,17 +66,23 @@ a strict NodeNext TypeScript consumer and the actual installed CLI. Failed
 tests block CI; a failed diagnostic upload does not.
 
 The separate `test-quality` workflow runs weekly, can be dispatched manually,
-and runs on pull requests that change its workflow file. It exercises Bun's
-native `--isolate`, `--parallel=2`, randomized
-ordering, and seven-way Windows sharding. It compares test identities and
-outcomes against an unsharded run and records timings in the job summary.
-Pull requests replay seed 1; scheduled and manual runs use the workflow run
-number for both property cases and test ordering.
+and runs on pull requests that change its workflow file. It compares Bun's
+default runner, `--isolate`, `--parallel=2`, and seven-way Windows sharding.
+Every mode uses the same seed for property cases and test ordering: pull
+requests replay seed 1; scheduled and manual runs use the workflow run number.
+The workflow compares test identities and outcomes against the unsharded
+default run and records timings, including failed shards, in the job summary.
 It is not a required check or part of the release trigger.
+
+Runner trials use Bun 1.3.13 to avoid the
+[async-module initialization bug in 1.3.14](https://github.com/oven-sh/bun/issues/31410)
+that breaks the Ink UI tests under isolation. Keep the trial pin until a newer
+release passes the full SDK suite in every mode. Required CI and the mutation
+trial remain on Bun 1.3.14.
 
 Keep the current file-balanced Windows runner until the native runner has
 matching inventories and acceptable Windows timings. Before promotion, compare
-the slowest native shard with the current required shards on the same commit.
+native and file-balanced shards using the same commit and Bun version.
 Keep the machine-policy test serial. Do not replace the full required suite
 with `--changed`: Python files, schemas, fixtures, and workflows loaded at
 runtime are not necessarily part of Bun's import graph.
@@ -86,8 +95,8 @@ pnpm exec stryker run --mutate src/worker-progress.ts
 ```
 
 The initial Stryker trial covers progress parsing, safe error messages, and
-pure cost arithmetic. It runs a small Bun suite without live services and
-writes HTML and JSON under `reports/mutation`. Review surviving mutants for
-missing behavior assertions or equivalent changes. There is no score gate yet;
-set one only after the trial has a stable, useful baseline. Do not make a
-surviving mutant disappear by adding assertions about implementation details.
+pure cost arithmetic. It uses the fixed default property-test seed and writes
+HTML and JSON under `reports/mutation`. Review surviving mutants for missing
+behavior assertions or equivalent changes. There is no score gate yet; set
+one only after the trial has a stable, useful baseline. Do not hide surviving
+mutants with assertions about implementation details.

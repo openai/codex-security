@@ -8,10 +8,9 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-def read_report(path: Path) -> tuple[Counter, float]:
+def read_report(path: Path) -> tuple[Counter, float, bool]:
     root = ET.parse(path).getroot()
-    cases = Counter()
-    identities = set()
+    cases = {}
     for case in root.iter("testcase"):
         status = "passed"
         if case.find("skipped") is not None:
@@ -23,25 +22,29 @@ def read_report(path: Path) -> tuple[Counter, float]:
             case.get("classname", ""),
             case.get("name", ""),
         )
-        if identity in identities:
+        if identity in cases:
             raise ValueError(f"{path}: duplicate test identity: {' > '.join(identity)}")
-        identities.add(identity)
-        cases[(*identity, status)] += 1
+        cases[identity] = status
     if not cases:
         raise ValueError(f"{path}: no test cases")
-    if int(root.get("tests", str(sum(cases.values())))) != sum(cases.values()):
+    if int(root.get("tests", str(len(cases)))) != len(cases):
         raise ValueError(f"{path}: reported test count does not match test cases")
-    if any(key[-1] == "failed" for key in cases) or any(
+    failed = "failed" in cases.values() or any(
         int(node.get(field, "0"))
         for node in root.iter()
         if node.tag in ("testsuite", "testsuites")
         for field in ("failures", "errors")
-    ):
-        raise ValueError(f"{path}: test run failed")
+    )
+    if failed:
+        print(f"{path}: test run failed", file=sys.stderr)
     seconds = float(root.get("time", "0"))
-    skipped = sum(count for key, count in cases.items() if key[-1] == "skipped")
-    print(f"| {path.name} | {sum(cases.values())} | {skipped} | {seconds:.2f} |")
-    return cases, seconds
+    skipped = sum(status == "skipped" for status in cases.values())
+    print(f"| {path.name} | {len(cases)} | {skipped} | {seconds:.2f} |")
+    return (
+        Counter((*identity, status) for identity, status in cases.items()),
+        seconds,
+        failed,
+    )
 
 
 def main() -> int:
@@ -51,7 +54,7 @@ def main() -> int:
     args = parser.parse_args()
     print("| Report | Cases | Skipped | Seconds |")
     print("| --- | ---: | ---: | ---: |")
-    baseline, _ = read_report(args.baseline)
+    baseline, _, failed = read_report(args.baseline)
     candidates = Counter()
     durations = []
     for pattern in args.candidates:
@@ -59,11 +62,12 @@ def main() -> int:
         if not paths:
             raise ValueError(f"No reports match {pattern}")
         for path in paths:
-            cases, seconds = read_report(Path(path))
+            cases, seconds, report_failed = read_report(Path(path))
+            failed = failed or report_failed
             candidates.update(cases)
             durations.append(seconds)
     missing, extra = baseline - candidates, candidates - baseline
-    if missing or extra:
+    if failed or missing or extra:
         for label, difference in (("Missing", missing), ("Extra", extra)):
             for identity, count in sorted(difference.items()):
                 print(f"{label} ({count}): {' > '.join(identity)}", file=sys.stderr)
