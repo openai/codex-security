@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
+import { bashCommand } from "./support/shell";
 
+const bash = bashCommand();
 const directories: string[] = [];
 afterEach(async () => {
   await Promise.all(
@@ -95,7 +97,7 @@ describe("JUnit inventory comparison", () => {
     for (const failedReport of ["", expected[0]!]) {
       await writeFile(summary, "");
       const result = spawnSync(
-        "bash",
+        bash,
         ["-e", "-o", "pipefail", "-c", `${mock}\n${script}`],
         {
           cwd: fixture.root,

@@ -112,7 +112,7 @@ describe("deep scan completion summary", () => {
   });
 
   test.each([false, true])(
-    "keeps the result when stop details are unavailable (read fails: %s)",
+    "keeps the result when stop details are unavailable (read fails: %p)",
     async (fails) => {
       const text = await summary({
         result: fakeResult(),
