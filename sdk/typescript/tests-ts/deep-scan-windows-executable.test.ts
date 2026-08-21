@@ -83,6 +83,12 @@ test("uses the newest relocated Windows executable when WindowsApps is inaccessi
       CODEX_CLI_PATH: "C:\\Program Files\\WindowsApps\\Codex\\codex.exe",
     };
     expect(resolve(environment, "win32", "x64")).toBe(newer);
+    const accessible = path.join(root, "WindowsApps", "Codex", "codex.exe");
+    await mkdir(path.dirname(accessible), { recursive: true });
+    await writeFile(accessible, "synthetic executable", { mode: 0o700 });
+    expect(
+      resolve({ ...environment, CODEX_CLI_PATH: accessible }, "win32", "x64"),
+    ).toBe(accessible);
     expect(
       resolve(
         { ...environment, CODEX_CLI_PATH: "C:\\Tools\\codex.exe" },
