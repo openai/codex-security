@@ -43,6 +43,7 @@ export interface ComponentScanOptions {
     options: ComponentPlanningOptions,
   ) => Promise<ComponentPlan>;
   environment?: NodeJS.ProcessEnv;
+  /** @internal */
   matchFindings?: typeof matchScanFindings;
   onPlan?: (components: ComponentReceipt[]) => void;
   onScanEvent?: (event: ComponentScanEvent) => void;

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
+import type { CodexSecurityConfig } from "./config.js";
 import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
@@ -17,6 +18,7 @@ import {
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
+/** @internal */
 export const componentPlanSchema = z
   .object({
     components: z
@@ -32,11 +34,17 @@ export const componentPlanSchema = z
   })
   .strict();
 
-export type ComponentPlan = z.infer<typeof componentPlanSchema>;
-export type ComponentPlanningOptions = Pick<
-  ReadOnlyCodexOptions,
-  "config" | "environment" | "codex" | "signal"
->;
+export interface ComponentPlan {
+  components: Array<{ name: string; paths: string[] }>;
+}
+
+export interface ComponentPlanningOptions {
+  config?: CodexSecurityConfig;
+  environment?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  /** @internal */
+  codex?: ReadOnlyCodexOptions["codex"];
+}
 
 export async function normalizeComponentPlan(
   repository: string,
