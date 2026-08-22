@@ -174,7 +174,7 @@ def generate_diff_in_scope_files(
         is_binary_sample,
         preview_for,
     )
-    from workbench_target import git_blob_bytes
+    from workbench_target import existing_ancestor_is_within_target, git_blob_bytes
 
     rows: list[bytes] = []
     try:
@@ -206,6 +206,19 @@ def generate_diff_in_scope_files(
 
         for path, status in eligible:
             relative = path.relative_to(repository)
+            if mode != "revisions":
+                try:
+                    within_target = existing_ancestor_is_within_target(
+                        path, repository
+                    )
+                except (OSError, RuntimeError) as error:
+                    raise InventoryError(
+                        "could not inspect a changed Git working-tree path"
+                    ) from error
+                if not within_target:
+                    raise InventoryError(
+                        "changed Git working-tree paths must stay inside the selected target"
+                    )
             if status != "D":
                 if mode == "revisions":
                     contents = revision_blobs[relative]
@@ -215,12 +228,13 @@ def generate_diff_in_scope_files(
                         )
                     if is_binary_sample(contents):
                         continue
-                elif (
-                    path.is_symlink()
-                    or not path.is_file()
-                    or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
-                ):
-                    continue
+                else:
+                    if (
+                        path.is_symlink()
+                        or not path.is_file()
+                        or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
+                    ):
+                        continue
             relative_path = relative.as_posix()
             if "\n" in relative_path or "\r" in relative_path:
                 raise InventoryError(

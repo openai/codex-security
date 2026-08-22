@@ -258,7 +258,10 @@ def worktree_content_digest_for_context(
             update_digest_field(
                 digest,
                 b"untracked-content",
-                directory_content_digest(path.resolve()).encode(),
+                directory_content_digest(
+                    path.resolve(),
+                    _selected_target=((work_tree or repository) / pathspec).resolve(),
+                ).encode(),
             )
         elif stat.S_ISREG(metadata.st_mode):
             content_digest = hashlib.sha256()
@@ -369,7 +372,21 @@ def clean_worktree_content_digest() -> str:
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
+def git_directory_snapshot_paths(
+    target: Path, *, skip_unsafe_paths: bool = False, _selected_target: Path | None = None
+) -> list[Path] | None:
+    try:
+        resolved_target = target.resolve()
+        canonical_target = (
+            _selected_target if _selected_target is not None else resolved_target
+        )
+        within_target = directory_is_within_target(resolved_target, canonical_target)
+    except (OSError, RuntimeError):
+        within_target = False
+    if not within_target:
+        if skip_unsafe_paths:
+            return []
+        raise SystemExit("Git working-tree paths must stay inside the selected target.")
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
         return None
@@ -387,6 +404,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
+    resolved_parents: dict[Path, Path] = {target: resolved_target}
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         path = repository / os.fsdecode(raw_path)
         try:
@@ -394,15 +412,35 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         except FileNotFoundError:
             # The index can retain a path that was staged and then deleted.
             continue
+        parent = path.parent
+        try:
+            if parent not in resolved_parents:
+                resolved_parents[parent] = parent.resolve()
+            directory = path.resolve() if stat.S_ISDIR(metadata.st_mode) else None
+            within_target = directory_is_within_target(
+                resolved_parents[parent], canonical_target
+            )
+            if directory is not None:
+                within_target = (
+                    within_target or directory.samefile(canonical_target)
+                ) and directory_is_within_target(directory, canonical_target)
+        except (OSError, RuntimeError):
+            within_target = False
+        if not within_target:
+            if skip_unsafe_paths:
+                continue
+            raise SystemExit("Git working-tree paths must stay inside the selected target.")
         paths.append(path)
         if not stat.S_ISDIR(metadata.st_mode):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if (
             nested_repository_root is not None
-            and Path(nested_repository_root).resolve() == path.resolve()
+            and Path(nested_repository_root).resolve() == directory
         ):
-            nested_paths = git_directory_snapshot_paths(path)
+            nested_paths = git_directory_snapshot_paths(
+                path, skip_unsafe_paths=skip_unsafe_paths, _selected_target=canonical_target
+            )
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
@@ -414,14 +452,41 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     return sorted(set(paths))
 
 
-def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -> str:
+def directory_is_within_target(directory: Path, target: Path) -> bool:
+    """Compare resolved directories, including equivalent filesystem spellings."""
+    if directory.is_relative_to(target):
+        return True
+    try:
+        return any(candidate.samefile(target) for candidate in (directory, *directory.parents))
+    except OSError:
+        return False
+
+
+def existing_ancestor_is_within_target(path: Path, target: Path) -> bool:
+    """Resolve the nearest existing path without losing missing Git entries."""
+    candidate = path
+    while True:
+        try:
+            candidate.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            parent = candidate.parent
+            if parent == candidate:
+                return False
+            candidate = parent
+            continue
+        return directory_is_within_target(candidate.resolve(strict=True), target)
+
+
+def directory_content_digest(
+    target: Path, *, excluded: tuple[Path, ...] = (), _selected_target: Path | None = None
+) -> str:
     excluded_relative = []
     for path in excluded:
         try:
             excluded_relative.append(path.relative_to(target))
         except ValueError:
             continue
-    paths = git_directory_snapshot_paths(target)
+    paths = git_directory_snapshot_paths(target, _selected_target=_selected_target)
     if paths is None:
         paths = sorted(target.rglob("*"))
     digest = hashlib.sha256()
@@ -464,7 +529,7 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
 
 
 def directory_snapshot_regular_file_count(target: Path) -> int:
-    paths = git_directory_snapshot_paths(target)
+    paths = git_directory_snapshot_paths(target, skip_unsafe_paths=True)
     if paths is None:
         paths = sorted(target.rglob("*"))
     count = 0

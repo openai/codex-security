@@ -43,7 +43,11 @@ from rank_preview import (
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_bytes, git_directory_snapshot_paths
+from workbench_target import (
+    existing_ancestor_is_within_target,
+    git_blob_bytes,
+    git_directory_snapshot_paths,
+)
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -708,6 +712,17 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     rows: list[JsonRow] = []
     for path, status in changed:
         rel = path.relative_to(repo)
+        if args.mode != "revisions":
+            try:
+                within_target = existing_ancestor_is_within_target(path, repo)
+            except (OSError, RuntimeError) as error:
+                raise SystemExit(
+                    "Could not inspect a changed Git working-tree path."
+                ) from error
+            if not within_target:
+                raise SystemExit(
+                    "Changed Git working-tree paths must stay inside the selected target."
+                )
 
         if status == "D":
             preview = ""
@@ -723,16 +738,11 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         elif path.is_symlink():
             preview = ""
         elif path.is_file():
-            try:
-                path.resolve(strict=True).relative_to(repo)
-            except (OSError, ValueError):
-                preview = ""
-            else:
-                preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary:
-                    continue
+            preview, is_binary = preview_for(path, args.preview_bytes)
+            if is_binary:
+                continue
         else:
-            preview = ""
+            continue
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))
