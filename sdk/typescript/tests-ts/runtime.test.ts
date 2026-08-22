@@ -65,6 +65,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   preserveCodexSecurityPluginRegistration,
+  pluginExecutionEnvironmentWithGit,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -4203,6 +4204,71 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
+  testPosix(
+    "does not execute repo-root Git shims from a nested workbench directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const nestedDirectory = join(repository, "src");
+      const untrustedBin = join(repository, "node_modules", ".bin");
+      const pluginRoot = join(root, "plugin");
+      const marker = join(root, "repository-git-executed");
+      const untrustedGit = join(untrustedBin, "git");
+      const git = Bun.which("git");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(git).not.toBeNull();
+      expect(python).not.toBeNull();
+      if (git === null || python === null) return;
+
+      await mkdir(untrustedBin, { recursive: true });
+      await mkdir(join(repository, ".git"));
+      await mkdir(nestedDirectory);
+      await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+      await writeFile(
+        untrustedGit,
+        `#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\nexit 1\n`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(pluginRoot, "scripts", "workbench_db.py"),
+        [
+          "import json, os, subprocess",
+          "assert os.environ.get('GIT_SSH_COMMAND') == 'synthetic-ssh'",
+          "git = os.environ['CODEX_SECURITY_GIT']",
+          "completed = subprocess.run([git, '--version'], check=True, capture_output=True, text=True)",
+          "print(json.dumps({'git': git, 'path': os.environ.get('PATH'), 'version': completed.stdout.strip()}))",
+        ].join("\n"),
+      );
+
+      const currentDirectory = spyOn(process, "cwd").mockReturnValue(
+        nestedDirectory,
+      );
+      try {
+        const result = await runWorkbench(
+          {
+            python,
+            pluginRoot,
+            environment: {
+              PATH: [untrustedBin, dirname(git)].join(delimiter),
+              CODEX_SECURITY_GIT: untrustedGit,
+              GIT_SSH_COMMAND: "synthetic-ssh",
+            },
+          },
+          ["test-command"],
+        );
+
+        expect(await realpath(String(result["git"]))).toBe(await realpath(git));
+        expect(result["version"]).toMatch(/^git version /u);
+        expect(String(result["path"]).split(delimiter)).not.toContain(
+          untrustedBin,
+        );
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        currentDirectory.mockRestore();
+      }
+    },
+  );
+
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");
     const repository = join(root, "repository");
@@ -5140,6 +5206,59 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       }),
     ).toBe(await realpath(interpreter!));
+  });
+
+  test("binds the plugin environment to inspected Git", () => {
+    const python = join(
+      tmpdir(),
+      process.platform === "win32" ? "python.exe" : "python",
+    );
+    const codex = join(
+      tmpdir(),
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
+    const environment = pluginExecutionEnvironmentWithGit(
+      python,
+      {
+        Path: join(tmpdir(), "repository-bin"),
+        PATH: join(tmpdir(), "other-repository-bin"),
+        Git_Config_Count: "1",
+        GIT_DIR: join(tmpdir(), "repository", ".git"),
+        Codex_Security_Git: join(tmpdir(), "repository-bin", "git"),
+        pythonutf8: "0",
+        CODEX_CLI_PATH: codex,
+        TEST: "1",
+      },
+      {
+        executable: join(tmpdir(), "trusted-bin", "git"),
+        environment: { PATH: join(tmpdir(), "trusted-bin") },
+      },
+    );
+
+    expect(environment).toEqual({
+      CODEX_SECURITY_GIT: join(tmpdir(), "trusted-bin", "git"),
+      CODEX_CLI_PATH: codex,
+      GIT_DIR: join(tmpdir(), "repository", ".git"),
+      Git_Config_Count: "1",
+      PATH: join(tmpdir(), "trusted-bin"),
+      PYTHON: python,
+      PYTHONUTF8: "1",
+      TEST: "1",
+    });
+    expect(
+      pluginExecutionEnvironmentWithGit(
+        python,
+        { Path: join(tmpdir(), "repository-bin"), GIT_DIR: ".git" },
+        { executable: null, environment: { PATH: "" } },
+      ),
+    ).toEqual({
+      CODEX_SECURITY_GIT: "",
+      CODEX_CLI_PATH: resolveCodexCommand().command,
+      GIT_DIR: ".git",
+      PATH: "",
+      PYTHON: python,
+      PYTHONUTF8: "1",
+    });
   });
 
   test.skipIf(process.platform !== "win32")(

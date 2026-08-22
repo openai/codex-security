@@ -28,6 +28,7 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
       env_vars: string[];
     };
     expect(config.env_vars).toContain("CODEX_MCP_NODE_PATH");
+    expect(config.env_vars).toContain("CODEX_SECURITY_GIT");
     let managedNode = node;
     const marker = join(root, "managed-node-used");
     if (process.platform !== "win32") {

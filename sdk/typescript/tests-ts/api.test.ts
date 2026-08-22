@@ -1,5 +1,6 @@
 import {
   appendFile,
+  chmod,
   copyFile,
   cp,
   mkdir,
@@ -15,7 +16,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Codex,
@@ -49,7 +50,11 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
-import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
+import {
+  resolveCodexCommand,
+  runWorkbench,
+  type WorkbenchCommandOptions,
+} from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -2050,16 +2055,19 @@ describe("CodexSecurity orchestration", () => {
     const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
     const reconnects: Array<[number, number]> = [];
     const commands: Array<readonly string[]> = [];
+    const workbenchGitExecutables: Array<string | null> = [];
     let registrationInput: string | undefined;
     const completionWarning =
       "Repository HEAD changed while the scan was running; results were saved for the original revision.";
     const recoveryWarning =
       "Recovered finding: normalized its semantic anchor.";
+    const git = Bun.which("git");
+    expect(git).not.toBeNull();
 
     const client = new TestClient(
       { codexOverrides: { model: "replay-model" } },
       {
-        environment: { PATH: "/usr/bin", OPENAI_API_KEY: "" },
+        environment: { PATH: dirname(git!), OPENAI_API_KEY: "" },
         prepareRuntime: async () => ({
           codexHome,
           plugin: {
@@ -2073,7 +2081,7 @@ describe("CodexSecurity orchestration", () => {
           environment: {
             CODEX_HOME: codexHome,
             Codex_Home: "/credentials/case-variant-must-not-reach-shell",
-            PATH: "/usr/bin",
+            PATH: dirname(git!),
             GITHUB_TOKEN: "must-not-reach-shell",
             AWS_SECRET_ACCESS_KEY: "must-not-reach-shell",
           },
@@ -2083,10 +2091,13 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          _options: unknown,
+          workbenchOptions: WorkbenchCommandOptions,
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
+          workbenchGitExecutables.push(
+            workbenchOptions.git?.executable ?? null,
+          );
           commands.push(args);
           if (args[0] === "register-cli-scan") {
             registrationInput = input;
@@ -2167,7 +2178,11 @@ describe("CodexSecurity orchestration", () => {
     expect(startedAt.endsWith("Z")).toBe(true);
     expect(Date.parse(startedAt)).toBeGreaterThanOrEqual(scanStartedAt);
     expect(Date.parse(startedAt)).toBeLessThanOrEqual(Date.now());
-    expect((codexOptions as CodexOptions | null)?.env).toMatchObject({
+    const codexEnvironment = (codexOptions as CodexOptions | null)?.env;
+    const codexGit = codexEnvironment?.["CODEX_SECURITY_GIT"];
+    if (typeof codexGit !== "string")
+      throw new Error("missing trusted Git binding");
+    expect(codexEnvironment).toMatchObject({
       CODEX_HOME: codexHome,
       PYTHON: "/managed/python",
       CODEX_SECURITY_STARTED_AT: startedAt,
@@ -2177,7 +2192,9 @@ describe("CodexSecurity orchestration", () => {
       CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repository),
       CODEX_SECURITY_TARGET_KIND: "git_revision",
       CODEX_SECURITY_TARGET_REVISION: "deadbeef",
+      CODEX_SECURITY_GIT: expect.stringMatching(/git(?:\.exe)?$/iu),
     });
+    expect(new Set(workbenchGitExecutables)).toEqual(new Set([codexGit]));
     expect((codexOptions as CodexOptions | null)?.env).not.toHaveProperty(
       "CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST",
     );
@@ -4116,36 +4133,56 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("provides authoritative knowledge-base context without retaining its documents", async () => {
+  test("protects cross-repository knowledge-base context without retaining its documents", async () => {
     const scanPrompt = "Review the synthetic authorization boundary.";
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
     const knowledgeBase = join(root, "system-knowledge");
+    const knowledgeBaseBin = join(knowledgeBase, "node_modules", ".bin");
+    const knowledgeBaseGit = join(
+      knowledgeBaseBin,
+      process.platform === "win32" ? "git.exe" : "git",
+    );
+    const trustedGit = Bun.which("git");
+    expect(trustedGit).not.toBeNull();
+    if (trustedGit === null) return;
+    const trustedBin = await realpath(dirname(trustedGit));
+    const expectedGit = join(trustedBin, basename(trustedGit));
     const context =
       "Internet-facing billing API; prioritize authorization bypasses.\n";
-    await mkdir(repository);
+    await mkdir(join(repository, ".git"), { recursive: true });
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
-    await mkdir(knowledgeBase);
+    await mkdir(join(knowledgeBase, ".git"), { recursive: true });
+    await mkdir(knowledgeBaseBin, { recursive: true });
+    await writeFile(knowledgeBaseGit, "knowledge-base-controlled Git\n");
+    if (process.platform !== "win32") await chmod(knowledgeBaseGit, 0o700);
     await writeFile(join(knowledgeBase, "system-threats.md"), context);
     let knowledgeDirectory = "";
+    let workbenchGit = "";
     let prompt = "";
     let recipe: unknown;
     const client = new TestClient(
       {},
       {
         environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: {
+            PATH: [knowledgeBaseBin, trustedBin].join(delimiter),
+          },
+        }),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         runWorkbench: async (
-          _options: unknown,
+          workbenchOptions: WorkbenchCommandOptions,
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
+          workbenchGit = workbenchOptions.git?.executable ?? "";
           if (args[0] === "get-scan-feedback") {
             return {
               scanId: "scan_example_001",
@@ -4184,6 +4221,7 @@ describe("CodexSecurity orchestration", () => {
       }),
     ).resolves.toMatchObject({ threadId: "thread-1" });
     expect(existsSync(knowledgeDirectory)).toBe(false);
+    expect(workbenchGit).toBe(expectedGit);
     expect(prompt).toContain(
       shellEnvironmentReference("CODEX_SECURITY_KNOWLEDGE_BASE"),
     );
@@ -4891,6 +4929,10 @@ describe("CodexSecurity orchestration", () => {
           const runtime = preparedRuntime(codexHome);
           return {
             ...runtime,
+            environment: {
+              ...runtime.environment,
+              PATH: process.env["PATH"] ?? "",
+            },
             plugin: {
               ...runtime.plugin,
               installedRoot: join(
@@ -5155,7 +5197,13 @@ describe("CodexSecurity orchestration", () => {
           "--out",
           output,
         ],
-        { stdio: "pipe" },
+        {
+          env: {
+            ...process.env,
+            CODEX_SECURITY_GIT: Bun.which("git") ?? "",
+          },
+          stdio: "pipe",
+        },
       );
       return (await readFile(output, "utf8"))
         .trimEnd()

@@ -57,7 +57,12 @@ import {
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
+import { outermostGitMarkerRoot } from "./targets.js";
 import {
   isWindowsUnsafePathComponent,
   windowsUnsafePathComponent,
@@ -116,6 +121,7 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  git?: InspectedExecutable;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1403,8 +1409,21 @@ export async function runWorkbench(
 ): Promise<JsonObject> {
   let stdout: string;
   try {
+    const git =
+      options.git ??
+      (await inspectTrustedExecutable(
+        "git",
+        options.environment,
+        await outermostGitMarkerRoot(process.cwd(), options.signal),
+      ));
     const environment = Object.fromEntries(
-      Object.entries(options.environment).filter(
+      Object.entries(
+        pluginExecutionEnvironmentWithGit(
+          options.python,
+          options.environment,
+          git,
+        ),
+      ).filter(
         ([name]) =>
           name.toUpperCase() !== "OPENAI_API_KEY" &&
           name.toUpperCase() !== "CODEX_API_KEY" &&
@@ -1422,7 +1441,7 @@ export async function runWorkbench(
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
-      pythonUtf8Environment(environment),
+      environment,
       input,
       options.signal,
     );
@@ -2370,11 +2389,27 @@ export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
-  return {
-    ...pythonUtf8Environment(environment),
-    PYTHON: python,
-    CODEX_CLI_PATH: resolveCodexCommand(environment).command,
-  };
+  const result = pythonUtf8Environment(environment);
+  result["PYTHON"] = python;
+  result["CODEX_CLI_PATH"] = resolveCodexCommand(environment).command;
+  return result;
+}
+
+export function pluginExecutionEnvironmentWithGit(
+  python: string,
+  environment: ProcessEnvironment,
+  git: InspectedExecutable,
+): ProcessEnvironment {
+  const result = pluginExecutionEnvironment(python, environment);
+  for (const name of Object.keys(result)) {
+    const normalized = name.toUpperCase();
+    if (normalized === "PATH" || normalized === "CODEX_SECURITY_GIT") {
+      delete result[name];
+    }
+  }
+  result["PATH"] = git.environment["PATH"] ?? "";
+  result["CODEX_SECURITY_GIT"] = git.executable ?? "";
+  return result;
 }
 
 export function pythonUtf8Environment(

@@ -1,6 +1,9 @@
 """Shared constants for the Codex Security workbench."""
 
 import argparse
+import os
+import sys
+from pathlib import Path
 
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
@@ -68,6 +71,59 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_WORK_TREE",
 )
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+def _protected_repository_root(target: Path) -> Path:
+    root = target.resolve()
+    if root.is_file():
+        root = root.parent
+    protected = root
+    for ancestor in (root, *root.parents):
+        try:
+            (ancestor / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        protected = ancestor
+    return protected
+
+
+def trusted_git_executable(protected_root: Path) -> str | None:
+    """Return the host-selected Git executable without searching ``PATH``."""
+    configured = os.environ.get("CODEX_SECURITY_GIT")
+    if not configured:
+        return None
+
+    candidate = Path(configured)
+    if not candidate.is_absolute():
+        raise SystemExit("CODEX_SECURITY_GIT must name an absolute trusted executable.")
+
+    try:
+        invocation = Path(os.path.abspath(candidate))
+        canonical = candidate.resolve(strict=True)
+        repository = _protected_repository_root(protected_root)
+    except (OSError, RuntimeError):
+        return None
+
+    windows = sys.platform == "win32"
+    native_windows_suffixes = {".exe", ".com"}
+    if (
+        not canonical.is_file()
+        or not os.access(canonical, os.F_OK if windows else os.X_OK)
+        or (
+            windows
+            and (
+                candidate.suffix.lower() not in native_windows_suffixes
+                or canonical.suffix.lower() in {".bat", ".cmd"}
+            )
+        )
+    ):
+        return None
+    if any(
+        path == repository or repository in path.parents
+        for path in (invocation, canonical)
+    ):
+        raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
+    return str(invocation)
 
 
 def main() -> None:

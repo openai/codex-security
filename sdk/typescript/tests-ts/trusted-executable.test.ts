@@ -12,7 +12,10 @@ import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
-import { resolveTrustedExecutable } from "../src/trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+} from "../src/trusted-executable.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -110,6 +113,40 @@ describe("trusted executable resolution", () => {
     ).toEqual({
       executable: join(trusted, executable),
       environment: { KEEP: "ok", PATH: trusted },
+    });
+  });
+
+  test("sanitizes repository-linked PATH entries when no trusted executable exists", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const repositoryTools = join(repository, "tools");
+    const linkedExecutable = join(root, "linked-executable");
+    const safe = join(root, "safe");
+    const executable = process.platform === "win32" ? "git.exe" : "git";
+    await Promise.all([
+      mkdir(repositoryTools, { recursive: true }),
+      mkdir(linkedExecutable),
+      mkdir(safe),
+    ]);
+    await writeFile(join(repositoryTools, executable), "untrusted executable");
+    await symlink(
+      join(repositoryTools, executable),
+      join(linkedExecutable, executable),
+      "file",
+    );
+
+    await expect(
+      inspectTrustedExecutable(
+        "git",
+        {
+          PATH: [linkedExecutable, safe].join(delimiter),
+          KEEP: "ok",
+        },
+        repository,
+      ),
+    ).resolves.toEqual({
+      executable: null,
+      environment: { KEEP: "ok", PATH: safe },
     });
   });
 
@@ -252,6 +289,31 @@ describe("trusted executable resolution", () => {
         repository,
       ),
     ).toBeNull();
+  });
+
+  test("rejects Windows batch targets without requiring a canonical native suffix", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const trusted = join(root, "trusted");
+    await Promise.all([mkdir(repository), mkdir(trusted)]);
+    await Promise.all([
+      writeFile(join(trusted, "git.cmd"), "batch"),
+      writeFile(join(trusted, "tool"), "extensionless"),
+    ]);
+    await Promise.all([
+      symlink(join(trusted, "git.cmd"), join(trusted, "git.exe"), "file"),
+      symlink(join(trusted, "tool"), join(trusted, "tool.exe"), "file"),
+    ]);
+
+    expect(
+      await resolveWindowsExecutable("git", trusted, repository),
+    ).toBeNull();
+    expect(await resolveWindowsExecutable("tool", trusted, repository)).toEqual(
+      {
+        executable: join(trusted, "tool.exe"),
+        environment: { KEEP: "ok", PATH: trusted },
+      },
+    );
   });
 
   test("removes PATH entries containing repository-linked Windows shims", async () => {
