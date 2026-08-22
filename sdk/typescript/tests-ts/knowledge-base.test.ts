@@ -242,6 +242,63 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("SSRF & IDOR\n");
   });
 
+  test("keeps DOCX numeric references that cannot name a code point as literal text", async () => {
+    // https://github.com/openai/codex-security/issues/40 -- an out-of-range
+    // reference used to raise RangeError out of String.fromCodePoint, which
+    // surfaced as an unextractable document and failed the whole knowledge base.
+    const cases: Array<[string, string, string]> = [
+      [
+        "above-max-hex",
+        "Boundary &#x110000; case.",
+        "Boundary &#x110000; case.",
+      ],
+      [
+        "above-max-decimal",
+        "Boundary &#1114112; case.",
+        "Boundary &#1114112; case.",
+      ],
+      [
+        "huge-decimal",
+        "Huge &#99999999999999; case.",
+        "Huge &#99999999999999; case.",
+      ],
+      [
+        "lone-surrogate",
+        "Surrogate &#xD800; case.",
+        "Surrogate &#xD800; case.",
+      ],
+      ["valid-ascii", "Valid &#65; case.", "Valid A case."],
+      ["valid-astral", "Valid &#128512; case.", "Valid \u{1F600} case."],
+      ["max-code-point", "Valid &#x10FFFF; case.", "Valid \u{10FFFF} case."],
+    ];
+
+    for (const [name, body, expected] of cases) {
+      const root = await temporaryDirectory();
+      await writeFile(join(root, `${name}.docx`), docx(body));
+      const knowledgeBase = await prepareKnowledgeBase([root]);
+      temporaryDirectories.push(knowledgeBase.path);
+      const documents = await extractedDocuments(knowledgeBase.path);
+      expect(documents).toEqual([`${expected}\n`]);
+    }
+  });
+
+  test("keeps one unusable reference from failing the other knowledge-base documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "notes.md"), "Authentication boundary notes");
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("Boundary &#x110000; case."),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.push(knowledgeBase.path);
+    const documents = await extractedDocuments(knowledgeBase.path);
+
+    expect(documents).toHaveLength(2);
+    expect(documents).toContain("Authentication boundary notes");
+    expect(documents).toContain("Boundary &#x110000; case.\n");
+  });
+
   test("cleans up documents and rediscovers directory contents on later runs", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");
