@@ -4,6 +4,7 @@ import {
   appendFile,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   writeFile,
@@ -21,6 +22,7 @@ import {
   type LinearClientFactory,
 } from "./linear.js";
 import {
+  linearPublicationArguments,
   prepareScanPublication,
   type LinearPublicationDestination,
   type PreparedPublicationIssue,
@@ -28,7 +30,9 @@ import {
 } from "./publication.js";
 import {
   collectPublicationEvents,
+  hasExpectedPublicationArguments,
   matchPublicationIssue,
+  publicationIssueReferences,
 } from "./publication-events.js";
 import {
   preparePublicationStore,
@@ -89,6 +93,7 @@ export interface PublishScanResult {
   };
   dryRun?: boolean;
   issues?: PreparedPublicationIssue[];
+  indeterminate?: boolean;
   warnings?: string[];
 }
 
@@ -113,6 +118,10 @@ export interface PublishScanDependencies {
   ) => Promise<PublicationCodexResult>;
   preparePublicationStore?: typeof preparePublicationStore;
   recordPublishedIssues?: typeof recordPublishedIssues;
+  writeEvents?: (
+    directory: string,
+    events: readonly string[],
+  ) => Promise<string>;
   writeReceipt?: (
     result: PublishScanResult,
     environment: NodeJS.ProcessEnv,
@@ -169,6 +178,7 @@ export async function publishScanInternal(
       failed: 0,
     },
   };
+  const saveReceipt = dependencies.writeReceipt ?? writePublicationReceipt;
   if (options.dryRun) {
     return { ...result, dryRun: true, issues: prepared.issues };
   }
@@ -298,50 +308,10 @@ export async function publishScanInternal(
     events,
     failureMessage,
   );
-  if (handoffResults.created.length > 0) {
-    await preserveVerifiedHandoff(
-      handoff.file,
-      prepared,
-      handoffResults.created,
-    );
-    try {
-      result.created = await (
-        dependencies.recordPublishedIssues ?? recordPublishedIssues
-      )(prepared, handoffResults.created, environment);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new CodexSecurityError(
-        `Could not persist created Linear issues: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
-        { cause: error },
-      );
-    }
-  }
   result.failed = handoffResults.failed;
-  result.counts.created = result.created.length;
   result.counts.failed = result.failed.length;
-  if (options.signal?.aborted) {
-    try {
-      await (dependencies.writeReceipt ?? writePublicationReceipt)(
-        result,
-        environment,
-      );
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new CodexSecurityError(
-        `Linear publication was interrupted and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
-        { cause: error },
-      );
-    }
-    throw new CodexSecurityError(
-      `Linear publication was interrupted. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
-      { cause: options.signal.reason },
-    );
-  }
-  await rm(handoff.directory, { recursive: true, force: true }).catch(
-    () => undefined,
-  );
   if (progressObserver !== undefined) {
-    for (const issue of [...result.created, ...result.failed]) {
+    for (const issue of [...handoffResults.created, ...handoffResults.failed]) {
       if (completedFindings.has(issue.findingId)) continue;
       completedFindings.add(issue.findingId);
       reportPublicationProgress(progressObserver, {
@@ -355,11 +325,95 @@ export async function publishScanInternal(
       });
     }
   }
+  const recoveryMessage = `The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`;
+  let eventLogNotice: string | undefined;
+  const preserveCompletedEvents = async (): Promise<void> => {
+    if (eventLogNotice !== undefined || events.completedEvents === undefined)
+      return;
+    try {
+      const file = await (dependencies.writeEvents ?? writePublicationEvents)(
+        handoff.directory,
+        events.completedEvents,
+      );
+      eventLogNotice = `Completed Linear publication events remain at ${file}.`;
+    } catch (error) {
+      eventLogNotice = `Could not preserve unverified Linear publication events: ${safeErrorMessage(error)}.`;
+    }
+  };
+  if (handoffResults.indeterminate) {
+    result.indeterminate = true;
+    result.warnings = [
+      `The Linear publication outcome is indeterminate; local history may not include every created issue. ${recoveryMessage}`,
+    ];
+    await preserveCompletedEvents();
+    if (eventLogNotice !== undefined) result.warnings.push(eventLogNotice);
+    try {
+      await saveReceipt(result, environment);
+    } catch (error) {
+      result.warnings.push(
+        `Could not save the initial indeterminate publication receipt: ${safeErrorMessage(error)}.`,
+      );
+    }
+  }
+  let persistenceFailure: { cause: unknown; detail: string } | undefined;
+  if (handoffResults.created.length > 0) {
+    try {
+      await preserveVerifiedHandoff(
+        handoff.file,
+        prepared,
+        handoffResults.created,
+      );
+      result.created = await (
+        dependencies.recordPublishedIssues ?? recordPublishedIssues
+      )(prepared, handoffResults.created, environment);
+    } catch (cause) {
+      persistenceFailure = { cause, detail: safeErrorMessage(cause) };
+    }
+  }
+  result.counts.created = result.created.length;
+  if (
+    persistenceFailure !== undefined ||
+    options.signal?.aborted ||
+    handoffResults.indeterminate
+  ) {
+    await preserveCompletedEvents();
+    if (
+      eventLogNotice !== undefined &&
+      !result.warnings?.includes(eventLogNotice)
+    ) {
+      result.warnings = [
+        ...(result.warnings ?? [recoveryMessage]),
+        eventLogNotice,
+      ];
+    }
+    const recoveryDetails = result.warnings?.join(" ") ?? recoveryMessage;
+    const reason =
+      persistenceFailure === undefined
+        ? `Linear publication ${options.signal?.aborted ? "was interrupted" : "could not verify every completed mutation"}`
+        : `Could not persist created Linear issues: ${persistenceFailure.detail}`;
+    const cause =
+      persistenceFailure === undefined
+        ? options.signal?.reason
+        : persistenceFailure.cause;
+    if (persistenceFailure !== undefined && !result.indeterminate) {
+      throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
+    }
+    try {
+      await saveReceipt(result, environment);
+    } catch (error) {
+      const detail = safeErrorMessage(error);
+      throw new CodexSecurityError(
+        `${reason} and its partial receipt could not be saved: ${detail}. ${recoveryDetails}`,
+        { cause: error },
+      );
+    }
+    throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
+  }
+  await rm(handoff.directory, { recursive: true, force: true }).catch(
+    () => undefined,
+  );
   try {
-    await (dependencies.writeReceipt ?? writePublicationReceipt)(
-      result,
-      environment,
-    );
+    await saveReceipt(result, environment);
   } catch (error) {
     if (result.created.length === 0 || options.signal?.aborted) throw error;
     result.warnings = [
@@ -402,27 +456,18 @@ async function publishLinearApiIssues(
     const batch = publication.issues.slice(index, index + 20);
     const settled = await Promise.allSettled(
       batch.map(async (issue) => {
-        const content = {
-          title: issue.title,
-          description: issue.description,
-          ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-        };
-        const arguments_ = {
-          team: publication.destination.teamId,
-          ...(publication.destination.projectId === undefined
-            ? {}
-            : { project: publication.destination.projectId }),
-          ...content,
-        };
+        const arguments_ = linearPublicationArguments(
+          publication.destination,
+          issue,
+        );
+        const { team, project, ...content } = arguments_;
         let outcome:
           | { issueIdentifier: string; url: string }
           | { error: string };
         try {
           const response = await client.createIssue({
-            teamId: publication.destination.teamId,
-            ...(publication.destination.projectId === undefined
-              ? {}
-              : { projectId: publication.destination.projectId }),
+            teamId: team,
+            ...(project === undefined ? {} : { projectId: project }),
             ...content,
             ...(assigneeId === undefined ? {} : { assigneeId }),
           });
@@ -507,22 +552,12 @@ function reportCompletedIssue(
     "Linear issue creation failed.",
   );
   const created = verified.created[0];
-  const failed = verified.failed[0];
-  if (created === undefined && failed === undefined) return;
-  if (
-    created === undefined &&
-    failed?.error ===
-      "The connected Linear app did not return a created issue identifier."
-  ) {
-    return;
-  }
+  if (created === undefined) return;
   completed.add(issue.findingId);
   reportPublicationProgress(observer, {
     type: "issue_completed",
     findingId: issue.findingId,
-    ...(created === undefined
-      ? { error: failed!.error }
-      : { issueIdentifier: created.issueIdentifier }),
+    issueIdentifier: created.issueIdentifier,
     completed: completed.size,
     total: publication.issues.length,
   });
@@ -609,15 +644,7 @@ async function createPublicationHandoff(
   const issues = publication.issues.map((issue) => ({
     findingId: issue.findingId,
     occurrenceId: issue.occurrenceId,
-    arguments: {
-      team: publication.destination.teamId,
-      ...(publication.destination.projectId === undefined
-        ? {}
-        : { project: publication.destination.projectId }),
-      title: issue.title,
-      description: issue.description,
-      ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-    },
+    arguments: linearPublicationArguments(publication.destination, issue),
   }));
   const batches = Array.from(
     { length: Math.ceil(issues.length / 20) },
@@ -646,9 +673,8 @@ async function collectPublicationHandoff(
   try {
     content = await readFile(file, "utf8");
   } catch {
-    return events;
+    content = "";
   }
-  if (content.trim().length === 0) return events;
 
   const created = new Map<string, PublishedScanIssue>();
   const failed = new Map<string, string>();
@@ -658,6 +684,11 @@ async function collectPublicationHandoff(
   const expectedIssues = new Map(
     publication.issues.map((issue) => [issue.findingId, issue]),
   );
+  const eventCreated = new Map(
+    events.created.map((issue) => [issue.findingId, issue]),
+  );
+  const claimedIssues: Array<{ findingId: unknown; issueIdentifier: string }> =
+    [...events.created];
 
   for (const line of content.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
@@ -667,6 +698,14 @@ async function collectPublicationHandoff(
     } catch {
       unexpected.push("Codex wrote an invalid Linear publication handoff.");
       continue;
+    }
+    if (isRecord(record)) {
+      for (const claimed of publicationIssueReferences(record)) {
+        claimedIssues.push({
+          findingId: record["findingId"],
+          issueIdentifier: claimed.issueIdentifier,
+        });
+      }
     }
     if (!isRecord(record) || typeof record["findingId"] !== "string") {
       unexpected.push("Codex wrote an unexpected Linear publication handoff.");
@@ -680,28 +719,6 @@ async function collectPublicationHandoff(
       continue;
     }
     if (observed.has(issue.findingId)) {
-      const saved = created.get(issue.findingId);
-      const identifiers = ["issueIdentifier", "identifier", "id"].filter(
-        (name) => Object.hasOwn(record, name),
-      );
-      const identifier =
-        identifiers.length === 1 ? record[identifiers[0]!] : undefined;
-      const url = record["url"];
-      if (
-        saved !== undefined &&
-        record["scanId"] === publication.scanId &&
-        record["occurrenceId"] === issue.occurrenceId &&
-        !Object.hasOwn(record, "error") &&
-        typeof identifier === "string" &&
-        identifier.trim().length > 0 &&
-        identifier !== saved.issueIdentifier &&
-        (url === undefined ||
-          (typeof url === "string" && url.trim().length > 0))
-      ) {
-        throw new CodexSecurityError(
-          `More than one Linear issue was created for finding ${issue.findingId}: ${saved.issueIdentifier} and ${identifier}. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover both issues before retrying to avoid creating duplicate issues.`,
-        );
-      }
       explicitFailures.delete(issue.findingId);
       created.delete(issue.findingId);
       failed.set(
@@ -758,6 +775,25 @@ async function collectPublicationHandoff(
       );
       continue;
     }
+    if (
+      !hasExpectedPublicationArguments(publication, issue, record["arguments"])
+    ) {
+      const verified = eventCreated.get(issue.findingId);
+      if (
+        verified?.issueIdentifier === identifier &&
+        (url === undefined ||
+          verified.url === undefined ||
+          url === verified.url)
+      ) {
+        created.set(issue.findingId, verified);
+      } else {
+        failed.set(
+          issue.findingId,
+          "Codex wrote a Linear publication with unexpected arguments or destination.",
+        );
+      }
+      continue;
+    }
     created.set(issue.findingId, {
       findingId: issue.findingId,
       occurrenceId: issue.occurrenceId,
@@ -776,9 +812,6 @@ async function collectPublicationHandoff(
     }
   }
 
-  const eventCreated = new Map(
-    events.created.map((issue) => [issue.findingId, issue]),
-  );
   const eventFailed = new Map(
     events.failed.map((issue) => [issue.findingId, issue.error]),
   );
@@ -820,7 +853,19 @@ async function collectPublicationHandoff(
     }
   }
 
+  const indeterminate =
+    events.indeterminate === true ||
+    events.unresolvedCompletions?.some(
+      (findingId) => !created.has(findingId),
+    ) === true ||
+    claimedIssues.some(
+      ({ findingId, issueIdentifier }) =>
+        typeof findingId !== "string" ||
+        created.get(findingId)?.issueIdentifier !== issueIdentifier,
+    );
+
   return {
+    ...(indeterminate ? { indeterminate: true } : {}),
     created: publication.issues.flatMap((issue) => {
       const saved = created.get(issue.findingId);
       return saved === undefined ? [] : [saved];
@@ -843,15 +888,32 @@ async function preserveVerifiedHandoff(
   } catch {
     current = "";
   }
+  const planned = new Map(
+    publication.issues.map((issue) => [issue.findingId, issue]),
+  );
+  const verified = new Map(issues.map((issue) => [issue.findingId, issue]));
   const recorded = new Set<string>();
   for (const line of current.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
     try {
       const record = JSON.parse(line) as unknown;
+      if (!isRecord(record) || typeof record["findingId"] !== "string")
+        continue;
+      const expected = planned.get(record["findingId"]);
+      const saved = verified.get(record["findingId"]);
       if (
-        isRecord(record) &&
-        typeof record["findingId"] === "string" &&
-        !Object.hasOwn(record, "error")
+        expected !== undefined &&
+        saved !== undefined &&
+        record["scanId"] === publication.scanId &&
+        record["occurrenceId"] === expected.occurrenceId &&
+        (record["issueIdentifier"] ?? record["identifier"] ?? record["id"]) ===
+          saved.issueIdentifier &&
+        !Object.hasOwn(record, "error") &&
+        hasExpectedPublicationArguments(
+          publication,
+          expected,
+          record["arguments"],
+        )
       ) {
         recorded.add(record["findingId"]);
       }
@@ -860,9 +922,6 @@ async function preserveVerifiedHandoff(
     }
   }
 
-  const planned = new Map(
-    publication.issues.map((issue) => [issue.findingId, issue]),
-  );
   const records = issues
     .filter((issue) => !recorded.has(issue.findingId))
     .map((issue) => {
@@ -873,17 +932,10 @@ async function preserveVerifiedHandoff(
         occurrenceId: issue.occurrenceId,
         issueIdentifier: issue.issueIdentifier,
         ...(issue.url === undefined ? {} : { url: issue.url }),
-        arguments: {
-          team: publication.destination.teamId,
-          ...(publication.destination.projectId === undefined
-            ? {}
-            : { project: publication.destination.projectId }),
-          title: expected.title,
-          description: expected.description,
-          ...(expected.priority === undefined
-            ? {}
-            : { priority: expected.priority }),
-        },
+        arguments: linearPublicationArguments(
+          publication.destination,
+          expected,
+        ),
       });
     });
   if (records.length === 0) return;
@@ -1054,6 +1106,23 @@ function reportCodexEvent(
     onEvent(event);
   } catch {
     // Ignore malformed diagnostic lines and optional observer failures.
+  }
+}
+
+async function writePublicationEvents(
+  directory: string,
+  events: readonly string[],
+): Promise<string> {
+  const file = join(directory, `events-${randomUUID()}.jsonl`);
+  const handle = await open(file, "wx", 0o600);
+  try {
+    await handle.writeFile(`${events.join("\n")}\n`, "utf8");
+    await handle.close();
+    return file;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(file, { force: true }).catch(() => undefined);
+    throw error;
   }
 }
 

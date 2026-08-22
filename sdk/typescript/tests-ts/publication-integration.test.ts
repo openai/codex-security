@@ -710,6 +710,100 @@ describe("database-backed Linear publication integration", () => {
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
   });
 
+  test("retains uncertain mutations when events.jsonl already exists without losing verified SQLite publications", async () => {
+    const completed = await fixture(2);
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const stdout = capture();
+    const stderr = capture();
+    const cli = dependencies({ environment: completed.environment });
+    let handoffFile = "";
+    let events = "";
+
+    cli.publishScan = async (directory, options) =>
+      publishScanInternal(directory, options, {
+        environment: completed.environment,
+        resolveCodex: () => ({ command: "synthetic-codex" }),
+        runCodex: async (_command, _args, prompt) => {
+          const payload = await publicationPayload(prompt);
+          handoffFile = payload.handoffFile;
+          await writeFile(
+            join(dirname(handoffFile), "events.jsonl"),
+            "Existing event log\n",
+            { flag: "wx", mode: 0o600 },
+          );
+          events = payload.batches[0]!.map((finding, index) =>
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: `tool-${index}`,
+                type: "mcp_tool_call",
+                server: "codex_apps",
+                tool: "linear.save_issue",
+                arguments:
+                  index === 0
+                    ? finding.arguments
+                    : { ...finding.arguments, priority: 4 },
+                status: "completed",
+                result: {
+                  content: [],
+                  structured_content: { identifier: `SEC-${901 + index}` },
+                },
+              },
+            }),
+          ).join("\n");
+          return { exitCode: 0, stdout: events, stderr: "" };
+        },
+      });
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--project",
+          OPTIONS.projectId,
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      ),
+    ).toBe(2);
+
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(
+      "could not verify every completed mutation",
+    );
+    expect(stderr.text()).toContain(handoffFile);
+    expect(
+      storedPublications(completed).map(({ external_id }) => external_id),
+    ).toEqual(["SEC-901"]);
+    const receipt = JSON.parse(
+      await readFile(receiptPath(completed), "utf8"),
+    ) as PublishScanResult;
+    expect(receipt.indeterminate).toBe(true);
+    expect(receipt.counts).toEqual({ findings: 2, created: 1, failed: 1 });
+    expect(receipt.created[0]?.issueIdentifier).toBe("SEC-901");
+    const eventFiles = (await readdir(dirname(handoffFile))).filter(
+      (name) => name.startsWith("events-") && name.endsWith(".jsonl"),
+    );
+    expect(eventFiles).toHaveLength(1);
+    const eventsFile = join(dirname(handoffFile), eventFiles[0]!);
+    expect(await readFile(eventsFile, "utf8")).toBe(`${events}\n`);
+    expect(receipt.warnings).toContainEqual(
+      expect.stringContaining(eventsFile),
+    );
+    expect(
+      await readFile(join(dirname(handoffFile), "events.jsonl"), "utf8"),
+    ).toBe("Existing event log\n");
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
   test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
     const completed = await fixture(3);
     const sealed = await artifactDigests(completed.scanDirectory);

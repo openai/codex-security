@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -18,6 +19,7 @@ import {
   type PublishScanDependencies,
   type PublishScanOptions,
   type PublishScanProgress,
+  type PublishScanResult,
 } from "../src/publish.js";
 import type {
   PreparedPublicationIssue,
@@ -125,6 +127,7 @@ function dependencies(
   return {
     environment: {
       ...process.env,
+      CODEX_SECURITY_LINEAR_API_KEY: "",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
     },
     prepare: async () => publication,
@@ -246,6 +249,15 @@ async function writeHandoff(
       .join("\n")}\n`,
     "utf8",
   );
+}
+
+async function publicationEventsFile(handoffFile: string): Promise<string> {
+  const directory = dirname(handoffFile);
+  const files = (await readdir(directory)).filter(
+    (name) => name.startsWith("events-") && name.endsWith(".jsonl"),
+  );
+  expect(files).toHaveLength(1);
+  return join(directory, files[0]!);
 }
 
 async function processHasExited(pid: number): Promise<boolean> {
@@ -984,6 +996,13 @@ describe("connected Linear publication", () => {
       content: [],
       structured_content: { nested_connector_response: "unrecognized" },
     };
+    const rejectedRetry = JSON.parse(
+      issueEvent(publication.issues[0]!, {
+        status: "failed",
+        error: "Linear rejected the retry.",
+      }),
+    );
+    rejectedRetry.item.id = "tool-finding-1-retry";
 
     const result = await publishScanInternal(
       publication.scanDirectory,
@@ -994,6 +1013,7 @@ describe("connected Linear publication", () => {
         {
           runCodex: async (_command, _args, input, _environment, onEvent) => {
             onEvent?.(event);
+            onEvent?.(rejectedRetry);
             await writeHandoff(input, [
               handoffRecord(publication, publication.issues[0]!, {
                 identifier: "SEC-808",
@@ -1001,7 +1021,9 @@ describe("connected Linear publication", () => {
             ]);
             return {
               exitCode: 0,
-              stdout: JSON.stringify(event),
+              stdout: [event, rejectedRetry]
+                .map((item) => JSON.stringify(item))
+                .join("\n"),
               stderr: "",
             };
           },
@@ -1022,6 +1044,101 @@ describe("connected Linear publication", () => {
         total: 1,
       },
     ]);
+  });
+
+  test("does not stage recovery events for a determinate publication", async () => {
+    const publication = preparedPublication();
+    let handoffFile = "";
+    let eventWrites = 0;
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _args, input) => {
+            handoffFile = publicationData(input).handoffFile;
+            return {
+              exitCode: 0,
+              stdout: issueEvent(publication.issues[0]!),
+              stderr: "",
+            };
+          },
+          recordPublishedIssues: async (_prepared, issues) => {
+            expect(
+              (await readdir(dirname(handoffFile))).filter((name) =>
+                name.startsWith("events-"),
+              ),
+            ).toEqual([]);
+            return [...issues];
+          },
+          writeEvents: async () => {
+            eventWrites += 1;
+            throw new Error("Determinate publication needs no recovery log.");
+          },
+        },
+      ),
+    );
+
+    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+    expect(eventWrites).toBe(0);
+  });
+
+  test("retains completed calls with unfamiliar results until a handoff resolves them", async () => {
+    const publication = preparedPublication(2);
+    const unresolved = JSON.parse(issueEvent(publication.issues[1]!));
+    unresolved.item.result = {
+      structured_content: { nested_connector_response: "unrecognized" },
+    };
+    const output = [
+      issueEvent(publication.issues[0]!),
+      JSON.stringify(unresolved),
+    ].join("\n");
+    let handoffFile = "";
+    let persisted: string[] = [];
+    let receipt: unknown;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              return { exitCode: 0, stdout: output, stderr: "" };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = issues.map((issue) => issue.issueIdentifier);
+              return [...issues];
+            },
+            writeReceipt: async (result) => {
+              receipt = result;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("could not verify every completed mutation");
+
+    expect(persisted).toEqual(["SEC-1"]);
+    expect(receipt).toMatchObject({
+      counts: { findings: 2, created: 1, failed: 1 },
+      failed: [
+        {
+          findingId: "finding-2",
+          error: expect.stringContaining(
+            "did not return a created issue identifier",
+          ),
+        },
+      ],
+    });
+    expect(
+      await readFile(await publicationEventsFile(handoffFile), "utf8"),
+    ).toBe(`${output}\n`);
+    expect(await readFile(handoffFile, "utf8")).toContain("SEC-1");
   });
 
   test("creates deterministic concurrent batches of at most 20 and persists every settled batch", async () => {
@@ -1196,6 +1313,59 @@ describe("connected Linear publication", () => {
     expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
   });
 
+  test("retains verified event evidence when an incomplete handoff is rejected", async () => {
+    const publication = preparedPublication(2);
+    const incomplete = handoffRecord(publication, publication.issues[0]!);
+    delete incomplete["issueIdentifier"];
+    const output = publication.issues
+      .map((issue) => issueEvent(issue))
+      .join("\n");
+    let handoffFile = "";
+    let persisted: string[] = [];
+    let receipt: unknown;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [incomplete]);
+              return { exitCode: 0, stdout: output, stderr: "" };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = issues.map((issue) => issue.issueIdentifier);
+              return [...issues];
+            },
+            writeReceipt: async (result) => {
+              receipt = result;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("could not verify every completed mutation");
+
+    expect(persisted).toEqual(["SEC-2"]);
+    expect(receipt).toMatchObject({
+      created: [{ findingId: "finding-2", issueIdentifier: "SEC-2" }],
+      failed: [{ findingId: "finding-1" }],
+      counts: { findings: 2, created: 1, failed: 1 },
+    });
+    expect(
+      await readFile(await publicationEventsFile(handoffFile), "utf8"),
+    ).toBe(`${output}\n`);
+    const recovery = (await readFile(handoffFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(recovery[0]).toEqual(incomplete);
+    expect(recovery[1]?.["issueIdentifier"]).toBe("SEC-2");
+  });
+
   test("retains verified issue mappings after model-authored failures if the publication database fails", async () => {
     const publication = preparedPublication(2);
     let handoffFile: string | undefined;
@@ -1321,7 +1491,7 @@ describe("connected Linear publication", () => {
         ),
       ),
     ).rejects.toThrow(
-      /Linear publication was interrupted\. The publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
+      /Linear publication was interrupted.*indeterminate.*publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
     );
 
     expect(recorded).toEqual(["SEC-WRITTEN", "SEC-SALVAGED"]);
@@ -1460,7 +1630,7 @@ describe("connected Linear publication", () => {
     expect(await readFile(handoffFile!, "utf8")).toContain("SEC-SAVED");
   });
 
-  test("rejects mismatched scan IDs, finding occurrences, duplicate findings, and unknown findings", async () => {
+  test("retains rejected success-shaped handoffs for recovery", async () => {
     const scenarios: Array<{
       name: string;
       mutate: (record: Record<string, unknown>) => Record<string, unknown>[];
@@ -1481,12 +1651,54 @@ describe("connected Linear publication", () => {
         name: "an unexpected finding",
         mutate: (record) => [{ ...record, findingId: "another-finding" }],
       },
+      {
+        name: "an invalid URL",
+        mutate: (record) => [{ ...record, url: "" }],
+      },
+      {
+        name: "conflicting identity aliases",
+        mutate: (record) => [{ ...record, identifier: "" }],
+      },
+      {
+        name: "conflicting nested identity",
+        mutate: (record) => {
+          const changed: Record<string, unknown> = {
+            ...record,
+            id: record["issueIdentifier"],
+            issue: { identifier: "SEC-OTHER" },
+          };
+          delete changed["issueIdentifier"];
+          delete changed["arguments"];
+          return [changed];
+        },
+      },
+      {
+        name: "a nested success result",
+        mutate: (record) => {
+          const { issueIdentifier, ...rest } = record;
+          return [{ ...rest, issue: { identifier: issueIdentifier } }];
+        },
+      },
+      {
+        name: "a structured success result",
+        mutate: (record) => {
+          const { issueIdentifier, ...rest } = record;
+          return [
+            {
+              ...rest,
+              structured_content: { issue: { identifier: issueIdentifier } },
+            },
+          ];
+        },
+      },
     ];
 
     for (const scenario of scenarios) {
       const publication = preparedPublication();
       let persisted = false;
-      const result = await publishScanInternal(
+      let handoffFile = "";
+      let receipt: unknown;
+      const operation = publishScanInternal(
         publication.scanDirectory,
         OPTIONS,
         dependencies(
@@ -1494,6 +1706,7 @@ describe("connected Linear publication", () => {
           {},
           {
             runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
               await writeHandoff(
                 input,
                 scenario.mutate(
@@ -1506,23 +1719,44 @@ describe("connected Linear publication", () => {
               persisted = true;
               return [...created];
             },
+            writeReceipt: async (result) => {
+              receipt = result;
+            },
           },
         ),
       );
 
-      expect(result.created, scenario.name).toEqual([]);
-      expect(result.failed, scenario.name).toHaveLength(1);
-      expect(result.failed[0]!.findingId, scenario.name).toBe("finding-1");
+      await expect(operation).rejects.toThrow(
+        "could not verify every completed mutation",
+      );
+      expect(receipt, scenario.name).toMatchObject({
+        created: [],
+        failed: [{ findingId: "finding-1" }],
+        counts: { findings: 1, created: 0, failed: 1 },
+      });
+      expect(await readFile(handoffFile, "utf8"), scenario.name).toContain(
+        "SEC-1",
+      );
       expect(persisted, scenario.name).toBe(false);
     }
   });
 
   test("retains distinct duplicate Linear issue IDs for indeterminate recovery", async () => {
-    const publication = preparedPublication();
+    const publication = preparedPublication(2);
     const issue = publication.issues[0]!;
+    const first = issueEvent(issue, { identifier: "SYNTH-DUPLICATE-A" });
+    const unverified = JSON.parse(
+      issueEvent(issue, { identifier: "SYNTH-DUPLICATE-B" }),
+    );
+    unverified.item.arguments.title = "Changed title";
+    const output = [
+      first,
+      JSON.stringify(unverified),
+      issueEvent(publication.issues[1]!),
+    ].join("\n");
     let handoffFile: string | undefined;
-    let persisted = false;
-    let receipt = false;
+    let persisted: string[] = [];
+    let receipt: unknown;
 
     await expect(
       publishScanInternal(
@@ -1541,32 +1775,38 @@ describe("connected Linear publication", () => {
                 handoffRecord(publication, issue, {
                   identifier: "SYNTH-DUPLICATE-B",
                 }),
+                handoffRecord(publication, publication.issues[1]!),
               ]);
               return {
                 exitCode: 0,
-                stdout: [
-                  issueEvent(issue, { identifier: "SYNTH-DUPLICATE-A" }),
-                  issueEvent(issue, { identifier: "SYNTH-DUPLICATE-B" }),
-                ].join("\n"),
+                stdout: output,
                 stderr: "",
               };
             },
             recordPublishedIssues: async (_prepared, created) => {
-              persisted = true;
+              persisted = created.map((issue) => issue.issueIdentifier);
               return [...created];
             },
-            writeReceipt: async () => {
-              receipt = true;
+            writeReceipt: async (result) => {
+              receipt = result;
             },
           },
         ),
       ),
     ).rejects.toThrow(
-      /SYNTH-DUPLICATE-A and SYNTH-DUPLICATE-B.*indeterminate.*publication handoff remains at.*recover both issues.*avoid creating duplicate issues/u,
+      /could not verify every completed mutation.*publication handoff remains at.*avoid creating duplicate issues/u,
     );
 
-    expect(persisted).toBe(false);
-    expect(receipt).toBe(false);
+    expect(persisted).toEqual(["SEC-2"]);
+    expect(receipt).toMatchObject({
+      counts: { findings: 2, created: 1, failed: 1 },
+      failed: [
+        {
+          findingId: "finding-1",
+          error: expect.stringContaining("more than one"),
+        },
+      ],
+    });
     const records = (await readFile(handoffFile!, "utf8"))
       .trim()
       .split("\n")
@@ -1574,11 +1814,71 @@ describe("connected Linear publication", () => {
     expect(records.map((record) => record["issueIdentifier"])).toEqual([
       "SYNTH-DUPLICATE-A",
       "SYNTH-DUPLICATE-B",
+      "SEC-2",
     ]);
+    expect(
+      await readFile(await publicationEventsFile(handoffFile!), "utf8"),
+    ).toBe(`${output}\n`);
   });
 
-  test("matches durable publication handoffs by scan and finding IDs only", async () => {
+  test("retains unverified handoffs while persisting independently valid issues", async () => {
     const publication = preparedPublication(3);
+    let handoffFile: string | undefined;
+    let persisted: string[] = [];
+    let receipt: unknown;
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(
+                input,
+                publication.issues.map((issue, index) => {
+                  const record = handoffRecord(publication, issue);
+                  if (index === 0) {
+                    record["arguments"] = { title: "Normalized issue title" };
+                  } else if (index === 1) {
+                    delete record["arguments"];
+                  } else {
+                    record["connectorRequestId"] = "request-example";
+                  }
+                  return record;
+                }),
+              );
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = issues.map((issue) => issue.issueIdentifier);
+              return [...issues];
+            },
+            writeReceipt: async (result) => {
+              receipt = result;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /could not verify every completed mutation.*handoff remains at.*avoid creating duplicate issues/u,
+    );
+
+    expect(persisted).toEqual(["SEC-3"]);
+    expect(receipt).toMatchObject({
+      counts: { findings: 3, created: 1, failed: 2 },
+      created: [{ findingId: "finding-3", issueIdentifier: "SEC-3" }],
+    });
+    expect(await readFile(handoffFile!, "utf8")).toContain(
+      "Normalized issue title",
+    );
+  });
+
+  test("recovers incomplete handoff arguments from an exact observed mutation", async () => {
+    const publication = preparedPublication(2);
+    let handoffFile: string | undefined;
     const result = await publishScanInternal(
       publication.scanDirectory,
       OPTIONS,
@@ -1587,33 +1887,285 @@ describe("connected Linear publication", () => {
         {},
         {
           runCodex: async (_command, _args, input) => {
-            await writeHandoff(
-              input,
-              publication.issues.map((issue, index) => {
-                const record = handoffRecord(publication, issue);
-                if (index === 0) {
-                  record["arguments"] = { title: "Normalized issue title" };
-                } else if (index === 1) {
-                  delete record["arguments"];
-                } else {
-                  record["connectorRequestId"] = "request-example";
-                }
-                return record;
-              }),
+            handoffFile = publicationData(input).handoffFile;
+            const records = publication.issues.map((issue) => {
+              const record = handoffRecord(publication, issue);
+              delete record["arguments"];
+              return record;
+            });
+            await writeHandoff(input, records);
+            return {
+              exitCode: 0,
+              stdout: publication.issues
+                .map((issue) => issueEvent(issue))
+                .join("\n"),
+              stderr: "",
+            };
+          },
+          recordPublishedIssues: async (_prepared, issues) => {
+            const records = (await readFile(handoffFile!, "utf8"))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            expect(records.slice(2)).toEqual(
+              publication.issues.map((issue) => ({
+                ...handoffRecord(publication, issue),
+                url: `https://linear.app/example/issue/SEC-${issue.findingId.slice(8)}`,
+              })),
             );
-            return { exitCode: 0, stdout: "", stderr: "" };
+            return [...issues];
           },
         },
       ),
     );
 
-    expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
-    expect(result.created.map((issue) => issue.findingId)).toEqual([
-      "finding-1",
-      "finding-2",
-      "finding-3",
-    ]);
+    expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
   });
+
+  test.each(["none", "both", "final"] as const)(
+    "retains mutation evidence when payload verification fails (receipt failure: %s)",
+    async (receiptFailure) => {
+      const publication = preparedPublication(2);
+      const changed = JSON.parse(issueEvent(publication.issues[1]!));
+      changed.item.arguments.team = "different-team";
+      const output = [
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "Unrelated diagnostic" },
+        }),
+        issueEvent(publication.issues[0]!),
+        JSON.stringify(changed),
+      ].join("\n");
+      let handoffFile: string | undefined;
+      let persisted: string[] = [];
+      let receipt: unknown;
+      let receiptWrites = 0;
+      const updates: PublishScanProgress[] = [];
+
+      await expect(
+        publishScanInternal(
+          publication.scanDirectory,
+          { ...OPTIONS, onProgress: (event) => updates.push(event) },
+          dependencies(
+            publication,
+            {},
+            {
+              runCodex: async (
+                _command,
+                _args,
+                input,
+                _environment,
+                onEvent,
+              ) => {
+                handoffFile = publicationData(input).handoffFile;
+                onEvent?.(changed);
+                return { exitCode: 0, stdout: output, stderr: "" };
+              },
+              recordPublishedIssues: async (_prepared, issues) => {
+                expect(
+                  (await readdir(dirname(handoffFile!))).filter((name) =>
+                    name.startsWith("events-"),
+                  ),
+                ).toHaveLength(1);
+                persisted = issues.map((issue) => issue.issueIdentifier);
+                return [...issues];
+              },
+              writeReceipt: async (result) => {
+                receiptWrites += 1;
+                receipt = result;
+                if (
+                  receiptFailure === "both" ||
+                  (receiptFailure === "final" && receiptWrites === 2)
+                )
+                  throw new Error(
+                    "OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123",
+                  );
+              },
+            },
+          ),
+        ),
+      ).rejects.toThrow(
+        receiptFailure !== "none"
+          ? /could not verify every completed mutation and its partial receipt could not be saved: \[redacted\]\..*handoff remains at.*avoid creating duplicate issues/u
+          : /could not verify every completed mutation.*handoff remains at.*avoid creating duplicate issues/u,
+      );
+
+      expect(receiptWrites).toBe(2);
+      expect(persisted).toEqual(["SEC-1"]);
+      expect(receipt).toMatchObject({
+        indeterminate: true,
+        counts: { findings: 2, created: 1, failed: 1 },
+      });
+      expect(await readFile(handoffFile!, "utf8")).toContain("SEC-1");
+      const eventsFile = await publicationEventsFile(handoffFile!);
+      expect(await readFile(eventsFile, "utf8")).toBe(
+        `${issueEvent(publication.issues[0]!)}\n${JSON.stringify(changed)}\n`,
+      );
+      expect(receipt).toMatchObject({
+        warnings: expect.arrayContaining([expect.stringContaining(eventsFile)]),
+      });
+      expect(updates).toContainEqual(
+        expect.objectContaining({
+          type: "issue_completed",
+          findingId: "finding-2",
+          error: expect.any(String),
+        }),
+      );
+      expect(updates.some((event) => event.type === "completed")).toBe(false);
+      if (process.platform !== "win32") {
+        expect((await stat(eventsFile)).mode & 0o077).toBe(0);
+      }
+    },
+  );
+
+  test("keeps recovery-write failures from blocking verified history persistence", async () => {
+    const publication = preparedPublication(2);
+    const changed = JSON.parse(issueEvent(publication.issues[1]!));
+    changed.item.arguments.team = "different-team";
+    const phases: string[] = [];
+    let receipt: PublishScanResult | undefined;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {
+            stdout: [
+              issueEvent(publication.issues[0]!),
+              JSON.stringify(changed),
+            ].join("\n"),
+          },
+          {
+            recordPublishedIssues: async (_prepared, issues) => {
+              phases.push("history");
+              return [...issues];
+            },
+            writeEvents: async () => {
+              phases.push("events");
+              throw new Error("Synthetic event writer unavailable.");
+            },
+            writeReceipt: async (result) => {
+              phases.push(result.created.length === 0 ? "initial" : "final");
+              receipt = structuredClone(result);
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /could not verify every completed mutation.*Could not preserve unverified Linear publication events/u,
+    );
+
+    expect(phases).toEqual(["events", "initial", "history", "final"]);
+    expect(receipt).toMatchObject({
+      indeterminate: true,
+      created: [{ findingId: "finding-1", issueIdentifier: "SEC-1" }],
+      counts: { findings: 2, created: 1, failed: 1 },
+      warnings: expect.arrayContaining([
+        expect.stringContaining("Synthetic event writer unavailable"),
+      ]),
+    });
+  });
+
+  test.each(["history", "handoff", "interruption"] as const)(
+    "preserves durable indeterminate status across %s failure",
+    async (failure) => {
+      const publication = preparedPublication();
+      const controller = new AbortController();
+      const extra = JSON.parse(
+        issueEvent(publication.issues[0]!, { identifier: "SEC-EXTRA" }),
+      );
+      extra.item.arguments.description = "An unrelated synthetic completion";
+      const output = [
+        issueEvent(publication.issues[0]!),
+        JSON.stringify(extra),
+      ].join("\n");
+      const stateDirectory = await mkdtemp(
+        join(tmpdir(), "codex-security-indeterminate-receipt-"),
+      );
+      temporaryDirectories.push(stateDirectory);
+      const receiptDirectory = join(stateDirectory, "publications", "linear");
+      const digest = createHash("sha256")
+        .update(publication.scanId)
+        .digest("hex");
+      const readReceipt = async () =>
+        JSON.parse(
+          await readFile(join(receiptDirectory, `${digest}.json`), "utf8"),
+        ) as PublishScanResult;
+      let handoffFile = "";
+      let historyAttempted = false;
+      const injected = dependencies(
+        publication,
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          runCodex: async (_command, _args, input) => {
+            handoffFile = publicationData(input).handoffFile;
+            if (failure === "handoff") {
+              await rm(handoffFile);
+              await mkdir(handoffFile);
+            }
+            if (failure === "interruption") controller.abort("SIGINT");
+            return { exitCode: 0, stdout: output, stderr: "" };
+          },
+          recordPublishedIssues: async (_prepared, issues) => {
+            historyAttempted = true;
+            expect(
+              (await readdir(dirname(handoffFile))).filter((name) =>
+                name.startsWith("events-"),
+              ),
+            ).toHaveLength(1);
+            expect(await readReceipt()).toMatchObject({
+              indeterminate: true,
+              created: [],
+              failed: [],
+              counts: { findings: 1, created: 0, failed: 0 },
+            });
+            if (failure === "history") {
+              throw new Error("Publication history is unavailable.");
+            }
+            return [...issues];
+          },
+        },
+      );
+      delete injected.writeReceipt;
+
+      await expect(
+        publishScanInternal(
+          publication.scanDirectory,
+          { ...OPTIONS, signal: controller.signal },
+          injected,
+        ),
+      ).rejects.toThrow(
+        failure === "interruption"
+          ? /was interrupted.*indeterminate.*handoff remains at/u
+          : /Could not persist created Linear issues.*indeterminate.*handoff remains at/u,
+      );
+
+      const receipt = await readReceipt();
+      const eventsFile = await publicationEventsFile(handoffFile);
+      expect(receipt.indeterminate).toBe(true);
+      expect(receipt.warnings).toContainEqual(
+        expect.stringContaining(eventsFile),
+      );
+      expect(receipt.failed).toEqual([]);
+      expect(receipt.counts).toEqual({
+        findings: 1,
+        created: failure === "interruption" ? 1 : 0,
+        failed: 0,
+      });
+      expect(receipt.created.map((issue) => issue.issueIdentifier)).toEqual(
+        failure === "interruption" ? ["SEC-1"] : [],
+      );
+      expect(historyAttempted).toBe(failure !== "handoff");
+      expect(await readFile(eventsFile, "utf8")).toBe(`${output}\n`);
+      const archived = (await readdir(receiptDirectory)).filter(
+        (name) => name.startsWith(`${digest}-`) && name.endsWith(".json"),
+      );
+      expect(archived).toHaveLength(2);
+    },
+  );
 
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {
     const scenarios: Array<{
@@ -1646,7 +2198,8 @@ describe("connected Linear publication", () => {
 
     for (const scenario of scenarios) {
       const publication = preparedPublication();
-      const result = await publishScanInternal(
+      let receipt: unknown;
+      const operation = publishScanInternal(
         publication.scanDirectory,
         OPTIONS,
         dependencies(
@@ -1663,12 +2216,20 @@ describe("connected Linear publication", () => {
                 stderr: "",
               };
             },
+            writeReceipt: async (result) => {
+              receipt = result;
+            },
           },
         ),
       );
 
-      expect(result.created, scenario.name).toEqual([]);
-      expect(result.failed, scenario.name).toHaveLength(1);
+      await expect(operation).rejects.toThrow(
+        "could not verify every completed mutation",
+      );
+      expect(receipt, scenario.name).toMatchObject({
+        created: [],
+        failed: [{ findingId: "finding-1" }],
+      });
     }
   });
 

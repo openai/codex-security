@@ -724,6 +724,13 @@ scan must already exist in the local scan history. Running publication again
 creates another set of issues for the same scan; existing issues are not
 matched, updated, or reused.
 
+Connected-app publication checks recorded issue-creation arguments against the
+prepared payload. If a completed mutation cannot be verified, publication keeps
+any verified successes in local history, retains its private recovery handoff
+and available event evidence, and exits with the recovery path. Inspect the
+existing Linear issues before retrying. This checks the submitted arguments; it
+is not a fresh readback of the remote issues.
+
 Issue descriptions contain source code and vulnerability details. Select a
 Linear destination authorized to receive that information. Publication receipts
 are stored separately from the sealed scan artifacts.

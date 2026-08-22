@@ -40,6 +40,24 @@ export interface PreparedScanPublication {
   issues: PreparedPublicationIssue[];
 }
 
+export function linearPublicationArguments(
+  destination: LinearPublicationDestination,
+  issue: PreparedPublicationIssue,
+): Pick<PreparedPublicationIssue, "title" | "description" | "priority"> & {
+  team: string;
+  project?: string;
+} {
+  return {
+    team: destination.teamId,
+    ...(destination.projectId === undefined
+      ? {}
+      : { project: destination.projectId }),
+    title: issue.title,
+    description: issue.description,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+  };
+}
+
 const LINEAR_PRIORITIES = {
   critical: 1,
   high: 2,

@@ -84,6 +84,10 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: [
+        event(prepared, 0),
+        event(prepared, 1, { tool: "linear_save_issue" }),
+      ],
       created: [
         {
           findingId: "finding_0",
@@ -132,6 +136,7 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: output.split("\n"),
       created: [
         {
           findingId: "finding_0",
@@ -149,12 +154,14 @@ describe("Codex Linear publication events", () => {
     });
   });
 
-  test("recognizes all created issues when Codex rewrites the final descriptions", () => {
+  test("does not verify rewritten issue content even when finding identities match", () => {
     const prepared = publication(8);
     const output = prepared.issues
       .map((issue, index) =>
         event(prepared, index, {
           arguments: {
+            team: prepared.destination.teamId,
+            project: prepared.destination.projectId,
             title: index < 6 ? issue.title : "A rewritten issue title",
             description:
               index < 6
@@ -167,7 +174,7 @@ describe("Codex Linear publication events", () => {
       .join("\n");
 
     const result = collectPublicationEvents(output, prepared, "missing");
-    expect(result.created).toHaveLength(8);
+    expect(result.created).toHaveLength(6);
     expect(result.created.map((issue) => issue.issueIdentifier)).toEqual([
       "SEC-1",
       "SEC-2",
@@ -175,10 +182,49 @@ describe("Codex Linear publication events", () => {
       "SEC-4",
       "SEC-5",
       "SEC-6",
-      "SEC-7",
-      "SEC-8",
     ]);
+    expect(result.failed.map((issue) => issue.findingId)).toEqual([
+      "finding_6",
+      "finding_7",
+    ]);
+    expect(result.indeterminate).toBe(true);
+    expect(result.completedEvents).toEqual(output.split("\n"));
+  });
+
+  test("retains every completed mutation for an indeterminate finding", () => {
+    const prepared = publication();
+    const first = event(prepared);
+    const second = JSON.parse(first);
+    second.item.arguments.title = "Changed title";
+    second.item.result.structured_content.identifier = "SEC-OTHER";
+    const changed = JSON.stringify(second);
+
+    const result = collectPublicationEvents(
+      `${first}\n${changed}`,
+      prepared,
+      "missing",
+    );
+    expect(result.created).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.completedEvents).toEqual([first, changed]);
+  });
+
+  test("keeps verified findings when an additional completed mutation is unknown", () => {
+    const prepared = publication();
+    const first = event(prepared);
+    const extra = JSON.parse(first);
+    extra.item.arguments.description = "An unrelated issue";
+    extra.item.result.structured_content.identifier = "SEC-OTHER";
+    const unknown = JSON.stringify(extra);
+
+    const result = collectPublicationEvents(
+      `${first}\n${unknown}`,
+      prepared,
+      "missing",
+    );
+    expect(result.created[0]?.issueIdentifier).toBe("SEC-1");
     expect(result.failed).toEqual([]);
+    expect(result.completedEvents).toEqual([first, unknown]);
   });
 
   test("rejects missing, mismatched, or ambiguous finding occurrence IDs", () => {
@@ -233,6 +279,7 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: output.split("\n"),
       created: [
         {
           findingId: "finding_0",
@@ -305,6 +352,7 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: output.split("\n").slice(1),
       created: [
         {
           findingId: "finding_0",
@@ -368,7 +416,7 @@ describe("Codex Linear publication events", () => {
     ["existing issue id", { id: "EXAMPLE-999" }],
     ["additional argument", { assignee: "synthetic_user" }],
   ] as const)(
-    "matches an actual dotted Linear tool event by finding IDs despite %s",
+    "retains an indeterminate result for a completed Linear mutation with %s",
     (_label, changed) => {
       const prepared = publication();
       const issue = prepared.issues[0]!;
@@ -389,11 +437,73 @@ describe("Codex Linear publication events", () => {
       });
 
       const result = collectPublicationEvents(output, prepared, "not verified");
-      expect(result.created).toHaveLength(1);
-      expect(result.created[0]?.findingId).toBe("finding_0");
-      expect(result.failed).toEqual([]);
+      expect(result.created).toEqual([]);
+      expect(result.failed).toEqual([
+        {
+          findingId: "finding_0",
+          error:
+            "Codex attempted to create a Linear issue with unexpected arguments or destination.",
+        },
+      ]);
+      expect(result.indeterminate).toBe(true);
     },
   );
+
+  test("does not require recovery for a rejected mutation", () => {
+    const prepared = publication();
+    const result = collectPublicationEvents(
+      event(prepared, 0, {
+        status: "failed",
+        arguments: {
+          team: "another-team",
+          description: prepared.issues[0]!.description,
+        },
+      }),
+      prepared,
+      "not verified",
+    );
+
+    expect(result.created).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.indeterminate).toBeUndefined();
+  });
+
+  test("keeps one verified mutation when another attempt is rejected", () => {
+    const prepared = publication();
+    const completed = event(prepared);
+    const rejected = event(prepared, 0, {
+      id: "call_retry",
+      status: "failed",
+      error: { message: "Linear rejected the retry." },
+      result: undefined,
+    });
+
+    for (const output of [
+      `${completed}\n${rejected}`,
+      `${rejected}\n${completed}`,
+    ]) {
+      const result = collectPublicationEvents(output, prepared, "missing");
+      expect(result.created[0]?.issueIdentifier).toBe("SEC-1");
+      expect(result.failed).toEqual([]);
+      expect(result.indeterminate).toBeUndefined();
+      expect(result.completedEvents).toEqual([completed]);
+    }
+  });
+
+  test("accepts team-only informational issues without optional arguments", () => {
+    const prepared = publication();
+    delete prepared.destination.projectId;
+    delete prepared.issues[0]!.priority;
+
+    const result = collectPublicationEvents(
+      event(prepared),
+      prepared,
+      "missing",
+    );
+    expect(result.created[0]?.issueIdentifier).toBe("SEC-1");
+    expect(result.failed).toEqual([]);
+    expect(result.indeterminate).toBeUndefined();
+  });
 
   test("does not trust issue ids reported by an agent message or a code-mode wrapper", () => {
     const prepared = publication();
@@ -453,6 +563,8 @@ describe("Codex Linear publication events", () => {
     });
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      indeterminate: true,
+      completedEvents: [output],
       created: [],
       failed: [
         {
@@ -506,6 +618,8 @@ describe("Codex Linear publication events", () => {
     expect(
       collectPublicationEvents(output, prepared, "Missing tool call."),
     ).toEqual({
+      completedEvents: [output.split("\n")[1]!],
+      unresolvedCompletions: ["finding_0"],
       created: [],
       failed: [
         {
