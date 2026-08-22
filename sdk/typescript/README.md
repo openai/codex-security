@@ -67,6 +67,44 @@ Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
 
+### Validate an existing finding
+
+Use `security.validate()` to assess one finding without running a repository
+scan or invoking the Codex Security CLI:
+
+```ts
+const security = new CodexSecurity();
+try {
+  const result = await security.validate({
+    repositoryPath: "/path/to/repository",
+    finding: {
+      title: "Possible SQL injection",
+      location: "src/query.ts:42",
+    },
+    outputDir: "/path/outside/repository/validation",
+  });
+  console.log(result.disposition);
+  console.log(result.report);
+} finally {
+  await security.close();
+}
+```
+
+`finding` accepts literal text or a JSON-serializable object, never a file
+path. Read files explicitly. Validation uses the CLI's validation skill and
+the client's settings and authentication. It leaves repository files unchanged
+and does not add a scan to scan history.
+
+The result contains `disposition` (`reportable`, `suppressed`, `not_applicable`,
+or `deferred`), a Markdown `report`, `threadId`, and `outputDir` for evidence.
+The report explains root cause, exploitability, evidence, and proof gaps.
+`reportable` can rely on static analysis; `deferred` means insufficient evidence.
+
+`outputDir` must be empty and outside the enclosing Git worktree. It defaults
+to the Codex Security state directory's `validations/` folder. Pass `auth` to
+select authentication or `signal` to cancel. Failed, incomplete, or malformed
+responses reject the promise.
+
 ### SDK configuration and scan options
 
 Pass runtime configuration to the `CodexSecurity` constructor:
@@ -661,6 +699,72 @@ and scans stopped at their configured cost limit do not start another turn.
 `4`. `--max-attempts` sets how many times each pending repository can run per
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
+
+### Custom validation
+
+Use a prompt file to replace the final validation step in a standard or diff
+scan. The ordinary source review still runs. The supplied text goes directly
+into a separate validation turn and is not sent to discovery workers.
+The SDK adapts the bundled discovery workflow without changing the plugin.
+An incompatible plugin workflow stops the scan instead of using default validation.
+
+```bash
+npx @openai/codex-security scan . --validation-prompt-file validation.md
+```
+
+The SDK accepts the same text as `validationPrompt`:
+
+```ts
+const result = await security.run(repository, {
+  validationPrompt:
+    "Run scripts/validate.sh, test each candidate through the local API, and stop the test environment when finished.",
+});
+```
+
+Describe setup, allowed test targets, expected evidence, and cleanup in the
+prompt. Refer to credentials through environment variables; do not put secrets
+in the prompt or validation output. There are no separate setup or teardown
+hooks. Deep scans reject this option. Empty candidate sets skip the custom turn.
+
+The SDK supplies the candidate IDs and requires a `CustomValidationResult`:
+
+```json
+{
+  "status": "complete",
+  "reason": null,
+  "validations": [
+    {
+      "candidateId": "candidate-1",
+      "validation": {
+        "disposition": "reportable",
+        "method": "integration test",
+        "confidence": "high",
+        "confidence_rationale": "The test reproduced the reported behavior.",
+        "rubric": "Check the protected operation.",
+        "evidence": ["The unauthorized request succeeded."],
+        "counterevidence_or_proof_gap": "",
+        "remaining_uncertainty": "",
+        "artifact_paths": []
+      },
+      "severity": null,
+      "impact": null
+    }
+  ]
+}
+```
+
+Each candidate needs exactly one result. The disposition is `reportable`,
+`suppressed`, `not_applicable`, or `deferred`. Optional assessment changes use
+`{ "level": "medium", "rationale": "..." }` in `severity` or `impact`; use
+`null` to retain the original assessment. Finding identity and source locations
+do not change. Deferred candidates make coverage partial. Suppressed and
+deferred candidates remain in the saved validation artifacts.
+
+The scan directory contains `artifacts/custom-validation/candidates.json` and
+`results.json`. Setup failure, incomplete output, or invalid output leaves the
+scan incomplete. There is no automatic fallback to default validation. When
+rerunning a saved custom-validation scan, supply
+`scans rerun SCAN_ID --validation-prompt-file validation.md` again.
 
 ### Publish completed scans to Linear
 

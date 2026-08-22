@@ -172,6 +172,8 @@ const distFiles = new Set(
     "contract",
     "cost",
     "cost-model",
+    "custom-validation",
+    "custom-validation-prompt",
     "errors",
     "index",
     "knowledge-base",

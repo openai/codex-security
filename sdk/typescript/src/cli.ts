@@ -109,6 +109,7 @@ import {
   codexSecurityStateDirectory,
   expandHome,
   prepareCodexSecurityCredentialHome,
+  pythonUtf8Environment,
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
@@ -215,6 +216,7 @@ const VALUE_OPTIONS = new Set([
   "--components-file",
   "--knowledge-base",
   "--scan-prompt-file",
+  "--validation-prompt-file",
   "--post-scan-prompt-file",
   "--diff",
   "--head",
@@ -756,8 +758,11 @@ async function readPromptFiles(
   scanPromptFile?: string,
   postScanPromptFile?: string,
   repository = directory,
-): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
-  const [scanPrompt, postScanPrompt] = await Promise.all([
+  validationPromptFile?: string,
+): Promise<
+  Pick<ScanOptions, "scanPrompt" | "validationPrompt" | "postScanPrompt">
+> {
+  const [scanPrompt, postScanPrompt, validationPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
       : readRegularInputFile(
@@ -770,9 +775,19 @@ async function readPromptFiles(
           resolveCliPath(directory, postScanPromptFile),
           repository,
         ),
+    validationPromptFile === undefined
+      ? undefined
+      : readRegularInputFile(
+          resolveCliPath(directory, validationPromptFile),
+          repository,
+        ),
   ]);
+  if (validationPrompt !== undefined && !validationPrompt.trim()) {
+    throw new CodexSecurityError("The validation prompt must not be empty.");
+  }
   return {
     ...(scanPrompt?.trim() ? { scanPrompt } : {}),
+    ...(validationPrompt === undefined ? {} : { validationPrompt }),
     ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
   };
 }
@@ -834,6 +849,7 @@ interface ScanArguments extends DeepScanOptions {
   paths: string[];
   knowledgeBasePaths: string[];
   scanPromptFile?: string;
+  validationPromptFile?: string;
   postScanPromptFile?: string;
   diff?: string;
   workingTree: boolean;
@@ -968,6 +984,7 @@ interface CliDependencies {
     args: readonly string[],
     output?: SkillCommandOutput,
     environment?: NodeJS.ProcessEnv,
+    input?: string,
   ): Promise<number>;
   runRepositoryCommand(
     command: "git" | "gh",
@@ -1035,12 +1052,13 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     writeSync(stream.fd, value);
   },
   forceExit: (signal) => process.kill(process.pid, signal),
-  runCodex: (args, output, environment) =>
+  runCodex: (args, output, environment, input) =>
     runCodexSkillCommand(
       args,
       output,
       resolveCodexCommand(environment),
       environment,
+      input,
     ),
   runRepositoryCommand: async (command, args, repository) => {
     const executable = await resolveTrustedExecutable(
@@ -1071,6 +1089,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       python,
       [
         "-I",
+        "-X",
+        "utf8",
         join(plugin, "scripts", "finalize_scan_contract.py"),
         "--scan-dir",
         arguments_.scanDir,
@@ -1148,6 +1168,7 @@ export async function runCodexSkillCommand(
   output?: SkillCommandOutput,
   command: CodexCommand = resolveCodexCommand(),
   processEnvironment: NodeJS.ProcessEnv = process.env,
+  input?: string,
 ): Promise<number> {
   const configuredHome = processEnvironment["CODEX_HOME"];
   const environment = { ...processEnvironment };
@@ -1164,10 +1185,22 @@ export async function runCodexSkillCommand(
     cwd: output?.appServer?.directory ?? parse(process.execPath).root,
     stdio:
       output === undefined
-        ? "inherit"
-        : [output.appServer === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+        ? input === undefined
+          ? "inherit"
+          : ["pipe", "inherit", "inherit"]
+        : [
+            output.appServer !== undefined || input !== undefined
+              ? "pipe"
+              : "ignore",
+            "pipe",
+            "pipe",
+          ],
     windowsHide: true,
   });
+  if (input !== undefined) {
+    invocation.stdin?.on("error", () => {});
+    invocation.stdin?.end(input);
+  }
   let requestedSignal: SignalName | null = null;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
@@ -1331,24 +1364,26 @@ async function writeCliOutput(
 export function exportEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    [
-      "PATH",
-      "Path",
-      "PATHEXT",
-      "SystemRoot",
-      "SYSTEMROOT",
-      "WINDIR",
-      "TMP",
-      "TEMP",
-      "TMPDIR",
-      "PYTHON",
-      "LANG",
-      "LC_ALL",
-      "LC_CTYPE",
-    ]
-      .filter((key) => environment[key] !== undefined)
-      .map((key) => [key, environment[key]]),
+  return pythonUtf8Environment(
+    Object.fromEntries(
+      [
+        "PATH",
+        "Path",
+        "PATHEXT",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TMP",
+        "TEMP",
+        "TMPDIR",
+        "PYTHON",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+      ]
+        .filter((key) => environment[key] !== undefined)
+        .map((key) => [key, environment[key]]),
+    ),
   );
 }
 
@@ -1714,6 +1749,11 @@ export async function main(
           .describe("Saved scan identifier (default: latest completed scan)."),
       }),
       options: z.object({
+        validationPromptFile: optionValue("--validation-prompt-file")
+          .optional()
+          .describe(
+            "Use FILE for custom validation; required when rerunning a custom-validation scan.",
+          ),
         verbose: z
           .boolean()
           .default(false)
@@ -1730,7 +1770,11 @@ export async function main(
             "--scan-id",
             scanId,
           ]);
-          scanArguments = scanArgumentsFromRecipe(recipe, scanId);
+          scanArguments = scanArgumentsFromRecipe(
+            recipe,
+            scanId,
+            options.validationPromptFile,
+          );
           scanArguments.verbose = options.verbose;
         } catch (error) {
           const message = errorMessage(error);
@@ -2220,6 +2264,11 @@ export async function main(
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
             .describe("Append scan instructions from FILE."),
+          validationPromptFile: optionValue("--validation-prompt-file")
+            .optional()
+            .describe(
+              "Replace final validation with the workflow in FILE (not Deep).",
+            ),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
             .describe("Run FILE after each scan, including failures."),
@@ -2379,6 +2428,7 @@ export async function main(
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
             scanPromptFile: options.scanPromptFile,
+            validationPromptFile: options.validationPromptFile,
             postScanPromptFile: options.postScanPromptFile,
             diff: options.diff,
             workingTree: options.workingTree,
@@ -2791,6 +2841,11 @@ export async function main(
         scanPromptFile: optionValue("--scan-prompt-file")
           .optional()
           .describe("Append instructions from FILE to every scan."),
+        validationPromptFile: optionValue("--validation-prompt-file")
+          .optional()
+          .describe(
+            "Replace final validation with FILE for every standard scan.",
+          ),
         postScanPromptFile: optionValue("--post-scan-prompt-file")
           .optional()
           .describe("Run FILE after each scan, including failures."),
@@ -2855,6 +2910,8 @@ export async function main(
             currentDirectory,
             options.scanPromptFile,
             options.postScanPromptFile,
+            currentDirectory,
+            options.validationPromptFile,
           );
           let inputPath: string;
           let outputDir: string;
@@ -3679,10 +3736,19 @@ function defaultListCommand(argv: readonly string[]): readonly string[] {
 function scanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
   parentScanId: string,
+  validationPromptFile?: string,
 ): ScanArguments {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
       "This scan does not have a saved launch recipe.",
+    );
+  }
+  if (
+    recipe["validationMode"] === "custom" &&
+    validationPromptFile === undefined
+  ) {
+    throw new CodexSecurityError(
+      "This scan used custom validation. Supply --validation-prompt-file to rerun it.",
     );
   }
   const repository = recipe["repository"];
@@ -3798,6 +3864,7 @@ function scanArgumentsFromRecipe(
     repository,
     paths,
     knowledgeBasePaths,
+    validationPromptFile,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
     head: kind === "refs" ? head ?? "HEAD" : undefined,
@@ -4644,7 +4711,7 @@ async function runSkill(
             "--skip-git-repo-check",
             "--cd",
             directory,
-            prompt,
+            "-",
           ]),
     ],
     {
@@ -4665,6 +4732,7 @@ async function runSkill(
         : {}),
     },
     options.environment,
+    appServer ? undefined : prompt,
   );
 }
 
@@ -5268,6 +5336,7 @@ async function executeScan(
       arguments_.scanPromptFile,
       arguments_.postScanPromptFile,
       resolve(directory, repository),
+      arguments_.validationPromptFile,
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
