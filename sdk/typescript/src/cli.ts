@@ -55,6 +55,7 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { publishScanToCloud } from "./cloud-publish.js";
 import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
@@ -960,6 +961,7 @@ interface CliDependencies {
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishScan?: typeof publishScan;
+  publishScanToCloud?: typeof publishScanToCloud;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1890,7 +1892,13 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: z.object({
-      to: z.literal("linear").describe("Publication destination."),
+      // Cloud remains an internal destination, omitted from public discovery.
+      to: z
+        .string()
+        .refine((value) => value === "linear" || value === "cloud", {
+          message: "Unsupported publication destination. Use --to linear.",
+        })
+        .describe("Publication destination (linear)."),
       linearTeam: optionValue("--linear-team")
         .optional()
         .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
@@ -1926,10 +1934,27 @@ export async function main(
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
       try {
-        const linearApiKey = resolveLinearApiKey(
-          dependencies.environment,
-          options.linearApiKey,
-        );
+        if (
+          options.to === "cloud" &&
+          [
+            options.linearTeam,
+            options.linearApiKey,
+            options.linearProject,
+            options.project,
+            options.linearAssignee,
+          ].some((value) => value !== undefined)
+        ) {
+          throw new CodexSecurityError(
+            "Cloud publication cannot be combined with Linear options.",
+          );
+        }
+        const linearApiKey =
+          options.to === "linear"
+            ? resolveLinearApiKey(
+                dependencies.environment,
+                options.linearApiKey,
+              )
+            : undefined;
         const assigneeId = options.linearAssignee?.trim();
         if (options.linearAssignee !== undefined && !assigneeId) {
           throw new CodexSecurityError("--linear-assignee must not be empty.");
@@ -1941,8 +1966,9 @@ export async function main(
         }
         const teamId =
           options.linearTeam?.trim() ||
-          dependencies.environment["CODEX_SECURITY_LINEAR_TEAM"]?.trim();
-        if (!teamId) {
+          dependencies.environment["CODEX_SECURITY_LINEAR_TEAM"]?.trim() ||
+          "";
+        if (options.to === "linear" && !teamId) {
           throw new CodexSecurityError(
             "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required.",
           );
@@ -1981,7 +2007,7 @@ export async function main(
             }).prompt;
           if (!prompt.isInteractive()) {
             throw new CodexSecurityError(
-              "Interactive scan selection requires a terminal. Provide a completed scan directory: codex-security publish scan /path/to/sealed-scan --to linear --linear-team TEAM_ID.",
+              `Interactive scan selection requires a terminal. Provide a completed scan directory: codex-security publish scan /path/to/sealed-scan --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
             );
           }
           const saved = await dependencies.runWorkbench([
@@ -2128,6 +2154,21 @@ export async function main(
             repositories.get(scanDir) ?? basename(scanDir);
         }
 
+        if (options.to === "cloud") {
+          dependencies.addSignalListener("SIGINT", onInterrupt);
+          dependencies.addSignalListener("SIGTERM", onTerminate);
+          observingSignals = true;
+          const result = await (
+            dependencies.publishScanToCloud ?? publishScanToCloud
+          )(resolve(dependencies.currentDirectory(), scanDir), {
+            environment: dependencies.environment,
+            dryRun: options.dryRun,
+            signal: controller.signal,
+          });
+          controller.signal.throwIfAborted();
+          return { ...result };
+        }
+
         const progress = new PublicationProgressPresenter(
           errorOutput,
           dependencies,
@@ -2145,7 +2186,7 @@ export async function main(
           result = await (dependencies.publishScan ?? publishScan)(
             resolve(dependencies.currentDirectory(), scanDir),
             {
-              destination: options.to,
+              destination: "linear",
               teamId,
               ...(projectId === undefined ? {} : { projectId }),
               dryRun: options.dryRun,
@@ -2201,7 +2242,9 @@ export async function main(
           errorOutput.write(`codex-security: ${reason}${recovery}\n`);
           exitCode = signal === "SIGINT" ? 130 : 143;
         } else {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(
+            `codex-security: ${options.to === "cloud" ? safeErrorMessage(error) : errorMessage(error)}\n`,
+          );
           exitCode = 2;
         }
         return undefined;
