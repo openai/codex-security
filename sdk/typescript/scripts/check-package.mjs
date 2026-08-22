@@ -173,6 +173,7 @@ const distFiles = new Set(
     "custom-validation",
     "custom-validation-prompt",
     "errors",
+    "finding-catalogue",
     "index",
     "knowledge-base",
     "linear",

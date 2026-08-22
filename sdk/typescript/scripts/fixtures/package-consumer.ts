@@ -2,8 +2,12 @@ import {
   CodexSecurity,
   DiffTarget,
   estimateScanCost,
+  matchScanFindings,
   type Finding,
   type ScanCost,
+  type ScanComparisonInput,
+  type ScanComparisonOptions,
+  type ScanComparisonResult,
   type ScanOptions,
   type ScanProgress,
   type ScanResult,
@@ -52,3 +56,32 @@ export async function validate(
 
 // @ts-expect-error The dependency-injection constructor is internal.
 new CodexSecurity({}, undefined as never, undefined as never);
+
+const comparisonInput: ScanComparisonInput = {
+  before: [],
+  after: [],
+  knownFindingGroups: [["finding-a", "finding-b"]],
+};
+const comparisonOptions: ScanComparisonOptions = {
+  environment: { CODEX_SECURITY_STATE_DIR: "." },
+  model: "synthetic-model",
+  reasoningEffort: "medium",
+  signal: new AbortController().signal,
+  workingDirectory: ".",
+  onProgress: ({ phase }) => {
+    void phase;
+  },
+};
+const comparisonResult: Promise<ScanComparisonResult> = matchScanFindings(
+  comparisonInput,
+  comparisonOptions,
+);
+void comparisonResult;
+
+// @ts-expect-error Historical matching policy is internal.
+matchScanFindings(comparisonInput, { allowHistoricalUncertainty: true });
+const codex = {
+  startThread: () => ({ run: async () => ({ finalResponse: "{}" }) }),
+};
+// @ts-expect-error Codex injection is internal.
+matchScanFindings(comparisonInput, { codex });

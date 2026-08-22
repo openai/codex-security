@@ -301,6 +301,8 @@ describe("scan history renderer", () => {
           unavailableScans: 2,
           matchedPairs: 0,
           findingMatches: 0,
+          relatedPairs: 2,
+          uncertainPairs: 1,
         },
         "match-all",
       ),
@@ -311,9 +313,57 @@ describe("scan history renderer", () => {
       "5 scans",
       "0 comparisons",
       "0 root-cause matches",
+      "2 related pairs recorded",
+      "1 uncertain pair",
       "2 scans unavailable",
     ]) {
       expect(output).toContain(expected);
     }
+  });
+
+  test("shows related findings without presenting them as duplicate matches", () => {
+    const relation = {
+      beforeTitle: "Archive writer boundary",
+      afterTitle: "Archive reader boundary",
+      title: "Archive reader boundary",
+      reason: "The two controls require independent corrections.",
+    };
+    const comparison = renderScanHistory(
+      {
+        beforeScanId: "before",
+        afterScanId: "after",
+        coverage: { afterCompleteness: "complete" },
+        summary: {},
+        findings: [],
+        related: [relation],
+      },
+      "compare",
+      { color: false },
+    );
+    for (const text of [
+      "Related findings, kept separate",
+      relation.beforeTitle,
+      relation.afterTitle,
+      relation.reason,
+    ]) {
+      expect(comparison).toContain(text);
+    }
+    const scan = {
+      scanId: "scan",
+      targetPath: "/synthetic/repository",
+      progress: { status: "complete" },
+      findings: [
+        { title: relation.beforeTitle, severity: "high", related: [relation] },
+      ],
+    };
+    const compact = renderScanHistory(scan, "show", { color: false });
+    expect(compact).toContain("1 related finding, kept separate");
+    expect(compact).not.toContain(relation.reason);
+    const expanded = renderScanHistory(scan, "show", {
+      color: false,
+      showLinkedFindings: true,
+    });
+    expect(expanded).toContain(relation.afterTitle);
+    expect(expanded).toContain(relation.reason);
   });
 });

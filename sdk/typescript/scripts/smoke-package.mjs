@@ -348,7 +348,16 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)});
+      for (const name of ["CodexSecurity", "publishScan", "matchScanFindings"]) {
+        if (typeof sdk[name] !== "function") {
+          throw new Error("The installed package does not export " + name + ".");
+        }
+      }
+      const result = await sdk.matchScanFindings({ before: [], after: [] });
+      if (result.matches.length !== 0 || result.uncertain.length !== 0) {
+        throw new Error("Empty finding comparison did not return an empty result.");
+      }`,
     ],
     { cwd: consumer },
   );

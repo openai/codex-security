@@ -56,7 +56,9 @@ scan.
 
 Successful results include open repository findings in `repositoryFindings`,
 when available; `findings` remains the current scan. Matching earlier findings
-can make one additional model call, including with a scan cost limit.
+can make additional model calls. With a scan cost limit, automatic matching
+makes at most one additional call. If it needs more context, the completed scan
+is kept and a warning directs you to run `scans match --all` explicitly.
 
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
@@ -587,6 +589,8 @@ unvalidated candidates as follow-up work. Requests already in progress can
 finish above the limit; preparing the partial report makes no additional model
 requests. Incomplete coverage retains its existing exit code.
 For `bulk-scan`, the limit applies separately to each repository attempt.
+Automatic finding-history matching makes at most one extra model call with
+`--max-cost`; comparisons that need more context are deferred to `scans match --all`.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -843,17 +847,62 @@ the same reason still applies.
 `scans rerun` repeats the latest completed scan against the current checkout.
 Pass `SCAN_ID` to rerun another scan.
 
-`scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
-cause; `scans match --all` matches all completed scans of the current repository,
-including other worktrees and clones. Saved matches appear in `scans show` and
-are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
-
 `scans compare` compares the two latest completed scans. Pass one scan ID to
 compare it with the latest completed scan, or two IDs to select both scans. It
 matches findings by root cause, reuses saved matches, and reports findings as
 new, persisting, reopened, resolved, or unknown. Missing findings are not
 treated as resolved when the later scan is incomplete or does not cover their
 original scope.
+
+`scans match BEFORE_SCAN_ID AFTER_SCAN_ID` matches a specific pair of scans.
+`scans match --all` matches all completed scans of the current repository,
+including other worktrees and clones. Saved matches appear in `scans show` and
+are reused unless `--force` is passed. Use `scans match --all --force` to rebuild
+saved comparisons in chronological order. Forced matching recomputes model
+decisions for the selected pairs while retaining stable finding identities.
+Ctrl-C stops matching and keeps comparisons that have already been saved.
+
+Only high-confidence duplicates are grouped. Possible duplicates remain
+uncertain. Findings with related but independent root causes are shown as
+related and kept separate. A later confirmed match replaces an earlier related
+label. Matching preserves the original findings, triage, and sealed scan
+artifacts.
+
+Matching reuses stable finding IDs and confirmed links. Codex is called only
+when a new decision is needed, using the existing Codex authentication. No
+additional service or API key is required. Scans without sealed artifacts are
+skipped, but their confirmed links can still be reused. Older custom plugins
+still save confirmed and uncertain matches. Use the bundled plugin for
+related-finding links and large comparisons.
+
+SDK callers can compare findings without saving a workbench comparison:
+
+```ts
+import { readFile } from "node:fs/promises";
+import {
+  matchScanFindings,
+  type FindingsDocument,
+} from "@openai/codex-security";
+
+const before = JSON.parse(
+  await readFile("/path/to/earlier-scan/findings.json", "utf8"),
+) as FindingsDocument;
+const after = JSON.parse(
+  await readFile("/path/to/later-scan/findings.json", "utf8"),
+) as FindingsDocument;
+
+const comparison = await matchScanFindings(
+  { before: before.findings, after: after.findings },
+  { workingDirectory: "/path/to/repository" },
+);
+console.log(comparison.matches, comparison.uncertain, comparison.related ?? []);
+```
+
+Pass `knownFindingGroups` in the input to reuse confirmed groups of stable
+`findingId` values from your own store. Returned matches always identify the
+original `occurrenceId` values. The options also accept a model, reasoning
+effort, and `AbortSignal`. Progress callbacks are optional; their errors do not
+interrupt matching.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a

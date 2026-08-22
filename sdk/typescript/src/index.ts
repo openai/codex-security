@@ -3,6 +3,13 @@ export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent } from "./cost.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
+export { matchScanFindings } from "./scan-comparison.js";
+export type {
+  ScanComparisonInput,
+  ScanComparisonOptions,
+  ScanComparisonProgress,
+  ScanComparisonResult,
+} from "./scan-comparison.js";
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
