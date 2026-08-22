@@ -35,6 +35,18 @@ const SEVERITY_COLORS: Record<string, number> = {
   INFORMATIONAL: 37,
 };
 
+// Severity badges occupy a fixed column, so the widest label decides the width
+// and the finding indent that lines up under it. INFORMATIONAL is abbreviated to
+// keep that column narrow; spelling it out costs every finding title five
+// characters, which matters most at the 48-column minimum.
+const SEVERITY_LABELS: Record<string, string> = { INFORMATIONAL: "INFO" };
+const SEVERITY_BADGE_WIDTH = Math.max(
+  ...Object.keys(SEVERITY_COLORS).map(
+    (severity) => (SEVERITY_LABELS[severity] ?? severity).length,
+  ),
+);
+const FINDING_INDENT = 4 + SEVERITY_BADGE_WIDTH + 2;
+
 const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
@@ -101,8 +113,11 @@ export function renderScanHistory(
   const finding = (entry: JsonObject, includeReason = true): void => {
     const severity = findingSeverity(entry);
     const title = clean(entry["title"]);
-    const badge = paint(severity.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
-    wrap(title, 14, `    ${badge}  `);
+    const badge = paint(
+      (SEVERITY_LABELS[severity] ?? severity).padEnd(SEVERITY_BADGE_WIDTH),
+      SEVERITY_COLORS[severity] ?? 37,
+    );
+    wrap(title, FINDING_INDENT, `    ${badge}  `);
     const before = entry["beforeOccurrenceIds"] as string[] | undefined;
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
@@ -123,15 +138,19 @@ export function renderScanHistory(
       entry["path"] ??
       entry["locationPath"] ??
       `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
-    lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
+    lines.push(
+      `${" ".repeat(FINDING_INDENT)}${dim(clean(path))}${grouped}${knownSince}`,
+    );
     const showLinkedFindings = command !== "show" || options.showLinkedFindings;
     if (matches?.length && showLinkedFindings) {
-      lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
+      lines.push(
+        `${" ".repeat(FINDING_INDENT)}${accent("↔")} ${strong("LINKED FINDINGS")}`,
+      );
       for (const match of matches) {
         lines.push(
-          `                ${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
+          `${" ".repeat(FINDING_INDENT + 2)}${strong("MATCHED SCAN")} ${accent(clean(match["scanId"]).slice(0, 8))}`,
         );
-        wrap(`↳ ${clean(match["title"])}`, 18);
+        wrap(`↳ ${clean(match["title"])}`, FINDING_INDENT + 4);
       }
     }
     const reason =
@@ -144,10 +163,12 @@ export function renderScanHistory(
         : undefined);
     if (includeReason && reason && (!matches?.length || showLinkedFindings)) {
       if (matches?.length) {
-        lines.push(`                ${strong("SAME ROOT CAUSE")}`);
-        wrap(clean(reason), 18);
+        lines.push(
+          `${" ".repeat(FINDING_INDENT + 2)}${strong("SAME ROOT CAUSE")}`,
+        );
+        wrap(clean(reason), FINDING_INDENT + 4);
       } else {
-        wrap(`↳ ${clean(reason)}`, 14);
+        wrap(`↳ ${clean(reason)}`, FINDING_INDENT);
       }
     }
   };
