@@ -36,7 +36,7 @@ describe("completed scan follow-up instructions", () => {
       const client = new TestClient(
         {},
         {
-          environment: {},
+          environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,

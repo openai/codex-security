@@ -421,7 +421,7 @@ describe("compact diff scan", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
     mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
+    mkdirSync(join(root, "state"), { mode: 0o700 });
     const client = await startMcp(root);
     const owner = "preflight-stdin-owner";
 
@@ -456,7 +456,7 @@ describe("compact diff scan", () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
     mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
+    mkdirSync(join(root, "state"), { mode: 0o700 });
     const client = await startMcp(root);
     const userContext = `--${"é".repeat(64 * 1_024)}`;
 
@@ -516,7 +516,7 @@ describe("compact diff scan", () => {
     git(repository, "commit", "-qm", "changed");
     const headRevision = git(repository, "rev-parse", "HEAD");
     mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
+    mkdirSync(join(root, "state"), { mode: 0o700 });
     const client = await startMcp(root);
     const owner = "compact-diff-owner";
     const call = (name: string, args: JsonObject) =>

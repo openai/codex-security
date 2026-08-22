@@ -1,12 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   appendFile,
+  chmod,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -267,6 +272,295 @@ async function processHasExited(pid: number): Promise<boolean> {
   }
   return false;
 }
+
+describe("private publication state", () => {
+  test("does not inspect configured state for previews or empty scans", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-unused-publication-state-"),
+    );
+    temporaryDirectories.push(root);
+    const marker = join(root, "not-a-directory");
+    await writeFile(marker, "preserved\n");
+
+    for (const scenario of [
+      { count: 1, dryRun: true },
+      { count: 0, dryRun: false },
+    ]) {
+      const publication = preparedPublication(scenario.count);
+      const result = await publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, dryRun: scenario.dryRun },
+        dependencies(
+          publication,
+          {},
+          {
+            environment: {
+              CODEX_SECURITY_STATE_DIR: join(marker, "state"),
+            },
+            preparePublicationStore: async () => {
+              throw new Error("Unused publication state must not be opened.");
+            },
+          },
+        ),
+      );
+      expect(result.counts.findings).toBe(scenario.count);
+    }
+
+    expect(await readFile(marker, "utf8")).toBe("preserved\n");
+    expect(await readdir(root)).toEqual(["not-a-directory"]);
+  });
+
+  test("leaves a missing history directory absent when publication cannot start", async () => {
+    const publication = preparedPublication();
+    let started = false;
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        runCodex: async () => {
+          started = true;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+    );
+    delete injected.preparePublicationStore;
+    const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
+
+    await expect(
+      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
+    ).rejects.toThrow(/scan-history database does not exist/u);
+
+    expect(started).toBe(false);
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects shared state before opening history or contacting a publisher",
+    async () => {
+      const stateDirectory = await mkdtemp(
+        join(tmpdir(), "codex-security-shared-publication-state-"),
+      );
+      temporaryDirectories.push(stateDirectory);
+      await chmod(stateDirectory, 0o755);
+      const publication = preparedPublication();
+      const calls: string[] = [];
+
+      for (const direct of [false, true]) {
+        await expect(
+          publishScanInternal(
+            publication.scanDirectory,
+            {
+              ...OPTIONS,
+              ...(direct ? { linearApiKey: "synthetic-key" } : {}),
+            },
+            dependencies(
+              publication,
+              {},
+              {
+                environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+                preparePublicationStore: async () => {
+                  calls.push("history");
+                },
+                linearClient: linearApiClient(publication, {
+                  configured: () => calls.push("client"),
+                  create: () => {
+                    calls.push("create");
+                  },
+                }),
+                resolveCodex: () => {
+                  calls.push("resolve");
+                  return { command: "synthetic-codex" };
+                },
+                runCodex: async () => {
+                  calls.push("publish");
+                  return { exitCode: 0, stdout: "", stderr: "" };
+                },
+              },
+            ),
+          ),
+        ).rejects.toThrow(/state directory must be private/u);
+      }
+
+      expect(calls).toEqual([]);
+      expect(await readdir(stateDirectory)).toEqual([]);
+      expect((await stat(stateDirectory)).mode & 0o777).toBe(0o755);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "revalidates state before creating a publication handoff",
+    async () => {
+      const stateDirectory = await mkdtemp(
+        join(tmpdir(), "codex-security-publication-handoff-state-"),
+      );
+      temporaryDirectories.push(stateDirectory);
+      const publication = preparedPublication();
+      let started = false;
+
+      await expect(
+        publishScanInternal(
+          publication.scanDirectory,
+          OPTIONS,
+          dependencies(
+            publication,
+            {},
+            {
+              environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+              preparePublicationStore: async () => {
+                await chmod(stateDirectory, 0o755);
+              },
+              runCodex: async () => {
+                started = true;
+                return { exitCode: 0, stdout: "", stderr: "" };
+              },
+            },
+          ),
+        ),
+      ).rejects.toThrow(/state directory must be private/u);
+
+      expect(started).toBe(false);
+      expect(await readdir(stateDirectory)).toEqual([]);
+      expect((await stat(stateDirectory)).mode & 0o777).toBe(0o755);
+    },
+  );
+
+  test("pins a trusted state alias for the full publication", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-publication-state-alias-")),
+    );
+    temporaryDirectories.push(root);
+    const selected = join(root, "selected");
+    const other = join(root, "other");
+    const alias = join(root, "state-alias");
+    await mkdir(selected, { mode: 0o700 });
+    await mkdir(other, { mode: 0o700 });
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    await symlink(selected, alias, linkType);
+    const canonicalState = await realpath(selected);
+    const environment = { CODEX_SECURITY_STATE_DIR: alias };
+    const inherited: NodeJS.ProcessEnv[] = [];
+    const publication = preparedPublication();
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        environment,
+        preparePublicationStore: async (_publication, env) => {
+          inherited.push(env);
+        },
+        resolveCodex: (env) => {
+          inherited.push(env);
+          return { command: "synthetic-codex" };
+        },
+        runCodex: async (_command, _args, input, env) => {
+          inherited.push(env);
+          expect(publicationData(input).handoffFile).toStartWith(
+            join(canonicalState, "publications"),
+          );
+          await rm(alias, { recursive: true, force: true });
+          await symlink(other, alias, linkType);
+          environment.CODEX_SECURITY_STATE_DIR = other;
+          return {
+            exitCode: 0,
+            stdout: issueEvent(publication.issues[0]!),
+            stderr: "",
+          };
+        },
+        recordPublishedIssues: async (_publication, issues, env) => {
+          inherited.push(env);
+          return [...issues];
+        },
+      },
+    );
+    delete injected.writeReceipt;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      injected,
+    );
+
+    expect(inherited).toHaveLength(4);
+    for (const env of inherited) {
+      expect(env).toBe(inherited[0]!);
+      expect(env).not.toBe(environment);
+      expect(env["CODEX_SECURITY_STATE_DIR"]).toBe(canonicalState);
+    }
+    expect(environment.CODEX_SECURITY_STATE_DIR).toBe(other);
+    const digest = createHash("sha256")
+      .update(publication.scanId)
+      .digest("hex");
+    const receipt = join(
+      canonicalState,
+      "publications",
+      "linear",
+      `${digest}.json`,
+    );
+    expect(JSON.parse(await readFile(receipt, "utf8"))).toEqual(result);
+    expect(await readdir(other)).toEqual([]);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "blocks final and partial receipt writers if state becomes shared",
+    async () => {
+      for (const interrupted of [false, true]) {
+        const stateDirectory = await mkdtemp(
+          join(tmpdir(), "codex-security-publication-receipt-state-"),
+        );
+        temporaryDirectories.push(stateDirectory);
+        const publication = preparedPublication();
+        const controller = new AbortController();
+        let persisted = false;
+        let receiptWrites = 0;
+        const pending = publishScanInternal(
+          publication.scanDirectory,
+          { ...OPTIONS, signal: controller.signal },
+          dependencies(
+            publication,
+            {},
+            {
+              environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+              recordPublishedIssues: async (_publication, issues) => {
+                persisted = true;
+                await chmod(stateDirectory, 0o755);
+                if (interrupted) controller.abort("Publication interrupted.");
+                return [...issues];
+              },
+              writeReceipt: async () => {
+                receiptWrites += 1;
+              },
+            },
+          ),
+        );
+
+        if (interrupted) {
+          await expect(pending).rejects.toThrow(
+            /partial receipt could not be saved: .*state directory must be private/u,
+          );
+        } else {
+          const result = await pending;
+          expect(result.counts).toEqual({
+            findings: 1,
+            created: 1,
+            failed: 0,
+          });
+          expect(result.warnings).toHaveLength(1);
+          expect(result.warnings![0]).toContain(
+            "state directory must be private",
+          );
+          expect(result.warnings![0]).toContain("do not retry publication");
+        }
+
+        expect(persisted).toBe(true);
+        expect(receiptWrites).toBe(0);
+        expect((await stat(stateDirectory)).mode & 0o777).toBe(0o755);
+        expect(
+          await readdir(join(stateDirectory, "publications", "linear")),
+        ).toEqual(["handoffs"]);
+      }
+    },
+  );
+});
 
 describe("direct Linear API publication", () => {
   test("leaves issues unassigned unless an email or user ID is selected", async () => {
@@ -631,6 +925,7 @@ describe("connected Linear publication", () => {
       join(tmpdir(), "codex-security-publication-environment-"),
     );
     temporaryDirectories.push(stateDirectory);
+    const canonicalState = await realpath(stateDirectory);
     const environment = {
       CODEX_HOME: "/existing/connected-codex-home",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -666,7 +961,7 @@ describe("connected Linear publication", () => {
           },
           writeReceipt: async (receipt, env) => {
             receiptScanId = receipt.scanId;
-            expect(env).toBe(environment);
+            expect(env).toBe(inheritedEnvironment!);
           },
         },
       ),
@@ -675,7 +970,7 @@ describe("connected Linear publication", () => {
     expect(command).toBe("synthetic-codex");
     const handoffDirectory = args![args!.indexOf("--cd") + 1]!;
     expect(
-      handoffDirectory.startsWith(join(stateDirectory, "publications")),
+      handoffDirectory.startsWith(join(canonicalState, "publications")),
     ).toBe(true);
     expect(args).toEqual([
       "exec",
@@ -694,7 +989,11 @@ describe("connected Linear publication", () => {
     ]);
     expect(args).not.toContain("--ignore-user-config");
     expect(args).not.toContain("--disable");
-    expect(inheritedEnvironment).toBe(environment);
+    expect(inheritedEnvironment).not.toBe(environment);
+    expect(inheritedEnvironment).toEqual({
+      ...environment,
+      CODEX_SECURITY_STATE_DIR: canonicalState,
+    });
     expect(input).toContain("already-connected hosted Linear application");
     expect(input).toContain("untrusted inert data");
     expect(input).toContain("track-findings");

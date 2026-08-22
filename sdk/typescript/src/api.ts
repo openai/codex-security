@@ -128,6 +128,7 @@ import {
   type PluginInstall,
   type ProcessEnvironment,
   type WorkbenchCommandOptions,
+  validateCodexSecurityStateDirectory,
   validateOutputDir,
 } from "./runtime.js";
 import {
@@ -1598,6 +1599,11 @@ export class CodexSecurity {
       this.#runtime?.environment ?? this.#dependencies.environment,
       "chatgpt",
     );
+    if (this.#runtime?.persistentCredentialHome === true) {
+      await validateCodexSecurityStateDirectory(
+        codexSecurityStateDirectory(environment),
+      );
+    }
     const codexHome =
       this.#runtime?.codexHome ??
       (await prepareCodexSecurityCredentialHome(environment));
@@ -1740,11 +1746,14 @@ export class CodexSecurity {
           `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
         );
       }
-      const scanEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-      );
+      const scanEnvironment = {
+        ...selectedScanEnvironment(
+          this.#dependencies.environment,
+          options.auth,
+          modelProvider,
+        ),
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      };
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
@@ -1758,11 +1767,11 @@ export class CodexSecurity {
       }
       const previousRuntime = this.#runtime;
       const runtime = await this.#ensureRuntime(
+        scanEnvironment,
         signal,
         temporaryRoot,
         (path) =>
           requireOutputOutsideRepository(protectedRoot, path, "runtime"),
-        options.auth,
         requestedConfig,
       );
       if (
@@ -1892,20 +1901,20 @@ export class CodexSecurity {
   }
 
   async #ensureRuntime(
+    processEnvironment: ProcessEnvironment,
     signal?: AbortSignal,
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
-    auth: ScanAuthMode = "auto",
     requestedConfig?: JsonObject,
   ): Promise<PreparedRuntime> {
     this.#requireOpen();
     if (this.#runtime !== null) return this.#runtime;
     if (this.#runtimePromise === null) {
       const runtimePromise = this.#prepareRuntime(
+        processEnvironment,
         signal ?? this.#abortController.signal,
         temporaryRoot,
         validateLocation,
-        auth,
         requestedConfig,
       );
       this.#runtimePromise = runtimePromise;
@@ -2021,25 +2030,10 @@ export class CodexSecurity {
     if (requestedOutput !== null) {
       requireOutputOutsideRepository(protectedRoot, requestedOutput);
     }
-    const stateDirectory = codexSecurityStateDirectory(
-      this.#dependencies.environment,
+    const stateDirectory = await validateCodexSecurityStateDirectory(
+      codexSecurityStateDirectory(this.#dependencies.environment),
+      (canonical) => requireOutputOutsideRepository(protectedRoot, canonical),
     );
-    let canonicalStateDirectory = stateDirectory;
-    while (true) {
-      try {
-        canonicalStateDirectory = join(
-          await realpath(canonicalStateDirectory),
-          relative(canonicalStateDirectory, stateDirectory),
-        );
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        const parent = dirname(canonicalStateDirectory);
-        if (parent === canonicalStateDirectory) throw error;
-        canonicalStateDirectory = parent;
-      }
-    }
-    requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
     return {
       repository: repo,
       target: normalized,
@@ -2051,10 +2045,10 @@ export class CodexSecurity {
   }
 
   async #prepareRuntime(
+    processEnvironment: ProcessEnvironment,
     signal: AbortSignal,
     temporaryRoot?: string,
     validateLocation?: (path: string) => void,
-    auth: ScanAuthMode = "auto",
     requestedConfig?: JsonObject,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
@@ -2064,11 +2058,6 @@ export class CodexSecurity {
       requestedConfig === undefined
         ? undefined
         : scanModelProvider(requestedConfig);
-    const processEnvironment = selectedScanEnvironment(
-      this.#dependencies.environment,
-      auth,
-      modelProvider,
-    );
     const codexHome =
       validateLocation === undefined
         ? await prepareCodexSecurityCredentialHome(processEnvironment)

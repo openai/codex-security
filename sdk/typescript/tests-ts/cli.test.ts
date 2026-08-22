@@ -4089,6 +4089,42 @@ describe("CLI", () => {
     }
   });
 
+  test("keeps unsafe ancestry errors local and off JSON stdout", async () => {
+    const failure = new OutputDirectoryError(
+      "Scan output parent has unsafe permissions (mode 0775).",
+    );
+
+    for (const extraArgs of [[], ["--dry-run"]]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw failure;
+        },
+        preflight: async () => {
+          throw failure;
+        },
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          ["scan", ".", "--json", "--verbose", ...extraArgs],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(`${failure.message}\n`);
+      expect(stderr.text()).toContain('scan.failed classification="local"');
+      expect(stderr.text()).not.toContain("cannot access the configured model");
+      expect(stderr.text()).not.toContain("Authentication failed");
+      expect(stderr.text()).not.toContain("model service could not be reached");
+    }
+  });
+
   test("keeps model authorization advice for genuine transport failures", async () => {
     // The bypass must not swallow real 401/403 handling, and the advice must
     // still replace upstream text that can name the organization or project.

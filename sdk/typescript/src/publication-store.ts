@@ -8,6 +8,7 @@ import {
   codexSecurityStateDirectory,
   resolvePluginPython,
   runWorkbench,
+  validateCodexSecurityStateDirectory,
 } from "./runtime.js";
 
 export async function preparePublicationStore(
@@ -92,7 +93,13 @@ async function runPublicationWorkbench(
   environment: NodeJS.ProcessEnv,
   issues?: readonly PublishedScanIssue[],
 ): Promise<Record<string, unknown>> {
-  const stateDirectory = codexSecurityStateDirectory(environment);
+  const stateDirectory = await validateCodexSecurityStateDirectory(
+    codexSecurityStateDirectory(environment),
+  );
+  const workbenchEnvironment = {
+    ...environment,
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  };
   const database = join(stateDirectory, "workbench.sqlite3");
   try {
     if (!(await stat(database)).isFile()) throw new Error("not a regular file");
@@ -104,7 +111,7 @@ async function runPublicationWorkbench(
   }
   const [python, pluginRoot] = await Promise.all([
     resolvePluginPython({
-      environment,
+      environment: workbenchEnvironment,
       protectedRoot: publication.scanDirectory,
     }),
     bundledPluginRoot(),
@@ -113,6 +120,7 @@ async function runPublicationWorkbench(
     findingId,
     occurrenceId,
   }));
+  await validateCodexSecurityStateDirectory(stateDirectory);
   const directory = await mkdtemp(join(stateDirectory, "publication-"));
   try {
     const input = join(directory, "publication.json");
@@ -131,7 +139,7 @@ async function runPublicationWorkbench(
       {
         python,
         pluginRoot,
-        environment,
+        environment: workbenchEnvironment,
         failureMessage:
           command === "prepare-linear-publication"
             ? "Cannot publish findings without their existing local Codex Security scan history"

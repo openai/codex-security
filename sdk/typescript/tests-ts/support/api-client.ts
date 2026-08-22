@@ -1,4 +1,8 @@
-import { CodexSecurity } from "../../src/api.js";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CodexSecurity, environmentValue } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
@@ -57,23 +61,54 @@ export function mockWorkbench(
 }
 
 export class TestClient extends CodexSecurity {
+  readonly #temporaryStateDirectory: string | undefined;
+
   public constructor(
     config: ClientArguments[0],
     dependencies: Partial<ClientArguments[1]>,
   ) {
+    let environment = dependencies.environment ?? {};
+    let temporaryStateDirectory: string | undefined;
+    if (
+      !["CODEX_SECURITY_STATE_DIR", "CODEX_HOME", "HOME", "USERPROFILE"].some(
+        (name) => environmentValue(environment, name) !== undefined,
+      )
+    ) {
+      temporaryStateDirectory = realpathSync(
+        mkdtempSync(join(tmpdir(), "codex-security-api-state-")),
+      );
+      environment = {
+        ...environment,
+        CODEX_SECURITY_STATE_DIR: temporaryStateDirectory,
+      };
+    }
     super(
       config,
       {
         createCodex: () => {
           throw new Error("Unexpected Codex invocation in test");
         },
-        environment: {},
         runWorkbench: async (_options, args, input) =>
           mockWorkbench(args, input),
         ...dependencies,
+        environment,
       },
       { surface: "sdk" },
     );
+    this.#temporaryStateDirectory = temporaryStateDirectory;
+  }
+
+  public override async close(): Promise<void> {
+    try {
+      await super.close();
+    } finally {
+      if (this.#temporaryStateDirectory !== undefined) {
+        await rm(this.#temporaryStateDirectory, {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
   }
 }
 

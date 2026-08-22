@@ -18,6 +18,7 @@ import {
   open,
   opendir,
   readFile,
+  readlink,
   readdir,
   realpath,
   rename,
@@ -152,6 +153,252 @@ export function codexSecurityStateDirectory(
   return path;
 }
 
+interface WindowsPrivateDirectoryOptions {
+  repair: boolean;
+  creationAncestor?: boolean;
+  inspectDescendants?: boolean;
+}
+
+interface StateDirectorySecurityOptions {
+  platform?: NodeJS.Platform;
+  windowsAcl?: (
+    path: string,
+    options: WindowsPrivateDirectoryOptions,
+  ) => Promise<void>;
+}
+
+async function nearestExistingStateAncestor(path: string): Promise<string> {
+  for (let current = path; ; current = dirname(current)) {
+    const metadata = await lstat(current).catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (metadata !== null) {
+      if (!metadata.isDirectory() && !metadata.isSymbolicLink()) {
+        throw new OutputDirectoryError(
+          `Codex Security state path must use directories: ${current}`,
+        );
+      }
+      return current;
+    }
+    if (current === dirname(current)) {
+      throw new OutputDirectoryError(
+        `Unable to find an existing Codex Security state ancestor: ${path}`,
+      );
+    }
+  }
+}
+
+export async function validateCodexSecurityStateDirectory(
+  path: string,
+  validateLocation?: (canonical: string) => void,
+  securityOptions: StateDirectorySecurityOptions = {},
+): Promise<string> {
+  const requested = resolve(expandHome(path));
+  const platform = securityOptions.platform ?? process.platform;
+  try {
+    const canonical = await canonicalizeModelSafePath(requested);
+    const windowsAcl =
+      securityOptions.windowsAcl ?? secureWindowsPrivateDirectory;
+    const inspectWindowsAcl = async (
+      inspected: string,
+      options: WindowsPrivateDirectoryOptions,
+    ): Promise<void> => {
+      try {
+        await windowsAcl(inspected, options);
+      } catch (error) {
+        const detail = windowsCredentialAclFailure(error);
+        throw new OutputDirectoryError(
+          `Configured Codex Security state directory must have a private Windows ACL: ${inspected}${detail}`,
+          { cause: error },
+        );
+      }
+    };
+    validateLocation?.(canonical);
+    const metadata = await lstat(canonical).catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (metadata !== null) {
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new OutputDirectoryError(
+          `Configured Codex Security state path must be a directory: ${canonical}`,
+        );
+      }
+      if (platform === "win32") {
+        const paths =
+          relative(requested, canonical) === ""
+            ? [canonical]
+            : [requested, canonical];
+        for (const inspected of paths) {
+          await inspectWindowsAcl(inspected, {
+            repair: false,
+            inspectDescendants: false,
+          });
+        }
+      } else {
+        const effectiveUid = process.geteuid?.();
+        try {
+          requirePrivateOutputDirectory(metadata, canonical, effectiveUid);
+        } catch (error) {
+          if (!(error instanceof OutputDirectoryError)) throw error;
+          const mode = (metadata.mode & 0o7777).toString(8).padStart(4, "0");
+          if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
+            throw new OutputDirectoryError(
+              `Configured Codex Security state directory must be owned by the current user: ${canonical} (mode ${mode}). Set CODEX_SECURITY_STATE_DIR to a private directory owned by the current user.`,
+              { cause: error },
+            );
+          }
+          throw new OutputDirectoryError(
+            `Configured Codex Security state directory must be private to the current user: ${canonical} (mode ${mode}). Set CODEX_SECURITY_STATE_DIR to a private directory, or set this directory's permissions to 0700 only if you own it and can safely change it.`,
+            { cause: error },
+          );
+        }
+      }
+    } else if (platform === "win32") {
+      const ancestors: string[] = [];
+      for (const candidate of [requested, canonical]) {
+        const ancestor = await nearestExistingStateAncestor(candidate);
+        if (
+          ancestors.some((inspected) => relative(inspected, ancestor) === "")
+        ) {
+          continue;
+        }
+        ancestors.push(ancestor);
+        await inspectWindowsAcl(ancestor, {
+          repair: false,
+          creationAncestor: true,
+          inspectDescendants: false,
+        });
+      }
+    }
+    if (platform !== "win32") await requireSecureStateAncestry(requested);
+    return canonical;
+  } catch (error) {
+    if (error instanceof OutputDirectoryError) throw error;
+    throw new OutputDirectoryError(
+      `Unable to inspect configured Codex Security state directory: ${requested}`,
+      { cause: error },
+    );
+  }
+}
+
+export async function prepareCodexSecurityStateDirectory(
+  path: string,
+  validateLocation?: (canonical: string) => void,
+  securityOptions: StateDirectorySecurityOptions = {},
+): Promise<string> {
+  const canonical = await validateCodexSecurityStateDirectory(
+    path,
+    validateLocation,
+    securityOptions,
+  );
+  const platform = securityOptions.platform ?? process.platform;
+  const windowsAcl =
+    securityOptions.windowsAcl ?? secureWindowsPrivateDirectory;
+  const validatePinned = async (): Promise<string> => {
+    const validated = await validateCodexSecurityStateDirectory(
+      canonical,
+      validateLocation,
+      securityOptions,
+    );
+    if (relative(canonical, validated) !== "") {
+      throw new OutputDirectoryError(
+        `Configured Codex Security state directory changed during preparation: ${canonical}`,
+      );
+    }
+    return validated;
+  };
+  try {
+    const missing: string[] = [];
+    let current = canonical;
+    while (true) {
+      try {
+        await lstat(current);
+        break;
+      } catch (error) {
+        if (nodeErrorCode(error) !== "ENOENT") throw error;
+        missing.push(current);
+        const parent = dirname(current);
+        if (parent === current) throw error;
+        current = parent;
+      }
+    }
+    await validatePinned();
+    for (const directory of missing.reverse()) {
+      try {
+        await mkdir(directory, { mode: 0o700 });
+      } catch (error) {
+        if (nodeErrorCode(error) !== "EEXIST") throw error;
+        await validatePinned();
+        continue;
+      }
+      if (platform === "win32") {
+        await windowsAcl(directory, {
+          repair: true,
+          inspectDescendants: false,
+        });
+      } else {
+        // Restore owner access before creating a child under a restrictive
+        // umask.
+        if (((await lstat(directory)).mode & 0o700) !== 0o700) {
+          await chmod(directory, 0o700);
+        }
+      }
+    }
+    return await validatePinned();
+  } catch (error) {
+    if (error instanceof OutputDirectoryError) throw error;
+    throw new OutputDirectoryError(
+      `Unable to prepare configured Codex Security state directory: ${canonical}`,
+      { cause: error },
+    );
+  }
+}
+
+async function requireSecureStateAncestry(
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): Promise<void> {
+  if (process.platform === "win32") return;
+  const pending = [path];
+  const checked = new Set<string>();
+  while (pending.length > 0) {
+    let current = pending.pop()!;
+    while (true) {
+      while (current.length > 1 && current.endsWith(sep)) {
+        current = current.slice(0, -1);
+      }
+      if (checked.has(current)) break;
+      checked.add(current);
+      const parent = dirname(current);
+      const metadata = await lstat(current).catch((error: unknown) => {
+        if (nodeErrorCode(error) === "ENOENT") return null;
+        throw error;
+      });
+      if (metadata?.isSymbolicLink()) {
+        requireTrustedOutputOwner(metadata, current, effectiveUid);
+        const canonical = await realpath(current);
+        const target = await readlink(current);
+        // Preserve dot segments until the filesystem resolves the link target.
+        const lexicalTarget = isAbsolute(target)
+          ? target
+          : `${parent}${parent.endsWith(sep) ? "" : sep}${target}`;
+        pending.push(canonical, lexicalTarget);
+      } else if (metadata !== null) {
+        if (!metadata.isDirectory()) {
+          throw new OutputDirectoryError(
+            `Codex Security state path must use directories: ${current}`,
+          );
+        }
+        requireTrustedOutputAncestor(metadata, current, effectiveUid);
+      }
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+}
+
 export function codexSecurityCredentialHome(
   environment: ProcessEnvironment = process.env,
 ): string {
@@ -162,7 +409,13 @@ export async function prepareCodexSecurityCredentialHome(
   environment: ProcessEnvironment = process.env,
   validateLocation?: (path: string) => void,
 ): Promise<string> {
-  const path = codexSecurityCredentialHome(environment);
+  const stateDirectory = await prepareCodexSecurityStateDirectory(
+    codexSecurityStateDirectory(environment),
+    validateLocation === undefined
+      ? undefined
+      : (canonical) => validateLocation(join(canonical, "codex-home")),
+  );
+  const path = join(stateDirectory, "codex-home");
   try {
     try {
       await mkdir(path, { recursive: true, mode: 0o700 });
@@ -418,7 +671,7 @@ export function inspectWindowsCredentialAcl(
   currentUserSid: string,
   options: {
     resolvedAliases?: Readonly<Record<string, string>>;
-    scope?: "directory" | "file" | "ancestor";
+    scope?: "directory" | "file" | "ancestor" | "creation-ancestor";
   } = {},
 ): WindowsCredentialAcl {
   if (!WINDOWS_SID.test(currentUserSid)) {
@@ -439,7 +692,7 @@ export function inspectWindowsCredentialAcl(
     WINDOWS_ADMINISTRATORS_SID,
     principalAliases["LA"] ?? "LA",
   ]);
-  if (options.scope === "ancestor") {
+  if (options.scope === "ancestor" || options.scope === "creation-ancestor") {
     trustedPrincipals.add(WINDOWS_TRUSTED_INSTALLER_SID);
   }
   const normalizePrincipal = (principal: string): string =>
@@ -495,8 +748,11 @@ export function inspectWindowsCredentialAcl(
     if (type === "A" || type === "OA" || type === "XA" || type === "ZA") {
       if (!trustedPrincipal(principal)) {
         if (
-          options.scope !== "ancestor" ||
-          windowsAceAllowsAncestorReplacement(rights!, inheritanceFlags)
+          (options.scope !== "ancestor" &&
+            options.scope !== "creation-ancestor") ||
+          (options.scope === "ancestor"
+            ? windowsAceAllowsAncestorReplacement(rights!, inheritanceFlags)
+            : windowsAceAllowsStateCreationRace(rights!, inheritanceFlags))
         ) {
           untrustedPrincipals.add(principal);
         }
@@ -596,6 +852,10 @@ function windowsAceAllowsAncestorReplacement(
   inheritanceFlags: ReadonlySet<string>,
 ): boolean {
   if (inheritanceFlags.has("IO")) return false;
+  return windowsRightsAllowAncestorReplacement(rights);
+}
+
+function windowsRightsAllowAncestorReplacement(rights: string): boolean {
   if (/^0x[\da-f]+$/iu.test(rights)) {
     return (BigInt(rights) & 0x100d0040n) !== 0n;
   }
@@ -607,6 +867,23 @@ function windowsAceAllowsAncestorReplacement(
     ) {
       return true;
     }
+  }
+  return false;
+}
+
+function windowsAceAllowsStateCreationRace(
+  rights: string,
+  inheritanceFlags: ReadonlySet<string>,
+): boolean {
+  if (inheritanceFlags.has("IO") && !inheritanceFlags.has("CI")) {
+    return false;
+  }
+  if (/^0x[\da-f]+$/iu.test(rights)) {
+    return (BigInt(rights) & 0x500d0046n) !== 0n;
+  }
+  if (windowsRightsAllowAncestorReplacement(rights)) return true;
+  for (let index = 0; index < rights.length; index += 2) {
+    if (["CC", "AD"].includes(rights.slice(index, index + 2))) return true;
   }
   return false;
 }
@@ -719,6 +996,7 @@ export async function inspectWindowsCredentialAclSnapshot(
     command: string;
     args: readonly string[];
     environment?: NodeJS.ProcessEnv;
+    inspectDescendants?: boolean;
     resolvedAliases?: Readonly<Record<string, string>>;
     resolveDescriptorAliases?: (descriptor: string) => Promise<void>;
   },
@@ -734,77 +1012,80 @@ export async function inspectWindowsCredentialAclSnapshot(
 
   let home: WindowsCredentialAcl | undefined;
   let descendantsArePrivate = true;
-  await verifyStableWindowsCredentialDescendants(
-    path,
-    async () => {
-      home = undefined;
-      descendantsArePrivate = true;
-      let inspected = 0;
-      const descriptors = await streamWindowsCredentialAclDescriptors(
-        options.command,
-        options.args,
-        async (descriptor) => {
-          const index = inspected;
-          inspected += 1;
-          await options.resolveDescriptorAliases?.(descriptor);
+  const inspectDescriptors = async (): Promise<number> => {
+    home = undefined;
+    descendantsArePrivate = true;
+    let inspected = 0;
+    const descriptors = await streamWindowsCredentialAclDescriptors(
+      options.command,
+      options.args,
+      async (descriptor) => {
+        const index = inspected;
+        inspected += 1;
+        await options.resolveDescriptorAliases?.(descriptor);
 
-          if (index < ancestors) {
-            const ancestor = inspectWindowsCredentialAcl(
-              descriptor,
-              currentUserSid,
-              {
-                resolvedAliases: options.resolvedAliases,
-                scope: "ancestor",
-              },
-            );
-            if (ancestor.untrustedPrincipals.length !== 0) {
-              throw new Error(
-                "Windows credential-home ancestor allows another identity to replace the directory",
-              );
-            }
-            return;
-          }
-
-          if (index === ancestors) {
-            try {
-              home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
-                resolvedAliases: options.resolvedAliases,
-              });
-            } catch (error) {
-              if (error instanceof UntrustedWindowsCredentialOwnerError) {
-                throw new RepairableWindowsCredentialOwnerError(error);
-              }
-              throw new RepairableWindowsCredentialAclError(error);
-            }
-            return;
-          }
-
-          const descendant = inspectWindowsCredentialAcl(
+        if (index < ancestors) {
+          const ancestor = inspectWindowsCredentialAcl(
             descriptor,
             currentUserSid,
             {
               resolvedAliases: options.resolvedAliases,
-              scope: "file",
+              scope: "ancestor",
             },
           );
-          if (
-            !descendant.grantsCurrentUserAccess ||
-            descendant.untrustedPrincipals.length !== 0
-          ) {
-            descendantsArePrivate = false;
+          if (ancestor.untrustedPrincipals.length !== 0) {
+            throw new Error(
+              "Windows credential-home ancestor allows another identity to replace the directory",
+            );
           }
-        },
-        { environment: options.environment },
-      );
-      if (descriptors <= ancestors) {
-        throw new Error(
-          "Windows credential-home ancestry could not be verified",
+          return;
+        }
+
+        if (index === ancestors) {
+          try {
+            home = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
+              resolvedAliases: options.resolvedAliases,
+            });
+          } catch (error) {
+            if (error instanceof UntrustedWindowsCredentialOwnerError) {
+              throw new RepairableWindowsCredentialOwnerError(error);
+            }
+            throw new RepairableWindowsCredentialAclError(error);
+          }
+          return;
+        }
+
+        const descendant = inspectWindowsCredentialAcl(
+          descriptor,
+          currentUserSid,
+          {
+            resolvedAliases: options.resolvedAliases,
+            scope: "file",
+          },
         );
-      }
-      return descriptors - ancestors - 1;
-    },
-    { inspectEmpty: true },
-  );
+        if (
+          !descendant.grantsCurrentUserAccess ||
+          descendant.untrustedPrincipals.length !== 0
+        ) {
+          descendantsArePrivate = false;
+        }
+      },
+      { environment: options.environment },
+    );
+    if (descriptors <= ancestors) {
+      throw new Error("Windows credential-home ancestry could not be verified");
+    }
+    return descriptors - ancestors - 1;
+  };
+  if (options.inspectDescendants === false) {
+    if ((await inspectDescriptors()) !== 0) {
+      throw new Error("Windows credential ACL inspection was not root-only");
+    }
+  } else {
+    await verifyStableWindowsCredentialDescendants(path, inspectDescriptors, {
+      inspectEmpty: true,
+    });
+  }
 
   if (home === undefined) {
     throw new Error("Windows credential ACL could not be verified");
@@ -812,7 +1093,51 @@ export async function inspectWindowsCredentialAclSnapshot(
   return { home, descendantsArePrivate };
 }
 
+async function inspectWindowsStateCreationAncestry(
+  path: string,
+  currentUserSid: string,
+  options: {
+    command: string;
+    args: readonly string[];
+    environment?: NodeJS.ProcessEnv;
+    resolvedAliases?: Readonly<Record<string, string>>;
+    resolveDescriptorAliases?: (descriptor: string) => Promise<void>;
+  },
+): Promise<void> {
+  let inspected = 0;
+  const descriptors = await streamWindowsCredentialAclDescriptors(
+    options.command,
+    options.args,
+    async (descriptor) => {
+      await options.resolveDescriptorAliases?.(descriptor);
+      const acl = inspectWindowsCredentialAcl(descriptor, currentUserSid, {
+        resolvedAliases: options.resolvedAliases,
+        scope: inspected === 0 ? "creation-ancestor" : "ancestor",
+      });
+      inspected += 1;
+      if (acl.untrustedPrincipals.length !== 0) {
+        throw new Error(
+          "Windows state-creation ancestor allows another identity to create or replace a directory",
+        );
+      }
+    },
+    { environment: options.environment },
+  );
+  if (descriptors === 0) {
+    throw new Error(
+      `Windows state-creation ancestry could not be verified: ${path}`,
+    );
+  }
+}
+
 async function secureWindowsCredentialHome(path: string): Promise<void> {
+  await secureWindowsPrivateDirectory(path, { repair: true });
+}
+
+async function secureWindowsPrivateDirectory(
+  path: string,
+  options: WindowsPrivateDirectoryOptions,
+): Promise<void> {
   const systemRoot = process.env["SystemRoot"] ?? "C:\\Windows";
   const systemDirectory = join(systemRoot, "System32");
   const powershell = join(
@@ -855,14 +1180,24 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
 
   // Signed built-in cmdlets remain available under ConstrainedLanguage;
   // arbitrary .NET constructors, static methods, and SID translation do not.
-  const script = [
+  const inspectionCommands = [
     "$ErrorActionPreference = 'Stop'",
     "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
     "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+  ];
+  if (options.inspectDescendants !== false) {
     // A temporary descendant can disappear after enumeration. Its missing
     // descriptor reduces the count and retries the stable snapshot.
-    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } }",
+    inspectionCommands.push(
+      "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } }",
+    );
+  }
+  const script = inspectionCommands.join("; ");
+  const creationAncestryScript = [
+    "$ErrorActionPreference = 'Stop'",
+    "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "while ($true) { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; $path = $parent }",
   ].join("; ");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
@@ -917,12 +1252,29 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       remaining = rest;
     }
   };
+  if (options.creationAncestor === true) {
+    await inspectWindowsStateCreationAncestry(path, sid, {
+      command: powershell,
+      args: [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        creationAncestryScript,
+      ],
+      environment: processOptions.env,
+      resolvedAliases,
+      resolveDescriptorAliases,
+    });
+    return;
+  }
   let descendantsArePrivate = true;
   const readAcl = async (): Promise<WindowsCredentialAcl> => {
     const snapshot = await inspectWindowsCredentialAclSnapshot(path, sid, {
       command: powershell,
       args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
       environment: processOptions.env,
+      inspectDescendants: options.inspectDescendants,
       resolvedAliases,
       resolveDescriptorAliases,
     });
@@ -950,6 +1302,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     try {
       existing = await readAcl();
     } catch (error) {
+      if (!options.repair) throw error;
       if (error instanceof RepairableWindowsCredentialOwnerError) {
         await execFile(icacls, [path, "/setowner", `*${sid}`], processOptions);
       } else if (error instanceof RepairableWindowsCredentialAclError) {
@@ -962,9 +1315,14 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   if (existing === undefined) {
     throw new Error("Windows credential ACL could not be repaired");
   }
+  if (!options.repair) {
+    requirePrivateWindowsCredentialAcl(existing, descendantsArePrivate);
+    return;
+  }
   if (
     existing.grantsCurrentUserAccess &&
     existing.untrustedPrincipals.length === 0 &&
+    existing.deniedPrincipals.length === 0 &&
     !existing.protected
   ) {
     await execFile(icacls, [path, "/inheritance:d"], processOptions);
@@ -975,7 +1333,8 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   if (
     !verified.protected ||
     !verified.grantsCurrentUserAccess ||
-    verified.untrustedPrincipals.length !== 0
+    verified.untrustedPrincipals.length !== 0 ||
+    verified.deniedPrincipals.length !== 0
   ) {
     await installTrustedAcl();
     verified = await readAcl();
@@ -1010,17 +1369,6 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       verified = await readAcl();
     }
   }
-  if (!verified.protected) {
-    throw new Error("Windows credential ACL still inherits access rules");
-  }
-  if (!verified.grantsCurrentUserAccess) {
-    throw new Error(
-      "Windows credential ACL does not grant the current user access",
-    );
-  }
-  if (verified.untrustedPrincipals.length !== 0) {
-    throw new Error("Windows credential ACL grants access to another identity");
-  }
   if (!descendantsArePrivate) {
     await execFile(
       icacls,
@@ -1032,6 +1380,57 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
       throw new Error("Windows credential descendants remain accessible");
     }
   }
+  requirePrivateWindowsCredentialAcl(verified, descendantsArePrivate);
+}
+
+function requirePrivateWindowsCredentialAcl(
+  acl: WindowsCredentialAcl,
+  descendantsArePrivate: boolean,
+): void {
+  if (!acl.protected) {
+    throw new Error("Windows credential ACL still inherits access rules");
+  }
+  if (!acl.grantsCurrentUserAccess) {
+    throw new Error(
+      "Windows credential ACL does not grant the current user access",
+    );
+  }
+  if (acl.untrustedPrincipals.length !== 0) {
+    throw new Error("Windows credential ACL grants access to another identity");
+  }
+  if (acl.deniedPrincipals.length !== 0) {
+    throw new Error("Windows credential ACL denies access to an identity");
+  }
+  if (!descendantsArePrivate) {
+    throw new Error("Windows credential descendants remain accessible");
+  }
+}
+
+interface CredentialLockReadRetry {
+  deadline?: number;
+  device?: bigint;
+  inode?: bigint;
+}
+
+function clearCredentialLockReadRetry(
+  readRetry: CredentialLockReadRetry,
+): void {
+  delete readRetry.deadline;
+  delete readRetry.device;
+  delete readRetry.inode;
+}
+
+function credentialLockReadDeadline(
+  readRetry: CredentialLockReadRetry,
+  metadata: BigIntStats,
+): number {
+  if (readRetry.device !== metadata.dev || readRetry.inode !== metadata.ino) {
+    clearCredentialLockReadRetry(readRetry);
+    readRetry.device = metadata.dev;
+    readRetry.inode = metadata.ino;
+  }
+  return (readRetry.deadline ??=
+    Date.now() + INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS);
 }
 
 export async function acquireCodexSecurityCredentialHomeLock(
@@ -1048,9 +1447,11 @@ export async function acquireCodexSecurityCredentialHomeLock(
   );
   const expectedDevice = homeMetadata.dev;
   const expectedInode = homeMetadata.ino;
+  const platform = securityOptions.platform ?? process.platform;
   const lock = join(codexHome, CREDENTIAL_LOCK_NAME);
   const ownerPath = join(lock, "owner.json");
   const token = randomUUID();
+  const readRetry: CredentialLockReadRetry = {};
 
   while (true) {
     throwIfSignalAborted(signal);
@@ -1065,10 +1466,12 @@ export async function acquireCodexSecurityCredentialHomeLock(
       throw error;
     });
     if (existingLock !== null) {
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform, readRetry))
+        continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
+    clearCredentialLockReadRetry(readRetry);
     await requireSecureCredentialHome(codexHome, {
       ...securityOptions,
       expectedDevice,
@@ -1078,7 +1481,8 @@ export async function acquireCodexSecurityCredentialHomeLock(
       await mkdir(lock, { mode: 0o700 });
     } catch (error) {
       if (nodeErrorCode(error) !== "EEXIST") throw error;
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform, readRetry))
+        continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1116,12 +1520,21 @@ export async function acquireCodexSecurityCredentialHomeLock(
   }
 }
 
-async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
-  const metadata = await lstat(lock).catch((error: unknown) => {
-    if (nodeErrorCode(error) === "ENOENT") return null;
-    throw error;
-  });
-  if (metadata === null) return true;
+async function recoverStaleCredentialHomeLock(
+  lock: string,
+  platform: NodeJS.Platform,
+  readRetry: CredentialLockReadRetry,
+): Promise<boolean> {
+  const metadata = await lstat(lock, { bigint: true }).catch(
+    (error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    },
+  );
+  if (metadata === null) {
+    clearCredentialLockReadRetry(readRetry);
+    return true;
+  }
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new OutputDirectoryError(
       `Codex Security credential-home lock is not a directory: ${lock}`,
@@ -1129,19 +1542,53 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   }
 
   let owner: unknown;
+  const deadline =
+    platform === "win32"
+      ? credentialLockReadDeadline(readRetry, metadata)
+      : undefined;
   try {
     owner = JSON.parse(await readFile(join(lock, "owner.json"), "utf8"));
   } catch (error) {
-    if (nodeErrorCode(error) !== "ENOENT" && !(error instanceof SyntaxError)) {
+    const code = nodeErrorCode(error);
+    // Re-enter the acquisition loop so a Windows read retry rechecks the lock.
+    const transientWindowsRead =
+      deadline !== undefined && (code === "EPERM" || code === "EBUSY");
+    if (transientWindowsRead) {
+      if (Date.now() < deadline) return false;
+      // The failed read can race a lock replacement. Only charge an expired
+      // retry window to the lock identity that established it.
+      const current = await lstat(lock, { bigint: true }).catch(
+        (statError: unknown) => {
+          if (nodeErrorCode(statError) === "ENOENT") return null;
+          throw statError;
+        },
+      );
+      if (current === null) {
+        clearCredentialLockReadRetry(readRetry);
+        return true;
+      }
+      if (!current.isDirectory() || current.isSymbolicLink()) {
+        throw new OutputDirectoryError(
+          `Codex Security credential-home lock is not a directory: ${lock}`,
+        );
+      }
+      if (current.dev !== metadata.dev || current.ino !== metadata.ino) {
+        credentialLockReadDeadline(readRetry, current);
+        return false;
+      }
+    }
+    clearCredentialLockReadRetry(readRetry);
+    if (code !== "ENOENT" && !(error instanceof SyntaxError)) {
       throw error;
     }
     if (
-      Date.now() - metadata.mtimeMs <
+      Date.now() - Number(metadata.mtimeMs) <
       INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS
     ) {
       return false;
     }
   }
+  clearCredentialLockReadRetry(readRetry);
 
   // Only positive signed-32-bit PIDs identify an owner. Other values can name
   // process groups or fail argument validation, so use the stale-age check.
@@ -1162,7 +1609,7 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
       }
     }
   } else if (
-    Date.now() - metadata.mtimeMs <
+    Date.now() - Number(metadata.mtimeMs) <
     INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS
   ) {
     return false;
@@ -1172,10 +1619,14 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   try {
     await rename(lock, quarantine);
   } catch (error) {
-    if (nodeErrorCode(error) === "ENOENT") return true;
+    if (nodeErrorCode(error) === "ENOENT") {
+      clearCredentialLockReadRetry(readRetry);
+      return true;
+    }
     throw error;
   }
   await rm(quarantine, { recursive: true, force: true });
+  clearCredentialLockReadRetry(readRetry);
   return true;
 }
 
@@ -1354,8 +1805,7 @@ export async function preparePersistentOutputRoot(
   repositoryName: string,
 ): Promise<string> {
   requireModelSafeOutputDir(stateDirectory);
-  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-  let root = await realpath(stateDirectory);
+  let root = await prepareCodexSecurityStateDirectory(stateDirectory);
   for (const directory of [category, safePrefix(repositoryName)]) {
     root = join(root, directory);
     await mkdir(root, { recursive: true, mode: 0o700 });
@@ -1373,17 +1823,29 @@ export async function runWorkbench(
   args: readonly string[],
   input?: string,
 ): Promise<JsonObject> {
+  const stateDirectory = ["inspect-target", "inspect-setup"].includes(
+    args[0] ?? "",
+  )
+    ? undefined
+    : await validateCodexSecurityStateDirectory(
+        codexSecurityStateDirectory(options.environment),
+      );
+  const environment = Object.fromEntries(
+    Object.entries(options.environment).filter(
+      ([name]) =>
+        name.toUpperCase() !== "OPENAI_API_KEY" &&
+        name.toUpperCase() !== "CODEX_API_KEY" &&
+        name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+        name.toUpperCase() !== "FIREWORKS_API_KEY" &&
+        (stateDirectory === undefined ||
+          name.toUpperCase() !== "CODEX_SECURITY_STATE_DIR"),
+    ),
+  );
+  if (stateDirectory !== undefined) {
+    environment["CODEX_SECURITY_STATE_DIR"] = stateDirectory;
+  }
   let stdout: string;
   try {
-    const environment = Object.fromEntries(
-      Object.entries(options.environment).filter(
-        ([name]) =>
-          name.toUpperCase() !== "OPENAI_API_KEY" &&
-          name.toUpperCase() !== "CODEX_API_KEY" &&
-          name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-          name.toUpperCase() !== "FIREWORKS_API_KEY",
-      ),
-    );
     const result = await runCodexCommand(
       { command: options.python },
       [
@@ -1418,7 +1880,7 @@ export async function runWorkbench(
     throw new CodexSecurityError(
       databaseFailure
         ? `${failure}: cannot open the workbench database at ${join(
-            codexSecurityStateDirectory(options.environment),
+            stateDirectory ?? codexSecurityStateDirectory(options.environment),
             "workbench.sqlite3",
           )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
         : `${failure}: ${detail}`,
@@ -1732,6 +2194,21 @@ export function requireTrustedOutputAncestor(
   path: string,
   effectiveUid = process.geteuid?.(),
 ): void {
+  requireTrustedOutputOwner(metadata, path, effectiveUid);
+  if ((metadata.mode & 0o022) === 0) return;
+  if ((metadata.mode & 0o1000) === 0) {
+    const mode = (metadata.mode & 0o7777).toString(8).padStart(4, "0");
+    throw new OutputDirectoryError(
+      `Scan output parent must not be group- or world-writable without the sticky bit: ${path} (mode ${mode}). A private child directory does not make an unsafe ancestor safe. Choose a location with secure parent directories, or remove group- and world-write permissions from this ancestor only if you own it and can safely change it.`,
+    );
+  }
+}
+
+function requireTrustedOutputOwner(
+  metadata: Pick<Stats, "uid">,
+  path: string,
+  effectiveUid: number | undefined,
+): void {
   if (
     effectiveUid !== undefined &&
     metadata.uid !== 0 &&
@@ -1739,12 +2216,6 @@ export function requireTrustedOutputAncestor(
   ) {
     throw new OutputDirectoryError(
       `Scan output parent must have a trusted owner: ${path}`,
-    );
-  }
-  if ((metadata.mode & 0o022) === 0) return;
-  if ((metadata.mode & 0o1000) === 0) {
-    throw new OutputDirectoryError(
-      `Scan output parent must not be group- or world-writable without the sticky bit: ${path}`,
     );
   }
 }

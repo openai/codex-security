@@ -36,7 +36,9 @@ import {
 } from "./publication-store.js";
 import {
   codexSecurityStateDirectory,
+  prepareCodexSecurityStateDirectory,
   resolveCodexCommand,
+  validateCodexSecurityStateDirectory,
   type CodexCommand,
 } from "./runtime.js";
 
@@ -144,8 +146,11 @@ export async function publishScanInternal(
     );
   }
 
-  const environment = dependencies.environment ?? process.env;
-  const linearApiKey = resolveLinearApiKey(environment, options.linearApiKey);
+  const inheritedEnvironment = dependencies.environment ?? process.env;
+  const linearApiKey = resolveLinearApiKey(
+    inheritedEnvironment,
+    options.linearApiKey,
+  );
   if (options.assigneeId !== undefined && linearApiKey === undefined) {
     throw new ConfigurationError(
       "A Linear API key is required to select a publication assignee.",
@@ -174,6 +179,13 @@ export async function publishScanInternal(
   }
   if (prepared.issues.length === 0) return result;
 
+  const stateDirectory = await validateCodexSecurityStateDirectory(
+    codexSecurityStateDirectory(inheritedEnvironment),
+  );
+  const environment = {
+    ...inheritedEnvironment,
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  };
   await (dependencies.preparePublicationStore ?? preparePublicationStore)(
     prepared,
     environment,
@@ -207,7 +219,7 @@ export async function publishScanInternal(
       ? (dependencies.resolveCodex ?? resolveCodexCommand)(environment)
       : undefined;
   options.signal?.throwIfAborted();
-  const handoff = await createPublicationHandoff(prepared, environment);
+  const handoff = await createPublicationHandoff(prepared, stateDirectory);
   const progressObserver = options.onProgress;
   reportPublicationProgress(progressObserver, {
     type: "started",
@@ -319,12 +331,18 @@ export async function publishScanInternal(
   result.failed = handoffResults.failed;
   result.counts.created = result.created.length;
   result.counts.failed = result.failed.length;
+  const saveReceipt = async (): Promise<void> => {
+    const receiptStateDirectory =
+      await prepareCodexSecurityStateDirectory(stateDirectory);
+    if (dependencies.writeReceipt !== undefined) {
+      await dependencies.writeReceipt(result, environment);
+    } else {
+      await writePublicationReceipt(result, receiptStateDirectory);
+    }
+  };
   if (options.signal?.aborted) {
     try {
-      await (dependencies.writeReceipt ?? writePublicationReceipt)(
-        result,
-        environment,
-      );
+      await saveReceipt();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
@@ -356,10 +374,7 @@ export async function publishScanInternal(
     }
   }
   try {
-    await (dependencies.writeReceipt ?? writePublicationReceipt)(
-      result,
-      environment,
-    );
+    await saveReceipt();
   } catch (error) {
     if (result.created.length === 0 || options.signal?.aborted) throw error;
     result.warnings = [
@@ -593,10 +608,10 @@ function publicationPrompt(
 
 async function createPublicationHandoff(
   publication: PreparedScanPublication,
-  environment: NodeJS.ProcessEnv,
+  stateDirectory: string,
 ): Promise<{ directory: string; file: string; publicationFile: string }> {
   const root = join(
-    codexSecurityStateDirectory(environment),
+    await prepareCodexSecurityStateDirectory(stateDirectory),
     "publications",
     "linear",
     "handoffs",
@@ -1059,13 +1074,9 @@ function reportCodexEvent(
 
 async function writePublicationReceipt(
   result: PublishScanResult,
-  environment: NodeJS.ProcessEnv,
+  stateDirectory: string,
 ): Promise<void> {
-  const directory = join(
-    codexSecurityStateDirectory(environment),
-    "publications",
-    "linear",
-  );
+  const directory = join(stateDirectory, "publications", "linear");
   await mkdir(directory, { mode: 0o700, recursive: true });
   const name = createHash("sha256").update(result.scanId).digest("hex");
   const contents = JSON.stringify(result);

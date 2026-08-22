@@ -40,6 +40,7 @@ import {
   createMarketplace,
   extractPluginZip,
   importAmbientAuth,
+  OutputDirectoryError,
   pluginExecutionEnvironment,
   PluginBootstrapError,
   PluginPythonUnavailableError,
@@ -62,6 +63,7 @@ import {
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
+  prepareCodexSecurityStateDirectory,
   preparePersistentOutputRoot,
   preserveCodexSecurityPluginRegistration,
   requirePrivateCredentialHome,
@@ -73,6 +75,7 @@ import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
+  validateCodexSecurityStateDirectory,
   verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
@@ -2129,6 +2132,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(
         requireSecureOutputAncestry(join(shared, "state")),
       ).rejects.toThrow("sticky bit");
+      expect(existsSync(join(shared, "state"))).toBe(false);
     },
   );
 
@@ -2248,7 +2252,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test("identifies a credential home that already exists as a regular file", async () => {
     const root = await temporaryDirectory();
     const stateDirectory = join(root, "state");
-    await mkdir(stateDirectory);
+    await prepareCodexSecurityStateDirectory(stateDirectory);
     await writeFile(join(stateDirectory, "codex-home"), "not a directory\n");
 
     await expect(
@@ -2297,6 +2301,374 @@ describe("runtime directories and plugin Python boundary", () => {
     try {
       await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
     } finally {
+      await release();
+    }
+  });
+
+  test.each(["EPERM", "EBUSY"])(
+    "retries temporarily unreadable Windows credential-lock owners with %s",
+    async (code) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `retries temporarily unreadable Windows credential-lock owners with ${code}`,
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const home = join(root, "credential-home");
+      const lock = join(home, ".codex-security-scan.lock");
+      const ownerPath = join(lock, "owner.json");
+      await mkdir(home, { mode: 0o700 });
+      const securityOptions = {
+        platform: "win32" as const,
+        secureWindowsHome: async () => {},
+      };
+      const releaseFirst = await acquireCodexSecurityCredentialHomeLock(
+        home,
+        undefined,
+        securityOptions,
+      );
+      const originalReadFile = fsPromises.readFile;
+      let ownerReads = 0;
+      let retryObserved!: () => void;
+      const retried = new Promise<void>((resolve) => {
+        retryObserved = resolve;
+      });
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        readFile: async (...args: Parameters<typeof originalReadFile>) => {
+          if (String(args[0]) === ownerPath) {
+            ownerReads += 1;
+            if (ownerReads === 1) {
+              throw Object.assign(new Error("temporarily unreadable owner"), {
+                code,
+              });
+            }
+            if (ownerReads === 2) retryObserved();
+          }
+          return originalReadFile(...args);
+        },
+      }));
+      const controller = new AbortController();
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+        securityOptions,
+      );
+      void waiting.catch(() => undefined);
+
+      try {
+        await Promise.race([
+          retried,
+          waiting.then(() => {
+            throw new Error("The held credential lock was acquired early.");
+          }),
+        ]);
+        expect(ownerReads).toBeGreaterThanOrEqual(2);
+        expect(existsSync(ownerPath)).toBe(true);
+        await releaseFirst();
+        const releaseSecond = await waiting;
+        await releaseSecond();
+        expect(existsSync(lock)).toBe(false);
+      } finally {
+        controller.abort();
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          readFile: originalReadFile,
+        }));
+        await releaseFirst();
+        await waiting.then(
+          (release) => release(),
+          () => undefined,
+        );
+      }
+    },
+  );
+
+  test.each(["EPERM", "EBUSY"])(
+    "reports persistent Windows credential-lock read failures with %s",
+    async (code) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `reports persistent Windows credential-lock read failures with ${code}`,
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const home = join(root, "credential-home");
+      const ownerPath = join(home, ".codex-security-scan.lock", "owner.json");
+      await mkdir(home, { mode: 0o700 });
+      const securityOptions = {
+        platform: "win32" as const,
+        secureWindowsHome: async () => {},
+      };
+      const release = await acquireCodexSecurityCredentialHomeLock(
+        home,
+        undefined,
+        securityOptions,
+      );
+      const originalReadFile = fsPromises.readFile;
+      const failure = Object.assign(
+        new Error("persistent owner read failure"),
+        {
+          code,
+        },
+      );
+      let now = Date.now();
+      let ownerReads = 0;
+      const clock = spyOn(Date, "now").mockImplementation(() => now);
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        readFile: async (...args: Parameters<typeof originalReadFile>) => {
+          if (String(args[0]) === ownerPath) {
+            ownerReads += 1;
+            now += 15_000;
+            throw failure;
+          }
+          return originalReadFile(...args);
+        },
+      }));
+      const controller = new AbortController();
+      const watchdog = setTimeout(() => controller.abort(), 1_000);
+      try {
+        await expect(
+          acquireCodexSecurityCredentialHomeLock(
+            home,
+            controller.signal,
+            securityOptions,
+          ),
+        ).rejects.toBe(failure);
+        expect(ownerReads).toBe(2);
+        expect(existsSync(ownerPath)).toBe(true);
+      } finally {
+        clearTimeout(watchdog);
+        controller.abort();
+        clock.mockRestore();
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          readFile: originalReadFile,
+        }));
+        await release();
+      }
+    },
+  );
+
+  test("resets Windows credential-lock read retries for a replacement lock", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "resets Windows credential-lock read retries for a replacement lock",
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "credential-home");
+    const lock = join(home, ".codex-security-scan.lock");
+    const ownerPath = join(lock, "owner.json");
+    await mkdir(home, { mode: 0o700 });
+    const securityOptions = {
+      platform: "win32" as const,
+      secureWindowsHome: async () => {},
+    };
+    const releaseFirst = await acquireCodexSecurityCredentialHomeLock(
+      home,
+      undefined,
+      securityOptions,
+    );
+    const originalReadFile = fsPromises.readFile;
+    const originalLstat = fsPromises.lstat;
+    const controller = new AbortController();
+    let now = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    let releasing = false;
+    let replacementCreated = false;
+    let ownerReads = 0;
+    let retriedReplacement!: () => void;
+    const retried = new Promise<void>((resolve) => {
+      retriedReplacement = resolve;
+    });
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (...args: Parameters<typeof originalLstat>) => {
+        const metadata = await originalLstat(...args);
+        if (String(args[0]) === lock && typeof metadata.dev === "bigint") {
+          Object.defineProperties(metadata, {
+            dev: { value: replacementCreated ? 2n : 1n },
+            ino: { value: replacementCreated ? 4n : 3n },
+          });
+        }
+        return metadata;
+      },
+      readFile: async (...args: Parameters<typeof originalReadFile>) => {
+        if (String(args[0]) !== ownerPath || releasing) {
+          return originalReadFile(...args);
+        }
+        ownerReads += 1;
+        if (ownerReads === 1) {
+          now += 29_999;
+          throw Object.assign(new Error("original owner is unreadable"), {
+            code: "EPERM",
+          });
+        }
+        if (ownerReads === 2) {
+          releasing = true;
+          await releaseFirst();
+          releasing = false;
+          await mkdir(lock, { mode: 0o700 });
+          replacementCreated = true;
+          now += 2;
+          throw Object.assign(new Error("owner replaced during read"), {
+            code: "EBUSY",
+          });
+        }
+        if (ownerReads === 3) {
+          retriedReplacement();
+          controller.abort();
+        }
+        throw Object.assign(new Error("replacement owner is busy"), {
+          code: "EBUSY",
+        });
+      },
+    }));
+    const waiting = acquireCodexSecurityCredentialHomeLock(
+      home,
+      controller.signal,
+      securityOptions,
+    );
+    void waiting.catch(() => undefined);
+    try {
+      await Promise.race([
+        retried,
+        waiting.then(() => {
+          throw new Error(
+            "The replacement lock was acquired before its owner was ready.",
+          );
+        }),
+      ]);
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(ownerReads).toBe(3);
+      expect(existsSync(lock)).toBe(true);
+      expect(existsSync(ownerPath)).toBe(false);
+    } finally {
+      controller.abort();
+      clock.mockRestore();
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+        readFile: originalReadFile,
+      }));
+      await waiting.then(
+        (release) => release(),
+        () => undefined,
+      );
+      await releaseFirst();
+      await rm(lock, { recursive: true, force: true });
+    }
+  });
+
+  test("cancels unreadable Windows credential-lock retries", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "cancels unreadable Windows credential-lock retries",
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "credential-home");
+    const ownerPath = join(home, ".codex-security-scan.lock", "owner.json");
+    await mkdir(home, { mode: 0o700 });
+    const securityOptions = {
+      platform: "win32" as const,
+      secureWindowsHome: async () => {},
+    };
+    const release = await acquireCodexSecurityCredentialHomeLock(
+      home,
+      undefined,
+      securityOptions,
+    );
+    const originalReadFile = fsPromises.readFile;
+    const controller = new AbortController();
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      readFile: async (...args: Parameters<typeof originalReadFile>) => {
+        if (String(args[0]) === ownerPath) {
+          controller.abort();
+          throw Object.assign(new Error("unreadable owner"), { code: "EPERM" });
+        }
+        return originalReadFile(...args);
+      },
+    }));
+    try {
+      await expect(
+        acquireCodexSecurityCredentialHomeLock(
+          home,
+          controller.signal,
+          securityOptions,
+        ),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(existsSync(ownerPath)).toBe(true);
+    } finally {
+      controller.abort();
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        readFile: originalReadFile,
+      }));
+      await release();
+    }
+  });
+
+  test("preserves other Windows credential-lock read errors", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "preserves other Windows credential-lock read errors",
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "credential-home");
+    const ownerPath = join(home, ".codex-security-scan.lock", "owner.json");
+    await mkdir(home, { mode: 0o700 });
+    const securityOptions = {
+      platform: "win32" as const,
+      secureWindowsHome: async () => {},
+    };
+    const release = await acquireCodexSecurityCredentialHomeLock(
+      home,
+      undefined,
+      securityOptions,
+    );
+    const originalReadFile = fsPromises.readFile;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      readFile: async (...args: Parameters<typeof originalReadFile>) => {
+        if (String(args[0]) === ownerPath) {
+          throw Object.assign(new Error("access denied"), { code: "EACCES" });
+        }
+        return originalReadFile(...args);
+      },
+    }));
+    try {
+      await expect(
+        acquireCodexSecurityCredentialHomeLock(
+          home,
+          undefined,
+          securityOptions,
+        ),
+      ).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        readFile: originalReadFile,
+      }));
       await release();
     }
   });
@@ -2639,6 +3011,41 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("can inspect only a Windows state boundary without walking descendants", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const external = join(root, "external");
+    await mkdir(state);
+    await mkdir(external);
+    await symlink(
+      external,
+      join(state, "accumulated-scan"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const ancestors: string[] = [];
+    for (let ancestor = dirname(state); ; ancestor = dirname(ancestor)) {
+      ancestors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    const descriptors = [...ancestors, directory];
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(state, sid, {
+        command: process.execPath,
+        args: [
+          "--eval",
+          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+        ],
+        inspectDescendants: false,
+      }),
+    ).resolves.toMatchObject({
+      home: { owner: sid, protected: true },
+      descendantsArePrivate: true,
+    });
+  });
+
   test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -2852,6 +3259,39 @@ describe("runtime directories and plugin Python boundary", () => {
         user,
       ),
     ).toThrow("owner is not a trusted principal");
+  });
+
+  test("rejects Windows grants that can race state-directory creation", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    for (const [flags, rights] of [
+      ["CIIO", "GA"],
+      ["CI", "0x2"],
+      ["CI", "0x4"],
+      ["CI", "0x40000000"],
+      ["CI", "CC"],
+      ["", "CC"],
+    ] as const) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;${flags};${rights};;;WD)`,
+          user,
+          { scope: "creation-ancestor" },
+        ).untrustedPrincipals,
+      ).toEqual(["S-1-1-0"]);
+    }
+    for (const [flags, rights] of [
+      ["OIIO", "GA"],
+      ["CIIO", "FR"],
+      ["CI", "FR"],
+    ] as const) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;${flags};${rights};;;WD)`,
+          user,
+          { scope: "creation-ancestor" },
+        ).untrustedPrincipals,
+      ).toEqual([]);
+    }
   });
 
   test("accepts private credential-file ACLs without inheritance flags", () => {
@@ -3373,20 +3813,22 @@ describe("runtime directories and plugin Python boundary", () => {
     async () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
-      await mkdir(state);
+      await prepareCodexSecurityStateDirectory(state);
+      const home = join(state, "codex-home");
+      await mkdir(home);
       const systemDirectory = join(
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
       );
       const shared = spawnSync(
         join(systemDirectory, "icacls.exe"),
-        [state, "/grant", "*S-1-1-0:(OI)(CI)R"],
+        [home, "/grant", "*S-1-1-0:(OI)(CI)R"],
         { encoding: "utf8", windowsHide: true },
       );
       expect(shared.status).toBe(0);
 
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: state,
+      await requirePrivateCredentialHome(await lstat(home), home, {
+        platform: "win32",
       });
       const result = spawnSync(
         join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -3421,7 +3863,8 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       const home = join(state, "codex-home");
-      await mkdir(home, { recursive: true });
+      await prepareCodexSecurityStateDirectory(state);
+      await mkdir(home);
       const systemDirectory = join(
         process.env["SystemRoot"] ?? "C:\\Windows",
         "System32",
@@ -3433,11 +3876,9 @@ describe("runtime directories and plugin Python boundary", () => {
       );
       expect(configured.status).toBe(0);
 
-      expect(
-        await prepareCodexSecurityCredentialHome({
-          CODEX_SECURITY_STATE_DIR: state,
-        }),
-      ).toBe(await realpath(home));
+      await requirePrivateCredentialHome(await lstat(home), home, {
+        platform: "win32",
+      });
       const result = spawnSync(
         join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
         [
@@ -3539,6 +3980,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const state = join(root, "state");
       const home = join(state, "codex-home");
       const nested = join(home, "sessions");
+      await prepareCodexSecurityStateDirectory(state);
       await mkdir(nested, { recursive: true });
       const auth = join(home, "auth.json");
       const nestedAuth = join(nested, "credentials.json");
@@ -3567,11 +4009,9 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(unsafe.status).toBe(0);
       }
 
-      expect(
-        await prepareCodexSecurityCredentialHome({
-          CODEX_SECURITY_STATE_DIR: state,
-        }),
-      ).toBe(await realpath(home));
+      await requirePrivateCredentialHome(await lstat(home), home, {
+        platform: "win32",
+      });
 
       const inspection = spawnSync(
         join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -3628,16 +4068,18 @@ describe("runtime directories and plugin Python boundary", () => {
         ),
       ).rejects.toThrow("Windows-ambiguous components");
     }
-    const scanRoot = await preparePersistentOutputRoot(
-      join(root, "state"),
-      "scans",
-      "repository with spaces",
-    );
-    expect(scanRoot).toBe(
-      join(root, "state", "scans", "repository-with-spaces"),
-    );
-    if (process.platform !== "win32") {
-      expect((await stat(scanRoot)).mode & 0o777).toBe(0o700);
+    for (const category of ["scans", "policies"] as const) {
+      const outputRoot = await preparePersistentOutputRoot(
+        join(root, "state"),
+        category,
+        "repository with spaces",
+      );
+      expect(outputRoot).toBe(
+        join(root, "state", category, "repository-with-spaces"),
+      );
+      if (process.platform !== "win32") {
+        expect((await stat(outputRoot)).mode & 0o777).toBe(0o700);
+      }
     }
 
     const linkedState = join(root, "linked-state");
@@ -3655,6 +4097,592 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(join(root, "state", "scans", "linked-repository"));
   });
 
+  test("validates private state aliases and missing paths without creating them", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const alias = join(root, "state-alias");
+    const missing = join(alias, "missing", "state");
+    await prepareCodexSecurityStateDirectory(state);
+    await writeFile(join(state, "preserved.txt"), "preserved\n");
+    await symlink(
+      state,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    let location: string | undefined;
+
+    expect(
+      await validateCodexSecurityStateDirectory(alias, (canonical) => {
+        location = canonical;
+      }),
+    ).toBe(state);
+    expect(location).toBe(state);
+    expect(await validateCodexSecurityStateDirectory(missing)).toBe(
+      join(state, "missing", "state"),
+    );
+    expect(existsSync(missing)).toBe(false);
+    expect(await readdir(state)).toEqual(["preserved.txt"]);
+    expect(await readFile(join(state, "preserved.txt"), "utf8")).toBe(
+      "preserved\n",
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    }
+  });
+
+  test("inspects existing Windows state ACLs without repairing them", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    await mkdir(state, { mode: 0o700 });
+    const inspections: [
+      string,
+      {
+        repair: boolean;
+        creationAncestor?: boolean;
+        inspectDescendants?: boolean;
+      },
+    ][] = [];
+    const security = {
+      platform: "win32" as const,
+      windowsAcl: async (
+        path: string,
+        options: {
+          repair: boolean;
+          creationAncestor?: boolean;
+          inspectDescendants?: boolean;
+        },
+      ) => {
+        inspections.push([path, options]);
+      },
+    };
+
+    expect(
+      await validateCodexSecurityStateDirectory(state, undefined, security),
+    ).toBe(state);
+    expect(inspections).toEqual([
+      [state, { repair: false, inspectDescendants: false }],
+    ]);
+    const alias = join(root, "state-alias");
+    await symlink(
+      state,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    expect(
+      await validateCodexSecurityStateDirectory(alias, undefined, security),
+    ).toBe(state);
+    expect(inspections.slice(1)).toEqual([
+      [alias, { repair: false, inspectDescendants: false }],
+      [state, { repair: false, inspectDescendants: false }],
+    ]);
+
+    const unsafe = new Error("unsafe synthetic Windows state ACL");
+    security.windowsAcl = async (path, options) => {
+      inspections.push([path, options]);
+      throw unsafe;
+    };
+    await expect(
+      prepareCodexSecurityStateDirectory(state, undefined, security),
+    ).rejects.toMatchObject({ cause: unsafe });
+    expect(inspections.at(-1)).toEqual([
+      state,
+      { repair: false, inspectDescendants: false },
+    ]);
+    expect(await readdir(state)).toEqual([]);
+  });
+
+  test("rejects unsafe Windows creation ancestors during non-mutating validation", async () => {
+    const root = await temporaryDirectory();
+    type AclOptions = {
+      repair: boolean;
+      creationAncestor?: boolean;
+      inspectDescendants?: boolean;
+    };
+    const options: AclOptions = {
+      repair: false,
+      creationAncestor: true,
+      inspectDescendants: false,
+    };
+    const inspections: [string, AclOptions][] = [];
+    const security = {
+      platform: "win32" as const,
+      windowsAcl: async (path: string, aclOptions: AclOptions) => {
+        inspections.push([path, aclOptions]);
+      },
+    };
+    const directState = join(root, "direct", "state");
+
+    expect(
+      await validateCodexSecurityStateDirectory(
+        directState,
+        undefined,
+        security,
+      ),
+    ).toBe(directState);
+    expect(inspections).toEqual([[root, options]]);
+    expect(existsSync(join(root, "direct"))).toBe(false);
+
+    const target = join(root, "target");
+    const alias = join(root, "target-alias");
+    const state = join(alias, "missing", "state");
+    await mkdir(target, { mode: 0o700 });
+    await symlink(
+      target,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    inspections.length = 0;
+    const unsafe = new Error("unsafe synthetic Windows creation ancestor");
+    security.windowsAcl = async (path, aclOptions) => {
+      inspections.push([path, aclOptions]);
+      if (path === target) throw unsafe;
+    };
+
+    await expect(
+      validateCodexSecurityStateDirectory(state, undefined, security),
+    ).rejects.toMatchObject({ cause: unsafe });
+    expect(inspections).toEqual([
+      [alias, options],
+      [target, options],
+    ]);
+    expect(existsSync(join(target, "missing"))).toBe(false);
+  });
+
+  test("repairs only Windows state directories created during preparation", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "missing", "state");
+    const inspections: [
+      string,
+      {
+        repair: boolean;
+        creationAncestor?: boolean;
+        inspectDescendants?: boolean;
+      },
+    ][] = [];
+    const security = {
+      platform: "win32" as const,
+      windowsAcl: async (
+        path: string,
+        options: {
+          repair: boolean;
+          creationAncestor?: boolean;
+          inspectDescendants?: boolean;
+        },
+      ) => {
+        inspections.push([path, options]);
+      },
+    };
+
+    expect(
+      await prepareCodexSecurityStateDirectory(state, undefined, security),
+    ).toBe(state);
+    expect(inspections).toEqual([
+      [
+        root,
+        {
+          repair: false,
+          creationAncestor: true,
+          inspectDescendants: false,
+        },
+      ],
+      [
+        root,
+        {
+          repair: false,
+          creationAncestor: true,
+          inspectDescendants: false,
+        },
+      ],
+      [join(root, "missing"), { repair: true, inspectDescendants: false }],
+      [state, { repair: true, inspectDescendants: false }],
+      [state, { repair: false, inspectDescendants: false }],
+    ]);
+  });
+
+  test("rejects unsafe Windows state creation ancestors before mkdir", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "missing", "state");
+    const unsafe = new Error("unsafe synthetic Windows creation ancestor");
+    const inspections: [
+      string,
+      {
+        repair: boolean;
+        creationAncestor?: boolean;
+        inspectDescendants?: boolean;
+      },
+    ][] = [];
+
+    await expect(
+      prepareCodexSecurityStateDirectory(state, undefined, {
+        platform: "win32",
+        windowsAcl: async (path, options) => {
+          inspections.push([path, options]);
+          if (options.creationAncestor === true) throw unsafe;
+        },
+      }),
+    ).rejects.toMatchObject({ cause: unsafe });
+    expect(inspections).toEqual([
+      [
+        root,
+        {
+          repair: false,
+          creationAncestor: true,
+          inspectDescendants: false,
+        },
+      ],
+    ]);
+    expect(existsSync(join(root, "missing"))).toBe(false);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "creates private Windows state ACLs and never repairs existing state",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "missing", "state");
+      expect(await prepareCodexSecurityStateDirectory(state)).toBe(state);
+      const systemDirectory = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+      );
+      const identity = spawnSync(
+        join(systemDirectory, "whoami.exe"),
+        ["/user", "/fo", "csv", "/nh"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(identity.status).toBe(0);
+      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
+      expect(sid).toBeDefined();
+      const powershell = join(
+        systemDirectory,
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      );
+      const inspect = (): {
+        protected: boolean;
+        principals: string[];
+      } => {
+        const result = spawnSync(
+          powershell,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            [
+              "$acl = Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH",
+              "$principals = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
+              "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; principals = $principals } | ConvertTo-Json -Compress",
+            ].join("; "),
+          ],
+          {
+            encoding: "utf8",
+            env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: state },
+            windowsHide: true,
+          },
+        );
+        expect(result.status).toBe(0);
+        return JSON.parse(result.stdout) as {
+          protected: boolean;
+          principals: string[];
+        };
+      };
+      const privateAcl = inspect();
+      expect(privateAcl.protected).toBe(true);
+      expect(new Set(privateAcl.principals)).toEqual(
+        new Set([sid!, "S-1-5-18", "S-1-5-32-544"]),
+      );
+
+      const shared = spawnSync(
+        join(systemDirectory, "icacls.exe"),
+        [state, "/grant", "*S-1-1-0:(OI)(CI)R"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(shared.status).toBe(0);
+      await expect(
+        validateCodexSecurityStateDirectory(state),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      await expect(
+        prepareCodexSecurityStateDirectory(state),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      expect(inspect().principals).toContain("S-1-1-0");
+    },
+  );
+
+  test("prepares a canonical private state root without replacing existing data", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "missing", "state");
+    const alias = join(root, "state-alias");
+    expect(await prepareCodexSecurityStateDirectory(state)).toBe(state);
+    await writeFile(join(state, "preserved.txt"), "preserved\n");
+    await symlink(
+      state,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    expect(await prepareCodexSecurityStateDirectory(alias)).toBe(state);
+    expect(await readFile(join(state, "preserved.txt"), "utf8")).toBe(
+      "preserved\n",
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    }
+  });
+
+  testPosix(
+    "changes owner permissions only on newly created state roots",
+    async () => {
+      const root = await temporaryDirectory();
+      const existing = join(root, "existing");
+      await mkdir(existing, { mode: 0o755 });
+      await chmod(existing, 0o755);
+      for (const mask of [0o700, 0o777]) {
+        const first = join(existing, `nested-${mask.toString(8)}`);
+        const second = join(first, "parent");
+        const state = join(second, "state");
+        const previousUmask = process.umask(mask);
+        try {
+          expect(await prepareCodexSecurityStateDirectory(state)).toBe(state);
+        } finally {
+          process.umask(previousUmask);
+        }
+        for (const directory of [first, second, state]) {
+          expect((await stat(directory)).mode & 0o7777).toBe(0o700);
+        }
+        expect((await stat(existing)).mode & 0o7777).toBe(0o755);
+        await chmod(state, 0o755);
+        await expect(prepareCodexSecurityStateDirectory(state)).rejects.toThrow(
+          "Configured Codex Security state directory must be private",
+        );
+        expect((await stat(state)).mode & 0o7777).toBe(0o755);
+      }
+    },
+  );
+
+  testPosix(
+    "revalidates colliding state components without changing or redirecting them",
+    async () => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          "revalidates colliding state components without changing or redirecting them",
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const parent = join(root, "parent");
+      const state = join(parent, "state");
+      const nonprivateState = join(root, "nonprivate-state");
+      const alias = join(root, "alias");
+      const destination = join(root, "destination");
+      await mkdir(destination, { mode: 0o700 });
+      const pending = new Set([parent, nonprivateState, alias]);
+      const originalMkdir = fsPromises.mkdir;
+      const originalChmod = fsPromises.chmod;
+      const changed: string[] = [];
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        mkdir: async (...args: Parameters<typeof originalMkdir>) => {
+          const path = String(args[0]);
+          if (!pending.delete(path)) return await originalMkdir(...args);
+          if (path === alias) {
+            await symlink(destination, alias, "dir");
+          } else {
+            await originalMkdir(path, { mode: 0o755 });
+            await originalChmod(path, 0o755);
+          }
+          throw Object.assign(new Error("Directory already exists."), {
+            code: "EEXIST",
+          });
+        },
+        chmod: async (...args: Parameters<typeof originalChmod>) => {
+          changed.push(String(args[0]));
+          return await originalChmod(...args);
+        },
+      }));
+      const previousUmask = process.umask(0o777);
+      try {
+        const locations: [string, boolean][] = [];
+        expect(
+          await prepareCodexSecurityStateDirectory(state, (path) => {
+            locations.push([path, existsSync(path)]);
+          }),
+        ).toBe(state);
+        expect(locations[0]).toEqual([state, false]);
+        expect(locations.at(-1)).toEqual([state, true]);
+        expect((await stat(parent)).mode & 0o7777).toBe(0o755);
+        expect((await stat(state)).mode & 0o7777).toBe(0o700);
+
+        await expect(
+          prepareCodexSecurityStateDirectory(nonprivateState),
+        ).rejects.toThrow(
+          "Configured Codex Security state directory must be private",
+        );
+        expect((await stat(nonprivateState)).mode & 0o7777).toBe(0o755);
+        process.umask(previousUmask);
+        await expect(
+          prepareCodexSecurityStateDirectory(join(alias, "state")),
+        ).rejects.toThrow("state directory changed during preparation");
+        expect(existsSync(join(destination, "state"))).toBe(false);
+        expect(pending.size).toBe(0);
+        expect(changed).toEqual([state]);
+      } finally {
+        process.umask(previousUmask);
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          mkdir: originalMkdir,
+          chmod: originalChmod,
+        }));
+      }
+    },
+  );
+
+  testPosix(
+    "rejects non-private state before preparing credentials or output roots",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      await mkdir(state, { mode: 0o700 });
+      await chmod(state, 0o755);
+
+      await expect(
+        prepareCodexSecurityCredentialHome({ CODEX_SECURITY_STATE_DIR: state }),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      for (const category of ["scans", "policies"] as const) {
+        await expect(
+          preparePersistentOutputRoot(state, category, "repository"),
+        ).rejects.toBeInstanceOf(OutputDirectoryError);
+      }
+      expect((await stat(state)).mode & 0o7777).toBe(0o755);
+      expect(await readdir(state)).toEqual([]);
+    },
+  );
+
+  testPosix(
+    "requires existing configured state roots to be private",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      await mkdir(state, { mode: 0o700 });
+      await writeFile(join(state, "preserved.txt"), "preserved\n");
+
+      for (const requestedMode of [0o755, 0o775, 0o1777]) {
+        await chmod(state, requestedMode);
+        const mode = (await stat(state)).mode & 0o7777;
+        await expect(
+          validateCodexSecurityStateDirectory(state),
+        ).rejects.toThrow(
+          `${state} (mode ${mode.toString(8).padStart(4, "0")})`,
+        );
+        await expect(
+          validateCodexSecurityStateDirectory(state),
+        ).rejects.toThrow("only if you own it and can safely change it");
+        expect((await stat(state)).mode & 0o7777).toBe(mode);
+      }
+      expect(() =>
+        requirePrivateOutputDirectory(
+          { mode: 0o41777, uid: 1000 },
+          "state",
+          1000,
+        ),
+      ).toThrow("must not be accessible to other users");
+      expect(await readdir(state)).toEqual(["preserved.txt"]);
+    },
+  );
+
+  testPosix(
+    "reports foreign-owned state roots without permission-change advice",
+    async () => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          "reports foreign-owned state roots without permission-change advice",
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      await mkdir(state, { mode: 0o700 });
+      const originalLstat = fsPromises.lstat;
+      const originalMetadata = await originalLstat(state);
+      const foreignUid = originalMetadata.uid === 0 ? 1 : 0;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: async (...args: Parameters<typeof originalLstat>) => {
+          const metadata = await originalLstat(...args);
+          if (String(args[0]) === state) {
+            Object.defineProperty(metadata, "uid", { value: foreignUid });
+          }
+          return metadata;
+        },
+      }));
+
+      try {
+        const failure = await validateCodexSecurityStateDirectory(state).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(failure).toBeInstanceOf(OutputDirectoryError);
+        if (!(failure instanceof OutputDirectoryError)) {
+          throw new Error("foreign-owned state must be rejected");
+        }
+        expect(failure.message).toContain("must be owned by the current user");
+        expect(failure.message).toContain(`${state} (mode 0700)`);
+        expect(failure.message).toContain("CODEX_SECURITY_STATE_DIR");
+        expect(failure.message).not.toContain("chmod");
+        expect(failure.message).not.toContain("permissions to 0700");
+        expect(failure.cause).toBeInstanceOf(OutputDirectoryError);
+        expect(failure.cause).toMatchObject({
+          message: expect.stringContaining("must be owned by the current user"),
+        });
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+        }));
+      }
+      expect((await originalLstat(state)).uid).toBe(originalMetadata.uid);
+      expect((await originalLstat(state)).mode & 0o7777).toBe(0o700);
+      expect(await readdir(state)).toEqual([]);
+    },
+  );
+
+  testPosix("rejects unsafe lexical and chained state aliases", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const shared = join(root, "shared");
+    const trusted = join(root, "trusted");
+    const unsafeLink = join(shared, "state-link");
+    const nextLink = join(trusted, "next-link");
+    const alias = join(root, "state-alias");
+    const missing = join(alias, "missing", "state");
+    await mkdir(state, { mode: 0o700 });
+    await mkdir(shared, { mode: 0o700 });
+    await mkdir(trusted, { mode: 0o700 });
+    await chmod(shared, 0o775);
+    await symlink(state, unsafeLink, "dir");
+    await symlink(unsafeLink, nextLink, "dir");
+    await symlink(`${nextLink}${sep}`, alias, "dir");
+
+    for (const path of [unsafeLink, nextLink, alias, missing]) {
+      await expect(validateCodexSecurityStateDirectory(path)).rejects.toThrow(
+        `${shared} (mode 0775)`,
+      );
+      await expect(prepareCodexSecurityStateDirectory(path)).rejects.toThrow(
+        `${shared} (mode 0775)`,
+      );
+    }
+    expect((await stat(shared)).mode & 0o7777).toBe(0o775);
+    expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    expect(await readdir(state)).toEqual([]);
+    expect(await readdir(shared)).toEqual(["state-link"]);
+    expect(await readdir(trusted)).toEqual(["next-link"]);
+    expect(existsSync(missing)).toBe(false);
+  });
+
   test("rejects symbolic children beneath persistent scan state", async () => {
     const root = await temporaryDirectory();
     const external = join(root, "external");
@@ -3666,7 +4694,8 @@ describe("runtime directories and plugin Python boundary", () => {
     ] as const) {
       const state = join(root, `state-${name}`);
       const linked = join(state, path);
-      await mkdir(dirname(linked), { recursive: true });
+      await prepareCodexSecurityStateDirectory(state);
+      await mkdir(dirname(linked), { recursive: true, mode: 0o700 });
       await symlink(
         external,
         linked,
@@ -3941,6 +4970,7 @@ describe("runtime directories and plugin Python boundary", () => {
         pluginRoot,
         environment: {
           PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "must-not-reach-python",
           CODEX_API_KEY: "also-must-not-reach-python",
           OPENROUTER_API_KEY: "openrouter-must-not-reach-python",
@@ -3956,13 +4986,79 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
+  test("pins canonical state without preparing it for workbench commands", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    const state = join(root, "state");
+    const alias = join(root, "state-alias");
+    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import json, os, sys",
+        "print(json.dumps({'command': sys.argv[1], 'state': os.environ.get('CODEX_SECURITY_STATE_DIR'), 'stateKeys': sorted(name for name in os.environ if name.upper() == 'CODEX_SECURITY_STATE_DIR')}))",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const options = {
+      python: python!,
+      pluginRoot,
+      environment: { CODEX_SECURITY_STATE_DIR: state },
+    };
+
+    for (const command of ["inspect-target", "inspect-setup"]) {
+      expect(await runWorkbench(options, [command])).toMatchObject({
+        command,
+        state,
+      });
+      expect(existsSync(state)).toBe(false);
+    }
+    expect(await runWorkbench(options, ["list-scans"])).toMatchObject({
+      state,
+      stateKeys: ["CODEX_SECURITY_STATE_DIR"],
+    });
+    expect(existsSync(state)).toBe(false);
+    await prepareCodexSecurityStateDirectory(state);
+    await symlink(
+      state,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const aliased = {
+      ...options,
+      environment: {
+        CODEX_SECURITY_STATE_DIR: alias,
+        codex_security_state_dir: join(root, "unused"),
+      },
+    };
+    expect(await runWorkbench(aliased, ["list-scans"])).toMatchObject({
+      state,
+      stateKeys: ["CODEX_SECURITY_STATE_DIR"],
+    });
+    expect(aliased.environment.CODEX_SECURITY_STATE_DIR).toBe(alias);
+    expect(existsSync(join(root, "unused"))).toBe(false);
+    if (process.platform !== "win32") {
+      expect((await stat(state)).mode & 0o7777).toBe(0o700);
+      await chmod(state, 0o755);
+      await expect(
+        runWorkbench(options, ["list-scans"]),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      expect(await runWorkbench(options, ["inspect-target"])).toMatchObject({
+        state,
+      });
+      expect((await stat(state)).mode & 0o7777).toBe(0o755);
+      expect(await readdir(state)).toEqual([]);
+    }
+  });
+
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
     const scanDirectory = join(root, "scan");
     await mkdir(repository);
-    await mkdir(stateDirectory);
+    await prepareCodexSecurityStateDirectory(stateDirectory);
     await mkdir(scanDirectory, { mode: 0o700 });
 
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -4124,7 +5220,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "codex-security-migration-history-",
       );
       const stateDirectory = join(root, "state");
-      await mkdir(stateDirectory);
+      await prepareCodexSecurityStateDirectory(stateDirectory);
       const database = join(stateDirectory, "workbench.sqlite3");
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
@@ -4244,7 +5340,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const stateDirectory = join(root, "state");
     const scanDirectory = join(root, "scan");
     await mkdir(repository);
-    await mkdir(stateDirectory);
+    await prepareCodexSecurityStateDirectory(stateDirectory);
     await mkdir(scanDirectory, { mode: 0o700 });
 
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -4636,6 +5732,34 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(requireSecureOutputAncestry(output)).rejects.toThrow(
         "sticky bit",
       );
+    },
+  );
+
+  testPosix(
+    "explains unsafe ancestry above a private output directory without changing it",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      const privateChild = join(shared, "private");
+      const output = join(privateChild, "results");
+      await mkdir(privateChild, { recursive: true, mode: 0o700 });
+      await chmod(shared, 0o775);
+
+      await expect(validateOutputDir(privateChild)).rejects.toThrow(
+        `${shared} (mode 0775)`,
+      );
+      await expect(validateOutputDir(output)).rejects.toThrow(
+        "A private child directory does not make an unsafe ancestor safe",
+      );
+      await expect(prepareOutputDir(output, "repository")).rejects.toThrow(
+        "Choose a location with secure parent directories",
+      );
+      await expect(requireSecureOutputAncestry(output)).rejects.toThrow(
+        "only if you own it and can safely change it",
+      );
+      expect((await lstat(shared)).mode & 0o7777).toBe(0o775);
+      expect((await lstat(privateChild)).mode & 0o7777).toBe(0o700);
+      expect(existsSync(output)).toBe(false);
     },
   );
 

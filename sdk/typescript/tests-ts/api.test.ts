@@ -1,5 +1,6 @@
 import {
   appendFile,
+  chmod,
   copyFile,
   cp,
   mkdir,
@@ -15,6 +16,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
@@ -69,6 +71,7 @@ type ScanObserverName = Parameters<
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+const testPosix = process.platform === "win32" ? test.skip : test;
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
@@ -1621,7 +1624,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
+        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
         prepareRuntime: async () => {
           runtimeStarted = true;
           throw new Error("runtime should not initialize");
@@ -4176,6 +4179,66 @@ describe("CodexSecurity orchestration", () => {
     expect(existsSync(join(result.scanDir, "scan-manifest.json"))).toBe(true);
   });
 
+  test("preflights state initialized by a history command", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    const outputDir = join(root, "output");
+    await mkdir(repository);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const environment = {
+      PATH: process.env["PATH"],
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    const history = execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import os, runpy, sys",
+          "os.umask(0o022)",
+          "sys.argv = sys.argv[1:]",
+          "sys.path.insert(0, os.path.dirname(sys.argv[0]))",
+          'runpy.run_path(sys.argv[0], run_name="__main__")',
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+        "list-scans",
+        "--repository",
+        repository,
+      ],
+      { encoding: "utf8", env: environment },
+    );
+    expect(JSON.parse(history)).toMatchObject({ scans: [] });
+    if (process.platform !== "win32") {
+      expect((await stat(stateDirectory)).mode & 0o777).toBe(0o700);
+    }
+    const initialize = mock(() => {
+      throw new Error("runtime must not initialize");
+    });
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: initialize,
+        resolvePluginPython: initialize,
+        createCodex: initialize,
+      },
+    );
+
+    try {
+      await expect(
+        client.preflight(repository, { outputDir }),
+      ).resolves.toMatchObject({ outputDir });
+      expect(initialize).not.toHaveBeenCalled();
+      expect(existsSync(outputDir)).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("rejects state directories overlapping the selected repository", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -4187,6 +4250,7 @@ describe("CodexSecurity orchestration", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     for (const stateDirectory of [
+      repository,
       join(repository, "state"),
       root,
       linkedState,
@@ -4211,11 +4275,183 @@ describe("CodexSecurity orchestration", () => {
           client[operation](repository, { outputDir: join(root, "output") }),
         ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
       }
-      if (stateDirectory !== root && stateDirectory !== linkedState)
+      if (
+        stateDirectory !== repository &&
+        stateDirectory !== root &&
+        stateDirectory !== linkedState
+      )
         expect(existsSync(stateDirectory)).toBe(false);
       await client.close();
     }
   });
+
+  testPosix(
+    "rejects unsafe output and state ancestry before runtime initialization",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const shared = join(root, "shared");
+      const privateChild = join(shared, "private");
+      const linkedParent = join(root, "linked-parent");
+      const safeState = join(root, "state");
+      const privateState = join(root, "private-state");
+      const stateLink = join(shared, "state-link");
+      const indirectState = join(root, "indirect-state");
+      const missingState = join(privateChild, "state");
+      const linkedState = join(linkedParent, "private", "missing", "state");
+      const safeOutput = join(root, "output");
+      const unsafeOutput = join(privateChild, "output");
+      await mkdir(repository);
+      await mkdir(privateChild, { recursive: true, mode: 0o700 });
+      await mkdir(privateState, { mode: 0o700 });
+      await chmod(shared, 0o775);
+      await symlink(shared, linkedParent, "dir");
+      await symlink(privateState, stateLink, "dir");
+      await symlink(stateLink, indirectState, "dir");
+
+      for (const [stateDirectory, outputDir] of [
+        [safeState, unsafeOutput],
+        [shared, undefined],
+        [shared, safeOutput],
+        [missingState, undefined],
+        [missingState, safeOutput],
+        [linkedState, safeOutput],
+        [stateLink, safeOutput],
+        [indirectState, safeOutput],
+        [join(indirectState, "missing", "state"), safeOutput],
+      ] as const) {
+        const initialize = mock(() => {
+          throw new Error("runtime must not initialize");
+        });
+        const client = new TestClient(
+          {},
+          {
+            environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+            prepareRuntime: initialize,
+            resolvePluginPython: initialize,
+            createCodex: initialize,
+          },
+        );
+
+        try {
+          for (const operation of ["preflight", "run"] as const) {
+            await expect(
+              client[operation](repository, { outputDir }),
+            ).rejects.toMatchObject({
+              name: OutputDirectoryError.name,
+              message: expect.stringContaining(`${shared} (mode 0775)`),
+            });
+          }
+          expect(initialize).not.toHaveBeenCalled();
+        } finally {
+          await client.close();
+        }
+      }
+
+      expect((await stat(shared)).mode & 0o7777).toBe(0o775);
+      expect((await stat(privateChild)).mode & 0o7777).toBe(0o700);
+      expect((await readdir(shared)).sort()).toEqual(["private", "state-link"]);
+      expect(await readdir(privateChild)).toEqual([]);
+      expect(await readdir(privateState)).toEqual([]);
+      for (const path of [
+        safeState,
+        missingState,
+        linkedState,
+        safeOutput,
+        unsafeOutput,
+      ]) {
+        expect(existsSync(path)).toBe(false);
+      }
+    },
+  );
+
+  testPosix(
+    "rejects non-private existing state before runtime initialization",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const stateDirectory = join(root, "state");
+      const outputDir = join(root, "output");
+      await mkdir(repository);
+      await mkdir(stateDirectory, { mode: 0o700 });
+      const initialize = mock(() => {
+        throw new Error("runtime must not initialize");
+      });
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: initialize,
+          resolvePluginPython: initialize,
+          createCodex: initialize,
+        },
+      );
+
+      try {
+        for (const requestedMode of [0o755, 0o1777]) {
+          await chmod(stateDirectory, requestedMode);
+          const mode = (await stat(stateDirectory)).mode & 0o7777;
+          for (const operation of ["preflight", "run"] as const) {
+            await expect(
+              client[operation](repository, { outputDir }),
+            ).rejects.toThrow(
+              "Configured Codex Security state directory must be private",
+            );
+          }
+          expect((await stat(stateDirectory)).mode & 0o7777).toBe(mode);
+        }
+        expect(initialize).not.toHaveBeenCalled();
+        expect(await readdir(stateDirectory)).toEqual([]);
+        expect(existsSync(outputDir)).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  testPosix(
+    "preflights persistent state under a sticky shared parent without creating it",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const outputDir = join(root, "output");
+      let stickyParent = join(root, "shared");
+      await mkdir(repository);
+      await mkdir(stickyParent, { mode: 0o1777 });
+      await chmod(stickyParent, 0o1777);
+      if (((await stat(stickyParent)).mode & 0o1000) === 0) {
+        stickyParent = await realpath(tmpdir());
+        if (((await stat(stickyParent)).mode & 0o1000) === 0) return;
+      }
+      const parentMode = (await stat(stickyParent)).mode & 0o7777;
+      const stateDirectory = join(stickyParent, `${basename(root)}-state`);
+      const initialize = mock(() => {
+        throw new Error("runtime must not initialize");
+      });
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: initialize,
+          resolvePluginPython: initialize,
+          createCodex: initialize,
+        },
+      );
+
+      try {
+        await expect(
+          client.preflight(repository, { outputDir }),
+        ).resolves.toMatchObject({ outputDir });
+        expect(initialize).not.toHaveBeenCalled();
+        expect((await stat(stickyParent)).mode & 0o7777).toBe(parentMode);
+        expect(existsSync(stateDirectory)).toBe(false);
+        expect(existsSync(outputDir)).toBe(false);
+      } finally {
+        await client.close();
+        await rm(stateDirectory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("rejects reruns when the original plugin version is unavailable", async () => {
     const root = await temporaryDirectory();
@@ -4239,6 +4475,65 @@ describe("CodexSecurity orchestration", () => {
     ).rejects.toThrow("original scan used plugin version 0.0.1");
     await client.close();
   });
+
+  testPosix(
+    "revalidates state before reusing cached persistent authentication",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const stateDirectory = join(root, "state");
+      const codexHome = join(stateDirectory, "codex-home");
+      const outputDir = join(root, "output");
+      await mkdir(repository);
+      await mkdir(codexHome, { recursive: true, mode: 0o700 });
+      const authenticationCommand = mock(() => {
+        throw new Error("authentication command must not start");
+      });
+      const initialize = mock(() => {
+        throw new Error("scan must not start");
+      });
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            persistentCredentialHome: true,
+            environment: {
+              CODEX_HOME: codexHome,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          }),
+          resolveCodexCommand: authenticationCommand,
+          resolvePluginPython: initialize,
+          createCodex: initialize,
+        },
+      );
+
+      try {
+        await expect(
+          client.run(repository, { outputDir, expectedPluginVersion: "0.0.0" }),
+        ).rejects.toThrow("original scan used plugin version");
+        await chmod(stateDirectory, 0o755);
+        for (const operation of [
+          () => client.account(),
+          () => client.logout(),
+          () => client.loginApiKey("synthetic-key"),
+        ]) {
+          await expect(operation()).rejects.toThrow(
+            "Configured Codex Security state directory must be private",
+          );
+        }
+        expect(authenticationCommand).not.toHaveBeenCalled();
+        expect(initialize).not.toHaveBeenCalled();
+        expect((await stat(stateDirectory)).mode & 0o7777).toBe(0o755);
+        expect(await readdir(codexHome)).toEqual([]);
+        expect(existsSync(outputDir)).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.each([
     ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
@@ -4284,11 +4579,20 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (options, args, input) => {
+            expect(options.environment["CODEX_SECURITY_STATE_DIR"]).toBe(
+              stateDirectory,
+            );
+            return mockWorkbench(args, input);
+          },
           createCodex: (options: CodexOptions) => ({
             startThread: () => ({
               id: null,
               async runStreamed() {
                 expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
+                expect(options.env?.["CODEX_SECURITY_STATE_DIR"]).toBe(
+                  stateDirectory,
+                );
                 expect(options.apiKey).toBe(
                   provider === undefined
                     ? "synthetic-transient-key"
@@ -4332,6 +4636,13 @@ describe("CodexSecurity orchestration", () => {
       expect(persistentConfigText).not.toContain("synthetic-transient-key");
       const persistentConfig = parseToml(persistentConfigText);
       expect(persistentConfig["model"]).toBeUndefined();
+      expect(persistentConfig).toMatchObject({
+        permissions: {
+          codex_security_scan: {
+            filesystem: { [stateDirectory]: "write" },
+          },
+        },
+      });
       if (provider !== undefined) {
         expect(persistentConfig).toMatchObject({
           model_provider: provider,
@@ -5583,6 +5894,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const environment: Record<string, string | undefined> = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "first-key",
     };
     const selectedKeys: Array<string | undefined> = [];
@@ -5619,6 +5931,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await mkdir(repository);
     await mkdir(codexHome);
     const environment: Record<string, string | undefined> = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
       openai_api_key: "ambient-key",
     };
     const client = new TestClient(

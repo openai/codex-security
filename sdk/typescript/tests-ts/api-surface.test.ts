@@ -34,7 +34,7 @@ async function scanResponseSurface(runtimeOptions?: {
   const client = new InternalCodexSecurity(
     {},
     {
-      environment: {},
+      environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
       prepareRuntime: async () => preparedRuntime(codexHome),
       resolvePluginPython: async () => "/managed/python",
       prepareOutputDir: async () => scanDir,

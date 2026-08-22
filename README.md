@@ -86,8 +86,9 @@ unset OPENAI_API_KEY CODEX_API_KEY
 ```
 
 Scan history is stored in the Codex Security workbench state directory. If that
-directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
-directory outside the repository.
+directory cannot be written or has unsafe parent permissions, set
+`CODEX_SECURITY_STATE_DIR` to a private directory with trusted parents outside
+the repository. See [output and state directory permissions](sdk/typescript/README.md#output-and-state-directory-permissions).
 
 `findings list [repository]` shows open findings across a repository's scans
 and identifies findings not confirmed in its latest scan.

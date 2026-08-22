@@ -1,7 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -322,6 +330,51 @@ connection.close()
 
     expect(existsSync(fixture.stateDirectory)).toBe(false);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects shared state before inspecting a missing database",
+    async () => {
+      const fixture = await publicationFixture({ createDatabase: false });
+      await mkdir(fixture.stateDirectory, { mode: 0o700 });
+      await chmod(fixture.stateDirectory, 0o755);
+
+      await expect(
+        preparePublicationStore(fixture.publication, fixture.environment),
+      ).rejects.toThrow(/state directory must be private/u);
+
+      expect(await readdir(fixture.stateDirectory)).toEqual([]);
+      expect((await stat(fixture.stateDirectory)).mode & 0o777).toBe(0o755);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects publication reads and writes when existing state becomes shared",
+    async () => {
+      const fixture = await publicationFixture({ count: 1 });
+      const contents = await readdir(fixture.stateDirectory);
+      await chmod(fixture.stateDirectory, 0o755);
+
+      await expect(
+        preparePublicationStore(fixture.publication, fixture.environment),
+      ).rejects.toThrow(/state directory must be private/u);
+      await expect(
+        recordPublishedIssues(
+          fixture.publication,
+          [publishedIssue(fixture.publication, 0)],
+          fixture.environment,
+        ),
+      ).rejects.toThrow(/state directory must be private/u);
+
+      expect(await readdir(fixture.stateDirectory)).toEqual(contents);
+      expect((await stat(fixture.stateDirectory)).mode & 0o777).toBe(0o755);
+      expect(
+        databaseRows(
+          fixture,
+          "SELECT COUNT(*) AS count FROM finding_publications",
+        ),
+      ).toEqual([{ count: 0 }]);
+    },
+  );
 
   test("rejects a scan absent from existing local scan history", async () => {
     const fixture = await publicationFixture({ seedScan: false });
