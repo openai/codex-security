@@ -15,7 +15,15 @@ Confirm the repository or component the user wants to cover. Inventory policy pa
 <python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --list
 ```
 
-The command runs on Windows, macOS, and Linux. It emits a sorted JSON array of repository-relative policy paths, escapes control characters unambiguously, includes linked policies without following directory links, and prunes Git metadata. Resolve each candidate within the repository and check the resolved regular file's byte size. Do not pass policies larger than 1 MiB to the resolver; report them so the user can decide how to proceed. The resolver enforces the same limit for regular files and repository-local symbolic links.
+The command runs on Windows, macOS, and Linux. It emits a sorted JSON array of repository-relative policy paths, escapes control characters unambiguously, includes linked policies without following directory links, and prunes Git metadata. Add `--scope <directory>` to inventory only a component. For separate or shared Git metadata, pass each Git-reported directory with `--git-dir <directory>`; see `../../references/security-guidance.md` for discovery, defaults, and the full resolver interface.
+
+Before drafting or updating a policy, collect checked inputs for its directory:
+
+```bash
+<python_command> <plugin_dir>/scripts/resolve_security_md.py --repo <repo_root> --inspect --scope <directory> --git-dir <git_dir> --git-dir <common_git_dir>
+```
+
+The JSON result contains `previousContent` for the selected policy, inherited scanner `guidance`, and sorted `policyPaths` for its ancestors, descendants, and separate reporting policies. Inspection checks containment, Git metadata, regular-file type, UTF-8, and the 1 MiB policy limit. It accepts safe inherited links but rejects symbolic or multiple hard links at the selected draft destination. It does not edit the repository. Report invalid or oversized policies so the user can decide how to proceed.
 
 Read `../../references/security-guidance.md`, then resolve the policy chain for the file or directory being reviewed:
 
