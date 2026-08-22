@@ -99,6 +99,10 @@ describe("CLI workbench", () => {
         ["scans", "list", "--scan-root", "/tmp/history"],
         ["list-scans", "--scan-root", resolve("/tmp/history")],
       ],
+      [
+        ["scans", "list", "--scan-root", ""],
+        ["list-scans", "--scan-root", repository],
+      ],
     ];
     for (const [argv, expected] of cases) {
       let invocation: readonly string[] | undefined;

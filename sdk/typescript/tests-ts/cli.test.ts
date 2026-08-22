@@ -14,6 +14,7 @@ import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import type {
   CodexSecurityConfig,
@@ -38,6 +39,7 @@ import {
   parseCodexOverrides,
   Progress,
   resolveCliPath,
+  safeIncurErrorMessage,
 } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
@@ -423,6 +425,28 @@ describe("CLI", () => {
         maxTimeHours: number;
       };
       expect(defaults.workers).toBe(4);
+      const schema = capture();
+      expect(
+        await main(
+          ["scan", "--schema", "--format", "json"],
+          schema.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      const scanOptions = JSON.parse(schema.text()).options
+        .properties as Record<string, { description: string }>;
+      for (const name of [
+        "workers",
+        "subagents",
+        "stopAfterNoNew",
+        "maxDiscoveryRuns",
+        "maxTimeHours",
+      ] as const) {
+        expect(scanOptions[name]?.description).toContain(
+          `bundled default: ${defaults[name]}`,
+        );
+      }
       const documentedDeepScan = documentedConfigs.find(
         (config) =>
           typeof config["deep_scan"] === "object" &&
@@ -2312,7 +2336,7 @@ describe("CLI", () => {
       "--provider <openai|openrouter|fireworks|amazon-bedrock>",
     );
     expect(help.text()).toContain(
-      `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+      `OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}`,
     );
     expect(help.text()).toContain(
       "--effort <minimal|low|medium|high|xhigh|max>",
@@ -2350,7 +2374,7 @@ describe("CLI", () => {
     ).toBe(0);
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
-      `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+      `OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}`,
     );
     expect(help.text()).toContain(
       "--effort <minimal|low|medium|high|xhigh|max>",
@@ -2856,6 +2880,65 @@ describe("CLI", () => {
       ).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).not.toContain("SYNTHETIC");
+    }
+  });
+
+  test("rebuilds value-free guidance from the selected command schema", () => {
+    const unexpected = (): never => {
+      throw new Error("Formatting must not run a command.");
+    };
+    const cli = Cli.create("sample")
+      .command("scan", {
+        options: z.object({ auth: z.enum(["auto", "chatgpt", "api-key"]) }),
+        run: unexpected,
+      })
+      .command(
+        Cli.create("publish").command("scan", {
+          options: z.object({
+            linearApiKey: z
+              .string()
+              .min(1)
+              .default("documentation-only")
+              .describe("Description must not become a diagnostic."),
+          }),
+          run: unexpected,
+        }),
+      )
+      .command("opaque", {
+        options: z.object({ apiKey: z.unknown() }),
+        run: unexpected,
+      });
+    const humanError = (flag: string) =>
+      [
+        `Error: invalid value for ${flag}: Discard this formatter detail`,
+        "See below for usage.",
+        "",
+        "Usage: sample <command>",
+      ].join("\n");
+
+    const auth = safeIncurErrorMessage(humanError("--auth"), cli, ["scan"]);
+    expect(auth).toContain("Invalid value for --auth.");
+    expect(auth).toContain("Allowed values: auto, chatgpt, api-key.");
+    const key = safeIncurErrorMessage(humanError("--linear-api-key"), cli, [
+      "publish",
+      "scan",
+    ]);
+    expect(key).toContain("Invalid value for --linear-api-key.");
+    expect(key).toContain("Expected type: string.");
+    expect(key).toContain("Minimum length: 1.");
+    for (const message of [auth, key]) {
+      expect(message).not.toContain("formatter detail");
+      expect(message).not.toContain("documentation-only");
+      expect(message).not.toContain("Description must not");
+    }
+    for (const [output, command] of [
+      [humanError("--linear-api-key"), ["scan"]],
+      [humanError("--linearApiKey"), ["publish", "scan"]],
+      [humanError("--access-token"), ["publish", "scan"]],
+      [humanError("--api-key"), ["opaque"]],
+      ["Error: invalid value for --auth: Invalid option", ["scan"]],
+    ] as const) {
+      expect(safeIncurErrorMessage(output, cli, command)).toBe("[redacted]");
     }
   });
 

@@ -314,11 +314,12 @@ overrides, without starting Codex or contacting the network.
 findings or failed scans. Set `--fail-on-severity` to change the threshold.
 
 `--path` scopes a scan to one or more paths, `--diff` scans committed changes,
-and `--working-tree` scans staged and unstaged changes. Deep scans support
-repository and path targets. The output directory must be outside the scanned
-directory and any enclosing Git worktree. When SARIF is produced, it is written
-to
-`<scan-dir>/exports/results.sarif`.
+and `--working-tree` scans staged and unstaged changes. These target selectors
+are mutually exclusive. `--head` requires `--diff`; `--base` requires
+`--working-tree`. Deep scans support repository and path targets, and deep-scan
+settings require `--mode deep`. The output directory must be outside the
+scanned directory and any enclosing Git worktree. When SARIF is produced, it
+is written to `<scan-dir>/exports/results.sarif`.
 
 Working-tree snapshots include files from untracked nested Git repositories.
 Initialized submodules must be clean and checked out at the commit recorded by
@@ -806,9 +807,10 @@ const directPublication = await publishScan("/path/to/completed-scan", {
 ### Scan history and reruns
 
 `scans` or `scans list` lists scans for the current repository. Pass a repository
-path to inspect another checkout, or `--scan-root DIR` to list scans whose
-artifacts are under a particular root. `scans show` opens the latest completed
-scan for the current repository. Pass `SCAN_ID` to inspect another scan. Scan
+path to inspect another checkout, or `--scan-root DIR` to filter indexed scans
+whose artifacts are under a particular root. It does not import report
+directories. `scans show` opens the latest completed scan for the current
+repository. Pass `SCAN_ID` to inspect another scan. Scan
 details include the configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
@@ -856,11 +858,18 @@ treated as resolved when the later scan is incomplete or does not cover their
 original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
-and structured output. Inspect the command manifest with `--llms`, inspect a
+and structured output. Use `--llms` for a command index or `--llms-full` for
+the full Markdown reference, including accepted flags, values, and the operating
+guide from this README. Add `--format json` to read the original structured
+manifest, or scope either manifest to a command or group, such as
+`scans --llms-full`. The full operating guide appears only in the root
+manifest. Inspect a
 command schema with `scan --schema --format json`, register the CLI as an MCP
 server with `mcp add`, sync agent skills with `skills add`, or generate shell
 completions with `completions bash|zsh|fish`. Scan results support
-`--format toon|json|yaml|jsonl` and `--full-output`.
+`--format toon|json|yaml|jsonl` and `--full-output`, but not Markdown or
+`--filter-output`. Structured manifest property names are parsed option keys;
+command-line flags use kebab-case.
 Use `info --json` for SDK and bundled-plugin metadata. MCP exposes only this
 read-only metadata command; scans, bulk repository scans,
 authentication, exports, validation, and patching remain CLI-only because the
@@ -879,11 +888,23 @@ npx @openai/codex-security scan . \
   --fail-on-severity high > "$SCAN_ROOT/findings.json"
 ```
 
+Use `scan --json` for machine-readable results on stdout; progress and
+diagnostics go to stderr. Completed-result fields are `manifest`, `findings`,
+`coverage`, `repositoryFindings`, `scanDir`, `reportPath`, `artifactsDir`,
+`sarifPath`, `threadId`, `cost`, and `turn`. `sarifPath` and `cost` may be null;
+`repositoryFindings` may be absent. `findings` describes this scan;
+`repositoryFindings`, when available, includes open findings across scans.
+If the target changes during execution, the result also includes a `warnings`
+array of strings and the CLI exits with code `2`. Those results do not describe
+the current checkout.
+
 JSON scans never use interactive terminal controls, even when stderr is a TTY.
-Saved-finding patch commands support `--json`; literal issue and file patch
-commands do not. The `validate`, `login`, and `logout` commands reject `--json`.
-Sign-in commands remain interactive. CSV exports cannot be written to stdout
-while JSON output is requested.
+`verify-fix`, saved-finding patch commands, and resumed patch publication
+support JSON and JSONL result output. Literal issue and file patch commands do
+not. The `validate`, `login`, and `logout` commands reject structured result
+output. Sign-in commands remain interactive. CSV exports cannot be written to
+stdout while JSON output is requested. These result-format restrictions do not
+apply to `--llms`, `--llms-full`, or `--schema` discovery.
 
 Use `export` to create CSV, JSON, or SARIF from a completed, sealed scan without
 starting Codex or loading credentials. Without a scan directory, it exports the
@@ -940,8 +961,9 @@ written to stderr; redirected output and CI receive plain progress lines, and
 JSON results on stdout remain machine-readable.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
-for a completed policy violation, `2` for invalid input, incomplete coverage, or
-a runtime/export error, `130` for interruption, and `143` for termination.
+for a completed policy violation, `2` for invalid input, incomplete coverage, a
+changed target, or a runtime/export error, `130` for interruption, and `143`
+for termination.
 
 Use `--dry-run` or `await security.preflight(...)` to validate the repository,
 target, mode, output location, and Codex overrides without initializing the

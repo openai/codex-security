@@ -56,6 +56,18 @@ import {
 } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {
+  applyManifestTokenControls,
+  fullMarkdownManifestArguments,
+  humanValidationMessage,
+  INCUR_VALUE_OPTIONS,
+  INFO_OUTPUT_SCHEMA,
+  parseIncurArguments,
+  PATCH_STRUCTURED_OUTPUT_RESTRICTION,
+  renderFullMarkdownManifest,
+  SCAN_MARKDOWN_RESULT_RESTRICTION,
+  validateCommandResultOptions,
+} from "./cli-manifest.js";
+import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
@@ -164,6 +176,7 @@ const CHILD_TERMINATION_GRACE_MS = 1_000;
 const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
+const DOCUMENTATION_FLAGS = new Set(["--help", "-h", "--llms", "--llms-full"]);
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
@@ -208,7 +221,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
   json: "findings.json",
   sarif: "results.sarif",
 } as const;
-const VALUE_OPTIONS = new Set([
+const COMMAND_VALUE_OPTIONS = new Set([
   "--auth",
   "--path",
   "--knowledge-base",
@@ -244,10 +257,6 @@ const VALUE_OPTIONS = new Set([
   "--export-format",
   "--output",
   "--source-root",
-  "--format",
-  "--filter-output",
-  "--token-limit",
-  "--token-offset",
   "--scan-root",
   "--reason",
   "--to",
@@ -259,11 +268,15 @@ const VALUE_OPTIONS = new Set([
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
-  .describe("Inference provider for scans.");
+  .describe(
+    "Inference provider; non-OpenAI providers require an explicit model.",
+  );
 const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
-  .describe("Create a draft GitHub pull request after verified patches.");
+  .describe(
+    "Create a draft GitHub pull request after scan --patch or a saved-finding patch succeeds.",
+  );
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -723,31 +736,39 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .int()
     .positive()
     .optional()
-    .describe("Maximum concurrent deep-scan discovery workers."),
+    .describe(
+      "Maximum concurrent deep-scan discovery workers (bundled default: 4).",
+    ),
   subagents: z
     .number()
     .int()
     .nonnegative()
     .optional()
-    .describe("Subagents available to each deep-scan worker."),
+    .describe(
+      "Subagents available to each deep-scan worker (bundled default: 3).",
+    ),
   stopAfterNoNew: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe("Stop after this many runs find no new issues."),
+    .describe(
+      "Stop after this many runs find no new issues (bundled default: 4).",
+    ),
   maxDiscoveryRuns: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe("Maximum deep-scan discovery runs."),
+    .describe("Maximum deep-scan discovery runs (bundled default: 40)."),
   maxTimeHours: z
     .number()
     .positive()
     .max(96)
     .optional()
-    .describe("Maximum deep-scan discovery hours (default: 96; maximum: 96)."),
+    .describe(
+      "Maximum deep-scan discovery hours (bundled default: 96; maximum: 96).",
+    ),
 };
 
 async function readPromptFiles(
@@ -1389,15 +1410,29 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  argv = defaultListCommand(argv);
+  const completing = Boolean(process.env["COMPLETE"]);
+  if (!completing) {
+    argv = defaultListCommand(
+      argv.flatMap((argument) => {
+        const equals = argument.indexOf("=");
+        const option = argument.slice(0, equals);
+        return equals >= 0 && INCUR_VALUE_OPTIONS.has(option)
+          ? [option, argument.slice(equals + 1)]
+          : [argument];
+      }),
+    );
+  }
   const positionals: string[] = [];
-  const argumentError = validateCliArguments(argv, positionals);
+  const argumentError = completing
+    ? undefined
+    : validateCliArguments(argv, positionals);
   if (argumentError !== undefined) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
   const updateController = new AbortController();
   const pendingUpdate =
+    !completing &&
     errorOutput.isTTY === true &&
     argv.length > 0 &&
     argv[0] !== "completions" &&
@@ -1617,7 +1652,7 @@ export async function main(
         scanRoot: z
           .string()
           .optional()
-          .describe("Include scans whose output is under ROOT."),
+          .describe("Include indexed scans whose output is under ROOT."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
@@ -1820,6 +1855,7 @@ export async function main(
           .default(false)
           .describe("Recompute an existing semantic finding comparison."),
       }),
+      hint: "Provide two scan identifiers, or use --all without identifiers.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         try {
@@ -1914,6 +1950,10 @@ export async function main(
         .default(false)
         .describe("Preview the findings without creating Linear issues."),
     }),
+    hint:
+      "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required. " +
+      "--linear-assignee requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY. " +
+      "If both --linear-project and --project are set, they must select the same project.",
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
@@ -2289,7 +2329,7 @@ export async function main(
           model: optionValue("--model")
             .optional()
             .describe(
-              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+              `Model identifier for the selected provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
             ),
           effort: effortOption(),
           provider: PROVIDER_OPTION,
@@ -2407,11 +2447,16 @@ export async function main(
           },
         },
       ],
+      hint:
+        "--path, --diff, and --working-tree are mutually exclusive. " +
+        "Deep-scan settings require --mode deep. --patch-severity and --create-pr require --patch, and --patch cannot be combined with --dry-run. " +
+        "Use --json for scan results; " +
+        "--dry-run checks local inputs without verifying authentication or model access.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
-            "codex-security: Markdown output is not supported for scan results.\n",
+            `codex-security: ${SCAN_MARKDOWN_RESULT_RESTRICTION}\n`,
           );
           exitCode = 2;
           return;
@@ -2492,8 +2537,10 @@ export async function main(
       }),
       output: z
         .object({
-          hook: z.string(),
-          failOnSeverity: z.enum(REPORTABLE_SEVERITIES),
+          hook: z.string().describe("Installed pre-commit hook path."),
+          failOnSeverity: z
+            .enum(REPORTABLE_SEVERITIES)
+            .describe("Finding severity threshold that blocks commits."),
         })
         .optional(),
       async run({ args, options }) {
@@ -2601,7 +2648,7 @@ export async function main(
         model: optionValue("--model")
           .optional()
           .describe(
-            `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            `Model identifier for each repository's provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ),
         effort: effortOption(),
         provider: PROVIDER_OPTION,
@@ -2636,10 +2683,10 @@ export async function main(
         },
       ],
       hint:
-        "CSV example:\n" +
-        "  codex-security bulk-scan repositories.csv " +
+        "A repository CSV requires --output-dir. For example: " +
+        "`codex-security bulk-scan repositories.csv " +
         "--output-dir /path/outside/repositories/results " +
-        "--workers 4 --max-attempts 3",
+        "--workers 4 --max-attempts 3`.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
@@ -2766,7 +2813,7 @@ export async function main(
           sourceRoot: optionValue("--source-root")
             .optional()
             .describe(
-              "Repository checkout used for SARIF source-line fingerprints.",
+              "Repository checkout used for source-line fingerprints; requires --export-format sarif.",
             ),
           python: optionValue("--python")
             .optional()
@@ -2869,10 +2916,14 @@ export async function main(
         linearIssue: z
           .array(optionValue("--linear-issue"))
           .default([])
-          .describe("Linear issue identifier or URL; repeat for more issues."),
+          .describe(
+            "Linear issue identifier or URL; repeat for more issues; cannot be combined with --linear-project or saved findings.",
+          ),
         linearProject: optionValue("--linear-project")
           .optional()
-          .describe("Verify issues in this Linear project."),
+          .describe(
+            "Verify issues in this Linear project; cannot be combined with --linear-issue or saved findings.",
+          ),
         linearFilter: optionValue("--linear-filter")
           .optional()
           .describe("JSON Linear issue filter for --linear-project."),
@@ -2884,6 +2935,10 @@ export async function main(
             'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
           ),
       }),
+      hint:
+        "Use finding text or files, saved finding identifiers with optional --scan, or Linear selectors. " +
+        "Saved findings cannot be combined with Linear selectors. --severity requires saved findings; " +
+        "--linear-filter requires --linear-project, and --linear-api-key requires a Linear selector.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
         try {
@@ -3085,10 +3140,14 @@ export async function main(
         linearIssue: z
           .array(optionValue("--linear-issue"))
           .default([])
-          .describe("Linear issue identifier or URL; repeat for more issues."),
+          .describe(
+            "Linear issue identifier or URL; repeat for more issues; cannot be combined with --linear-project or saved findings.",
+          ),
         linearProject: optionValue("--linear-project")
           .optional()
-          .describe("Patch every open issue in this Linear project."),
+          .describe(
+            "Patch every open issue in this Linear project; cannot be combined with --linear-issue or saved findings.",
+          ),
         linearFilter: optionValue("--linear-filter")
           .optional()
           .describe("JSON Linear issue filter for --linear-project."),
@@ -3097,7 +3156,7 @@ export async function main(
         resumePr: optionValue("--resume-pr")
           .optional()
           .describe(
-            "Resume publication of a saved patch branch without patching again.",
+            "Resume publication of a saved patch branch without other patch inputs or options.",
           ),
         codex: z
           .array(optionValue("--codex"))
@@ -3106,6 +3165,11 @@ export async function main(
             'Repeat TOML model="gpt-5.6-terra" or model_reasoning_effort="high" only.',
           ),
       }),
+      hint:
+        "Use issue text or files, saved finding identifiers with optional --scan, Linear selectors, or --resume-pr. " +
+        "Saved findings cannot be combined with Linear selectors. --severity and --create-pr require saved findings; " +
+        "--linear-filter requires --linear-project, and --linear-api-key requires a Linear selector. " +
+        "--resume-pr cannot be combined with other patch inputs or options.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
         try {
@@ -3211,9 +3275,7 @@ export async function main(
             );
           }
           if (format === "json" || format === "jsonl") {
-            throw new CodexSecurityError(
-              "JSON patch output requires a saved finding identifier or --scan.",
-            );
+            throw new CodexSecurityError(PATCH_STRUCTURED_OUTPUT_RESTRICTION);
           }
 
           const imports = linear
@@ -3388,18 +3450,7 @@ export async function main(
           openWorldHint: false,
         },
       },
-      output: z.object({
-        sdkVersion: z.string(),
-        bundledPluginVersion: z.string(),
-        scanMcp: z.literal(false),
-        cancellationNote: z.string(),
-        cliVersion: z.string(),
-        codexVersion: z.string(),
-        codexSdkVersion: z.string(),
-        model: z.string(),
-        reasoningEffort: z.string(),
-        nextStep: z.string(),
-      }),
+      output: INFO_OUTPUT_SCHEMA,
       run() {
         return {
           sdkVersion: VERSION,
@@ -3417,13 +3468,13 @@ export async function main(
     });
 
   let notice: UpdateNotice | undefined;
+  const manifestArguments = completing
+    ? undefined
+    : fullMarkdownManifestArguments(argv);
+  const markdownManifest = manifestArguments !== undefined;
   try {
     await cli.serve(
-      argv.flatMap((argument) =>
-        argument.startsWith("--format=")
-          ? ["--format", argument.slice("--format=".length)]
-          : [argument],
-      ),
+      [...argv, ...(markdownManifest ? ["--format", "json"] : [])],
       {
         stdout: (value) => {
           frameworkOutput += value;
@@ -3443,12 +3494,22 @@ export async function main(
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
-      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      `codex-security: ${safeIncurErrorMessage(frameworkOutput, cli, argv)}\n`,
     );
     return 2;
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
+    if (markdownManifest) {
+      frameworkOutput = await applyManifestTokenControls(
+        renderFullMarkdownManifest(
+          cli,
+          JSON.parse(frameworkOutput),
+          manifestArguments,
+        ),
+        argv,
+      );
+    }
     await writeCliOutput(
       output,
       renderedPublication ?? renderedHistory ?? frameworkOutput,
@@ -3461,19 +3522,15 @@ export async function main(
 }
 
 function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = argv.findIndex((value, index) => {
-    if (value.startsWith("-")) return false;
-    return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
-  });
+  const { commandArguments, commandIndex } = parseIncurArguments(argv);
   if (
     commandIndex < 0 ||
-    !["scans", "findings"].includes(argv[commandIndex]!) ||
-    argv.includes("--help") ||
-    argv.includes("-h")
+    !["scans", "findings"].includes(commandArguments[0]!) ||
+    argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))
   ) {
     return argv;
   }
-  const following = argv[commandIndex + 1];
+  const following = commandArguments[1];
   if (following !== undefined && !following.startsWith("-")) return argv;
   return [
     ...argv.slice(0, commandIndex + 1),
@@ -3636,13 +3693,42 @@ function scanArgumentsFromRecipe(
   };
 }
 
+function hasFlagValue(argv: readonly string[], index: number): boolean {
+  const next = argv[index + 1];
+  return next !== undefined && !next.startsWith("--") && next !== "-h";
+}
+
 function validateCliArguments(
   argv: readonly string[],
   positionals: string[],
 ): string | undefined {
-  if (argv.includes("--help") || argv.includes("-h")) return undefined;
-  const commandIndex = argv.findIndex((value) =>
-    [
+  for (let index = 0; index < argv.length; index += 1) {
+    const option = argv[index]!;
+    if (!INCUR_VALUE_OPTIONS.has(option)) continue;
+    const value = argv[index + 1];
+    if (value === undefined || value === "" || !hasFlagValue(argv, index)) {
+      return `Missing value for flag: ${option}`;
+    }
+    // Keep Incur's accepted numeric values without echoing rejected operands.
+    if (
+      (option === "--token-limit" || option === "--token-offset") &&
+      (!Number.isFinite(Number(value)) || value.trim() === "")
+    ) {
+      return `Invalid value for ${option}: expected a finite number.`;
+    }
+    index += 1;
+  }
+  if (
+    argv.includes("--schema") ||
+    argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))
+  ) {
+    return undefined;
+  }
+  const commandArguments = parseIncurArguments(argv).commandArguments;
+  const command = commandArguments[0];
+  if (
+    command === undefined ||
+    ![
       "scan",
       "install-hook",
       "bulk-scan",
@@ -3656,121 +3742,34 @@ function validateCliArguments(
       "login",
       "logout",
       "info",
-    ].includes(value),
-  );
-  if (commandIndex < 0) return undefined;
-  const command = argv[commandIndex]!;
-  const structuredOutput = argv.some(
-    (value, index) =>
-      value === "--json" ||
-      ((value === "--format" ||
-        value === "--format=json" ||
-        value === "--format=jsonl") &&
-        (value.endsWith("=json") ||
-          value.endsWith("=jsonl") ||
-          argv[index + 1] === "json" ||
-          argv[index + 1] === "jsonl")),
-  );
-  if (
-    structuredOutput &&
-    ["validate", "login", "logout"].includes(command) &&
-    !argv.includes("--schema")
+    ].includes(command)
   ) {
-    return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
+    return undefined;
   }
-  if (
-    command === "export" &&
-    structuredOutput &&
-    argv.some(
-      (value, index) =>
-        value === "--output=-" ||
-        (value === "--output" && argv[index + 1] === "-"),
-    ) &&
-    argv.some(
-      (value, index) =>
-        value === "--export-format=csv" ||
-        (value === "--export-format" && argv[index + 1] === "csv"),
-    )
-  ) {
-    return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-  }
-  if (command === "scan" && !argv.includes("--schema")) {
-    if (
-      argv.some(
-        (value) =>
-          value === "--filter-output" || value.startsWith("--filter-output="),
-      )
-    ) {
-      return "--filter-output is not supported for scan results.";
-    }
-    if (
-      argv.some(
-        (value, index) =>
-          value === "--format=md" ||
-          (value === "--format" && argv[index + 1] === "md"),
-      )
-    ) {
-      return "Markdown output is not supported for scan results.";
-    }
-  }
+  const resultOptionError = validateCommandResultOptions(command, argv);
+  if (resultOptionError !== undefined) return resultOptionError;
   const nestedCommand =
     command === "scans" || command === "findings" || command === "publish";
-  const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
-  if (command === "info") {
-    const metadataFields = new Set([
-      "sdkVersion",
-      "bundledPluginVersion",
-      "scanMcp",
-      "cancellationNote",
-      "cliVersion",
-      "codexVersion",
-      "codexSdkVersion",
-      "model",
-      "reasoningEffort",
-      "nextStep",
-    ]);
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      if (
-        argument !== "--filter-output" &&
-        !argument.startsWith("--filter-output=")
-      ) {
-        continue;
-      }
-      const selector = argument.includes("=")
-        ? argument.slice(argument.indexOf("=") + 1)
-        : argv[index + 1];
-      if (
-        selector !== undefined &&
-        !selector.split(",").every((field) => metadataFields.has(field))
-      ) {
-        return "--filter-output must select an info metadata field.";
-      }
-    }
-  }
+  const subcommand = nestedCommand ? commandArguments[1] : undefined;
   for (
-    let index = commandIndex + (nestedCommand ? 2 : 1);
-    index < argv.length;
+    let index = nestedCommand ? 2 : 1;
+    index < commandArguments.length;
     index += 1
   ) {
-    const value = argv[index]!;
+    const value = commandArguments[index]!;
     if (!value.startsWith("-")) {
       positionals.push(value);
       continue;
     }
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
-    if (equals >= 0 || !VALUE_OPTIONS.has(option)) continue;
-    const next = argv[index + 1];
-    if (next === undefined || next.startsWith("--") || next === "-h") {
+    if (equals >= 0 || !COMMAND_VALUE_OPTIONS.has(option)) continue;
+    if (!hasFlagValue(commandArguments, index)) {
       return `Missing value for flag: ${option}`;
     }
     index += 1;
   }
-  if (
-    subcommand === "match" &&
-    !argv.some((value) => ["--schema", "--llms", "--llms-full"].includes(value))
-  ) {
+  if (subcommand === "match") {
     if (argv.includes("--all") && positionals.length > 0) {
       return "scans match --all does not accept scan identifiers.";
     }
@@ -4766,18 +4765,30 @@ export function skillCommandFailure(
   return `${command} failed with exit code ${status}.`;
 }
 
-function incurErrorMessage(output: string): string {
+export function safeIncurErrorMessage(
+  output: string,
+  cli: Cli.Cli,
+  argv: readonly string[],
+): string {
   const message = output
     .split("\n")
     .find((line) => line.startsWith("message: "))
     ?.slice("message: ".length);
-  if (message === undefined) return output.trim();
-  try {
-    const parsed: unknown = JSON.parse(message);
-    return typeof parsed === "string" ? parsed : message;
-  } catch {
-    return message;
+  let detail = message ?? output.trim();
+  if (message !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(message);
+      if (typeof parsed === "string") detail = parsed;
+    } catch {}
   }
+  const safe = safeErrorMessage(detail);
+  return safe === "[redacted]"
+    ? humanValidationMessage(
+        cli,
+        parseIncurArguments(argv).commandArguments,
+        output,
+      ) ?? safe
+    : safe;
 }
 
 function isOutsidePath(path: string): boolean {
