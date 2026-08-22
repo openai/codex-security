@@ -15,7 +15,7 @@ Judge the result in this order:
 2. any fix completely closes the broken security boundary
 3. legitimate behavior and compatibility are preserved
 4. relevant repository checks pass
-5. the implementation follows repository conventions
+5. the implementation follows applicable organization-wide and project-specific style guides and surrounding code conventions
 6. the patch contains only the scope necessary for the earlier properties
 
 Never trade an earlier property for a later one. Minimal means the smallest repository-native change that satisfies all earlier properties, not the fewest lines.
@@ -27,6 +27,7 @@ Before editing, establish from repository evidence:
 - affected component and current source-to-sink path or broken control
 - attacker-controlled input and required preconditions
 - security invariant and narrowest plausible enforcement boundary
+- applicable repository instructions, organization-wide and project-specific style guides, and surrounding code conventions
 - legitimate behavior, APIs, error semantics, and compatibility constraints to preserve or intentionally change with supporting product evidence
 - available PoC, reproducer, tests, evidence, and affected locations
 - nearest relevant helpers and implementation, error-handling, and test precedents
@@ -53,7 +54,7 @@ The investigation requires repository-relative evidence and a clear separation b
 ## Implementation Workflow
 
 1. Revalidate and scope the finding.
-   - Inspect repository instructions, affected code, direct callers, and only the context needed to prove the vulnerable path.
+   - Inspect repository instructions, applicable organization-wide and project-specific style guides, affected code, direct callers, and only the context needed to prove the vulnerable path.
    - Establish concrete reachability in the current checkout; generic weakness labels, file anchors, and suspicious-looking code are not proof.
    - If the same broken security boundary cannot be shown after a bounded investigation, do not patch an adjacent weakness or add speculative defense in depth. Return `no_change` when evidence shows the path is already safe; otherwise return `blocked` with the missing proof.
    - Complete the patch contract and inspect relevant helpers, controls, and implementation and test precedents.
@@ -68,14 +69,15 @@ The investigation requires repository-relative evidence and a clear separation b
    - If the only complete fix requires an unresolved decision about product policy, public-API compatibility, or cross-subsystem ownership, return `blocked` with the options, security tradeoff, and likely owner or codeowner when available.
    - Use nearby variants to test the chosen boundary. Report unrelated sibling findings or longer-term architectural work separately instead of expanding this patch.
 4. Implement the fix and its proof.
-   - Make the smallest repository-native change that fully enforces the invariant.
-   - Prefer existing helpers and abstractions. Preserve APIs, legitimate inputs, and error semantics unless changing them is required by the security contract.
+   - Make the smallest, most reviewable repository-native change that fully enforces the invariant.
+   - Match surrounding naming, formatting, types, control flow, and error-handling idioms. Introduce exceptions only for conditions the surrounding code treats as exceptional.
+   - Prefer existing helpers and abstractions. Preserve APIs, helper signatures, data types, assertions, control flow, legitimate inputs, and error semantics unless changing them is strictly necessary to close the vulnerability.
    - Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it.
-   - Avoid unrelated refactors and preserve user changes outside the candidate patch.
+   - Avoid unrelated refactors, cleanup, renaming, and formatting changes; preserve user changes outside the candidate patch.
    - Add focused regression coverage that fails on the vulnerable behavior and passes after the fix.
    - Include positive coverage for the legitimate control. Test at the lowest level that proves the invariant and through the realistic interface when feasible.
 5. Verify in order.
-   - **Applicability and buildability**: inspect the final diff for unrelated changes, then run the narrowest relevant syntax, import, build, type, or focused test check.
+   - **Applicability and buildability**: compare the complete candidate patch against its original base and remove changes introduced for the fix that are not required for security closure, focused regression tests, or essential build wiring. Preserve pre-existing user changes, then run the narrowest relevant syntax, import, build, type, or focused test check.
    - **Security closure**: rerun the original PoC, trigger, or strongest exploit check. Re-trace the source-to-sink or broken-control path in the patched code.
    - **Change-aware bypass review**: reread the finding and final diff without relying on the original rationale. Trace changed branches from direct callers, check equivalent sinks, and exercise an alternate malicious input class when practical.
    - **Preserved behavior**: rerun the legitimate control and confirm the recorded APIs, error semantics, and compatibility constraints remain intact.
@@ -122,7 +124,7 @@ If using a scan artifact directory, resolve it using `../../references/scan-arti
 
 - Do not report `fixed` until every ordered verification gate has passed. Omit a check only when repository evidence shows it is irrelevant; an unavailable relevant check makes verification `blocked` and must be reported.
 - Do not rely only on code inspection when a focused test or reproducer is feasible.
-- Do not broaden the patch into unrelated cleanup, sibling findings, or architectural redesign without evidence that the broader change is required for complete closure.
+- Do not broaden the patch into unrelated refactoring, cleanup, formatting, sibling findings, or architectural redesign without evidence that the broader change is required for complete closure.
 - Do not remove user changes or unrelated local modifications.
 - Do not weaken authentication, authorization, tenant isolation, input validation, sandboxing, or logging to make tests pass.
 - Do not hide proof gaps. If the environment blocks validation, say exactly which command or setup failed and what evidence is still missing.
