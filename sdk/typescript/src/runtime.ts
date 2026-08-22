@@ -112,6 +112,12 @@ export interface PluginPythonOptions {
   signal?: AbortSignal;
 }
 
+export interface PluginPythonReadRootsOptions {
+  environment?: ProcessEnvironment;
+  protectedPaths: readonly string[];
+  signal?: AbortSignal;
+}
+
 export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
@@ -293,6 +299,33 @@ export async function requirePrivateCredentialHome(
     secureWindowsHome?: (path: string) => Promise<void>;
   } = {},
 ): Promise<void> {
+  await requirePrivateDirectory(metadata, path, "credential home", options);
+}
+
+export async function requirePrivatePolicyOutputDirectory(
+  path: string,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsHome?: (path: string) => Promise<void>;
+  } = {},
+): Promise<void> {
+  await requirePrivateDirectory(
+    await lstat(path),
+    path,
+    "policy output directory",
+    options,
+  );
+}
+
+async function requirePrivateDirectory(
+  metadata: Pick<Stats, "mode" | "uid">,
+  path: string,
+  description: string,
+  options: {
+    platform?: NodeJS.Platform;
+    secureWindowsHome?: (path: string) => Promise<void>;
+  },
+): Promise<void> {
   if ((options.platform ?? process.platform) !== "win32") {
     requirePrivateOutputDirectory(metadata, path);
     return;
@@ -303,7 +336,7 @@ export async function requirePrivateCredentialHome(
   } catch (error) {
     const detail = windowsCredentialAclFailure(error);
     throw new OutputDirectoryError(
-      `Unable to create a private Windows credential home: ${path}${detail}`,
+      `Unable to create a private Windows ${description}: ${path}${detail}`,
       { cause: error },
     );
   }
@@ -2366,6 +2399,143 @@ export async function resolvePluginPython(
   );
 }
 
+export async function pluginPythonReadRoots(
+  python: string,
+  options: PluginPythonReadRootsOptions,
+): Promise<string[]> {
+  throwIfSignalAborted(options.signal);
+  if (!isAbsolute(python)) {
+    throw new PluginPythonUnavailableError(
+      `Plugin Python executable must be an absolute path: ${python}`,
+    );
+  }
+
+  let stdout: string;
+  try {
+    ({ stdout } = await execFile(
+      python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        "import json,sys\nprint(json.dumps({'prefix':sys.prefix,'execPrefix':sys.exec_prefix,'basePrefix':sys.base_prefix,'baseExecPrefix':sys.base_exec_prefix},separators=(',',':')))",
+      ],
+      {
+        encoding: "utf8",
+        env: pythonUtf8Environment(options.environment ?? process.env),
+        signal: options.signal,
+        timeout: 5_000,
+        windowsHide: true,
+      },
+    ));
+  } catch (error) {
+    throwIfSignalAborted(options.signal);
+    throw new PluginPythonUnavailableError(
+      "Unable to inspect the plugin Python runtime.",
+      { cause: error },
+    );
+  }
+  throwIfSignalAborted(options.signal);
+
+  let prefixes: unknown;
+  try {
+    prefixes = JSON.parse(stdout);
+  } catch (error) {
+    throw new PluginPythonUnavailableError(
+      "Plugin Python returned invalid runtime metadata.",
+      { cause: error },
+    );
+  }
+  const prefixKeys = [
+    "prefix",
+    "execPrefix",
+    "basePrefix",
+    "baseExecPrefix",
+  ] as const;
+  if (
+    !isRecord(prefixes) ||
+    Object.keys(prefixes).length !== prefixKeys.length ||
+    !prefixKeys.every(
+      (key) => typeof prefixes[key] === "string" && prefixes[key].length !== 0,
+    )
+  ) {
+    throw new PluginPythonUnavailableError(
+      "Plugin Python returned invalid runtime metadata.",
+    );
+  }
+
+  const protectedPaths: string[] = [];
+  for (const path of options.protectedPaths) {
+    throwIfSignalAborted(options.signal);
+    try {
+      protectedPaths.push(
+        await canonicalizeProtectedPath(path, options.signal),
+      );
+    } catch (error) {
+      throwIfSignalAborted(options.signal);
+      throw new PluginPythonUnavailableError(
+        `Unable to inspect a protected path for the plugin Python runtime: ${path}`,
+        { cause: error },
+      );
+    }
+  }
+
+  let canonicalExecutable: string;
+  try {
+    canonicalExecutable = await realpath(python);
+    throwIfSignalAborted(options.signal);
+  } catch (error) {
+    throwIfSignalAborted(options.signal);
+    throw new PluginPythonUnavailableError(
+      `Unable to inspect the plugin Python executable: ${python}`,
+      { cause: error },
+    );
+  }
+  const candidates = [
+    dirname(python),
+    dirname(canonicalExecutable),
+    ...prefixKeys.map((key) => prefixes[key] as string),
+  ];
+  const roots: string[] = [];
+  for (const candidate of candidates) {
+    throwIfSignalAborted(options.signal);
+    if (!isAbsolute(candidate)) {
+      throw new PluginPythonUnavailableError(
+        `Plugin Python returned a non-absolute runtime directory: ${candidate}`,
+      );
+    }
+    let canonical: string;
+    try {
+      canonical = await realpath(candidate);
+      if (!(await stat(canonical)).isDirectory()) {
+        throw new Error("path is not a directory");
+      }
+      throwIfSignalAborted(options.signal);
+    } catch (error) {
+      throwIfSignalAborted(options.signal);
+      throw new PluginPythonUnavailableError(
+        `Plugin Python returned a runtime directory that does not exist: ${candidate}`,
+        { cause: error },
+      );
+    }
+    if (dirname(canonical) === canonical) {
+      throw new PluginPythonUnavailableError(
+        `Plugin Python runtime read roots must not include a filesystem root: ${canonical}`,
+      );
+    }
+    if (protectedPaths.some((path) => pathIsWithin(canonical, path))) {
+      throw new PluginPythonUnavailableError(
+        `Plugin Python runtime read root contains a protected path: ${canonical}`,
+      );
+    }
+    if (!roots.some((root) => relative(root, canonical) === "")) {
+      roots.push(canonical);
+    }
+  }
+  throwIfSignalAborted(options.signal);
+  return roots;
+}
+
 export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
@@ -2680,6 +2850,36 @@ export function expandHome(
 
 function safePrefix(value: string): string {
   return basename(value).replace(/[^A-Za-z0-9._-]/g, "-") || "repository";
+}
+
+async function canonicalizeProtectedPath(
+  path: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const absolute = resolve(path);
+  for (let ancestor = absolute; ; ancestor = dirname(ancestor)) {
+    throwIfSignalAborted(signal);
+    try {
+      const canonical = resolve(
+        await realpath(ancestor),
+        relative(ancestor, absolute),
+      );
+      throwIfSignalAborted(signal);
+      return canonical;
+    } catch (error) {
+      if (nodeErrorCode(error) !== "ENOENT" || dirname(ancestor) === ancestor) {
+        throw error;
+      }
+    }
+  }
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return (
+    path === "" ||
+    (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+  );
 }
 
 function processErrorDetail(error: unknown): string {

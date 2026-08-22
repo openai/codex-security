@@ -62,12 +62,14 @@ import {
   inspectWindowsCredentialAclSnapshot,
   isPythonPathCandidate,
   planOutputArchive,
+  pluginPythonReadRoots,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   preserveCodexSecurityPluginRegistration,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
+  requirePrivatePolicyOutputDirectory,
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
@@ -2661,29 +2663,41 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(true);
   });
 
-  test("requires a real private-ACL operation for Windows credential homes", async () => {
+  test("requires a real private-ACL operation for Windows private directories", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     await mkdir(home);
     const metadata = await lstat(home);
     const secured: string[] = [];
 
-    await requirePrivateCredentialHome(metadata, home, {
-      platform: "win32",
-      secureWindowsHome: async (path) => {
-        secured.push(path);
-      },
-    });
-
-    expect(secured).toEqual([home]);
-    await expect(
-      requirePrivateCredentialHome(metadata, home, {
+    for (const [description, secure] of [
+      [
+        "credential home",
+        (options: Parameters<typeof requirePrivatePolicyOutputDirectory>[1]) =>
+          requirePrivateCredentialHome(metadata, home, options),
+      ],
+      [
+        "policy output directory",
+        (options: Parameters<typeof requirePrivatePolicyOutputDirectory>[1]) =>
+          requirePrivatePolicyOutputDirectory(home, options),
+      ],
+    ] as const) {
+      await secure({
         platform: "win32",
-        secureWindowsHome: async () => {
-          throw new Error("ACL could not be secured");
+        secureWindowsHome: async (path) => {
+          secured.push(path);
         },
-      }),
-    ).rejects.toThrow("private Windows credential home");
+      });
+      await expect(
+        secure({
+          platform: "win32",
+          secureWindowsHome: async () => {
+            throw new Error("ACL could not be secured");
+          },
+        }),
+      ).rejects.toThrow(`private Windows ${description}`);
+    }
+    expect(secured).toEqual([home, home]);
   });
 
   test("retries Windows credential descendant verification after concurrent changes", async () => {
@@ -3490,6 +3504,57 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("private Windows credential home");
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "makes policy output private before files inherit its Windows ACL",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = join(root, "policy");
+      await mkdir(output);
+      const systemDirectory = join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+      );
+      const user = spawnSync(
+        join(systemDirectory, "whoami.exe"),
+        ["/user", "/fo", "csv", "/nh"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(user.stdout)?.[1];
+      expect(sid).toBeDefined();
+      const grant = spawnSync(
+        join(systemDirectory, "icacls.exe"),
+        [output, "/grant", "*S-1-1-0:(OI)(CI)R"],
+        { encoding: "utf8", windowsHide: true },
+      );
+      expect(grant.status, grant.stderr).toBe(0);
+      await requirePrivatePolicyOutputDirectory(output);
+      const draft = join(output, "THREAT_MODEL.md");
+      await writeFile(draft, "Synthetic private draft\n");
+      const descriptor = spawnSync(
+        join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: draft },
+          windowsHide: true,
+        },
+      );
+      expect(descriptor.status, descriptor.stderr).toBe(0);
+      expect(
+        inspectWindowsCredentialAcl(descriptor.stdout, sid!, { scope: "file" }),
+      ).toMatchObject({
+        grantsCurrentUserAccess: true,
+        untrustedPrincipals: [],
+      });
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "creates credential homes with a verified managed-compatible Windows ACL",
@@ -5122,6 +5187,171 @@ describe("runtime directories and plugin Python boundary", () => {
         process.umask(previousUmask);
       }
     }
+  });
+
+  test("discovers virtual-environment and base Python read roots", async () => {
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+    if (interpreter === null) return;
+    const root = await temporaryDirectory();
+    const virtualEnvironment = join(root, "venv");
+    const created = spawnSync(
+      interpreter,
+      ["-I", "-B", "-m", "venv", "--without-pip", virtualEnvironment],
+      { encoding: "utf8", windowsHide: true },
+    );
+    expect(created.status, created.stderr).toBe(0);
+    const python = join(
+      virtualEnvironment,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "python.exe" : "python",
+    );
+    const protectedPath = join(root, "protected", "state");
+    const roots = await pluginPythonReadRoots(python, {
+      protectedPaths: [protectedPath],
+    });
+    const inspected = spawnSync(
+      python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        "import json,sys;print(json.dumps([sys.prefix,sys.exec_prefix,sys.base_prefix,sys.base_exec_prefix]))",
+      ],
+      { encoding: "utf8", windowsHide: true },
+    );
+    expect(inspected.status, inspected.stderr).toBe(0);
+    const prefixes = JSON.parse(inspected.stdout) as string[];
+
+    for (const path of [
+      dirname(python),
+      dirname(await realpath(python)),
+      ...prefixes,
+    ]) {
+      expect(roots).toContain(await realpath(path));
+    }
+    expect(new Set(roots).size).toBe(roots.length);
+  });
+
+  testPosix(
+    "canonicalizes and deduplicates plugin Python read roots",
+    async () => {
+      const root = await temporaryDirectory();
+      const launcher = join(root, "launcher");
+      const runtime = join(root, "runtime");
+      const linkedRuntime = join(root, "linked-runtime");
+      const python = join(launcher, "python");
+      await mkdir(launcher);
+      await mkdir(runtime);
+      await symlink(runtime, linkedRuntime);
+      await writeFile(
+        python,
+        `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({
+          prefix: linkedRuntime,
+          execPrefix: runtime,
+          basePrefix: linkedRuntime,
+          baseExecPrefix: runtime,
+        })}'\n`,
+      );
+      await chmod(python, 0o700);
+
+      expect(
+        await pluginPythonReadRoots(python, { protectedPaths: [] }),
+      ).toEqual([await realpath(launcher), await realpath(runtime)]);
+    },
+  );
+
+  testPosix(
+    "rejects invalid plugin Python runtime metadata and missing directories",
+    async () => {
+      const root = await temporaryDirectory();
+      const python = join(root, "python");
+      for (const output of [
+        "not-json",
+        JSON.stringify({
+          prefix: root,
+          execPrefix: root,
+          basePrefix: root,
+          baseExecPrefix: root,
+          unexpected: root,
+        }),
+      ]) {
+        await writeFile(python, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`);
+        await chmod(python, 0o700);
+        await expect(
+          pluginPythonReadRoots(python, { protectedPaths: [] }),
+        ).rejects.toThrow(PluginBootstrapError);
+      }
+
+      const missing = join(root, "missing");
+      await writeFile(
+        python,
+        `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({
+          prefix: missing,
+          execPrefix: root,
+          basePrefix: root,
+          baseExecPrefix: root,
+        })}'\n`,
+      );
+      await chmod(python, 0o700);
+      await expect(
+        pluginPythonReadRoots(python, { protectedPaths: [] }),
+      ).rejects.toThrow("runtime directory that does not exist");
+    },
+  );
+
+  testPosix(
+    "rejects filesystem-root and protected plugin Python read roots",
+    async () => {
+      const root = await temporaryDirectory();
+      const launcher = join(root, "launcher");
+      const runtime = join(root, "runtime");
+      const protectedPath = join(runtime, "private", "state");
+      const python = join(launcher, "python");
+      await mkdir(launcher);
+      await mkdir(runtime);
+      await mkdir(protectedPath, { recursive: true });
+      const writeMetadata = async (prefix: string): Promise<void> => {
+        await writeFile(
+          python,
+          `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({
+            prefix,
+            execPrefix: runtime,
+            basePrefix: runtime,
+            baseExecPrefix: runtime,
+          })}'\n`,
+        );
+        await chmod(python, 0o700);
+      };
+
+      await writeMetadata(parse(root).root);
+      await expect(
+        pluginPythonReadRoots(python, { protectedPaths: [] }),
+      ).rejects.toThrow("must not include a filesystem root");
+
+      await writeMetadata(runtime);
+      for (const path of [runtime, protectedPath]) {
+        await expect(
+          pluginPythonReadRoots(python, { protectedPaths: [path] }),
+        ).rejects.toThrow("contains a protected path");
+      }
+    },
+  );
+
+  testPosix("preserves cancellation during Python root discovery", async () => {
+    const root = await temporaryDirectory();
+    const python = join(root, "python");
+    await writeFile(python, "#!/bin/sh\nwhile :; do :; done\n");
+    await chmod(python, 0o700);
+    const controller = new AbortController();
+    const discovery = pluginPythonReadRoots(python, {
+      protectedPaths: [],
+      signal: controller.signal,
+    });
+    controller.abort(new DOMException("canceled", "AbortError"));
+
+    await expect(discovery).rejects.toMatchObject({ name: "AbortError" });
   });
 
   test("resolves inherited Python names case-insensitively", async () => {

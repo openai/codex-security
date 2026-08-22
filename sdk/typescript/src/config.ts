@@ -135,6 +135,16 @@ function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+export function resolveCodexProfile(config: JsonObject): JsonObject {
+  const resolved = deepMerge(
+    cloneJson(config),
+    selectedScanProfile(config) ?? {},
+  );
+  delete resolved["profile"];
+  delete resolved["profiles"];
+  return resolved;
+}
+
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
 ): Promise<JsonObject> {
