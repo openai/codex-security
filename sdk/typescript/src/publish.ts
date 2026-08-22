@@ -529,25 +529,14 @@ async function assigneeCanAccessTeam(
   team: Team,
   assignee: User,
 ): Promise<boolean> {
-  let current: Team | undefined = team;
-  while (current !== undefined) {
-    if (current.visibility === "public" && assignee.canAccessAnyPublicTeam) {
-      return true;
-    }
-    const members = await current.members({
-      filter: { id: { eq: assignee.id } },
-      first: 1,
-    });
-    if (members.nodes.some(({ id }) => id === assignee.id)) return true;
-    if (
-      current.visibility !== "restricted" ||
-      !assignee.canAccessAnyPublicTeam
-    ) {
-      return false;
-    }
-    current = await current.parent;
+  if (team.visibility === "public" && assignee.canAccessAnyPublicTeam) {
+    return true;
   }
-  return false;
+  const members = await team.members({
+    filter: { id: { eq: assignee.id } },
+    first: 1,
+  });
+  return members.nodes.some(({ id }) => id === assignee.id);
 }
 
 function publicationApiKey(

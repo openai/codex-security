@@ -1,0 +1,161 @@
+name: test-quality
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/test-quality.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CODEX_SECURITY_INTEGRATION: "0"
+  CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+
+jobs:
+  runner:
+    name: ${{ matrix.os }} / ${{ matrix.mode }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        mode: [baseline, isolated, parallel]
+        include:
+          - mode: baseline
+            args: ""
+          - mode: isolated
+            args: --isolate
+          - mode: parallel
+            args: --parallel=2
+          - os: windows-latest
+            mode: shard-1
+            args: --shard=1/7
+          - os: windows-latest
+            mode: shard-2
+            args: --shard=2/7
+          - os: windows-latest
+            mode: shard-3
+            args: --shard=3/7
+          - os: windows-latest
+            mode: shard-4
+            args: --shard=4/7
+          - os: windows-latest
+            mode: shard-5
+            args: --shard=5/7
+          - os: windows-latest
+            mode: shard-6
+            args: --shard=6/7
+          - os: windows-latest
+            mode: shard-7
+            args: --shard=7/7
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: sdk/typescript/package.json
+          cache: true
+          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.13"
+      - name: Install dependencies
+        run: pnpm --dir sdk/typescript install --frozen-lockfile
+      - name: Prepare private Windows test root
+        if: runner.os == 'Windows'
+        id: windows-temp
+        shell: pwsh
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+      - name: Test runner mode
+        env:
+          TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
+          TMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}
+        run: |
+          node -e "require('node:fs').mkdirSync('sdk/typescript/reports',{recursive:true})"
+          pnpm --dir sdk/typescript run test ${{ runner.os == 'Windows' && '--timeout=120000' || '' }} ${{ matrix.args }} --seed=${{ env.CODEX_SECURITY_PROPERTY_SEED }} --reporter=junit --reporter-outfile=reports/runner-${{ matrix.os }}-${{ matrix.mode }}.xml
+      - name: Upload runner report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runner-${{ matrix.os }}-${{ matrix.mode }}
+          overwrite: true
+          path: sdk/typescript/reports/runner-*.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  compare:
+    name: Runner inventory and timing
+    if: always() && !cancelled()
+    needs: [runner]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: runner-*
+          merge-multiple: true
+          path: reports
+      - name: Compare inventories and outcomes
+        shell: bash
+        run: |
+          comparison_status=0
+          for os in ubuntu-latest windows-latest; do
+            for mode in isolated parallel; do
+              python3 sdk/typescript/scripts/compare-test-reports.py "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+            done
+          done
+          python3 sdk/typescript/scripts/compare-test-reports.py reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+          exit "$comparison_status"
+
+  mutation:
+    name: Pure-module mutation trial
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: sdk/typescript/package.json
+          cache: true
+          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+      - name: Install dependencies
+        run: pnpm --dir sdk/typescript install --frozen-lockfile
+      - name: Run mutation trial
+        run: pnpm --dir sdk/typescript run test:mutation
+      - name: Upload mutation report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-report
+          overwrite: true
+          path: sdk/typescript/reports/mutation/
+          if-no-files-found: warn
+          retention-days: 14

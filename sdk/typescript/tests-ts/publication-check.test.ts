@@ -308,8 +308,8 @@ describe("read-only publication preflight", () => {
         visibility: "restricted",
         publicTeamAccess: true,
         memberTeams: ["private-parent"],
-        allowed: true,
-        checkedTeams: ["canonical-team", "private-parent"],
+        allowed: false,
+        checkedTeams: ["canonical-team"],
       },
       {
         name: "restricted-team nonmember",
@@ -317,7 +317,7 @@ describe("read-only publication preflight", () => {
         publicTeamAccess: true,
         memberTeams: [],
         allowed: false,
-        checkedTeams: ["canonical-team", "private-parent"],
+        checkedTeams: ["canonical-team"],
       },
       {
         name: "limited user outside a restricted team",
