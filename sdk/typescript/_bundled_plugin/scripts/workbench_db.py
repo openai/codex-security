@@ -104,6 +104,7 @@ from workbench_target import (
     copy_git_worktree_files,
     directory_content_digest,
     directory_snapshot_regular_file_count,
+    git_bytes,
     git_command,
     git_output,
     git_revision,
@@ -315,11 +316,11 @@ def require_diff_target(
         }
     if kind == "commit":
         head = resolve_git_commit(target, head_revision or "", "Commit")
-        commit = git_output(target, "cat-file", "-p", head)
+        commit = git_bytes(target, "cat-file", "-p", head)
         if commit is None:
             raise SystemExit(f"Commit is not available in the local checkout: {head}")
         parent_line = next(
-            (line for line in commit.splitlines() if line.startswith("parent ")),
+            (line for line in commit.splitlines() if line.startswith(b"parent ")),
             None,
         )
         if parent_line is None:
@@ -327,7 +328,7 @@ def require_diff_target(
         else:
             parent = resolve_git_commit(
                 target,
-                parent_line.removeprefix("parent ").strip(),
+                parent_line.removeprefix(b"parent ").decode("ascii").strip(),
                 "Commit parent",
             )
         if base_revision and base_revision != parent:
@@ -1605,7 +1606,13 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
 
-    recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
+    user_context = None
+    if args.registration_json_stdin:
+        registration = json.load(sys.stdin)
+        recipe_json = json.dumps(registration["recipe"], ensure_ascii=False, separators=(",", ":"))
+        user_context = registration.get("userContext")
+    else:
+        recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
@@ -1691,10 +1698,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scan_dir=scan_dir,
         )
         connection.execute(
-            "UPDATE scans SET recipe_json = ?, parent_scan_id = ? WHERE id = ?",
+            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
             (
                 json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
                 parent_scan_id,
+                user_context,
                 scan_id,
             ),
         )
@@ -2888,7 +2896,7 @@ def require_reviewed_patch_applied(
         applied = git_command(
             checkout if unversioned else checkout_root,
             *arguments,
-            text=True,
+            text=False,
             git_dir=Path(git_dir) if git_dir is not None else None,
             work_tree=checkout_root if git_dir is not None else None,
         )

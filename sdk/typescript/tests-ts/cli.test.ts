@@ -1849,7 +1849,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "subscribes to session details only with TTY stdin: %s",
+    "subscribes to session details only with TTY stdin: %p",
     async (stdinTTY) => {
       const descriptor = Object.getOwnPropertyDescriptor(
         process.stdin,

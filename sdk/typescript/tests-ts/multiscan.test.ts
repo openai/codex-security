@@ -385,7 +385,7 @@ describe("multiscan", () => {
   });
 
   test.each([false, true])(
-    "continues scanning when a progress observer fails %s",
+    "continues scanning when a progress observer fails %p",
     async (asynchronous) => {
       const paths = await fixture();
       const source = await repository(paths.root, "observer-failure");
