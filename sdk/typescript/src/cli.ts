@@ -1478,6 +1478,7 @@ export async function main(
       ],
       async ({ matchingCached, matchingInputs, ...comparison }) => {
         if (matchingCached && !force) return comparison;
+        const input = matchingInputs as JsonObject & ScanComparisonInput;
         return await dependencies.runWorkbench(
           [
             "save-scan-comparison",
@@ -1488,9 +1489,10 @@ export async function main(
             "--matches-json-stdin",
           ],
           JSON.stringify(
-            await dependencies.matchFindings(
-              matchingInputs as JsonObject & ScanComparisonInput,
-            ),
+            await dependencies.matchFindings({
+              before: input.before,
+              after: input.after,
+            }),
           ),
         );
       },

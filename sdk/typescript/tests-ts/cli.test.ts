@@ -1398,6 +1398,10 @@ describe("CLI", () => {
         },
       ],
     };
+    const onWorkbench = (args: readonly string[]) =>
+      args[0] === "compare-scans"
+        ? { ...response, matchingCached: true }
+        : response;
     for (const argv of [
       ["scans", "compare", "before", "after", "--json"],
       ["scans", "compare", "before", "after", "--format", "yaml"],
@@ -1408,7 +1412,7 @@ describe("CLI", () => {
           argv,
           stdout.stream,
           capture().stream,
-          dependencies({ onWorkbench: () => response }),
+          dependencies({ onWorkbench }),
         ),
       ).toBe(0);
       expect(stdout.text()).toContain("internal-finding-id");
@@ -1424,7 +1428,7 @@ describe("CLI", () => {
         ["scans", "compare", "before", "after"],
         redirected.stream,
         capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(redirected.text()).toContain("internal-finding-id");
@@ -1437,7 +1441,7 @@ describe("CLI", () => {
         ["scans", "compare", "before", "after", "--filter-output", "summary"],
         filtered.stream,
         capture().stream,
-        dependencies({ onWorkbench: () => response }),
+        dependencies({ onWorkbench }),
       ),
     ).toBe(0);
     expect(filtered.text()).toContain("persisting: 1");

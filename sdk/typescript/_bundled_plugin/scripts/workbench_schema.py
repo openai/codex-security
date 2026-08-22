@@ -683,6 +683,17 @@ MIGRATIONS = (
         WHERE project_id IS NULL;
         """,
     ),
+    (
+        31,
+        "index finding identity and comparison history",
+        """
+        CREATE INDEX finding_occurrences_by_finding
+        ON finding_occurrences(finding_id, id);
+
+        CREATE INDEX scan_comparisons_by_after_scan
+        ON scan_comparisons(after_scan_id, before_scan_id);
+        """,
+    ),
 )
 
 

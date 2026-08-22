@@ -4180,11 +4180,10 @@ describe("runtime directories and plugin Python boundary", () => {
         "print(json.dumps({'ok': True, 'label': '出力', 'inputLength': len(payload), 'details': 'x' * (5 * 1024 * 1024)}, ensure_ascii=False))",
       ].join("\n"),
     );
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
+    const python = await resolvePluginPython();
     const result = await runWorkbench(
       {
-        python: python!,
+        python,
         pluginRoot,
         environment: {
           PATH: process.env["PATH"],
@@ -4202,6 +4201,110 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["inputLength"]).toBe(64 * 1024);
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
+
+  test.each(["legacy", "current"])(
+    "saves comparisons with a %s custom plugin",
+    async (version) => {
+      const supportsStdin = version === "current";
+      const root = await temporaryDirectory();
+      const pluginRoot = join(root, "custom plugin");
+      const scripts = join(pluginRoot, "scripts");
+      await mkdir(scripts, { recursive: true });
+      await writeFile(
+        join(scripts, "workbench_db.py"),
+        [
+          "import argparse, json, os, sys",
+          "from pathlib import Path",
+          "if '--help' in sys.argv:",
+          "    with Path(__file__).with_name('help-calls').open('ab') as calls: calls.write(b'help\\n')",
+          "    if os.environ.get('FAIL_COMPARISON_HELP'): sys.exit('Synthetic help failure')",
+          "parser = argparse.ArgumentParser()",
+          "command = parser.add_subparsers(dest='command', required=True).add_parser('save-scan-comparison')",
+          "command.add_argument('--before-scan-id', required=True)",
+          "command.add_argument('--after-scan-id', required=True)",
+          ...(supportsStdin
+            ? [
+                "transport = command.add_mutually_exclusive_group(required=True)",
+                "transport.add_argument('--matches-json')",
+                "transport.add_argument('--matches-json-stdin', action='store_true')",
+              ]
+            : ["command.add_argument('--matches-json', required=True)"]),
+          "args = parser.parse_args()",
+          "uses_stdin = getattr(args, 'matches_json_stdin', False)",
+          "payload = json.loads(sys.stdin.buffer.read().decode('utf-8') if uses_stdin else args.matches_json)",
+          "print(json.dumps({'payload': payload, 'usesStdin': uses_stdin}))",
+        ].join("\n"),
+      );
+      const python = await resolvePluginPython();
+      const options = {
+        python,
+        pluginRoot,
+        environment: {
+          PATH: process.env["PATH"],
+          OPENAI_API_KEY: "synthetic-openai-key",
+          CODEX_API_KEY: "synthetic-codex-key",
+          OPENROUTER_API_KEY: "synthetic-openrouter-key",
+          FIREWORKS_API_KEY: "synthetic-fireworks-key",
+        },
+      };
+      const original = {
+        matches: [
+          {
+            beforeOccurrenceIds: ["before"],
+            afterOccurrenceIds: ["after"],
+            confidence: "high",
+            reason: "Same synthetic control.",
+          },
+        ],
+        uncertain: [
+          {
+            beforeOccurrenceId: "uncertain-before",
+            afterOccurrenceId: "uncertain-after",
+            reason: "Needs more evidence.",
+          },
+        ],
+        related: [
+          {
+            beforeOccurrenceId: "related-before",
+            afterOccurrenceId: "related-after",
+            reason: "Separate synthetic controls. 🙂",
+          },
+        ],
+      };
+      const args = [
+        "save-scan-comparison",
+        "--before-scan-id",
+        "before-scan",
+        "--after-scan-id",
+        "after-scan",
+        "--matches-json-stdin",
+      ];
+      const input = JSON.stringify(original);
+      await expect(
+        runWorkbench(
+          {
+            ...options,
+            environment: { ...options.environment, FAIL_COMPARISON_HELP: "1" },
+          },
+          args,
+          input,
+        ),
+      ).rejects.toThrow("Synthetic help failure");
+      const expected = {
+        usesStdin: supportsStdin,
+        payload: supportsStdin
+          ? original
+          : { matches: original.matches, uncertain: original.uncertain },
+      };
+      expect(await runWorkbench(options, args, input)).toEqual(expected);
+      expect(await runWorkbench(options, args, input)).toEqual(expected);
+      expect(await readFile(join(scripts, "help-calls"), "utf8")).toBe(
+        "help\nhelp\n",
+      );
+      expect(args.at(-1)).toBe("--matches-json-stdin");
+      expect(JSON.parse(input)).toEqual(original);
+    },
+  );
 
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");

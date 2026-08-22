@@ -436,7 +436,14 @@ describe("CLI workbench", () => {
               }
               if (args[0] === "save-scan-comparison") comparisonInput = input;
               return args[0] === "compare-scans"
-                ? { matchingCached: false, matchingInputs: { before, after } }
+                ? {
+                    matchingCached: false,
+                    matchingInputs: {
+                      before,
+                      after,
+                      knownFindingGroups: [["known-a", "known-b"]],
+                    },
+                  }
                 : { summary: { persisting: 1 } };
             },
             onMatch: async (input) => {
