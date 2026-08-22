@@ -82,25 +82,22 @@ export async function publishScanToCloud(
     : timeout;
   let response: Response;
   try {
-    response = await (dependencies.fetch ?? globalThis.fetch)(
-      publishUrl,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${credentials.access_token}`,
-          "ChatGPT-Account-ID": credentials.account_id,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          schemaVersion: "1.0",
-          scan: manifest.scan,
-          findings: findings.findings,
-        }),
-        redirect: "error",
-        signal,
+    response = await (dependencies.fetch ?? globalThis.fetch)(publishUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${credentials.access_token}`,
+        "ChatGPT-Account-ID": credentials.account_id,
+        "Content-Type": "application/json",
+        Accept: "application/json",
       },
-    );
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        scan: manifest.scan,
+        findings: findings.findings,
+      }),
+      redirect: "error",
+      signal,
+    });
   } catch {
     // A lost response does not establish whether the server accepted the POST.
     throw new CodexSecurityError(
