@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
+// Native Windows credential and document checks can exceed 30 seconds.
+// The workflow still bounds each complete shard to ten minutes.
+const testTimeoutMs = "120000";
 const testsDirectory = new URL("../tests-ts/", import.meta.url);
 const packageDirectory = fileURLToPath(new URL("../", import.meta.url));
 const tests = (await readdir(testsDirectory))
@@ -71,13 +74,19 @@ const results = await Promise.all(
             ": " +
             paths.join(" "),
         );
-        // Native Windows credential and document checks can exceed 30 seconds.
-        // The workflow still bounds each complete shard to ten minutes.
-        const child = spawn("bun", ["test", "--timeout", "120000", ...paths], {
-          cwd: packageDirectory,
-          stdio: "inherit",
-          windowsHide: true,
-        });
+        const child = spawn(
+          "bun",
+          ["test", "--timeout", testTimeoutMs, ...paths],
+          {
+            cwd: packageDirectory,
+            env: {
+              ...process.env,
+              CODEX_SECURITY_TEST_TIMEOUT_MS: testTimeoutMs,
+            },
+            stdio: "inherit",
+            windowsHide: true,
+          },
+        );
         child.once("error", reject);
         child.once("close", (code) => {
           resolve(code ?? 1);

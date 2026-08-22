@@ -1,4 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import {
@@ -262,6 +265,42 @@ describe("TypeScript package skeleton", () => {
         (step) => step.name === "Run mutation trial",
       ),
     ).not.toHaveProperty("continue-on-error");
+  });
+
+  test("preserves the configured timeout in isolated test subprocesses", async () => {
+    const directory = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-test-timeout-")),
+    );
+    const fixture = join(directory, "isolated.test.ts");
+    const helper = new URL("./support/test-subprocess.ts", import.meta.url)
+      .href;
+    await writeFile(
+      fixture,
+      `import { test } from "bun:test";
+import { runTestInSubprocess } from ${JSON.stringify(helper)};
+test("isolated timeout", async () => {
+  if (runTestInSubprocess(import.meta.path, "isolated timeout")) return;
+  await Bun.sleep(1_000);
+});
+`,
+    );
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        ["test", "--timeout", "30000", fixture],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_SECURITY_TEST_TIMEOUT_MS: "100" },
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      expect(result.status, result.stderr || result.error?.message).toBe(1);
+      expect(result.stderr).toContain("this test timed out after 100ms");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("builds packages without a preinstalled package manager and provides a production audit", async () => {
