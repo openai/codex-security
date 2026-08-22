@@ -418,7 +418,7 @@ describe("CLI", () => {
             completeness === "complete" ? undefined : completeness,
           );
           if (completeness === "complete") {
-            expect(invocation.toolExecutionNotifications).toBeUndefined();
+            expect(invocation).not.toHaveProperty("toolExecutionNotifications");
           } else {
             const reasons = hasDeferred
               ? coverage.deferred.map((item) => item.reason)
