@@ -28,8 +28,6 @@ function git(repo: string, ...args: string[]): string {
 }
 
 test("validates committed diffs with tracked-file output larger than 1 MB", async () => {
-  if (process.platform === "win32") return;
-
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-large-targets-")),
   );
@@ -41,19 +39,16 @@ test("validates committed diffs with tracked-file output larger than 1 MB", asyn
   git(repo, "config", "user.email", "test@example.com");
   git(repo, "config", "user.name", "Test");
 
-  const longDirectory = join(
-    repo,
-    "a".repeat(200),
-    "b".repeat(200),
-    "c".repeat(200),
-  );
-  await mkdir(longDirectory, { recursive: true });
+  const trackedDirectory = join(repo, "tracked");
+  await mkdir(trackedDirectory);
+  // Exceed the byte limit without creating paths that are too long on Windows.
+  const utf8Stem = "界".repeat(120);
   await Promise.all(
-    Array.from({ length: 1_500 }, (_, index) =>
+    Array.from({ length: 3_000 }, (_, index) =>
       writeFile(
         join(
-          longDirectory,
-          `${index.toString().padStart(4, "0")}-${"x".repeat(180)}.ts`,
+          trackedDirectory,
+          `${index.toString().padStart(4, "0")}-${utf8Stem}.ts`,
         ),
         "",
       ),
@@ -66,10 +61,7 @@ test("validates committed diffs with tracked-file output larger than 1 MB", asyn
   const tracked = git(repo, "ls-files", "-t", "-z");
   expect(Buffer.byteLength(tracked, "utf8")).toBeGreaterThan(1024 * 1024);
 
-  const target = await normalizeTarget(
-    repo,
-    DiffTarget.refs({ base: "HEAD" }),
-  );
+  const target = await normalizeTarget(repo, DiffTarget.refs({ base: "HEAD" }));
   await expect(
     validateCommittedDiffCheckout(repo, target),
   ).resolves.toBeUndefined();
