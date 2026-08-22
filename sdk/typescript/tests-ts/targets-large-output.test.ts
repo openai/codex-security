@@ -42,9 +42,9 @@ test("validates committed diffs with tracked-file output larger than 1 MB", asyn
   const trackedDirectory = join(repo, "tracked");
   await mkdir(trackedDirectory);
   // Exceed the byte limit without creating paths that are too long on Windows.
-  const utf8Stem = "界".repeat(120);
+  const utf8Stem = "界".repeat(60);
   await Promise.all(
-    Array.from({ length: 3_000 }, (_, index) =>
+    Array.from({ length: 6_000 }, (_, index) =>
       writeFile(
         join(
           trackedDirectory,
