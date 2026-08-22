@@ -938,7 +938,9 @@ describe("CLI authentication", () => {
       const stderr = capture(false);
       const deps = dependencies({
         onRun: () => {
-          throw new CodexSecurityError(message);
+          throw new CodexSecurityError(
+            `Codex Exec exited with code 1: ${message} PRIVATE_UPSTREAM_DETAIL`,
+          );
         },
       });
 
@@ -947,6 +949,7 @@ describe("CLI authentication", () => {
       ).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(`${message}\n`);
+      expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
       expect(stderr.text()).not.toContain("npx @openai/codex-security logout");
     }
   });

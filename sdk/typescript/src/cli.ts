@@ -5740,9 +5740,14 @@ function scanFailureMessage(
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
+  const message = errorMessage(error);
+  const nativeRefreshRecovery = message.match(
+    /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
+  )?.[0];
+  if (nativeRefreshRecovery !== undefined) return nativeRefreshRecovery;
   if (
     /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
-      errorMessage(error),
+      message,
     )
   ) {
     return (
