@@ -2517,6 +2517,12 @@ export async function main(
       }),
       options: z
         .object({
+          auth: z
+            .enum(SCAN_AUTH_MODES)
+            .default("auto")
+            .describe(
+              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            ),
           component: z
             .array(optionValue("--component"))
             .default([])
@@ -2674,6 +2680,7 @@ export async function main(
             workers: options.workers,
             config,
             scanOptions: {
+              auth: options.auth,
               knowledgeBasePaths: options.knowledgeBase.map((path) =>
                 resolveCliPath(directory, path),
               ),

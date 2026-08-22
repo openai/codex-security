@@ -230,7 +230,11 @@ test("bounds standard scans, continues after failure, and preserves partial resu
   const seen: ScanOptions[] = [];
   const summary = await scan(paths, {
     workers: 2,
-    scanOptions: { scanPrompt: "Check access controls", maxCostUsd: 3 },
+    scanOptions: {
+      auth: "chatgpt",
+      scanPrompt: "Check access controls",
+      maxCostUsd: 3,
+    },
     onProgress() {
       throw new Error("optional observer");
     },
@@ -244,6 +248,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
         try {
           expect(options).toMatchObject({
             mode: "standard",
+            auth: "chatgpt",
             scanPrompt: "Check access controls",
             maxCostUsd: 3,
           });
@@ -726,6 +731,15 @@ test("plans from a Git inventory without tools or ignored files", async () => {
       paths: [".gitignore", "apps/web", "package.json", "shared"],
     },
   ]);
+  for (const path of ["ignored", "ignored/secret.txt"]) {
+    const proposed = { components: [{ name: "Ignored", paths: [path] }] };
+    await expect(
+      planComponents(paths.repository, { codex: fakeCodex(() => proposed) }),
+    ).rejects.toThrow("file inventory");
+    expect(await normalizeComponentPlan(paths.repository, proposed)).toEqual(
+      proposed,
+    );
+  }
 });
 
 test("plans plain directories and rejects unsafe or overlapping model scopes", async () => {
@@ -788,6 +802,65 @@ test.each(["auto", "explicit", "file"])(
     );
   },
 );
+
+test.each(["auto", "chatgpt", "api-key"] as const)(
+  "CLI uses %s authentication for planning, scans, and matching",
+  async (auth) => {
+    const paths = await fixture();
+    const environment = {
+      OPENAI_API_KEY: "synthetic-openai-key",
+      CODEX_API_KEY: "synthetic-codex-key",
+      CODEX_HOME: join(paths.root, "synthetic-home"),
+    };
+    const expectedEnvironment =
+      auth === "chatgpt" ? { CODEX_HOME: environment.CODEX_HOME } : environment;
+    let planned = false,
+      matched = false;
+    const result = await cli(
+      paths,
+      ["--auto", ...(auth === "auto" ? [] : ["--auth", auth])],
+      {
+        ...dependencies({ currentDirectory: paths.root, environment }),
+        planComponents: async (_repository, options) => {
+          expect(options?.environment).toEqual(expectedEnvironment);
+          planned = true;
+          return { components: components.slice(0, 2) };
+        },
+        createSecurity: client(async (_repository, options) => {
+          expect(options.auth).toBe(auth);
+          return completed(options);
+        }),
+        matchFindings: async (_input, options) => {
+          expect(options?.environment).toEqual(expectedEnvironment);
+          matched = true;
+          return noMatches;
+        },
+      },
+    );
+    expect(result.code).toBe(0);
+    expect([planned, matched]).toEqual([true, true]);
+    expect(environment.OPENAI_API_KEY).toBe("synthetic-openai-key");
+  },
+);
+
+test("CLI requires an explicitly selected API key before automatic planning", async () => {
+  const paths = await fixture();
+  let planned = false;
+  const result = await cli(
+    paths,
+    ["--auto", "--plan-only", "--auth", "api-key"],
+    {
+      ...dependencies({ currentDirectory: paths.root, environment: {} }),
+      planComponents: async () => {
+        planned = true;
+        return { components };
+      },
+    },
+  );
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("API-key authentication requires");
+  expect(planned).toBe(false);
+});
 
 test("CLI forwards scan settings and returns incomplete coverage", async () => {
   const paths = await fixture();

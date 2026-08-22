@@ -1,14 +1,23 @@
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { CodexSecurity, type ScanOptions } from "./api.js";
+import {
+  CodexSecurity,
+  scanAuthentication,
+  selectedScanEnvironment,
+  type ScanOptions,
+} from "./api.js";
 import {
   normalizeComponentPlan,
   planComponents,
   type ComponentPlan,
   type ComponentPlanningOptions,
 } from "./component-plan.js";
-import type { CodexSecurityConfig } from "./config.js";
+import {
+  mergedCodexConfig,
+  scanModelProvider,
+  type CodexSecurityConfig,
+} from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
 import { safeErrorMessage } from "./errors.js";
 import type { CoverageCompleteness, Finding } from "./models.js";
@@ -32,7 +41,11 @@ export interface ComponentScanOptions {
   config?: CodexSecurityConfig;
   scanOptions?: Pick<
     ScanOptions,
-    "knowledgeBasePaths" | "scanPrompt" | "postScanPrompt" | "maxCostUsd"
+    | "auth"
+    | "knowledgeBasePaths"
+    | "scanPrompt"
+    | "postScanPrompt"
+    | "maxCostUsd"
   >;
   signal?: AbortSignal;
   createSecurity?: (
@@ -117,6 +130,16 @@ export async function runComponentScans(
     throw new Error("Component workers must be a positive integer.");
   if (Boolean(options.auto) === (options.components !== undefined))
     throw new Error("Choose components or automatic planning, not both.");
+  const auth = options.scanOptions?.auth;
+  let environment = options.environment;
+  if (auth !== undefined && auth !== "auto") {
+    const source = environment ?? process.env;
+    const provider = scanModelProvider(
+      await mergedCodexConfig(options.config ?? {}),
+    );
+    scanAuthentication(source, auth, provider);
+    environment = selectedScanEnvironment(source, auth, provider);
+  }
   const repository = await normalizeRepository(
     options.repository,
     options.signal,
@@ -134,7 +157,7 @@ export async function runComponentScans(
     options.auto
       ? await (options.planComponents ?? planComponents)(repository, {
           config: options.config,
-          environment: options.environment,
+          environment,
           signal: options.signal,
         })
       : { components: options.components },
@@ -238,7 +261,7 @@ export async function runComponentScans(
   const { findings, matches, uncertain, error } = await deduplicateFindings(
     receipts,
     results,
-    options,
+    { ...options, environment },
   );
   const deduplication: ComponentDeduplicationSummary = {
     status: error === undefined ? "completed" : "incomplete",

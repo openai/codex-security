@@ -308,6 +308,10 @@ npx @openai/codex-security scan-components /path/to/project \
   --workers 4 --output-dir /path/outside/project/results
 ```
 
+Use `--auth chatgpt` or `--auth api-key` to select credentials for planning,
+component scans, and matching. The default is `--auth auto`, as with `scan`.
+The SDK accepts the same choice through `scanOptions.auth`.
+
 Use `--auto` instead of `--component` to let Codex propose the split. To review
 or edit it first, save a plan, then run that plan into a new output directory:
 
@@ -331,7 +335,9 @@ A component can contain several repository-relative paths:
 ```
 
 Automatic planning uses a local file inventory. In Git repositories it follows
-Git's ignore rules. Inventoried files omitted by the model are added to an
+Git's ignore rules. Each automatic path must cover at least one inventoried file.
+Explicit `--component` and `--components-file` selections keep their existing behavior.
+Inventoried files omitted by the model are added to an
 `Other files` component. No source files are changed during planning.
 
 In an interactive terminal, one dashboard shows all components and their scan

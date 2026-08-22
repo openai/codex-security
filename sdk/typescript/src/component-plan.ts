@@ -98,6 +98,11 @@ export async function planComponents(
   const selected = plan.components.flatMap(({ paths }) => paths);
   for (let index = 0; index < selected.length; index++) {
     const path = selected[index]!;
+    if (!files.some((file) => containsPath(path, file))) {
+      throw new Error(
+        `Automatic component plan selected a path outside its file inventory: ${path}.`,
+      );
+    }
     if (
       selected
         .slice(index + 1)
