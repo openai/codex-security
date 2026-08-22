@@ -28,7 +28,6 @@ const DESTINATION = {
   destination: "linear",
   teamId: "team_example",
   projectId: "project_example",
-  uploadedAt: "2026-06-01T10:30:00Z",
 } as const;
 
 afterEach(async () => {
@@ -68,6 +67,31 @@ async function reseal(scanDirectory: string): Promise<void> {
 }
 
 describe("scan publication preparation", () => {
+  test("preserves cancellation while loading the sealed scan", async () => {
+    const scanDirectory = await copyExample();
+    const controller = new AbortController();
+    const reason = new Error("Publication preparation canceled.");
+    controller.abort(reason);
+
+    await expect(
+      prepareScanPublication(scanDirectory, {
+        ...DESTINATION,
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(reason);
+  });
+
+  test("prepares stable descriptions without a wall-clock upload timestamp", async () => {
+    const scanDirectory = await copyExample();
+    const options = { destination: "linear", teamId: "team_example" } as const;
+    const first = await prepareScanPublication(scanDirectory, options);
+    const second = await prepareScanPublication(scanDirectory, options);
+
+    expect(second).toEqual(first);
+    expect(first.issues[0]!.description).toContain("**Completed:**");
+    expect(first.issues[0]!.description).not.toContain("**Uploaded:**");
+  });
+
   test("prepares sealed findings with scan-based upload IDs and full traceability", async () => {
     const scanDirectory = await copyExample();
     const publication = await prepareScanPublication(
@@ -113,7 +137,7 @@ describe("scan publication preparation", () => {
     expect(issue.description).toContain("**Scan mode:** standard");
     expect(issue.description).toContain("**CWE:** CWE-22");
     expect(issue.description).toContain("**Sink:** `src/extract.py:41-44`");
-    expect(issue.description).toContain("**Uploaded:** 2026-06-01T10:30:00Z");
+    expect(issue.description).not.toContain("**Uploaded:**");
     expect(issue.description).toContain("without containment validation");
     expect(issue.description).toContain("Normalize destinations");
     expect(issue.description).not.toContain("/blob/deadbeef/");
@@ -177,7 +201,6 @@ describe("scan publication preparation", () => {
     const publication = await prepareScanPublication(scanDirectory, {
       destination: "linear",
       teamId: "team_example",
-      uploadedAt: "2026-06-01T10:30:00Z",
     });
 
     expect(publication.destination).toEqual({

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import {
   appendFile,
   mkdir,
@@ -46,6 +46,8 @@ export interface PublishScanOptions {
   projectId?: string;
   linearApiKey?: string;
   assigneeId?: string;
+  findingIds?: readonly string[];
+  expectedDigest?: string;
   dryRun?: boolean;
   signal?: AbortSignal;
   onProgress?: (event: PublishScanProgress) => void;
@@ -90,6 +92,7 @@ export interface PublishScanResult {
   dryRun?: boolean;
   issues?: PreparedPublicationIssue[];
   warnings?: string[];
+  payloadDigest: string;
 }
 
 export interface PublicationCodexResult {
@@ -146,21 +149,38 @@ export async function publishScanInternal(
 
   const environment = dependencies.environment ?? process.env;
   const linearApiKey = resolveLinearApiKey(environment, options.linearApiKey);
-  if (options.assigneeId !== undefined && linearApiKey === undefined) {
-    throw new ConfigurationError(
-      "A Linear API key is required to select a publication assignee.",
-    );
+  let approvedAssignee: { id: string; key: string } | undefined;
+  if (options.assigneeId !== undefined) {
+    if (linearApiKey === undefined) {
+      throw new ConfigurationError(
+        "A Linear API key is required to select a publication assignee.",
+      );
+    }
+    approvedAssignee = { id: options.assigneeId, key: linearApiKey };
   }
 
-  const prepared = await (dependencies.prepare ?? prepareScanPublication)(
-    scanDirectory,
-    options,
-  );
+  const fullPublication = await (
+    dependencies.prepare ?? prepareScanPublication
+  )(scanDirectory, options);
   options.signal?.throwIfAborted();
+  const prepared = selectPublicationFindings(
+    fullPublication,
+    options.findingIds,
+  );
+  const payloadDigest = publicationPayloadDigest(prepared, approvedAssignee);
+  if (
+    options.expectedDigest !== undefined &&
+    options.expectedDigest !== payloadDigest
+  ) {
+    throw new ConfigurationError(
+      "The prepared Linear publication does not match the expected digest. Review a new dry run before publishing.",
+    );
+  }
   const result: PublishScanResult = {
     scanId: prepared.scanId,
     uploadId: prepared.scanId,
     destination: prepared.destination,
+    payloadDigest,
     created: [],
     failed: [],
     counts: {
@@ -175,7 +195,7 @@ export async function publishScanInternal(
   if (prepared.issues.length === 0) return result;
 
   await (dependencies.preparePublicationStore ?? preparePublicationStore)(
-    prepared,
+    fullPublication,
     environment,
   );
   options.signal?.throwIfAborted();
@@ -307,7 +327,7 @@ export async function publishScanInternal(
     try {
       result.created = await (
         dependencies.recordPublishedIssues ?? recordPublishedIssues
-      )(prepared, handoffResults.created, environment);
+      )(fullPublication, handoffResults.created, environment);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
@@ -375,6 +395,66 @@ export async function publishScanInternal(
     total: result.counts.findings,
   });
   return result;
+}
+
+function selectPublicationFindings(
+  publication: PreparedScanPublication,
+  findingIds: readonly string[] | undefined,
+): PreparedScanPublication {
+  if (findingIds === undefined) return publication;
+  if (
+    !Array.isArray(findingIds) ||
+    findingIds.some((id) => typeof id !== "string" || !id.trim())
+  ) {
+    throw new ConfigurationError(
+      "Publication finding IDs must be nonempty strings.",
+    );
+  }
+  const selected = new Set(findingIds);
+  const known = new Set(publication.issues.map((issue) => issue.findingId));
+  for (const findingId of selected) {
+    if (!known.has(findingId)) {
+      throw new ConfigurationError(
+        `Unknown publication finding ID: ${JSON.stringify(findingId)}.`,
+      );
+    }
+  }
+  return {
+    ...publication,
+    issues: publication.issues.filter((issue) => selected.has(issue.findingId)),
+  };
+}
+
+function publicationPayloadDigest(
+  publication: PreparedScanPublication,
+  assignee: { id: string; key: string } | undefined,
+): string {
+  const { destination } = publication;
+  const digest =
+    assignee === undefined
+      ? createHash("sha256")
+      : createHmac("sha256", assignee.key);
+  return digest
+    .update(
+      JSON.stringify({
+        version: assignee === undefined ? 1 : 2,
+        scanId: publication.scanId,
+        destination: {
+          type: destination.type,
+          teamId: destination.teamId,
+          projectId: destination.projectId ?? null,
+        },
+        assigneeId: assignee?.id ?? null,
+        issues: publication.issues.map((issue) => ({
+          findingId: issue.findingId,
+          occurrenceId: issue.occurrenceId,
+          title: issue.title,
+          description: issue.description,
+          priority: issue.priority ?? null,
+        })),
+      }),
+    )
+    .digest("hex");
 }
 
 async function publishLinearApiIssues(

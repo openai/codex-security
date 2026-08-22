@@ -21,7 +21,7 @@ export interface PrepareScanPublicationOptions {
   destination: "linear";
   teamId: string;
   projectId?: string;
-  uploadedAt?: string;
+  signal?: AbortSignal;
 }
 
 export interface PreparedPublicationIssue {
@@ -55,8 +55,8 @@ export async function prepareScanPublication(
   const { contract, scanDirectory: canonicalScanDirectory } =
     await loadContractWithScanDirectory(scanDirectory, {
       pluginRoot: await bundledPluginRoot(),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
-  const uploadedAt = options.uploadedAt ?? new Date().toISOString();
   const scanId = contract.manifest.scan.id;
 
   return {
@@ -76,7 +76,7 @@ export async function prepareScanPublication(
         findingId: finding.findingId,
         occurrenceId: finding.occurrenceId,
         title: `[Codex Security][${finding.severity.level.toUpperCase()}] ${finding.title}`,
-        description: renderFindingDescription(contract, finding, uploadedAt),
+        description: renderFindingDescription(contract, finding),
         ...(priority === undefined ? {} : { priority }),
       };
     }),
@@ -86,7 +86,6 @@ export async function prepareScanPublication(
 function renderFindingDescription(
   contract: LoadedContract,
   finding: Finding,
-  uploadedAt: string,
 ): string {
   const { coverage } = contract;
   const { scan } = contract.manifest;
@@ -119,7 +118,6 @@ function renderFindingDescription(
     `**Scan mode:** ${scanMode(coverage.mode)}`,
     `**Started:** ${scan.startedAt}`,
     `**Completed:** ${scan.completedAt}`,
-    `**Uploaded:** ${uploadedAt}`,
     "",
     "### Affected locations",
     "",

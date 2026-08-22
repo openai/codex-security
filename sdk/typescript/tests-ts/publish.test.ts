@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import {
   appendFile,
   mkdtemp,
@@ -441,6 +441,281 @@ describe("direct Linear API publication", () => {
 });
 
 describe("connected Linear publication", () => {
+  test("publishes only selected findings while verifying the full scan history", async () => {
+    const publication = preparedPublication(3);
+    const selected = [publication.issues[0]!, publication.issues[2]!];
+    const preview = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        findingIds: ["finding-3", "finding-1", "finding-1"],
+        dryRun: true,
+      },
+      dependencies(publication),
+    );
+    expect(preview.issues).toEqual(selected);
+    expect(preview.payloadDigest).toMatch(/^[a-f0-9]{64}$/u);
+    let verified = false;
+    let persisted = false;
+
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        findingIds: ["finding-1", "finding-3"],
+        expectedDigest: preview.payloadDigest,
+      },
+      dependencies(
+        publication,
+        {},
+        {
+          preparePublicationStore: async (full) => {
+            expect(full).toBe(publication);
+            verified = true;
+          },
+          runCodex: async (_command, _args, input) => {
+            expect(verified).toBe(true);
+            const payload = JSON.parse(
+              await readFile(publicationData(input).publicationFile, "utf8"),
+            );
+            expect(
+              payload.batches
+                .flat()
+                .map((issue: PreparedPublicationIssue) => issue.findingId),
+            ).toEqual(["finding-1", "finding-3"]);
+            expect(JSON.stringify(payload)).not.toContain("finding-2");
+            return {
+              exitCode: 0,
+              stdout: selected.map((issue) => issueEvent(issue)).join("\n"),
+              stderr: "",
+            };
+          },
+          recordPublishedIssues: async (full, issues) => {
+            expect(full).toBe(publication);
+            expect(issues.map((issue) => issue.findingId)).toEqual([
+              "finding-1",
+              "finding-3",
+            ]);
+            persisted = true;
+            return [...issues];
+          },
+        },
+      ),
+    );
+    expect(persisted).toBe(true);
+    expect(result.payloadDigest).toBe(preview.payloadDigest);
+    expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
+  });
+
+  test("rejects changed approved payloads before local or remote publication work", async () => {
+    const original = preparedPublication(2);
+    const preview = await publishScanInternal(
+      original.scanDirectory,
+      { ...OPTIONS, dryRun: true },
+      dependencies(original),
+    );
+    const changes: Array<
+      (
+        publication: PreparedScanPublication,
+        options: PublishScanOptions,
+      ) => void
+    > = [
+      (publication) => {
+        publication.scanId = "different-scan";
+      },
+      (publication) => {
+        publication.destination.teamId = "different-team";
+      },
+      (publication) => {
+        delete publication.destination.projectId;
+      },
+      (publication) => {
+        publication.issues[0]!.occurrenceId = "different-occurrence";
+      },
+      (publication) => {
+        publication.issues[0]!.title = "Changed title";
+      },
+      (publication) => {
+        publication.issues[0]!.description += "\nChanged content";
+      },
+      (publication) => {
+        publication.issues[0]!.priority = 4;
+      },
+      (_publication, options) => {
+        options.findingIds = ["finding-1"];
+      },
+      (_publication, options) => {
+        options.linearApiKey = "synthetic-key";
+        options.assigneeId = "another-user";
+      },
+    ];
+    for (const change of changes) {
+      const publication = structuredClone(original);
+      const options: PublishScanOptions = {
+        ...OPTIONS,
+        expectedDigest: preview.payloadDigest,
+      };
+      change(publication, options);
+      let started = false;
+      await expect(
+        publishScanInternal(
+          publication.scanDirectory,
+          options,
+          dependencies(
+            publication,
+            {},
+            {
+              preparePublicationStore: async () => {
+                started = true;
+              },
+              resolveCodex: () => {
+                started = true;
+                return { command: "must-not-run" };
+              },
+              linearClient: linearApiClient(publication, {
+                configured: () => {
+                  started = true;
+                },
+              }),
+            },
+          ),
+        ),
+      ).rejects.toThrow("does not match the expected digest");
+      expect(started).toBe(false);
+    }
+  });
+
+  test("rejects unknown selected findings and keeps an empty selection inert", async () => {
+    const publication = preparedPublication();
+    let started = false;
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        preparePublicationStore: async () => {
+          started = true;
+        },
+      },
+    );
+    for (const findingIds of [["missing-finding"], [""]]) {
+      await expect(
+        publishScanInternal(
+          publication.scanDirectory,
+          { ...OPTIONS, findingIds },
+          injected,
+        ),
+      ).rejects.toThrow(/finding ID/u);
+    }
+    const empty = await publishScanInternal(
+      publication.scanDirectory,
+      { ...OPTIONS, findingIds: [] },
+      injected,
+    );
+    expect(empty.counts).toEqual({ findings: 0, created: 0, failed: 0 });
+    expect(started).toBe(false);
+  });
+
+  test("keys assigned approvals without exposing the assignee or credential", async () => {
+    const publication = preparedPublication();
+    const preview = (
+      linearApiKey: string,
+      assigneeId = "reviewer@example.test",
+    ) =>
+      publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey,
+          assigneeId,
+          dryRun: true,
+        },
+        dependencies(publication),
+      );
+    const first = await preview("synthetic-first-key");
+    const repeated = await preview("synthetic-first-key");
+    const rotated = await preview("synthetic-rotated-key");
+    const reassigned = await preview(
+      "synthetic-first-key",
+      "another@example.test",
+    );
+    expect(repeated.payloadDigest).toBe(first.payloadDigest);
+    expect(rotated.payloadDigest).not.toBe(first.payloadDigest);
+    expect(reassigned.payloadDigest).not.toBe(first.payloadDigest);
+    expect(first.payloadDigest).toBe(
+      createHmac("sha256", "synthetic-first-key")
+        .update(
+          JSON.stringify({
+            version: 2,
+            scanId: publication.scanId,
+            destination: {
+              type: publication.destination.type,
+              teamId: publication.destination.teamId,
+              projectId: publication.destination.projectId ?? null,
+            },
+            assigneeId: "reviewer@example.test",
+            issues: publication.issues.map((issue) => ({
+              findingId: issue.findingId,
+              occurrenceId: issue.occurrenceId,
+              title: issue.title,
+              description: issue.description,
+              priority: issue.priority ?? null,
+            })),
+          }),
+        )
+        .digest("hex"),
+    );
+    expect(JSON.stringify(first)).not.toContain("synthetic-first-key");
+    expect(JSON.stringify(first)).not.toContain("reviewer@example.test");
+
+    const unassigned = (linearApiKey: string) =>
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, linearApiKey, dryRun: true },
+        dependencies(publication),
+      );
+    expect((await unassigned("synthetic-first-key")).payloadDigest).toBe(
+      (await unassigned("synthetic-rotated-key")).payloadDigest,
+    );
+
+    const approved = {
+      ...OPTIONS,
+      linearApiKey: "synthetic-first-key",
+      assigneeId: "reviewer@example.test",
+      expectedDigest: first.payloadDigest,
+    };
+    expect(
+      (
+        await publishScanInternal(
+          publication.scanDirectory,
+          { ...approved, dryRun: true },
+          dependencies(publication),
+        )
+      ).payloadDigest,
+    ).toBe(first.payloadDigest);
+    let started = false;
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...approved, linearApiKey: "synthetic-rotated-key" },
+        dependencies(
+          publication,
+          {},
+          {
+            preparePublicationStore: async () => {
+              started = true;
+            },
+            linearClient: linearApiClient(publication, {
+              configured: () => {
+                started = true;
+              },
+            }),
+          },
+        ),
+      ),
+    ).rejects.toThrow("does not match the expected digest");
+    expect(started).toBe(false);
+  });
+
   test("rejects pre-aborted publication before preparing scans or touching local state", async () => {
     const publication = preparedPublication();
     const controller = new AbortController();
@@ -510,7 +785,8 @@ describe("connected Linear publication", () => {
           publication,
           {},
           {
-            prepare: async () => {
+            prepare: async (_scanDirectory, prepareOptions) => {
+              expect(prepareOptions.signal).toBe(controller.signal);
               controller.abort(new Error("Publication preparation stopped."));
               return publication;
             },
@@ -742,6 +1018,7 @@ describe("connected Linear publication", () => {
       scanId: "scan-example",
       uploadId: "scan-example",
       destination: publication.destination,
+      payloadDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
       created: [
         {
           findingId: "finding-1",
@@ -1827,6 +2104,7 @@ describe("connected Linear publication", () => {
       scanId: "scan-example",
       uploadId: "scan-example",
       destination: publication.destination,
+      payloadDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
       created: [],
       failed: [],
       counts: { findings: 2, created: 0, failed: 0 },

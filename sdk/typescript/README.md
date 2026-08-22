@@ -678,12 +678,39 @@ npx @openai/codex-security publish scan \
 ```
 
 Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and the
-optional `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run` to preview the issue
-titles without creating them, or `--json` to return structured publication
-results.
+optional `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run --json` to preview the
+issue content and destination without creating issues, or `--json` to return
+structured publication results.
 Interactive publication shows a full-screen activity view with live Codex
 output and issue-creation progress. Other terminals receive plain progress on
 stderr, so `--json` output remains machine-readable.
+
+Repeat `--finding FINDING_ID` to publish only selected findings. Omit it to
+publish every finding. To publish exactly what you reviewed, copy the
+`payloadDigest` from a dry run and pass it as `--expect-digest` with the same
+selection and destination:
+
+```bash
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear --linear-team TEAM_ID --finding csf_example \
+  --dry-run --json
+
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear --linear-team TEAM_ID --finding csf_example \
+  --expect-digest DIGEST_FROM_PREVIEW
+```
+
+The digest covers the selected issue content, destination, scan identity, and
+requested assignee. A mismatch stops publication before any local publication
+state or Linear issues are created. When an assignee is selected, the digest
+uses HMAC-SHA-256 keyed by the selected Linear API credential. Keep the same
+assignee and credential when publishing; changing either requires a new preview.
+Unassigned previews remain credential-independent. Previews do not echo
+assignee identities or credentials. The digest is not a permissions check or a
+remote readback.
+Keep saved previews private: they contain the full finding descriptions and
+source snippets. Descriptions omit a wall-clock upload timestamp so an unchanged
+scan and selection produce the same preview; Linear records issue creation time.
 
 By default, publishing starts Codex with your existing Codex configuration and
 connected Linear app. Sign in to Codex and connect Linear before publishing in
@@ -751,6 +778,10 @@ console.log(publication.created.length);
 
 Add `projectId: "PROJECT_ID"` to the options to publish into a specific Linear
 project instead of directly to the team.
+
+Use `findingIds: ["csf_example"]` to select findings. A call with `dryRun: true`
+returns the selected `issues` and `payloadDigest`; pass that digest as
+`expectedDigest` on the publishing call to reject changes since review.
 
 Pass `linearApiKey` to publish directly through the Linear API. Omit
 `assigneeId` to leave issues unassigned, or supply a Linear user ID or email
