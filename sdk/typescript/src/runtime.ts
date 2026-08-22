@@ -1845,18 +1845,7 @@ export async function importAmbientAuth(
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
     await chmod(temporary, 0o600);
     try {
-      try {
-        await link(temporary, destination);
-      } catch (error) {
-        if (
-          !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
-            nodeErrorCode(error) ?? "",
-          )
-        ) {
-          throw error;
-        }
-        await copyFile(temporary, destination, constants.COPYFILE_EXCL);
-      }
+      await installFileNoClobber(temporary, destination);
     } catch (error) {
       if (
         nodeErrorCode(error) === "EEXIST" &&
@@ -1877,6 +1866,25 @@ export async function importAmbientAuth(
     );
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function installFileNoClobber(
+  source: string,
+  destination: string,
+): Promise<void> {
+  try {
+    await link(source, destination);
+  } catch (error) {
+    // Windows reports unsupported FAT/exFAT hard links as EISDIR.
+    if (
+      !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK", "EISDIR"].includes(
+        nodeErrorCode(error) ?? "",
+      )
+    ) {
+      throw error;
+    }
+    await copyFile(source, destination, constants.COPYFILE_EXCL);
   }
 }
 
@@ -2055,7 +2063,7 @@ async function rejectBackslashZipNames(
 
 export async function resolvePluginPath(
   pluginPath: string | undefined,
-  workspace: string,
+  workspace: string | (() => Promise<string>),
   signal?: AbortSignal,
 ): Promise<string> {
   if (pluginPath === undefined) {
@@ -2065,9 +2073,11 @@ export async function resolvePluginPath(
   const path = resolve(expandHome(pluginPath));
   const metadata = await lstat(path).catch(() => null);
   if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
+    const extractionRoot =
+      typeof workspace === "function" ? await workspace() : workspace;
     return await extractPluginZip(
       path,
-      join(workspace, "extracted-plugin"),
+      join(extractionRoot, "extracted-plugin"),
       signal,
     );
   }

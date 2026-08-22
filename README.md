@@ -121,10 +121,20 @@ npx @openai/codex-security policy . --headless --output-dir /path/outside/reposi
 
 The command reads the source, describes the system, builds a detailed threat
 model, and drafts a short `SECURITY.md`. In a terminal, it asks about important
-facts the code cannot establish and shows the proposed diff. It does not change
-repository files. Review the saved policy and check for other policy files that
-link to the target before copying it. Later scans read the root and nested
-`SECURITY.md` files.
+facts the code cannot establish, shows the proposed diff, and asks before
+writing. Later scans read the approved root and nested `SECURITY.md` files.
+
+To review a saved draft, edit its `SECURITY.md`, then run:
+
+```bash
+npx @openai/codex-security policy . --apply /path/outside/repository/policy --write
+```
+
+Use the same repository and `--path` as generation. Applying does not call the
+model. It checks that the original and inherited policies are unchanged, keeps
+the write inside the approved scope, and verifies the result. Updates retain the
+previous file at the reported recovery path. Keep it until other writers have
+closed it and any edits are reconciled.
 
 Drafts are stored outside the repository and any enclosing Git checkout. The
 same private directory contains `project-spec.md`, `THREAT_MODEL.md`, and review

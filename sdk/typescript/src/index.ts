@@ -37,6 +37,8 @@ export {
   PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
 } from "./errors.js";
 export type { ProtectedScanPathKind } from "./errors.js";
 export {
@@ -49,10 +51,13 @@ export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
 export {
+  applySecurityPolicy,
+  loadSecurityPolicyDraft,
   resolveSecurityPolicyTarget,
   securityPolicyDiff,
 } from "./security-policy.js";
 export type {
+  SecurityPolicyApplication,
   SecurityPolicyDraft,
   SecurityPolicyOptions,
   SecurityPolicyPreflight,

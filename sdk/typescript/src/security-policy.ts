@@ -1,22 +1,43 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  chmod,
+  copyFile,
   lstat,
   open,
+  readFile,
   readdir,
   readlink,
   realpath,
+  rename,
+  rm,
   stat,
+  writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import { jsonForPrompt, pluginPythonCommand } from "./codex-prompt.js";
 import type { ScanCost } from "./cost.js";
-import { CodexSecurityError, InvalidTargetError } from "./errors.js";
-import { resolvePluginPython, type ProcessEnvironment } from "./runtime.js";
+import { requireScanFile } from "./contract.js";
+import {
+  CodexSecurityError,
+  InvalidTargetError,
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
+} from "./errors.js";
+import {
+  cleanupSdkDirectory,
+  createIsolatedHome,
+  installFileNoClobber,
+  requireOutputOutsideRepositories,
+  resolvePluginPath,
+  resolvePluginPython,
+  type ProcessEnvironment,
+} from "./runtime.js";
 import {
   abortable,
   enclosingGitWorktreeRoot,
@@ -192,6 +213,12 @@ export interface SecurityPolicyDraft
   pluginPath?: string;
   reviewNotes: string[];
   cost: Readonly<ScanCost> | null;
+}
+
+export interface SecurityPolicyApplication {
+  status: "written" | "unchanged";
+  targetPath: string;
+  recoveryPath: string | null;
 }
 
 const execFileAsync = promisify(execFile);
@@ -452,15 +479,22 @@ function policyPathsMatch(
   );
 }
 
+interface SecurityPolicyPath {
+  path: string;
+  repository: string;
+  reportingPolicy: boolean;
+  isSymbolicLink: boolean;
+}
+
 async function* securityPolicyPaths(
   root: string,
   repositories: readonly string[],
   signal?: AbortSignal,
-): AsyncGenerator<string> {
+): AsyncGenerator<SecurityPolicyPath> {
   const knownRoots = new Set<string>();
   const gitDirectories = new Set<string>();
-  const policies: string[] = [];
-  const reportingPaths = new Set<string>();
+  const policies: SecurityPolicyPath[] = [];
+  const reportingPaths = new Map<string, string>();
   const isGitData = (path: string): boolean =>
     [...gitDirectories].some(
       (directory) => !relativePathIsOutside(relative(directory, path)),
@@ -487,7 +521,7 @@ async function* securityPolicyPaths(
         directory = await realpath(directory);
         policyRelativePath(repository, directory);
       }
-      reportingPaths.add(join(directory, "SECURITY.md"));
+      reportingPaths.set(join(directory, "SECURITY.md"), repository);
     }
   };
   for (const repository of repositories) await addRoot(repository);
@@ -532,7 +566,12 @@ async function* securityPolicyPaths(
       (metadata?.isFile() || metadata?.isSymbolicLink()) &&
       !reportingPaths.has(path)
     )
-      policies.push(path);
+      policies.push({
+        path,
+        repository,
+        reportingPolicy: false,
+        isSymbolicLink: metadata.isSymbolicLink(),
+      });
     // Match the plugin inventory: do not follow directory links or Git data.
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === ".git") continue;
@@ -553,8 +592,20 @@ async function* securityPolicyPaths(
     }
   }
   // A nested checkout can register a Git directory visited earlier in the walk.
-  for (const path of policies) if (!isGitData(path)) yield path;
-  for (const path of reportingPaths) if (!isGitData(path)) yield path;
+  for (const policy of policies) if (!isGitData(policy.path)) yield policy;
+  for (const [path, repository] of reportingPaths) {
+    if (isGitData(path)) continue;
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    });
+    yield {
+      path,
+      repository,
+      reportingPolicy: true,
+      isSymbolicLink: metadata?.isSymbolicLink() ?? false,
+    };
+  }
 }
 
 export async function inspectSecurityPolicyPaths(
@@ -562,21 +613,25 @@ export async function inspectSecurityPolicyPaths(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const paths: string[] = [];
-  for await (const path of securityPolicyPaths(
+  for await (const entry of securityPolicyPaths(
     dirname(target.targetPath),
     [target.repository],
     signal,
   )) {
-    const alias = await policyLinkSnapshot(path, target.repository, signal);
+    const alias = await policyLinkSnapshot(
+      entry.path,
+      target.repository,
+      signal,
+    );
     if (alias.status === "cycle")
       throw new CodexSecurityError(
-        `Security-policy link contains a cycle: ${path}`,
+        `Security-policy link contains a cycle: ${entry.path}`,
       );
     const destination = await policyLinkDestination(target.repository, alias);
     if (alias.status !== "resolved" || destination === null) continue;
     if ((await stat(destination)).isFile()) {
       await readPolicyFile(destination);
-      paths.push(policyRelativePath(target.repository, path));
+      paths.push(policyRelativePath(target.repository, entry.path));
     }
   }
   return paths.sort();
@@ -627,6 +682,13 @@ export async function requireUnchangedSecurityPolicy(
   signal?: AbortSignal,
 ): Promise<void> {
   const current = await readSecurityPolicySnapshot(target, signal);
+  requirePolicySnapshot(current, snapshot);
+}
+
+function requirePolicySnapshot(
+  current: SecurityPolicySnapshot,
+  snapshot: SecurityPolicySnapshot,
+): void {
   if (current.previousContent !== snapshot.previousContent) {
     throw new CodexSecurityError(
       "SECURITY.md changed after its contents were read. Reconcile the changes and generate a new draft before writing.",
@@ -637,6 +699,22 @@ export async function requireUnchangedSecurityPolicy(
       "An inherited SECURITY.md changed after the policy guidance was read. Generate a new draft before writing.",
     );
   }
+}
+
+async function readDraftContent(
+  target: SecurityPolicyTarget,
+  draft: SecurityPolicyDraft,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const current = await readSecurityPolicySnapshot(target, signal);
+  requirePolicySnapshot(current, {
+    previousContent:
+      current.previousContent === draft.content
+        ? draft.content
+        : draft.previousContent,
+    inheritedPolicySha256: draft.inheritedPolicySha256,
+  });
+  return current.previousContent;
 }
 
 export async function resolveSecurityPolicyGuidance(
@@ -793,7 +871,7 @@ export async function runSecurityPolicyStages(options: {
       "Retain their full repository-relative citations where they support policy decisions; do not shorten nested source paths.",
       ownerContext,
       `Threat-model questions and review notes (JSON data): ${jsonForPrompt({ questions: threatModel.questions, reviewNotes: threatModel.reviewNotes })}`,
-      "Use the define-security-policy skill to draft the complete SECURITY.md for the selected component. This request authorizes a draft only; the host will save it for owner review.",
+      "Use the define-security-policy skill to draft the complete SECURITY.md for the selected component. This request authorizes a draft only; the host will preview the exact diff and obtain approval before applying it.",
       "Preserve useful existing guidance, private-reporting instructions, and confirmed owner decisions. Write concise, source-backed scope, trust boundaries, named security invariants, reportability and severity context, owner-confirmed exclusions, limitations, and open decisions. Do not copy the full threat model, exploit narratives, or private artifact paths into SECURITY.md.",
       "Mark new or changed policy decisions as requiring owner review. Never turn an assumption or missing evidence into permission to suppress findings. List new exclusions, accepted risks, severity changes, and material unanswered questions in reviewNotes.",
     ].join("\n"),
@@ -849,6 +927,65 @@ export async function runSecurityPolicyStages(options: {
   };
 }
 
+export async function loadSecurityPolicyDraft(
+  repository: string,
+  outputDir: string,
+  options: Pick<SecurityPolicyOptions, "path" | "signal"> = {},
+): Promise<SecurityPolicyDraft> {
+  const target = await resolveSecurityPolicyTarget(
+    repository,
+    options.path,
+    options.signal,
+  );
+  const manifestPath = await requireScanFile(
+    outputDir,
+    MANIFEST_NAME,
+    MANIFEST_NAME,
+    options.signal,
+  );
+  const directory = dirname(manifestPath);
+  const file = (name: string) =>
+    requireScanFile(directory, name, name, options.signal);
+  const manifest = manifestSchema.parse(
+    JSON.parse(await readFile(manifestPath, "utf8")),
+  );
+  if (
+    manifest.repository !== target.repository ||
+    manifest.scope !== target.scope
+  ) {
+    throw new CodexSecurityError(
+      "The saved policy draft belongs to a different repository or component. Select its original target explicitly.",
+    );
+  }
+  const originalPath = await file(ORIGINAL_NAME);
+  const original = await readPolicyFile(originalPath);
+  if (
+    manifest.previousPolicySha256 === null
+      ? original !== ""
+      : digest(original) !== manifest.previousPolicySha256
+  ) {
+    throw new CodexSecurityError(
+      "The saved policy's original-content checkpoint has changed.",
+    );
+  }
+  const draftPath = await file("SECURITY.md");
+  const content = await readPolicyFile(draftPath);
+  validatePolicyContent(content);
+  return {
+    ...target,
+    outputDir: directory,
+    draftPath,
+    specificationPath: await file("project-spec.md"),
+    threatModelPath: await file("THREAT_MODEL.md"),
+    content,
+    previousContent: manifest.previousPolicySha256 === null ? null : original,
+    inheritedPolicySha256: manifest.inheritedPolicySha256,
+    customPlugin: manifest.customPlugin,
+    reviewNotes: manifest.reviewNotes,
+    cost: null,
+  };
+}
+
 /** Raw unified diff. A Python resolver is called only when there is a change.
  * Use CodexSecurity.previewPolicy() for terminal output. */
 export async function securityPolicyDiff(
@@ -858,8 +995,8 @@ export async function securityPolicyDiff(
 ): Promise<string> {
   draft = { ...draft };
   const target = await resolveDraftTarget(draft, signal);
-  await requireUnchangedSecurityPolicy(target, draft, signal);
-  if (draft.previousContent === draft.content) return "";
+  if ((await readDraftContent(target, draft, signal)) === draft.content)
+    return "";
   const selectedPython = typeof python === "function" ? await python() : python;
   const interpreter =
     selectedPython ??
@@ -903,12 +1040,399 @@ export async function securityPolicyDiff(
       ]),
     );
   });
-  await requireUnchangedSecurityPolicy(
+  const current = await readDraftContent(
     await resolveDraftTarget(draft, signal),
     draft,
     signal,
   );
-  return diff;
+  return current === draft.content ? "" : diff;
+}
+
+async function validatePolicyLinks(
+  target: SecurityPolicyTarget,
+  signal?: AbortSignal,
+): Promise<void> {
+  const repositories = await enclosingGitWorktreeRoots(
+    target.repository,
+    signal,
+  );
+  if (repositories.length === 0) repositories.push(target.repository);
+  const protectedRoot = repositories.at(-1)!;
+  const component = dirname(target.targetPath);
+  const canonicalTarget = await realpath(target.targetPath).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    },
+  );
+  for await (const entry of securityPolicyPaths(
+    protectedRoot,
+    repositories,
+    signal,
+  )) {
+    if (!entry.reportingPolicy && !entry.isSymbolicLink) continue;
+    const boundary = repositories.find(
+      (root) => !relativePathIsOutside(relative(root, entry.path)),
+    )!;
+    const alias = await policyLinkSnapshot(entry.path, boundary, signal);
+    const destination = await policyLinkDestination(boundary, alias);
+    const reportingPolicy =
+      entry.reportingPolicy && entry.path !== target.targetPath;
+    const outsideScope =
+      entry.repository !== target.repository ||
+      relativePathIsOutside(relative(component, dirname(entry.path)));
+    if (
+      (outsideScope || reportingPolicy) &&
+      destination !== null &&
+      policyPathsMatch(
+        canonicalTarget ?? target.targetPath,
+        destination,
+        canonicalTarget === null && alias.status === "missing",
+      )
+    ) {
+      const policyPath = relative(protectedRoot, entry.path)
+        .split(sep)
+        .join("/");
+      throw new CodexSecurityError(
+        `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before applying a policy.`,
+      );
+    }
+  }
+}
+
+export async function applySecurityPolicy(
+  draft: SecurityPolicyDraft,
+  options: {
+    pythonPath?: string;
+    pluginPath?: string;
+    environment?: ProcessEnvironment;
+    signal?: AbortSignal;
+  } = {},
+): Promise<SecurityPolicyApplication> {
+  draft = { ...draft };
+  validatePolicyContent(draft.content);
+  const target = await resolveDraftTarget(draft, options.signal);
+  const alreadyApplied =
+    (await readSecurityPolicy(target.targetPath)) === draft.content;
+  let written = alreadyApplied && draft.previousContent !== draft.content;
+  let recoveryPath: string | null = null;
+  let pluginWorkspace: string | undefined;
+  try {
+    await readDraftContent(target, draft, options.signal);
+    if (draft.previousContent === draft.content)
+      return {
+        status: "unchanged",
+        targetPath: target.targetPath,
+        recoveryPath: null,
+      };
+    await validatePolicyLinks(target, options.signal);
+    const protectedRoots = await securityPolicyProtectedRoots(
+      target,
+      options.signal,
+    );
+    const protectedRoot = protectedRoots[0]!;
+    const recoveryDirectory =
+      alreadyApplied || draft.previousContent === null
+        ? null
+        : dirname(
+            await requireScanFile(
+              draft.outputDir,
+              MANIFEST_NAME,
+              MANIFEST_NAME,
+              options.signal,
+            ),
+          );
+    if (recoveryDirectory !== null)
+      requireOutputOutsideRepositories(protectedRoots, recoveryDirectory);
+    const pluginPath = options.pluginPath ?? draft.pluginPath;
+    if (draft.customPlugin && pluginPath === undefined) {
+      throw new CodexSecurityError(
+        "This draft used a custom plugin. Select it explicitly with --plugin-path or the SDK's pluginPath option before applying.",
+      );
+    }
+    const python = await resolvePluginPython({
+      configuredPath: options.pythonPath,
+      environment: options.environment,
+      protectedRoot,
+      signal: options.signal,
+    });
+    const pluginRoot = await resolvePluginPath(
+      pluginPath,
+      async () => {
+        const temporaryRoot = await realpath(tmpdir());
+        requireOutputOutsideRepositories(
+          protectedRoots,
+          temporaryRoot,
+          "temporary",
+        );
+        pluginWorkspace = await createIsolatedHome(temporaryRoot, (path) =>
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+        );
+        return pluginWorkspace;
+      },
+      options.signal,
+    );
+    if (!alreadyApplied) {
+      await resolveSecurityPolicyGuidance(
+        target,
+        python,
+        pluginRoot,
+        options.environment,
+        options.signal,
+      );
+      options.signal?.throwIfAborted();
+      const temporary = join(
+        dirname(target.targetPath),
+        `.SECURITY.md.${randomUUID()}.tmp`,
+      );
+      try {
+        const temporaryHandle = await open(
+          temporary,
+          "wx",
+          draft.previousContent === null ? 0o644 : 0o600,
+        );
+        try {
+          if (draft.previousContent !== null && process.platform === "win32")
+            await copyWindowsSecurityDescriptor(
+              target.targetPath,
+              temporary,
+              options.signal,
+            );
+          await temporaryHandle.writeFile(draft.content, {
+            encoding: "utf8",
+            signal: options.signal,
+          });
+        } finally {
+          await temporaryHandle.close();
+        }
+        if (
+          (await realpath(dirname(target.targetPath))) !==
+          dirname(target.targetPath)
+        ) {
+          throw new CodexSecurityError(
+            "The security-policy destination changed. Review a new draft before writing.",
+          );
+        }
+        await resolveDraftTarget(draft, options.signal);
+        await validatePolicyLinks(target, options.signal);
+        await requireUnchangedSecurityPolicy(target, draft, options.signal);
+        options.signal?.throwIfAborted();
+        if (draft.previousContent === null) {
+          try {
+            await installPolicyFile(temporary, target.targetPath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+              // A failed copy fallback can leave a partial destination.
+              written =
+                (await lstat(target.targetPath).catch(
+                  (inspectError: NodeJS.ErrnoException) => {
+                    if (
+                      inspectError.code === "ENOENT" ||
+                      inspectError.code === "ENOTDIR"
+                    )
+                      return null;
+                    throw inspectError;
+                  },
+                )) !== null;
+            }
+            throw error;
+          }
+        } else
+          recoveryPath = await replaceExistingPolicy(
+            temporary,
+            target.targetPath,
+            draft.previousContent,
+            recoveryDirectory!,
+            options.signal,
+          );
+        written = true;
+        if (recoveryPath !== null)
+          recoveryPath = await retainPolicyRecovery(
+            recoveryPath,
+            recoveryDirectory!,
+          );
+      } finally {
+        // Preserve the write or recovery outcome if temporary cleanup fails.
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+    }
+    // SDK cancellation must not skip post-write checks. Process interruption
+    // can still leave a written policy that needs verification on retry.
+    if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
+      throw new CodexSecurityError(
+        "The written policy contents do not match the reviewed draft.",
+      );
+    }
+    if (
+      recoveryPath !== null &&
+      (await readSecurityPolicy(recoveryPath)) !== draft.previousContent
+    ) {
+      throw new CodexSecurityError(
+        "The previous SECURITY.md changed while the replacement was being installed.",
+      );
+    }
+    await resolveSecurityPolicyGuidance(
+      target,
+      python,
+      pluginRoot,
+      options.environment,
+    );
+    await resolveDraftTarget(draft);
+    await validatePolicyLinks(target);
+    await requireUnchangedSecurityPolicy(target, {
+      previousContent: draft.content,
+      inheritedPolicySha256: draft.inheritedPolicySha256,
+    });
+    return {
+      status: alreadyApplied ? "unchanged" : "written",
+      targetPath: target.targetPath,
+      recoveryPath,
+    };
+  } catch (error) {
+    if (written)
+      throw new SecurityPolicyVerificationError(target.targetPath, {
+        cause: error,
+        ...(recoveryPath === null ? {} : { recoveryPath }),
+      });
+    throw error;
+  } finally {
+    if (pluginWorkspace !== undefined)
+      await cleanupSdkDirectory(pluginWorkspace).catch(() => undefined);
+  }
+}
+
+async function installPolicyFile(
+  temporary: string,
+  targetPath: string,
+): Promise<void> {
+  // Windows may make a read-only file writable before removing it. Keep the
+  // temporary inode separate so cleanup cannot change the installed mode.
+  if (((await stat(temporary)).mode & 0o200) === 0)
+    await copyFile(temporary, targetPath, constants.COPYFILE_EXCL);
+  else await installFileNoClobber(temporary, targetPath);
+}
+
+async function copyWindowsSecurityDescriptor(
+  source: string,
+  destination: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const sourceVariable = "CODEX_SECURITY_POLICY_ACL_SOURCE";
+  const destinationVariable = "CODEX_SECURITY_POLICY_ACL_DESTINATION";
+  const inheritedEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) =>
+        !["PSMODULEPATH", sourceVariable, destinationVariable].includes(
+          name.toUpperCase(),
+        ),
+    ),
+  );
+  const systemDirectory = join(
+    process.env["SystemRoot"] ?? "C:\\Windows",
+    "System32",
+  );
+  await execFileAsync(
+    join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      [
+        "$ErrorActionPreference = 'Stop'",
+        `$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:${sourceVariable}`,
+        `Microsoft.PowerShell.Security\\Set-Acl -LiteralPath $env:${destinationVariable} -AclObject $acl`,
+      ].join("; "),
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...inheritedEnvironment,
+        [sourceVariable]: source,
+        [destinationVariable]: destination,
+        PSModulePath: join(
+          systemDirectory,
+          "WindowsPowerShell",
+          "v1.0",
+          "Modules",
+        ),
+      },
+      signal,
+      windowsHide: true,
+    },
+  );
+}
+
+async function replaceExistingPolicy(
+  temporary: string,
+  targetPath: string,
+  previousContent: string,
+  recoveryDirectory: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const recoveryPath = `${temporary}.previous`;
+  await writeFile(recoveryPath, "", { flag: "wx", mode: 0o600 });
+  try {
+    signal?.throwIfAborted();
+    // Check the displaced file, then install without replacing a newer save.
+    await rename(targetPath, recoveryPath);
+  } catch (error) {
+    await rm(recoveryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  try {
+    if ((await readSecurityPolicy(recoveryPath)) !== previousContent) {
+      throw new CodexSecurityError(
+        "SECURITY.md changed while the policy was being applied. Review a new draft before writing.",
+      );
+    }
+    const mode = (await stat(recoveryPath)).mode & 0o777;
+    await chmod(temporary, mode);
+    signal?.throwIfAborted();
+    if (process.platform === "win32")
+      await copyWindowsSecurityDescriptor(recoveryPath, temporary, signal);
+    signal?.throwIfAborted();
+    await installPolicyFile(temporary, targetPath);
+  } catch (error) {
+    let cause = error;
+    try {
+      const metadata = await lstat(recoveryPath);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new CodexSecurityError(
+          "The recovery path is not a regular file.",
+        );
+      }
+      await installFileNoClobber(recoveryPath, targetPath);
+    } catch (restoreError) {
+      cause = new AggregateError([error, restoreError]);
+    }
+    throw new SecurityPolicyRecoveryError(
+      targetPath,
+      await retainPolicyRecovery(recoveryPath, recoveryDirectory),
+      { cause },
+    );
+  }
+  return recoveryPath;
+}
+
+async function retainPolicyRecovery(
+  recoveryPath: string,
+  directory: string,
+): Promise<string> {
+  const retained = join(directory, `recovery-SECURITY-${randomUUID()}.md`);
+  try {
+    await writeFile(retained, "", { flag: "wx", mode: 0o600 });
+  } catch {
+    return recoveryPath;
+  }
+  try {
+    // Preserve the inode: copying it would lose writes through an open handle.
+    await rename(recoveryPath, retained);
+    return retained;
+  } catch {
+    await rm(retained, { force: true }).catch(() => undefined);
+    return recoveryPath;
+  }
 }
 
 export function formatSecurityPolicyText(
