@@ -246,6 +246,7 @@ npx @openai/codex-security scan /path/to/repository --headless
 npx @openai/codex-security scan /path/to/repository --patch
 npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --json
 npx @openai/codex-security scan /path/to/repository --patch --patch-severity high --create-pr
+npx @openai/codex-security scan /path/to/repository --patch --review-minimality --review-style --assess-patch-risk
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
@@ -297,6 +298,7 @@ npx @openai/codex-security patch "Missing authorization check" --effort high
 npx @openai/codex-security patch OCCURRENCE_ID
 npx @openai/codex-security patch --scan SCAN_ID --severity high --json
 npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
+npx @openai/codex-security patch --scan SCAN_ID --review-minimality --review-style --assess-patch-risk
 npx @openai/codex-security patch --resume-pr codex-security/patch-SCAN_ID
 npx @openai/codex-security patch --scan latest --severity medium
 npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
@@ -397,6 +399,12 @@ saved-finding `patch` command to commit only verified patch files and open a
 draft pull request with `gh`. If the push or pull request fails, run the printed
 `patch --resume-pr BRANCH` command from the same repository. It uses the saved
 commit without running Codex again and refuses to publish if the branch changed.
+Add `--review-minimality`, `--review-style`, or `--assess-patch-risk` to either
+patching workflow for optional, independent reviews in that order. Minimality
+review removes unnecessary or unrelated changes; style review checks project
+instructions, local conventions, and applicable style guides; final risk
+assessment examines applicability, blast radius, regression protection, and
+merge risk without merging the patch. Each stage is disabled by default.
 JSON scan results include `patchSeverity`. Scan and
 saved-finding results include one `patches` entry per selected finding with
 status `verified`, `no_change`, `blocked`, or `failed`, plus `pullRequest` when

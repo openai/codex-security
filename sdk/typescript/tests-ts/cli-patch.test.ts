@@ -154,6 +154,50 @@ describe("scan and patch workflow", () => {
     expect(outcome.stderr).toContain("Patching 2 confirmed findings...");
   });
 
+  test("passes sequential review stages through scan and saved-finding patching", async () => {
+    for (const arguments_ of [
+      ["scan", "--patch"],
+      ["patch", "--scan", "scan-1"],
+    ]) {
+      const result = resultWithFindings(["high"]);
+      let prompt = "";
+      const outcome = await runWorkflow(
+        [
+          ...arguments_,
+          "--assess-patch-risk",
+          "--review-style",
+          "--review-minimality",
+        ],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onCodex: (args, output) => {
+            prompt = output!.appServer!.prompt;
+            completePatches(args, output);
+            return 0;
+          },
+        },
+      );
+
+      expect(outcome.exitCode).toBe(0);
+      const lines = prompt.split("\n");
+      const stageLine = lines.findIndex((line) =>
+        line.startsWith("After the existing security review"),
+      );
+      expect(JSON.parse(lines[stageLine + 1]!)).toEqual([
+        "minimality",
+        "local-coding-style",
+        "patch-risk-assessment",
+      ]);
+      expect(prompt).toContain(
+        JSON.stringify(join("skills", "assess-patch-risk", "SKILL.md")).slice(
+          1,
+          -1,
+        ),
+      );
+    }
+  });
+
   test("continues with separate patch tasks when one finding fails", async () => {
     const result = resultWithFindings(["critical", "high", "medium"]);
     const tasks: string[] = [];
@@ -490,6 +534,9 @@ describe("scan and patch workflow", () => {
       ["--scan", "scan-1"],
       ["--linear-issue", "SEC-123"],
       ["--create-pr"],
+      ["--review-minimality"],
+      ["--review-style"],
+      ["--assess-patch-risk"],
       ["occ_1"],
     ]) {
       let commandStarted = false;
@@ -1045,6 +1092,25 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(["scan", "--patch-severity", "high"]);
     expect(outcome.exitCode).toBe(2);
     expect(outcome.stderr).toContain("--patch-severity requires --patch");
+  });
+
+  test("rejects optional patch reviews without an explicit patch request", async () => {
+    for (const flag of [
+      "--review-minimality",
+      "--review-style",
+      "--assess-patch-risk",
+    ]) {
+      let started = false;
+      const outcome = await runWorkflow(["scan", flag], {
+        onCodex: () => {
+          started = true;
+          return 0;
+        },
+      });
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("Patch review options require --patch");
+      expect(started).toBe(false);
+    }
   });
 
   test("requires verified patching before creating a pull request", async () => {

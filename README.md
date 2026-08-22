@@ -20,6 +20,7 @@ npx @openai/codex-security scan .
 npx @openai/codex-security scan . --patch
 npx @openai/codex-security scan . --patch --patch-severity high --json
 npx @openai/codex-security scan . --patch --patch-severity high --create-pr
+npx @openai/codex-security scan . --patch --review-minimality --review-style --assess-patch-risk
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan . --validation-prompt-file validation.md
@@ -43,6 +44,12 @@ Use `--patch --patch-severity high` to fix high and critical findings. Add
 `--create-pr`, or enable the pull request option during review, to commit the
 verified files and open a draft GitHub pull request. Ordinary scans do not
 change repository files.
+
+Add `--review-minimality`, `--review-style`, or `--assess-patch-risk` to
+`scan --patch` or `patch` to enable independent, sequential reviews of patch
+scope, local coding conventions, and final patch applicability and merge risk.
+Each review is optional and disabled by default; risk assessment never merges a
+pull request.
 
 Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
 any positive number of hours, including fractional hours, up to 96. Completed

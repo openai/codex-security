@@ -1,0 +1,4 @@
+interface:
+  display_name: "Assess Patch Risk"
+  short_description: "Assess patch blast radius and merge risk"
+  default_prompt: "Use $assess-patch-risk to assess applicability, blast radius, merge readiness, and strict auto-merge eligibility; use independently grounded contract provenance, structured domain, claim-oracle, and assertion-sensitivity challenges plus a separate source falsifier where required."

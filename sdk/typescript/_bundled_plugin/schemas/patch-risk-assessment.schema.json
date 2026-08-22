@@ -1,0 +1,3533 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.com/codex-security/schemas/patch-risk-assessment.schema.json",
+  "title": "Codex Security patch risk assessment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "documentType",
+    "schemaVersion",
+    "subject",
+    "assessment",
+    "dimensions",
+    "patchDisposition",
+    "statusQuoRisk",
+    "boundaryChallenges",
+    "sourceChallengeReview",
+    "topRiskDrivers",
+    "protectiveFactors",
+    "unknowns",
+    "mergeConditions",
+    "recommendation",
+    "workflowLabel"
+  ],
+  "properties": {
+    "documentType": {
+      "const": "codex-security.patch-risk-assessment"
+    },
+    "schemaVersion": {
+      "const": "5.1"
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "baseRevision",
+        "patchDigest",
+        "changedFiles",
+        "materialization"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "headRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseContentDigest": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "patchDigest": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "changedFiles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "materialization": {
+          "$ref": "#/$defs/patchMaterialization"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "materialization": {
+                "properties": {
+                  "method": {
+                    "enum": [
+                      "provider_patch",
+                      "git_revision_range_v1"
+                    ]
+                  }
+                },
+                "required": [
+                  "method"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "headRevision"
+            ]
+          }
+        }
+      ]
+    },
+    "assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "overallRisk",
+        "impactIfWrong",
+        "regressionLikelihood",
+        "confidence"
+      ],
+      "properties": {
+        "overallRisk": {
+          "$ref": "#/$defs/riskRating"
+        },
+        "impactIfWrong": {
+          "$ref": "#/$defs/riskRating"
+        },
+        "regressionLikelihood": {
+          "$ref": "#/$defs/riskRating"
+        },
+        "confidence": {
+          "enum": [
+            "low",
+            "moderate",
+            "high"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "low"
+                },
+                "regressionLikelihood": {
+                  "enum": [
+                    "low",
+                    "moderate"
+                  ]
+                },
+                "overallRisk": {
+                  "$ref": "#/$defs/riskRating"
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "low"
+                },
+                "regressionLikelihood": {
+                  "const": "high"
+                },
+                "overallRisk": {
+                  "enum": [
+                    "moderate",
+                    "high",
+                    "critical"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "low"
+                },
+                "regressionLikelihood": {
+                  "const": "critical"
+                },
+                "overallRisk": {
+                  "enum": [
+                    "high",
+                    "critical"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "moderate"
+                },
+                "regressionLikelihood": {
+                  "const": "low"
+                },
+                "overallRisk": {
+                  "$ref": "#/$defs/riskRating"
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "moderate"
+                },
+                "regressionLikelihood": {
+                  "const": "moderate"
+                },
+                "overallRisk": {
+                  "enum": [
+                    "moderate",
+                    "high",
+                    "critical"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "moderate"
+                },
+                "regressionLikelihood": {
+                  "const": "high"
+                },
+                "overallRisk": {
+                  "enum": [
+                    "high",
+                    "critical"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "moderate"
+                },
+                "regressionLikelihood": {
+                  "const": "critical"
+                },
+                "overallRisk": {
+                  "const": "critical"
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "high"
+                },
+                "regressionLikelihood": {
+                  "const": "low"
+                },
+                "overallRisk": {
+                  "enum": [
+                    "moderate",
+                    "high",
+                    "critical"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "high"
+                },
+                "regressionLikelihood": {
+                  "const": "moderate"
+                },
+                "overallRisk": {
+                  "enum": [
+                    "high",
+                    "critical"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "high"
+                },
+                "regressionLikelihood": {
+                  "enum": [
+                    "high",
+                    "critical"
+                  ]
+                },
+                "overallRisk": {
+                  "const": "critical"
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "critical"
+                },
+                "regressionLikelihood": {
+                  "const": "low"
+                },
+                "overallRisk": {
+                  "enum": [
+                    "high",
+                    "critical"
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "impactIfWrong": {
+                  "const": "critical"
+                },
+                "regressionLikelihood": {
+                  "enum": [
+                    "moderate",
+                    "high",
+                    "critical"
+                  ]
+                },
+                "overallRisk": {
+                  "const": "critical"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "confidence": {
+                "const": "low"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "overallRisk": {
+                "enum": [
+                  "moderate",
+                  "high",
+                  "critical"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changeScope",
+        "blastRadius",
+        "boundaryCriticality",
+        "contractAndState",
+        "runtimeBehavior",
+        "regressionProtection",
+        "recoverability",
+        "analysisUncertainty"
+      ],
+      "properties": {
+        "changeScope": {
+          "$ref": "#/$defs/riskDimension"
+        },
+        "blastRadius": {
+          "$ref": "#/$defs/riskOrUnknownDimension"
+        },
+        "boundaryCriticality": {
+          "$ref": "#/$defs/riskDimension"
+        },
+        "contractAndState": {
+          "$ref": "#/$defs/riskOrUnknownDimension"
+        },
+        "runtimeBehavior": {
+          "$ref": "#/$defs/riskOrUnknownDimension"
+        },
+        "regressionProtection": {
+          "$ref": "#/$defs/regressionProtectionDimension"
+        },
+        "recoverability": {
+          "$ref": "#/$defs/recoverabilityDimension"
+        },
+        "analysisUncertainty": {
+          "$ref": "#/$defs/uncertaintyDimension"
+        }
+      }
+    },
+    "patchDisposition": {
+      "$ref": "#/$defs/patchDisposition"
+    },
+    "statusQuoRisk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rating",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "rating": {
+          "$ref": "#/$defs/riskOrUnknownRating"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "boundaryChallenges": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/boundaryChallenge"
+      }
+    },
+    "sourceChallengeReview": {
+      "$ref": "#/$defs/sourceChallengeReview"
+    },
+    "topRiskDrivers": {
+      "$ref": "#/$defs/stringList"
+    },
+    "protectiveFactors": {
+      "$ref": "#/$defs/stringList"
+    },
+    "unknowns": {
+      "$ref": "#/$defs/stringList"
+    },
+    "mergeConditions": {
+      "$ref": "#/$defs/mergeConditionList"
+    },
+    "recommendation": {
+      "enum": [
+        "merge",
+        "merge_with_conditions",
+        "revise",
+        "needs_validation",
+        "no_op",
+        "block"
+      ]
+    },
+    "workflowLabel": {
+      "enum": [
+        "auto_merge_candidate",
+        "human_review_required",
+        "revise",
+        "needs_validation",
+        "no_op",
+        "block"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "recommendation": {
+            "enum": [
+              "merge",
+              "merge_with_conditions"
+            ]
+          }
+        },
+        "required": [
+          "recommendation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "boundaryChallenges": {
+            "minItems": 1,
+            "items": {
+              "properties": {
+                "counterexample": {
+                  "properties": {
+                    "result": {
+                      "const": "handled"
+                    }
+                  }
+                },
+                "legitimateControl": {
+                  "properties": {
+                    "result": {
+                      "const": "preserved"
+                    }
+                  }
+                },
+                "domainCoverage": {
+                  "properties": {
+                    "result": {
+                      "enum": [
+                        "not_applicable",
+                        "complete"
+                      ]
+                    }
+                  }
+                },
+                "claimOracleCoverage": {
+                  "properties": {
+                    "result": {
+                      "enum": [
+                        "not_applicable",
+                        "complete"
+                      ]
+                    }
+                  }
+                },
+                "trustTransitionCoverage": {
+                  "properties": {
+                    "result": {
+                      "const": "complete"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "sourceChallengeReview": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "recommendation": {
+                "enum": [
+                  "merge",
+                  "merge_with_conditions"
+                ]
+              }
+            },
+            "required": [
+              "recommendation"
+            ]
+          },
+          {
+            "properties": {
+              "dimensions": {
+                "properties": {
+                  "boundaryCriticality": {
+                    "properties": {
+                      "rating": {
+                        "enum": [
+                          "high",
+                          "critical"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "dimensions"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "sourceChallengeReview": {
+            "properties": {
+              "method": {
+                "enum": [
+                  "separate_source_falsifier",
+                  "independent_source_falsifier"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflowLabel": {
+            "const": "auto_merge_candidate"
+          }
+        },
+        "required": [
+          "workflowLabel"
+        ]
+      },
+      "then": {
+        "properties": {
+          "recommendation": {
+            "const": "merge"
+          },
+          "assessment": {
+            "properties": {
+              "overallRisk": {
+                "const": "low"
+              },
+              "impactIfWrong": {
+                "const": "low"
+              },
+              "regressionLikelihood": {
+                "const": "low"
+              },
+              "confidence": {
+                "const": "high"
+              }
+            }
+          },
+          "dimensions": {
+            "properties": {
+              "changeScope": {
+                "properties": {
+                  "rating": {
+                    "enum": [
+                      "low",
+                      "moderate"
+                    ]
+                  }
+                }
+              },
+              "blastRadius": {
+                "properties": {
+                  "rating": {
+                    "const": "low"
+                  }
+                }
+              },
+              "boundaryCriticality": {
+                "properties": {
+                  "rating": {
+                    "const": "low"
+                  }
+                }
+              },
+              "contractAndState": {
+                "properties": {
+                  "rating": {
+                    "const": "low"
+                  }
+                }
+              },
+              "runtimeBehavior": {
+                "properties": {
+                  "rating": {
+                    "const": "low"
+                  }
+                }
+              },
+              "regressionProtection": {
+                "properties": {
+                  "rating": {
+                    "const": "strong"
+                  }
+                }
+              },
+              "recoverability": {
+                "properties": {
+                  "rating": {
+                    "const": "easy"
+                  }
+                }
+              },
+              "analysisUncertainty": {
+                "properties": {
+                  "rating": {
+                    "const": "low"
+                  }
+                }
+              }
+            }
+          },
+          "unknowns": {
+            "maxItems": 0
+          },
+          "sourceChallengeReview": {
+            "properties": {
+              "method": {
+                "enum": [
+                  "separate_source_falsifier",
+                  "independent_source_falsifier"
+                ]
+              },
+              "status": {
+                "const": "passed"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflowLabel": {
+            "const": "human_review_required"
+          }
+        },
+        "required": [
+          "workflowLabel"
+        ]
+      },
+      "then": {
+        "properties": {
+          "recommendation": {
+            "enum": [
+              "merge",
+              "merge_with_conditions"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "workflowLabel": {
+            "enum": [
+              "revise",
+              "needs_validation",
+              "no_op",
+              "block"
+            ]
+          }
+        },
+        "required": [
+          "workflowLabel"
+        ]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "workflowLabel": {
+                "const": "revise"
+              },
+              "recommendation": {
+                "const": "revise"
+              }
+            }
+          },
+          {
+            "properties": {
+              "workflowLabel": {
+                "const": "needs_validation"
+              },
+              "recommendation": {
+                "const": "needs_validation"
+              }
+            }
+          },
+          {
+            "properties": {
+              "workflowLabel": {
+                "const": "no_op"
+              },
+              "recommendation": {
+                "const": "no_op"
+              }
+            }
+          },
+          {
+            "properties": {
+              "workflowLabel": {
+                "const": "block"
+              },
+              "recommendation": {
+                "const": "block"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "assessment": {
+            "properties": {
+              "overallRisk": {
+                "enum": [
+                  "high",
+                  "critical"
+                ]
+              }
+            },
+            "required": [
+              "overallRisk"
+            ]
+          }
+        },
+        "required": [
+          "assessment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "recommendation": {
+            "enum": [
+              "merge_with_conditions",
+              "revise",
+              "needs_validation",
+              "no_op",
+              "block"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "recommendation": {
+                "const": "merge"
+              }
+            },
+            "required": [
+              "recommendation"
+            ]
+          },
+          {
+            "properties": {
+              "dimensions": {
+                "properties": {
+                  "regressionProtection": {
+                    "properties": {
+                      "validationEvidence": {
+                        "contains": {
+                          "properties": {
+                            "kind": {
+                              "const": "ci"
+                            },
+                            "executionStatus": {
+                              "const": "failed"
+                            },
+                            "relevance": {
+                              "enum": [
+                                "direct",
+                                "unknown"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "executionStatus",
+                            "relevance"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "then": false
+    },
+    {
+      "if": {
+        "properties": {
+          "recommendation": {
+            "const": "merge"
+          }
+        },
+        "required": [
+          "recommendation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "patchDisposition": {
+            "properties": {
+              "status": {
+                "const": "active"
+              }
+            }
+          },
+          "mergeConditions": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recommendation": {
+            "const": "merge_with_conditions"
+          }
+        },
+        "required": [
+          "recommendation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "patchDisposition": {
+            "properties": {
+              "status": {
+                "const": "active"
+              }
+            }
+          },
+          "mergeConditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/mergeCondition"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "owner_review",
+                        "validation",
+                        "dependency",
+                        "rollout",
+                        "post_apply",
+                        "operational"
+                      ]
+                    },
+                    "decisionCritical": {
+                      "const": false
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recommendation": {
+            "const": "revise"
+          }
+        },
+        "required": [
+          "recommendation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "patchDisposition": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "active",
+                  "uncertain"
+                ]
+              }
+            }
+          },
+          "mergeConditions": {
+            "minItems": 1,
+            "contains": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "code_change",
+                    "test_change"
+                  ]
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recommendation": {
+            "const": "needs_validation"
+          }
+        },
+        "required": [
+          "recommendation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "patchDisposition": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "active",
+                  "uncertain"
+                ]
+              }
+            }
+          },
+          "mergeConditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/mergeCondition"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "owner_review",
+                        "validation",
+                        "patch_set_analysis",
+                        "dependency",
+                        "operational"
+                      ]
+                    }
+                  },
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "decisionCritical": {
+                            "const": true
+                          }
+                        },
+                        "required": [
+                          "decisionCritical"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "resolution"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "contains": {
+              "properties": {
+                "decisionCritical": {
+                  "const": true
+                }
+              },
+              "required": [
+                "decisionCritical"
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recommendation": {
+            "const": "no_op"
+          }
+        },
+        "required": [
+          "recommendation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "patchDisposition": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "inactive",
+                  "no_affected_instances",
+                  "wrong_repository",
+                  "upstream_owned",
+                  "duplicate",
+                  "superseded"
+                ]
+              }
+            }
+          },
+          "mergeConditions": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recommendation": {
+            "const": "block"
+          }
+        },
+        "required": [
+          "recommendation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "patchDisposition": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "active",
+                  "uncertain"
+                ]
+              }
+            }
+          },
+          "mergeConditions": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "riskRating": {
+      "enum": [
+        "low",
+        "moderate",
+        "high",
+        "critical"
+      ]
+    },
+    "riskOrUnknownRating": {
+      "enum": [
+        "low",
+        "moderate",
+        "high",
+        "critical",
+        "unknown"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim",
+        "source"
+      ],
+      "properties": {
+        "claim": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "evidenceList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "validationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "executionStatus",
+        "relevance",
+        "scope",
+        "claim",
+        "source"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "test",
+            "static_analysis",
+            "build",
+            "ci",
+            "manual_qa",
+            "deployment",
+            "runtime_observation"
+          ]
+        },
+        "executionStatus": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "not_run",
+            "unknown"
+          ]
+        },
+        "relevance": {
+          "enum": [
+            "direct",
+            "indirect",
+            "unknown"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "changed_behavior",
+            "affected_component",
+            "broad_system",
+            "deployment",
+            "architecture_specific",
+            "runtime_observation",
+            "unknown"
+          ]
+        },
+        "claim": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "validationEvidenceList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/validationEvidence"
+      }
+    },
+    "stringList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "patchDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "active",
+            "inactive",
+            "no_affected_instances",
+            "wrong_repository",
+            "upstream_owned",
+            "duplicate",
+            "superseded",
+            "uncertain"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "boundaryChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundaryKind",
+        "boundary",
+        "invariant",
+        "dimensions",
+        "counterexample",
+        "legitimateControl",
+        "domainCoverage",
+        "claimOracleCoverage"
+      ],
+      "properties": {
+        "boundaryKind": {
+          "enum": [
+            "general",
+            "network",
+            "authentication",
+            "authorization",
+            "sandbox",
+            "parser",
+            "filesystem",
+            "deployment",
+            "contract",
+            "state",
+            "documentation_contract",
+            "test_oracle",
+            "other"
+          ]
+        },
+        "boundary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "invariant": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "dimensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "policy_mode",
+              "feature_gate_state",
+              "initial_trust_class",
+              "derived_target_transition",
+              "protocol_or_object_shape",
+              "identity_source",
+              "fallback_route",
+              "authority_lifecycle",
+              "supported_control",
+              "persisted_or_mixed_state",
+              "documentation_claim",
+              "test_oracle",
+              "other"
+            ]
+          }
+        },
+        "counterexample": {
+          "$ref": "#/$defs/counterexampleChallenge"
+        },
+        "legitimateControl": {
+          "$ref": "#/$defs/legitimateControlChallenge"
+        },
+        "domainCoverage": {
+          "$ref": "#/$defs/domainCoverage"
+        },
+        "claimOracleCoverage": {
+          "$ref": "#/$defs/claimOracleCoverage"
+        },
+        "trustTransitionCoverage": {
+          "$ref": "#/$defs/trustTransitionCoverage"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "const": "derived_target_transition"
+                }
+              }
+            },
+            "required": [
+              "dimensions"
+            ]
+          },
+          "then": {
+            "required": [
+              "trustTransitionCoverage"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "const": "authority_lifecycle"
+                }
+              }
+            },
+            "required": [
+              "dimensions"
+            ]
+          },
+          "then": {
+            "required": [
+              "trustTransitionCoverage"
+            ],
+            "properties": {
+              "trustTransitionCoverage": {
+                "properties": {
+                  "transitions": {
+                    "contains": {
+                      "required": [
+                        "lifecycleEvents"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "boundaryKind": {
+                "const": "network"
+              }
+            },
+            "required": [
+              "boundaryKind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "dimensions": {
+                "allOf": [
+                  {
+                    "contains": {
+                      "const": "policy_mode"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "const": "initial_trust_class"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "const": "derived_target_transition"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "boundaryKind": {
+                "enum": [
+                  "authentication",
+                  "authorization"
+                ]
+              }
+            },
+            "required": [
+              "boundaryKind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "dimensions": {
+                "allOf": [
+                  {
+                    "contains": {
+                      "const": "identity_source"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "const": "fallback_route"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "boundaryKind": {
+                "const": "documentation_contract"
+              }
+            },
+            "required": [
+              "boundaryKind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "const": "documentation_claim"
+                }
+              },
+              "claimOracleCoverage": {
+                "properties": {
+                  "applicability": {
+                    "const": "applicable"
+                  },
+                  "subjects": {
+                    "contains": {
+                      "properties": {
+                        "kind": {
+                          "const": "documentation_claim"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "boundaryKind": {
+                "const": "test_oracle"
+              }
+            },
+            "required": [
+              "boundaryKind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "dimensions": {
+                "contains": {
+                  "const": "test_oracle"
+                }
+              },
+              "claimOracleCoverage": {
+                "properties": {
+                  "applicability": {
+                    "const": "applicable"
+                  },
+                  "subjects": {
+                    "contains": {
+                      "properties": {
+                        "kind": {
+                          "const": "test_assertion"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dimensions": {
+                "allOf": [
+                  {
+                    "contains": {
+                      "const": "test_oracle"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "const": "fallback_route"
+                    }
+                  }
+                ]
+              }
+            },
+            "required": [
+              "dimensions"
+            ]
+          },
+          "then": {
+            "properties": {
+              "claimOracleCoverage": {
+                "properties": {
+                  "subjects": {
+                    "contains": {
+                      "properties": {
+                        "kind": {
+                          "const": "test_assertion"
+                        },
+                        "oracleSensitivity": {
+                          "properties": {
+                            "properties": {
+                              "allOf": [
+                                {
+                                  "contains": {
+                                    "properties": {
+                                      "observationTarget": {
+                                        "const": "real_sink"
+                                      }
+                                    },
+                                    "required": [
+                                      "observationTarget"
+                                    ]
+                                  }
+                                },
+                                {
+                                  "contains": {
+                                    "properties": {
+                                      "observationTarget": {
+                                        "const": "prohibited_alternate_sink"
+                                      }
+                                    },
+                                    "required": [
+                                      "observationTarget"
+                                    ]
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "properties"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "oracleSensitivity"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "trustTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "derivedTarget",
+        "derivation",
+        "trustCanChange",
+        "policyDecision",
+        "evidence"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "derivedTarget": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "derivation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "lifecycleEvents": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "trustCanChange": {
+          "type": "boolean"
+        },
+        "policyDecision": {
+          "enum": [
+            "reclassified",
+            "proven_equivalent",
+            "inherited",
+            "unresolved"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "trustCanChange": {
+                "const": true
+              }
+            },
+            "required": [
+              "trustCanChange"
+            ]
+          },
+          "then": {
+            "properties": {
+              "policyDecision": {
+                "enum": [
+                  "reclassified",
+                  "inherited",
+                  "unresolved"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "trustTransitionCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transitions",
+        "unreviewed",
+        "result",
+        "summary"
+      ],
+      "properties": {
+        "transitions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/trustTransition"
+          }
+        },
+        "unreviewed": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "result": {
+          "enum": [
+            "complete",
+            "gap_found",
+            "unresolved"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "transitions": {
+                "items": {
+                  "properties": {
+                    "policyDecision": {
+                      "enum": [
+                        "reclassified",
+                        "proven_equivalent"
+                      ]
+                    }
+                  }
+                }
+              },
+              "unreviewed": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transitions": {
+                "contains": {
+                  "properties": {
+                    "policyDecision": {
+                      "const": "inherited"
+                    }
+                  },
+                  "required": [
+                    "policyDecision"
+                  ]
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "const": "gap_found"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "gap_found"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "transitions": {
+                "contains": {
+                  "properties": {
+                    "policyDecision": {
+                      "const": "inherited"
+                    }
+                  },
+                  "required": [
+                    "policyDecision"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "unresolved"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "transitions": {
+                    "contains": {
+                      "properties": {
+                        "policyDecision": {
+                          "const": "unresolved"
+                        }
+                      },
+                      "required": [
+                        "policyDecision"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "unreviewed": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "domainCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicability",
+        "domain",
+        "completenessClaim",
+        "coverageMode",
+        "basis",
+        "contractProvenance",
+        "partitions",
+        "unclassified",
+        "result",
+        "summary"
+      ],
+      "properties": {
+        "applicability": {
+          "enum": [
+            "applicable",
+            "not_applicable"
+          ]
+        },
+        "domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "completenessClaim": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "coverageMode": {
+          "enum": [
+            "exhaustive",
+            "bounded",
+            "representative",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "basis": {
+          "$ref": "#/$defs/evidenceList"
+        },
+        "contractProvenance": {
+          "$ref": "#/$defs/contractProvenance"
+        },
+        "partitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/domainPartition"
+          }
+        },
+        "unclassified": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "result": {
+          "enum": [
+            "not_applicable",
+            "complete",
+            "gap_found",
+            "unresolved"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "applicability": {
+                "const": "not_applicable"
+              }
+            },
+            "required": [
+              "applicability"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coverageMode": {
+                "const": "not_applicable"
+              },
+              "contractProvenance": {
+                "properties": {
+                  "result": {
+                    "const": "not_applicable"
+                  }
+                }
+              },
+              "partitions": {
+                "maxItems": 0
+              },
+              "unclassified": {
+                "maxItems": 0
+              },
+              "result": {
+                "const": "not_applicable"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "coverageMode": {
+                "enum": [
+                  "exhaustive",
+                  "bounded",
+                  "representative",
+                  "unknown"
+                ]
+              },
+              "contractProvenance": {
+                "properties": {
+                  "result": {
+                    "enum": [
+                      "independently_grounded",
+                      "self_contained_new_contract",
+                      "conflict_found",
+                      "unresolved"
+                    ]
+                  }
+                }
+              },
+              "partitions": {
+                "minItems": 1
+              },
+              "result": {
+                "enum": [
+                  "complete",
+                  "gap_found",
+                  "unresolved"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coverageMode": {
+                "enum": [
+                  "exhaustive",
+                  "bounded"
+                ]
+              },
+              "contractProvenance": {
+                "properties": {
+                  "result": {
+                    "enum": [
+                      "independently_grounded",
+                      "self_contained_new_contract"
+                    ]
+                  }
+                }
+              },
+              "partitions": {
+                "items": {
+                  "properties": {
+                    "result": {
+                      "const": "handled"
+                    }
+                  }
+                }
+              },
+              "unclassified": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "contractProvenance": {
+                "properties": {
+                  "result": {
+                    "const": "self_contained_new_contract"
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "contractProvenance"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coverageMode": {
+                "const": "exhaustive"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "contractProvenance": {
+                "properties": {
+                  "result": {
+                    "const": "conflict_found"
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "contractProvenance"
+            ]
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "const": "gap_found"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "contractProvenance": {
+                "properties": {
+                  "result": {
+                    "const": "unresolved"
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "contractProvenance"
+            ]
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "const": "unresolved"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "gap_found"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "partitions": {
+                    "contains": {
+                      "properties": {
+                        "result": {
+                          "const": "fails"
+                        }
+                      },
+                      "required": [
+                        "result"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "unclassified": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "contractProvenance": {
+                    "properties": {
+                      "result": {
+                        "const": "conflict_found"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "unresolved"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "coverageMode": {
+                    "enum": [
+                      "representative",
+                      "unknown"
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "partitions": {
+                    "contains": {
+                      "properties": {
+                        "result": {
+                          "const": "unresolved"
+                        }
+                      },
+                      "required": [
+                        "result"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "unclassified": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "contractProvenance": {
+                    "properties": {
+                      "result": {
+                        "const": "unresolved"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "contractProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changeRelationship",
+        "sources",
+        "contradictions",
+        "unresolved",
+        "result",
+        "summary"
+      ],
+      "properties": {
+        "changeRelationship": {
+          "enum": [
+            "new_contract",
+            "preserves_existing",
+            "narrows_existing",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/contractSource"
+          }
+        },
+        "contradictions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "unresolved": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "result": {
+          "enum": [
+            "not_applicable",
+            "independently_grounded",
+            "self_contained_new_contract",
+            "conflict_found",
+            "unresolved"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "not_applicable"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "changeRelationship": {
+                "const": "not_applicable"
+              },
+              "sources": {
+                "maxItems": 0
+              },
+              "contradictions": {
+                "maxItems": 0
+              },
+              "unresolved": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "changeRelationship": {
+                "enum": [
+                  "new_contract",
+                  "preserves_existing",
+                  "narrows_existing",
+                  "unknown"
+                ]
+              },
+              "sources": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "independently_grounded"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "sources": {
+                "contains": {
+                  "properties": {
+                    "origin": {
+                      "enum": [
+                        "pre_existing_repository",
+                        "external_authority"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "origin"
+                  ]
+                }
+              },
+              "contradictions": {
+                "maxItems": 0
+              },
+              "unresolved": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "self_contained_new_contract"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "changeRelationship": {
+                "const": "new_contract"
+              },
+              "sources": {
+                "items": {
+                  "properties": {
+                    "origin": {
+                      "const": "patch_authored"
+                    }
+                  }
+                }
+              },
+              "contradictions": {
+                "maxItems": 0
+              },
+              "unresolved": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "conflict_found"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "contradictions": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "unresolved"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "changeRelationship": {
+                    "const": "unknown"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "unresolved": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "contractSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin",
+        "kind",
+        "claim",
+        "source"
+      ],
+      "properties": {
+        "origin": {
+          "enum": [
+            "pre_existing_repository",
+            "external_authority",
+            "patch_authored"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "caller_behavior",
+            "public_documentation",
+            "compatibility_test",
+            "schema_or_enum",
+            "provider_specification",
+            "historical_behavior",
+            "bounded_state_model",
+            "implementation"
+          ]
+        },
+        "claim": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "domainPartition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "result",
+        "evidence"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "result": {
+          "enum": [
+            "handled",
+            "fails",
+            "unresolved"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "claimOracleCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicability",
+        "coverageMode",
+        "basis",
+        "subjects",
+        "unreviewed",
+        "result",
+        "summary"
+      ],
+      "properties": {
+        "applicability": {
+          "enum": [
+            "applicable",
+            "not_applicable"
+          ]
+        },
+        "coverageMode": {
+          "enum": [
+            "exhaustive",
+            "bounded",
+            "representative",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "basis": {
+          "$ref": "#/$defs/evidenceList"
+        },
+        "subjects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/claimOracleSubject"
+          }
+        },
+        "unreviewed": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "result": {
+          "enum": [
+            "not_applicable",
+            "complete",
+            "gap_found",
+            "unresolved"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "applicability": {
+                "const": "not_applicable"
+              }
+            },
+            "required": [
+              "applicability"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coverageMode": {
+                "const": "not_applicable"
+              },
+              "subjects": {
+                "maxItems": 0
+              },
+              "unreviewed": {
+                "maxItems": 0
+              },
+              "result": {
+                "const": "not_applicable"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "coverageMode": {
+                "enum": [
+                  "exhaustive",
+                  "bounded",
+                  "representative",
+                  "unknown"
+                ]
+              },
+              "subjects": {
+                "minItems": 1
+              },
+              "result": {
+                "enum": [
+                  "complete",
+                  "gap_found",
+                  "unresolved"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coverageMode": {
+                "enum": [
+                  "exhaustive",
+                  "bounded"
+                ]
+              },
+              "subjects": {
+                "items": {
+                  "properties": {
+                    "result": {
+                      "const": "supported"
+                    }
+                  }
+                }
+              },
+              "unreviewed": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "gap_found"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "subjects": {
+                "contains": {
+                  "properties": {
+                    "result": {
+                      "const": "contradicted"
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "unresolved"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "coverageMode": {
+                    "enum": [
+                      "representative",
+                      "unknown"
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "subjects": {
+                    "contains": {
+                      "properties": {
+                        "result": {
+                          "const": "unresolved"
+                        }
+                      },
+                      "required": [
+                        "result"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "unreviewed": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "claimOracleSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "claim",
+        "source",
+        "requiredProperty",
+        "falsifier",
+        "result",
+        "evidence"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "documentation_claim",
+            "test_assertion",
+            "platform_assumption"
+          ]
+        },
+        "claim": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "requiredProperty": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "falsifier": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "oracleSensitivity": {
+          "$ref": "#/$defs/oracleSensitivity"
+        },
+        "result": {
+          "enum": [
+            "supported",
+            "contradicted",
+            "unresolved"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "test_assertion"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "oracleSensitivity"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "test_assertion"
+              },
+              "result": {
+                "const": "supported"
+              }
+            },
+            "required": [
+              "kind",
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "oracleSensitivity": {
+                "properties": {
+                  "result": {
+                    "const": "complete"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "oracleSensitivity": {
+                "properties": {
+                  "result": {
+                    "const": "gap_found"
+                  }
+                },
+                "required": [
+                  "result"
+                ]
+              }
+            },
+            "required": [
+              "oracleSensitivity"
+            ]
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "const": "contradicted"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "oracleSensitivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "properties",
+        "unobserved",
+        "result",
+        "summary"
+      ],
+      "properties": {
+        "properties": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/oracleSensitivityProperty"
+          }
+        },
+        "unobserved": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "result": {
+          "enum": [
+            "complete",
+            "gap_found",
+            "unresolved"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "properties": {
+                "items": {
+                  "properties": {
+                    "result": {
+                      "const": "detected"
+                    }
+                  }
+                }
+              },
+              "unobserved": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "gap_found"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "properties": {
+              "properties": {
+                "contains": {
+                  "properties": {
+                    "result": {
+                      "const": "not_detected"
+                    }
+                  },
+                  "required": [
+                    "result"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "unresolved"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "properties": {
+                    "contains": {
+                      "properties": {
+                        "result": {
+                          "const": "unresolved"
+                        }
+                      },
+                      "required": [
+                        "result"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "unobserved": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "oracleSensitivityProperty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "property",
+        "isolatedMutation",
+        "preservedBehavior",
+        "observationTarget",
+        "observedBy",
+        "expectedFailureSignal",
+        "result",
+        "evidence"
+      ],
+      "properties": {
+        "property": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "isolatedMutation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "preservedBehavior": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "observationTarget": {
+          "enum": [
+            "assertion_output",
+            "real_boundary",
+            "real_sink",
+            "prohibited_alternate_sink"
+          ]
+        },
+        "observedBy": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "expectedFailureSignal": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "result": {
+          "enum": [
+            "detected",
+            "not_detected",
+            "unresolved"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "counterexampleChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "result",
+        "evidence"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "result": {
+          "enum": [
+            "handled",
+            "fails",
+            "unresolved"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "legitimateControlChallenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "result",
+        "evidence"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "result": {
+          "enum": [
+            "preserved",
+            "broken",
+            "unresolved"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "sourceChallengeReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalog",
+        "method",
+        "status",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "catalog": {
+          "const": "boundary-challenges-v1"
+        },
+        "method": {
+          "enum": [
+            "integrated_source_review",
+            "separate_source_falsifier",
+            "independent_source_falsifier"
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "unresolved"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "mergeCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "summary",
+        "decisionCritical"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "code_change",
+            "test_change",
+            "owner_review",
+            "validation",
+            "patch_set_analysis",
+            "dependency",
+            "rollout",
+            "post_apply",
+            "operational"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "decisionCritical": {
+          "type": "boolean"
+        },
+        "reconciliation": {
+          "$ref": "#/$defs/conditionReconciliation"
+        },
+        "resolution": {
+          "$ref": "#/$defs/conditionResolution"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "code_change",
+                  "test_change",
+                  "patch_set_analysis"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "decisionCritical": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "conditionReconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conditionId",
+        "evidenceScope",
+        "subjectIds"
+      ],
+      "properties": {
+        "conditionId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "evidenceScope": {
+          "enum": [
+            "changed_subjects_only",
+            "broader_source",
+            "external_evidence"
+          ]
+        },
+        "subjectIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "evidenceScope": {
+                "const": "changed_subjects_only"
+              }
+            },
+            "required": [
+              "evidenceScope"
+            ]
+          },
+          "then": {
+            "properties": {
+              "subjectIds": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "conditionResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceRequired",
+        "collectionStatus",
+        "collectionAttempt",
+        "action",
+        "branches"
+      ],
+      "properties": {
+        "evidenceRequired": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "collectionStatus": {
+          "enum": [
+            "attempted_unavailable",
+            "pending_external",
+            "blocked_external"
+          ]
+        },
+        "collectionAttempt": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "action": {
+          "$ref": "#/$defs/resolutionAction"
+        },
+        "branches": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/resolutionBranch"
+          }
+        }
+      }
+    },
+    "resolutionAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "target"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "inspect_exact_head_ci",
+            "run_focused_local_check",
+            "inspect_repository_evidence",
+            "request_external_evidence"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "commandArguments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      }
+    },
+    "resolutionBranch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "recommendation"
+      ],
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "recommendation": {
+          "enum": [
+            "merge",
+            "merge_with_conditions",
+            "revise",
+            "no_op",
+            "block"
+          ]
+        }
+      }
+    },
+    "mergeConditionList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/mergeCondition"
+      }
+    },
+    "patchMaterialization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "commandArguments",
+        "artifactBytes"
+      ],
+      "properties": {
+        "method": {
+          "enum": [
+            "supplied_patch",
+            "provider_patch",
+            "git_revision_range_v1",
+            "git_working_tree_v1"
+          ]
+        },
+        "commandArguments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "artifactBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "providerArtifactFormat": {
+          "enum": [
+            "final_diff",
+            "commit_series_patch"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "provider_patch"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "required": [
+              "providerArtifactFormat"
+            ]
+          }
+        }
+      ]
+    },
+    "riskDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rating",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "rating": {
+          "$ref": "#/$defs/riskRating"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "riskOrUnknownDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rating",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "rating": {
+          "$ref": "#/$defs/riskOrUnknownRating"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "regressionProtectionDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rating",
+        "summary",
+        "evidence",
+        "validationEvidence"
+      ],
+      "properties": {
+        "rating": {
+          "enum": [
+            "strong",
+            "partial",
+            "weak",
+            "unknown"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        },
+        "validationEvidence": {
+          "$ref": "#/$defs/validationEvidenceList"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "rating": {
+                "const": "strong"
+              }
+            },
+            "required": [
+              "rating"
+            ]
+          },
+          "then": {
+            "properties": {
+              "validationEvidence": {
+                "contains": {
+                  "properties": {
+                    "executionStatus": {
+                      "const": "passed"
+                    },
+                    "relevance": {
+                      "const": "direct"
+                    }
+                  },
+                  "required": [
+                    "executionStatus",
+                    "relevance"
+                  ]
+                },
+                "minContains": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "recoverabilityDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rating",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "rating": {
+          "enum": [
+            "easy",
+            "moderate",
+            "hard",
+            "unknown"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    },
+    "uncertaintyDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rating",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "rating": {
+          "enum": [
+            "low",
+            "moderate",
+            "high",
+            "unknown"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidenceList"
+        }
+      }
+    }
+  }
+}

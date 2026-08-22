@@ -92,6 +92,27 @@ After implementing and running focused checks, launch one fresh read-only agent 
 
 The reviewer must not edit or delegate. Report only concrete, source-backed bypasses or regressions and explain how each can be verified. Treat reviewer findings as hypotheses: confirm them against the source or focused execution before revising the implementation. Address only confirmed issues within the finding and compatibility boundary; do not broaden into speculative concerns or redesign. Then rerun relevant verification and ensure no temporary or unrelated changes remain. Perform only one review cycle.
 
+## Optional Sequential Patch Reviews
+
+Run the following stages only when the calling workflow explicitly requests them. Complete each requested stage in the listed order before starting the next. For each stage, prefer a fresh read-only reviewer with `fork_turns: "none"`; if delegation is unavailable, adopt the same perspective in a separate sequential pass. Give reviewers the finding, repository root, authorized scope, applicable repository instructions, and the current candidate diff. Reviewers must not edit, delegate, expand scope, or rely on the patch author's rationale.
+
+1. **Minimality review**, when `minimality` is requested.
+   - Explain why each changed file, production change, regression test, dependency, helper, and abstraction is necessary to close or prove the reported security boundary.
+   - Identify unrelated refactoring, formatting, new dependencies, avoidable helper-signature or data-type changes, unnecessary control-flow or error-semantics changes, and broader fixes when an equally complete narrower change exists.
+   - Report only concrete, source-backed simplifications. The parent confirms them and removes only unnecessary candidate changes while preserving security closure, legitimate behavior, meaningful regression coverage, and unrelated pre-existing user changes.
+2. **Local coding-style review**, when `local-coding-style` is requested.
+   - Inspect the nearest applicable repository instructions, organization- or project-specific style guides, existing helpers, and representative nearby code.
+   - Check changed code for established naming, types, ownership, control flow, error handling, testing conventions, and formatter or linter requirements. Introduce exceptions or other uncommon mechanisms only when required and supported by local precedent.
+   - Distinguish documented requirements and consistent local conventions from personal preferences. Suggest only the smallest in-scope correction; never request broad formatting, cleanup, redesign, or unrelated refactoring.
+   - The parent confirms each observation and applies at most one bounded, repository-native revision before rerunning the relevant checks.
+3. **Patch-risk assessment**, when `patch-risk-assessment` is requested.
+   - Finish the ordered verification gates first, then ask a fresh read-only assessor to use the bundled `assess-patch-risk` skill specified by the calling workflow.
+   - Bind the assessment to the exact final candidate patch and finding; do not silently assess unrelated pre-existing working-tree changes. Assess applicability, production reachability, threat-model assumptions, blast radius, preserved behavior, regression protection, recoverability, and source-backed uncertainty.
+   - Report the assessment's recommendation and strongest supporting evidence with the patch outcome. If source evidence establishes that the patch is unnecessary or unsafe, do not report it as verified; return `no_change` after safely removing only candidate changes, or `blocked` when safe removal or the required decision is unresolved.
+   - The assessment must not edit, apply, commit, push, or merge the patch. Never treat its recommendation as permission to merge.
+
+Never weaken a security invariant, compatibility guarantee, or focused proof merely to make the patch smaller or more stylistically uniform. Keep all optional review and revision inside the Generate stage, before recording a canonical patch or digest; Apply and Verify retain their existing write boundaries.
+
 ## Workbench Remediation Stages
 
 When a Codex Security workbench request includes a scan ID, occurrence ID, remediation request ID, action token, and expected version, follow only the requested remediation stage. The stage boundary changes when code may be written, but it does not weaken the validation requirements above.
