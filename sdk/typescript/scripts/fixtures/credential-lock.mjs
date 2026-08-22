@@ -16,8 +16,9 @@ if (mode === "hold") {
   process.stdout.write("locked\n");
   await once(process.stdin, "data");
   await new Promise((resolve) => process.stdout.write("blocked\n", resolve));
-  // Stall the actual owner, including any JavaScript heartbeat it might run.
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+  // Stall the owner and any JavaScript heartbeat. Bound the wait so the holder
+  // can exit if its parent dies.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20_000);
   await release();
 } else {
   const home = await prepare({ CODEX_SECURITY_STATE_DIR: directory });
