@@ -316,9 +316,9 @@ Concurrent SDK clients can use different IDs without changing `process.env`.
 This requires a Codex runtime with native `--safety-identifier` support and a
 plugin that forwards it to workers. The current bundled runtime does not yet
 support this option. Use `CODEX_CLI_PATH` to select a compatible build.
-Unsupported runtimes or plugins fail before the scan starts. Omitting the
-option leaves ordinary scans unchanged. Preflight checks the ID's format,
-but does not check runtime support or authentication.
+The SDK does not check runtime or plugin compatibility; older versions may
+omit the identifier. Omitting the option leaves ordinary scans unchanged.
+Preflight checks the ID's format; authentication is checked when the scan starts.
 
 ### Configure deep scans
 

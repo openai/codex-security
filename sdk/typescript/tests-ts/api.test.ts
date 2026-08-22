@@ -69,12 +69,6 @@ type ScanObserverName = Parameters<
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
-const SAFETY_IDENTIFIER_HELP = {
-  success: true,
-  exitCode: 0,
-  stdout: "--safety-identifier",
-  stderr: "",
-};
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
@@ -202,10 +196,10 @@ describe("CodexSecurity orchestration", () => {
             environment: { OPENAI_API_KEY: "synthetic-key" },
             prepareRuntime: async () => ({
               ...preparedRuntime(codexHome),
+              persistentCredentialHome: true,
               environment: runtimeEnvironment,
             }),
             resolvePluginPython: async () => "/managed/python",
-            runCodexCommand: async () => SAFETY_IDENTIFIER_HELP,
             createCodex: (options) => {
               received.push(options);
               throw new Error("captured scan");
@@ -263,55 +257,6 @@ describe("CodexSecurity orchestration", () => {
         client.run("/unused", { safetyIdentifier: identifier }),
       ).rejects.toThrow("safetyIdentifier must");
       await client.close();
-    },
-  );
-
-  test.each([
-    [false, true, "runtime does not support"],
-    [true, false, "does not forward"],
-  ] as const)(
-    "rejects unsupported Safety IDs (runtime: %s, plugin: %s)",
-    async (supported, forwards, message) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "home");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await writeFile(
-        join(root, ".mcp.json"),
-        JSON.stringify({
-          mcpServers: {
-            "codex-security": {
-              env_vars: forwards ? ["CODEX_SAFETY_IDENTIFIER"] : [],
-            },
-          },
-        }),
-      );
-      const runtime = preparedRuntime(codexHome);
-      runtime.plugin.installedRoot = root;
-      const client = new TestClient(
-        {},
-        {
-          prepareRuntime: async () => runtime,
-          runCodexCommand: async (_command, args) => {
-            expect(args).toEqual(["exec", "--help"]);
-            return {
-              ...SAFETY_IDENTIFIER_HELP,
-              stdout: supported ? SAFETY_IDENTIFIER_HELP.stdout : "",
-            };
-          },
-        },
-      );
-      try {
-        await expect(
-          client.run(repository, {
-            safetyIdentifier: "synthetic-user",
-            outputDir: join(root, "scan"),
-          }),
-        ).rejects.toThrow(message);
-      } finally {
-        await client.close();
-      }
     },
   );
 
@@ -1408,7 +1353,6 @@ describe("CodexSecurity orchestration", () => {
         {
           environment: {},
           prepareRuntime: async () => preparedRuntime(codexHome),
-          runCodexCommand: async () => SAFETY_IDENTIFIER_HELP,
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
           createCodex: () => ({
