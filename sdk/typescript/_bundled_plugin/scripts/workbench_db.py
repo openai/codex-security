@@ -47,6 +47,7 @@ from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
+    _read_scan_local_json_bytes,
     _write_prepared_scan_finalization,
     csv_cell,
     finalize_scan,
@@ -1793,6 +1794,56 @@ def get_scan_recipe(connection: sqlite3.Connection, args: argparse.Namespace) ->
     }
 
 
+def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
+    if scan["seal_manifest_digest"] is None:
+        raise SystemExit("Only sealed scans have coverage summaries.")
+    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    coverage_ref = ARTIFACTS["coverage"]
+    try:
+        # Completion already validated the full scan. History only needs the
+        # pinned manifest and its coverage artifact, not findings or receipts.
+        manifest, manifest_bytes = _read_scan_local_json_bytes(
+            scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
+        )
+        if f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}" != scan["seal_manifest_digest"]:
+            raise ContractError("The sealed scan manifest changed after completion.")
+        sealed_scan = manifest["scan"]
+        if (
+            sealed_scan["id"] != scan["id"]
+            or not sealed_scan.get("sealedAt")
+            or sealed_scan["coverageRef"] != coverage_ref
+        ):
+            raise ContractError("The sealed coverage does not belong to this scan.")
+        coverage, coverage_bytes = _read_scan_local_json_bytes(
+            scan_dir, coverage_ref, coverage_ref
+        )
+        expected = next(
+            (
+                artifact["sha256"]
+                for artifact in sealed_scan["artifacts"]
+                if artifact["path"] == coverage_ref
+            ),
+            None,
+        )
+        if (
+            hashlib.sha256(coverage_bytes).hexdigest() != expected
+            or coverage.get("scanId") != scan["id"]
+        ):
+            raise ContractError("The sealed coverage changed after completion.")
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    return {
+        key: coverage[key]
+        for key in (
+            "mode",
+            "completeness",
+            "includePaths",
+            "excludePaths",
+            "explicitExclusions",
+        )
+    }
+
+
 def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     if scan["seal_manifest_digest"] is None:
         raise SystemExit("Only sealed scans can be compared.")
@@ -3175,6 +3226,20 @@ def scan_context(
     return context
 
 
+def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    result = scan_context(connection, args.scan_id, args.occurrence_id)
+    if result["scan"]["progress"]["status"] == "complete":
+        scan = require_scan(connection, args.scan_id)
+        try:
+            result["scan"] = {
+                **result["scan"],
+                "coverage": coverage_summary_for_history(scan),
+            }
+        except (OSError, RuntimeError, SystemExit):
+            pass  # Historical artifacts may no longer be available or verifiable.
+    return result
+
+
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
@@ -3874,7 +3939,7 @@ def main() -> None:
         elif args.command == "fail-deep-scan":
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "get-scan":
-            result = scan_context(connection, args.scan_id, args.occurrence_id)
+            result = get_scan(connection, args)
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":

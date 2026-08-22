@@ -1391,6 +1391,48 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("Repository scan manifest target must not be git_diff.");
   });
 
+  test("accepts complete scoped coverage with optional follow-up", async () => {
+    for (const paths of [
+      ["src/extract.py"],
+      ["src"],
+      ["src", "src/extract.py"],
+    ]) {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      Object.assign(manifest["scan"]["scope"], {
+        includePaths: paths,
+        validationMode: "static source review",
+        limitations: ["Runtime testing was not requested."],
+      });
+      await writeJson(manifestPath, manifest);
+      const coveragePath = join(scanDir, "coverage.json");
+      const coverage = await readJson(coveragePath);
+      Object.assign(coverage, {
+        mode: "scoped_path",
+        inventoryStrategy: "scoped_path",
+        includePaths: paths,
+        openQuestions: [
+          { question: "Consider separate deployment confirmation." },
+        ],
+      });
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+      const sealed = await readFile(coveragePath, "utf8");
+      const result = await loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: expectation({ kind: "paths", paths }),
+      });
+      expect(result.coverage).toMatchObject({
+        completeness: "complete",
+        mode: "scoped_path",
+        includePaths: paths,
+        openQuestions: coverage["openQuestions"],
+      });
+      expect(await readFile(coveragePath, "utf8")).toBe(sealed);
+    }
+  });
+
   test("binds requested path scope, mode, and plugin version", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");

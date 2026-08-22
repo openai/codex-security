@@ -1159,7 +1159,7 @@ describe("CLI", () => {
     expect(text).toContain("CODEX SECURITY");
     expect(text).toContain("SCAN HISTORY");
     expect(text).toContain("juice-shop");
-    for (const heading of ["DATE", "STATUS", "FINDINGS", "MODE", "SCAN"]) {
+    for (const heading of ["DATE", "EXECUTION", "FINDINGS", "MODE", "SCAN"]) {
       expect(text).toContain(heading);
     }
     expect(text).toContain("failed-scan");
@@ -2906,7 +2906,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain("Preparing scan");
     expect(stderr.text()).toContain("Running scan");
-    expect(stderr.text()).toContain("Scan complete");
+    expect(stderr.text()).toContain("Scan finished");
     expect(captured.config).toEqual({
       pluginPath: "plugin.zip",
       pythonPath: "/managed/python",
@@ -4189,14 +4189,15 @@ describe("CLI", () => {
       ),
     ).toBe(0);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Scan complete · 12345678");
+    expect(stderr.text()).toContain("Scan finished · 12345678");
     expect(stderr.text()).not.toContain(result.manifest.scan.id);
     expect(stderr.text()).toContain(
       [
         `  REPORT    ${result.reportPath}`,
         "",
         "  FINDINGS  1 (1 high)",
-        "  COVERAGE  complete",
+        "  SCOPE     repository: .",
+        "  COVERAGE  complete for requested scope",
         "  ELAPSED   6m 37s",
         "  TOKENS    1,250 input, 200 cached, 30 output",
         "  COST      $0.00625",
@@ -4895,7 +4896,8 @@ describe("CLI", () => {
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("FINDINGS  0\n  COVERAGE  complete");
+    expect(stderr.text()).toContain("FINDINGS  0");
+    expect(stderr.text()).toContain("COVERAGE  complete for requested scope");
   });
 
   test("validates a dry run without starting a scan", async () => {
@@ -5116,6 +5118,144 @@ describe("CLI", () => {
     }
   });
 
+  test("evaluates complete scoped scans against their requested scope", async () => {
+    for (const paths of [
+      ["src/parser.ts"],
+      ["src/parser"],
+      ["src", "src/parser.ts", "tests"],
+    ]) {
+      for (const policy of [false, true]) {
+        const result = fakeResult(["high"]);
+        result.manifest.scan.scope.includePaths = paths;
+        result.manifest.scan.scope.validationMode = "static source review";
+        result.manifest.scan.scope.limitations = [
+          "Runtime testing was not requested.",
+        ];
+        Object.assign(result.coverage, {
+          mode: "scoped_path",
+          inventoryStrategy: "scoped_path",
+          includePaths: paths,
+          openQuestions: [
+            { question: "Consider a separate deployment review." },
+          ],
+        });
+        const stdout = capture();
+        const stderr = capture();
+        const exit = await main(
+          [
+            "scan",
+            "--json",
+            ...paths.flatMap((path) => ["--path", path]),
+            ...(policy ? ["--fail-on-severity", "high"] : []),
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ result }),
+        );
+        expect(exit).toBe(policy ? 1 : 0);
+        expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+        expect(stderr.text()).toContain(`scoped paths: ${paths.join(", ")}`);
+        expect(stderr.text()).toContain("complete for requested scope");
+        expect(stderr.text()).not.toContain(
+          "Cannot evaluate the failure policy",
+        );
+      }
+    }
+  });
+
+  test("includes canonical exclusions in a complete scan summary", async () => {
+    const result = fakeResult();
+    Object.assign(result.manifest.scan.scope, {
+      includePaths: ["src"],
+      excludePaths: ["src/vendor"],
+    });
+    Object.assign(result.coverage, {
+      mode: "scoped_path",
+      inventoryStrategy: "scoped_path",
+      includePaths: ["src"],
+      excludePaths: ["src/vendor"],
+      explicitExclusions: [
+        { pattern: "src/vendor", reason: "Excluded dependency source." },
+        { pattern: "src/generated/**", reason: "Excluded generated source." },
+      ],
+    });
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "--path", "src", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain(
+      "scoped paths: src; excluding src/vendor, src/generated/**",
+    );
+    expect(stderr.text()).toContain("complete for requested scope");
+  });
+
+  test("quotes and escapes untrusted paths in human scope summaries", async () => {
+    const path = "src; excluding tests\u2028COVERAGE forged";
+    const result = fakeResult();
+    result.manifest.scan.scope.includePaths = [path];
+    Object.assign(result.coverage, {
+      mode: "scoped_path",
+      inventoryStrategy: "scoped_path",
+      includePaths: [path],
+      excludePaths: ["vendor\u0085\u2029forged"],
+    });
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "--path", path, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).not.toMatch(/[\u0085\u2028\u2029]/u);
+    expect(stderr.text()).toContain(
+      '"src; excluding tests\\u2028COVERAGE forged"',
+    );
+    expect(stderr.text()).toContain('"vendor\\u0085\\u2029forged"');
+  });
+
+  test("does not promote incomplete coverage merely because paths were selected", async () => {
+    for (const completeness of ["partial", "unknown"] as const) {
+      const result = fakeResult(["high"], completeness);
+      result.manifest.scan.scope.includePaths = ["src/parser"];
+      Object.assign(result.coverage, {
+        mode: "scoped_path",
+        inventoryStrategy: "scoped_path",
+        includePaths: ["src/parser"],
+        deferred: [
+          {
+            id: "source-review",
+            reason: "Requested source remains unreviewed.",
+          },
+        ],
+      });
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan", "--path", "src/parser", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ result }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+      expect(stderr.text()).toContain(
+        `${completeness} for the requested scope`,
+      );
+    }
+  });
+
   test("does not report an incomplete scan as successful without a policy", async () => {
     for (const completeness of ["partial", "unknown"] as const) {
       const result = fakeResult(["high"], completeness);
@@ -5131,7 +5271,7 @@ describe("CLI", () => {
       ).toBe(2);
       expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
       expect(stderr.text()).toContain(
-        `Scan coverage is ${completeness}; results may be incomplete.`,
+        `Scan coverage is ${completeness} for the requested scope; see the report for unfinished work.`,
       );
     }
   });

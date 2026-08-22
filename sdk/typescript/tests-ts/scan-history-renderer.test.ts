@@ -3,6 +3,107 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  const finishedScan = {
+    targetPath: "/demo/repository",
+    scanId: "scan-1",
+    mode: "standard",
+    progress: { status: "complete" },
+    findings: [],
+    findingCount: 0,
+    startedAt: "2026-08-01T00:00:00Z",
+  };
+
+  test("separates finished execution from requested-scope coverage", () => {
+    for (const completeness of ["complete", "partial", "unknown"] as const) {
+      const text = renderScanHistory(
+        {
+          ...finishedScan,
+          coverage: {
+            mode: "scoped_path",
+            completeness,
+            includePaths: ["src/parser"],
+            excludePaths: [],
+          },
+        },
+        "show",
+        { color: false },
+      );
+      expect(text).toContain("FINISHED");
+      expect(text).toContain("scoped paths: src/parser");
+      expect(text).toContain(`${completeness} for requested scope`);
+    }
+
+    for (const mode of ["standard", "diff"]) {
+      const legacy = renderScanHistory(
+        { ...finishedScan, mode, scope: "." },
+        "show",
+        { color: false },
+      );
+      expect(legacy).toContain("FINISHED");
+      expect(legacy).toContain("COVERAGE  not available");
+      expect(legacy).not.toContain("SCOPE");
+      expect(legacy).not.toContain("complete for requested scope");
+    }
+
+    const list = renderScanHistory({ scans: [finishedScan] }, "list", {
+      color: false,
+    });
+    expect(list).toContain("EXECUTION");
+    expect(list).toContain("FINISHED");
+    expect(list).not.toContain("SCOPE");
+  });
+
+  test("wraps exact canonical paths and both exclusion sources", () => {
+    const paths = ["src/a  b.ts", "src/trailing ", "src/\ufeffname"];
+    const text = renderScanHistory(
+      {
+        ...finishedScan,
+        coverage: {
+          mode: "scoped_path",
+          completeness: "complete",
+          includePaths: paths,
+          excludePaths: ["vendor/a  b"],
+          explicitExclusions: [
+            { pattern: "vendor/a  b", reason: "Dependency source." },
+            { pattern: "generated/**", reason: "Generated source." },
+          ],
+        },
+      },
+      "show",
+      { color: false, columns: 48 },
+    );
+    for (const path of paths.slice(0, 2)) expect(text).toContain(path);
+    expect(text).toContain('"src/\\ufeffname"');
+    expect(text).not.toContain("\ufeff");
+    expect(text).toContain("generated/**");
+    expect(text.split("vendor/a  b")).toHaveLength(2);
+    expect(text).toContain("complete for requested scope");
+    const lines = text.split("\n");
+    const start = lines.findIndex((line) => line.includes("SCOPE"));
+    const end = lines.findIndex((line) => line.includes("COVERAGE"));
+    expect(end - start).toBeGreaterThan(1);
+    expect(lines.slice(start, end).every((line) => line.length <= 48)).toBe(
+      true,
+    );
+  });
+
+  test("uses canonical diff scope when it is available", () => {
+    const text = renderScanHistory(
+      {
+        ...finishedScan,
+        mode: "diff",
+        coverage: {
+          mode: "branch_diff",
+          completeness: "complete",
+          includePaths: ["src/parser.ts"],
+          excludePaths: [],
+        },
+      },
+      "show",
+      { color: false },
+    );
+    expect(text).toContain("branch diff: src/parser.ts");
+  });
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {
@@ -284,7 +385,7 @@ describe("scan history renderer", () => {
       ),
     );
 
-    expect(output).toContain("COMPLETE");
+    expect(output).toContain("FINISHED");
     expect(output).toContain("WARNING");
     expect(output).toContain(
       "Repository HEAD changed while the scan was running",

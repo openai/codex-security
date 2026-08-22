@@ -2292,9 +2292,17 @@ def build_sarif_projection(
     sarif = build_sarif(manifest, findings, source_root)
     run = sarif["runs"][0]
     completeness = coverage["completeness"]
+    run["properties"].update(
+        {
+            "codexSecurityCoverageMode": coverage["mode"],
+            "codexSecurityCoverageCompleteness": completeness,
+            "codexSecurityIncludePaths": coverage["includePaths"],
+            "codexSecurityExcludePaths": coverage["excludePaths"],
+            "codexSecurityExplicitExclusions": coverage["explicitExclusions"],
+        }
+    )
     run["invocations"] = [{"executionSuccessful": completeness == "complete"}]
     if completeness != "complete":
-        run["properties"]["codexSecurityCoverageCompleteness"] = completeness
         reasons = [item["reason"] for item in coverage["deferred"]] or [
             f"Scan coverage is {completeness}; results may be incomplete."
         ]

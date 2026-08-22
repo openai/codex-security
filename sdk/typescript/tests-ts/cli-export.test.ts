@@ -415,7 +415,7 @@ describe("CLI", () => {
             completeness === "complete",
           );
           expect(run.properties.codexSecurityCoverageCompleteness).toBe(
-            completeness === "complete" ? undefined : completeness,
+            completeness,
           );
           if (completeness === "complete") {
             expect(invocation.toolExecutionNotifications).toBeUndefined();

@@ -901,6 +901,10 @@ describe("deep scan workbench ownership", () => {
       expect(report).toContain(
         "No findings were validated before the scan reached its cost limit.",
       );
+      expect(report).toContain(
+        "Review the deferred candidates in Incomplete Requested Work.",
+      );
+      expect(report).toContain("## Incomplete Requested Work");
       if (existingDeferred) {
         expect(report).toContain(
           "Existing candidate validation dependency was unavailable.",
