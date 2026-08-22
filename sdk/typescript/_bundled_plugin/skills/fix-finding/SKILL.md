@@ -22,25 +22,14 @@ Never trade an earlier property for a later one. Minimal means the smallest repo
 
 ## Patch Contract
 
-Before editing, establish from repository evidence:
+Before editing, inspect the affected implementation, its direct callers, nearby helpers, and relevant existing tests. Establish from repository evidence:
 
-- affected component and current source-to-sink path or broken control
-- attacker-controlled input and required preconditions
-- security invariant and narrowest plausible enforcement boundary
-- legitimate behavior, APIs, error semantics, and compatibility constraints to preserve or intentionally change with supporting product evidence
-- available PoC, reproducer, tests, evidence, and affected locations
-- nearest relevant helpers and implementation, error-handling, and test precedents
+- the attacker-controlled input and concrete source-to-sink path or broken control
+- the security invariant and narrowest shared enforcement boundary
+- legitimate behavior, APIs, error semantics, and compatibility constraints that must remain
+- the closest existing implementation, validation, and error-handling precedents
 
-Inspect the repository to fill gaps. Ask the user only when a material product, security, or compatibility decision remains.
-
-## Runtime Validation
-
-Use this guidance whenever reproducing the finding, running tests, or validating the fix:
-
-- Complete the patch contract before broad setup; start with the smallest high-signal check through the real vulnerable boundary.
-- Use repository-supported setup commands. Keep repair effort bounded so it does not displace path analysis, patching, or focused verification.
-- Do not stop a progressing command merely because it is slow. Inspect process state, logs, artifacts, or resource use first.
-- If runtime validation remains unavailable, use the strongest targeted static or harness-based artifact that preserves the real integration boundary. Do not substitute a simplified harness that removes the behavior being protected. Record every unrun check as unknown.
+Treat the finding as a data-flow and boundary problem, not merely the named input example. Check equivalent encodings, parser forms, aliases, callers, sinks, and every representation or copy of security-sensitive state that could bypass the proposed change. Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it into another reachable form.
 
 ## Pre-Patch Investigation
 
@@ -52,37 +41,16 @@ The investigation requires repository-relative evidence and a clear separation b
 
 ## Implementation Workflow
 
-1. Revalidate and scope the finding.
-   - Inspect repository instructions, affected code, direct callers, and only the context needed to prove the vulnerable path.
-   - Establish concrete reachability in the current checkout; generic weakness labels, file anchors, and suspicious-looking code are not proof.
-   - If the same broken security boundary cannot be shown after a bounded investigation, do not patch an adjacent weakness or add speculative defense in depth. Return `no_change` when evidence shows the path is already safe; otherwise return `blocked` with the missing proof.
-   - Complete the patch contract and inspect relevant helpers, controls, and implementation and test precedents.
-2. Reproduce or encode the issue before fixing when feasible.
-   - Prefer a failing regression test, unit test, integration test, property test, or realistic-interface reproduction.
-   - Capture the malicious condition and at least one legitimate control through the same boundary before implementation.
-   - Keep an unsafe-behavior test only when it is safe, deterministic, and appropriate for the repository. Otherwise use the strongest repeatable validation artifact available and record the gap.
-   - If the issue no longer reproduces before any code changes, investigate whether it was already fixed and preserve the validation evidence.
-3. Choose the patch strategy.
-   - Determine whether a narrow tactical change can close the boundary while preserving the patch contract.
-   - Consider broader remediation only when the narrow option cannot close the boundary without breaking supported behavior. Remove or disable functionality only when repository or product evidence supports that mitigation.
-   - If the only complete fix requires an unresolved decision about product policy, public-API compatibility, or cross-subsystem ownership, return `blocked` with the options, security tradeoff, and likely owner or codeowner when available.
-   - Use nearby variants to test the chosen boundary. Report unrelated sibling findings or longer-term architectural work separately instead of expanding this patch.
-4. Implement the fix and its proof.
-   - Make the smallest repository-native change that fully enforces the invariant.
-   - Prefer existing helpers and abstractions. Preserve APIs, legitimate inputs, and error semantics unless changing them is required by the security contract.
-   - Handle unsafe state explicitly; do not silently accept, truncate, or reinterpret it.
-   - Avoid unrelated refactors and preserve user changes outside the candidate patch.
-   - Add focused regression coverage that fails on the vulnerable behavior and passes after the fix.
-   - Include positive coverage for the legitimate control. Test at the lowest level that proves the invariant and through the realistic interface when feasible.
-5. Verify in order.
-   - **Applicability and buildability**: inspect the final diff for unrelated changes, then run the narrowest relevant syntax, import, build, type, or focused test check.
-   - **Security closure**: rerun the original PoC, trigger, or strongest exploit check. Re-trace the source-to-sink or broken-control path in the patched code.
-   - **Change-aware bypass review**: reread the finding and final diff without relying on the original rationale. Trace changed branches from direct callers, check equivalent sinks, and exercise an alternate malicious input class when practical.
-   - **Preserved behavior**: rerun the legitimate control and confirm the recorded APIs, error semantics, and compatibility constraints remain intact.
-   - **Repository checks**: run the focused regression tests, the owning package's relevant tests, and applicable formatter, linter, type checker, dependency, and integration checks.
-   - Confirm the regression check would fail if the security change were removed, when practical.
-   - Treat a failed earlier gate as disqualifying. Revise only the candidate changes or return `blocked`; never compensate for failed security closure or behavior preservation with style, smaller scope, or additional reporting.
-6. Report the outcome with exact commands, results, changed files, and remaining risk.
+1. Trace the reported path and inspect only the context needed to identify the real shared boundary. Return `no_change` when repository evidence shows that the reported path is already safe; do not make a speculative change.
+2. When feasible, run the smallest high-signal reproduction through that boundary and one legitimate control through the same path.
+3. Implement the smallest repository-native fix at the shared boundary. Prefer nearby helpers and established APIs. Do not broaden into unrelated redesign, cleanup, or sibling findings.
+4. Before verification, challenge the patch rather than defending it: inspect every direct caller of each changed helper and both outcomes of each changed condition. Look for one sibling path, representation, or copy that still reaches the vulnerable sink and one ordinary or default input that the patch newly rejects or reinterprets; revise the implementation if either exists.
+5. Verify in order:
+   - inspect the final diff and run the narrowest syntax, import, build, or type check relevant to it
+   - rerun the security trigger or strongest focused substitute and review one alternate malicious input class
+   - rerun the legitimate control, nearest existing tests, and the owning package's applicable required checks
+
+Return `blocked` if the vulnerability may be real, but essential evidence, tooling, access, or a product or compatibility decision is missing, so a safe fix cannot be responsibly completed or verified.
 
 ## Patch Candidate Review
 
