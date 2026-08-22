@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createLinearClient,
   importLinearIssues,
+  loadLinearPublicationContext,
   resolveLinearApiKey,
   type LinearClientFactory,
 } from "../src/linear.js";
@@ -154,7 +155,7 @@ describe("Linear issue intake", () => {
       [new RatelimitedLinearError(), "Linear request was rate limited."],
       [
         new Error("Invalid lin_api_SYNTHETIC_SECRET"),
-        "Linear request failed: [redacted]",
+        "Linear request failed: Invalid [redacted]",
       ],
     ] as const) {
       await expect(
@@ -172,5 +173,155 @@ describe("Linear issue intake", () => {
         }),
       ).rejects.toThrow(message);
     }
+  });
+});
+
+describe("Linear publication context", () => {
+  test("validates the destination and returns every active non-group team label", async () => {
+    const labels = {
+      nodes: [
+        {
+          id: "label-zeta",
+          name: "Zeta",
+          parentId: "label-group",
+          isGroup: false,
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+        {
+          id: "label-group",
+          name: "Escalation",
+          isGroup: true,
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+      ],
+      pageInfo: { hasNextPage: true },
+      async fetchNext() {
+        this.nodes.push({
+          id: "label-alpha",
+          name: "Alpha",
+          isGroup: false,
+          archivedAt: undefined,
+          retiredById: undefined,
+        });
+        this.nodes.push({
+          id: "label-archived",
+          name: "Archived",
+          isGroup: false,
+          archivedAt: new Date(),
+          retiredById: undefined,
+        });
+        this.nodes.push({
+          id: "label-retired",
+          name: "Retired",
+          isGroup: false,
+          archivedAt: undefined,
+          retiredById: "user-example",
+        });
+        this.pageInfo.hasNextPage = false;
+      },
+    };
+    const projectTeams = {
+      nodes: [{ id: "another-team" }],
+      pageInfo: { hasNextPage: true },
+      async fetchNext() {
+        this.nodes.push({ id: "team-example" });
+        this.pageInfo.hasNextPage = false;
+      },
+    };
+    let workspaceFilter: unknown;
+    const workspaceLabels = {
+      nodes: [
+        {
+          id: "label-workspace-group",
+          name: "Workspace impact",
+          isGroup: true,
+          teamId: undefined,
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+        {
+          id: "label-workspace",
+          name: "Workspace label",
+          parentId: "label-workspace-group",
+          isGroup: false,
+          teamId: undefined,
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+        {
+          id: "label-other-team",
+          name: "Other team",
+          isGroup: false,
+          teamId: "another-team",
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+      ],
+      pageInfo: { hasNextPage: false },
+    };
+    const context = await loadLinearPublicationContext(
+      {
+        team: async (id: string) => ({
+          id,
+          labels: async () => labels,
+        }),
+        project: async (id: string) => ({
+          id,
+          teams: async () => projectTeams,
+        }),
+        issueLabels: async ({ filter }: { filter: unknown }) => {
+          workspaceFilter = filter;
+          return workspaceLabels;
+        },
+      } as never,
+      "team-example",
+      "project-example",
+    );
+
+    expect(context).toEqual({
+      labels: [
+        { id: "label-alpha", name: "Alpha" },
+        {
+          id: "label-workspace",
+          name: "Workspace label",
+          groupId: "label-workspace-group",
+          groupName: "Workspace impact",
+        },
+        {
+          id: "label-zeta",
+          name: "Zeta",
+          groupId: "label-group",
+          groupName: "Escalation",
+        },
+      ],
+    });
+    expect(workspaceFilter).toEqual({ team: { null: true } });
+  });
+
+  test("rejects a project outside the selected team", async () => {
+    await expect(
+      loadLinearPublicationContext(
+        {
+          team: async () => ({
+            id: "team-example",
+            labels: async () => ({
+              nodes: [],
+              pageInfo: { hasNextPage: false },
+            }),
+          }),
+          project: async () => ({
+            id: "project-example",
+            teams: async () => ({
+              nodes: [{ id: "another-team" }],
+              pageInfo: { hasNextPage: false },
+            }),
+          }),
+        } as never,
+        "team-example",
+        "project-example",
+      ),
+    ).rejects.toThrow("does not belong to the selected team");
   });
 });

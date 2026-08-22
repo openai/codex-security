@@ -747,8 +747,54 @@ You can also pass `--linear-api-key KEY`, which takes precedence over
 `CODEX_SECURITY_LINEAR_API_KEY`. Prefer the environment variable to avoid
 exposing your API key in shell history and process listings. API keys are not
 added to successful publication results, scan history, or sealed scan artifacts.
-Error messages are preserved as returned. `--dry-run` never contacts Linear in
-either mode.
+Publication errors redact the selected API key. Without a publication knowledge
+base, `--dry-run` never contacts Linear in either mode.
+
+Without `--knowledge-base`, the CLI maps Critical, High, Medium, and Low
+findings to Urgent, High, Medium, and Low Linear priorities, respectively.
+Informational findings leave priority unset. To replace this mapping with your
+organization's publication rules, pass Markdown, text, PDF, or DOCX documents
+with one or more `--knowledge-base PATH` options:
+
+```bash
+cat > linear-publication-policy.md <<'EOF'
+# Linear publication policy
+
+- Findings explicitly classified as P0 use the Urgent priority.
+- P1 uses High, P2 uses Medium, and P3 uses Low.
+- Internet-facing findings receive the existing `Internet exposed` label.
+EOF
+
+export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
+npx @openai/codex-security publish scan /path/to/completed-scan \
+  --to linear \
+  --linear-team TEAM_ID \
+  --knowledge-base ./linear-publication-policy.md
+```
+
+The example rules above are not built into the CLI. When you supply a knowledge
+base, the CLI applies only the rules in those documents. If no rule matches a
+finding, the CLI leaves its priority and labels unset instead of using the
+default severity mapping.
+
+The CLI starts one ephemeral, read-only Codex turn for the policy documents and
+findings. It uses your existing Codex sign-in and the default Codex model. The
+turn does not load user configuration, ask for approval, access the network,
+use web search, or enable executable tool features. It does not persist a Codex
+session.
+
+The CLI uses the Linear API key to validate the selected team and project, read
+the available team and workspace labels, and create issues. The Codex turn does
+not receive the Linear API key. A policy may set only Linear priority and
+existing labels. It cannot change the team, project, issue title or description,
+assignee, state, cycle, estimate, or due date.
+
+`--knowledge-base` requires a Linear API key, so connected-app publication
+cannot use it. During `--dry-run --knowledge-base`, the CLI only reads from
+Linear. It runs the same policy evaluation and validation as publication, then
+returns the resolved fields in `issues` and `appliedMetadata`. The CLI does not
+store policy contents, policy file paths, model prompts, or credentials in the
+sealed scan or private publication receipt.
 
 Each finding creates a separate new issue titled
 `[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
@@ -802,6 +848,11 @@ const directPublication = await publishScan("/path/to/completed-scan", {
   assigneeId: "teammate@example.com",
 });
 ```
+
+Add `knowledgeBasePaths: ["./linear-publication-policy.md"]` to make direct
+publication apply the policy before it creates any issues. This also requires
+your existing Codex sign-in. `directPublication.appliedMetadata` contains the
+numeric Linear priority and resolved label IDs and names for each finding.
 
 ### Scan history and reruns
 

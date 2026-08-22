@@ -250,7 +250,82 @@ describe("publish scan", () => {
     );
   });
 
-  test("preserves Linear API error details", async () => {
+  test("forwards repeatable publication knowledge bases with every supported API-key source", async () => {
+    for (const scenario of [
+      {
+        environment: {},
+        flags: ["--linear-api-key", "explicit-key"],
+        key: "explicit-key",
+      },
+      {
+        environment: {
+          CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
+        },
+        flags: [],
+        key: "environment-key",
+      },
+    ]) {
+      const deps = dependencies({ environment: scenario.environment });
+      let selected: Record<string, unknown> | undefined;
+      deps.publishScan = async (_directory, options) => {
+        selected = { ...options };
+        return publicationResult();
+      };
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            ...scenario.flags,
+            "--knowledge-base",
+            "priority-policy.md",
+            "--knowledge-base",
+            "labels.docx",
+            "--json",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(selected).toMatchObject({
+        linearApiKey: scenario.key,
+        knowledgeBasePaths: ["priority-policy.md", "labels.docx"],
+      });
+    }
+  });
+
+  test("rejects publication knowledge bases without a direct Linear API key", async () => {
+    const stderr = capture();
+    const deps = dependencies();
+    deps.publishScan = async () => {
+      throw new Error("publisher must not run");
+    };
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--knowledge-base",
+          "policy.md",
+        ],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--knowledge-base requires a Linear API key from --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY",
+    );
+    expect(stderr.text()).not.toContain("publisher must not run");
+  });
+
+  test("redacts Linear API credentials from publication errors", async () => {
     const key = "lin_api_SYNTHETIC_ERROR_DETAILS";
     const stdout = capture();
     const stderr = capture();
@@ -269,7 +344,44 @@ describe("publish scan", () => {
         deps,
       ),
     ).toBe(2);
-    expect(stderr.text()).toContain(key);
+    expect(stderr.text()).toContain("Linear rejected [redacted].");
+    expect(stderr.text()).not.toContain(key);
+  });
+
+  test("shows knowledge-base enrichment progress during dry-run", async () => {
+    const stderr = capture();
+    const signals = new FakeSignals();
+    const deps = dependencies({
+      environment: { CODEX_SECURITY_LINEAR_API_KEY: "environment-key" },
+      signals,
+    });
+    deps.publishScan = async (_directory, options) => {
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      options.onProgress?.({ type: "enrichment_started", total: 1 });
+      options.onProgress?.({ type: "enrichment_completed", total: 1 });
+      return { ...publicationResult(), dryRun: true, issues: [] };
+    };
+
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--knowledge-base",
+          "policy.md",
+          "--dry-run",
+          "--json",
+        ],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toContain("Applying publication knowledge base.");
+    expect(signals.listeners.get("SIGINT")?.size ?? 0).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size ?? 0).toBe(0);
   });
 
   test("publishes directly to a Linear team when no project is selected", async () => {
