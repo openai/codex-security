@@ -392,7 +392,7 @@ describe("deep scan workbench ownership", () => {
     [0.5, 0.5],
     [96, 96],
   ] as const)(
-    "resolves the configured discovery deadline %s as %s hours",
+    "resolves the configured discovery deadline %p as %p hours",
     async (configuredHours, expectedHours) => {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "codex-security-deep-deadline-config-")),
@@ -509,7 +509,7 @@ describe("deep scan workbench ownership", () => {
   });
 
   test.each([false, true] as const)(
-    "backfills and repairs discovery deadline migration when already recorded: %s",
+    "backfills and repairs discovery deadline migration when already recorded: %p",
     (migrationRecorded) => {
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
@@ -565,7 +565,7 @@ describe("deep scan workbench ownership", () => {
     ["scoped_path", false],
     ["repository", true],
   ] as const)(
-    "returns an honest partial %s report with existing deferred work %s when saturated discovery exceeds its cost limit",
+    "returns an honest partial %s report with existing deferred work %p when saturated discovery exceeds its cost limit",
     async (inventoryStrategy, existingDeferred) => {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "codex-security-deep-budget-recovery-")),
