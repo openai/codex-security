@@ -143,6 +143,24 @@ describe("Cloud publication", () => {
     expect(requests).toBe(1);
   });
 
+  test("honors a Cloud publication URL override", async () => {
+    const { scan, environment } = await fixture();
+    const publishUrl =
+      "https://chatgpt-staging.com/backend-api/aardvark/cli/findings";
+    let requestedUrl: string | undefined;
+    await publishScanToCloud(scan, {
+      environment: {
+        ...environment,
+        CODEX_SECURITY_CLOUD_PUBLISH_URL: publishUrl,
+      },
+      fetch: async (url) => {
+        requestedUrl = String(url);
+        return Response.json(receipt);
+      },
+    });
+    expect(requestedUrl).toBe(publishUrl);
+  });
+
   test("prefers the dedicated file login and honors an explicit logout", async () => {
     const { scan, environment } = await fixture();
     const home = codexSecurityCredentialHome(environment);

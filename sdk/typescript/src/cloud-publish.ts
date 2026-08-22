@@ -73,6 +73,9 @@ export async function publishScanToCloud(
   const credentials = await readCloudCredentials(
     dependencies.environment ?? process.env,
   );
+  const publishUrl =
+    dependencies.environment?.["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
+    CLOUD_PUBLISH_URL;
   const timeout = AbortSignal.timeout(30_000);
   const signal = dependencies.signal
     ? AbortSignal.any([dependencies.signal, timeout])
@@ -80,7 +83,7 @@ export async function publishScanToCloud(
   let response: Response;
   try {
     response = await (dependencies.fetch ?? globalThis.fetch)(
-      CLOUD_PUBLISH_URL,
+      publishUrl,
       {
         method: "POST",
         headers: {
