@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import type { CheckScanPublicationResult } from "../src/publish.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
 
 const DESTINATION_OPTIONS = [
@@ -73,7 +74,217 @@ function publicationResult(
   };
 }
 
+describe("publish check", () => {
+  test("resolves the shared destination options without invoking publication", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const currentDirectory = join(tmpdir(), "codex-security-check-current");
+    const result: CheckScanPublicationResult = {
+      scanId: "scan-example",
+      destination: {
+        type: "linear",
+        teamId: "team-from-flags",
+        projectId: "project-from-flags",
+      },
+      recorded: [],
+      counts: { findings: 2, recorded: 0, pending: 2 },
+      access: {
+        transport: "linear-api",
+        authentication: "verified",
+        team: "verified",
+        project: "verified",
+        assignee: "verified",
+        issueCreation: "not-tested",
+      },
+    };
+    const deps = dependencies({
+      currentDirectory,
+      environment: {
+        CODEX_SECURITY_LINEAR_API_KEY: "environment-key",
+        CODEX_SECURITY_LINEAR_TEAM: "environment-team",
+      },
+    });
+    deps.publishScan = async () => {
+      throw new Error("Check must not publish.");
+    };
+    deps.checkScanPublication = async (directory, options) => {
+      expect(directory).toBe(resolve(currentDirectory, "completed-scan"));
+      expect(options).toEqual({
+        destination: "linear",
+        teamId: "team-from-flags",
+        projectId: "project-from-flags",
+        linearApiKey: "explicit-key",
+        assigneeId: "teammate@example.com",
+        signal: expect.any(AbortSignal),
+      });
+      return result;
+    };
+    expect(
+      await main(
+        [
+          "publish",
+          "check",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--linear-api-key",
+          "explicit-key",
+          "--linear-assignee",
+          "teammate@example.com",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toBe("");
+    expect(stdout.text()).not.toContain("explicit-key");
+    expect(stdout.text()).not.toContain("teammate@example.com");
+  });
+
+  test("reports a failed check without publishing or returning a successful result", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    deps.checkScanPublication = async () => {
+      throw new Error("The selected project is unavailable.");
+    };
+    deps.publishScan = async () => {
+      throw new Error("Check must not publish.");
+    };
+    expect(
+      await main(
+        [
+          "publish",
+          "check",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("The selected project is unavailable.");
+    expect(stdout.text().trim()).toBe("");
+  });
+
+  test("waits for read-only publication cleanup on terminal signals", async () => {
+    for (const command of [
+      ["check"],
+      ["scan", "--dry-run", "--skip-existing"],
+    ]) {
+      for (const [signal, expectedCode] of [
+        ["SIGINT", 130],
+        ["SIGTERM", 143],
+      ] as const) {
+        const stdout = capture();
+        const stderr = capture();
+        const signals = new FakeSignals();
+        const deps = dependencies({ signals });
+        let started!: () => void;
+        const operationStarted = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        let finishCleanup!: () => void;
+        const cleanup = new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        });
+        const operation = async (
+          _directory: string,
+          options: { signal?: AbortSignal },
+        ): Promise<never> => {
+          expect(options.signal).toBeInstanceOf(AbortSignal);
+          started();
+          await cleanup;
+          expect(options.signal?.reason).toBe(signal);
+          options.signal!.throwIfAborted();
+          throw new Error("Expected cancellation.");
+        };
+        deps.publishScan = operation;
+        deps.checkScanPublication = operation;
+        let finished = false;
+        const running = main(
+          [
+            "publish",
+            command[0]!,
+            "completed-scan",
+            ...command.slice(1),
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ).then((status) => {
+          finished = true;
+          return status;
+        });
+        await operationStarted;
+        signals.emit(signal);
+        expect(finished).toBe(false);
+        finishCleanup();
+        expect(await running).toBe(expectedCode);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          signal === "SIGINT" ? "canceled by Ctrl-C" : "terminated by SIGTERM",
+        );
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      }
+    }
+  });
+});
+
 describe("publish scan", () => {
+  test("forwards opt-in retry and reports skipped issues separately", async () => {
+    for (const dryRun of [false, true]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.publishScan = async (_directory, options) => {
+        expect(options.skipExisting).toBe(true);
+        expect(options.dryRun).toBe(dryRun);
+        const previous = publicationResult();
+        return {
+          ...previous,
+          created: [],
+          skipped: previous.created,
+          counts: { findings: 1, created: 0, failed: 0, skipped: 1 },
+          ...(dryRun ? { dryRun: true, issues: [] } : {}),
+        };
+      };
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--skip-existing",
+            ...(dryRun ? ["--dry-run", "--json"] : []),
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      if (dryRun) {
+        expect(JSON.parse(stdout.text()).counts).toEqual({
+          findings: 1,
+          created: 0,
+          failed: 0,
+          skipped: 1,
+        });
+      } else {
+        expect(stdout.text()).toContain("0 total issues created");
+        expect(stdout.text()).toContain("1 previously recorded issue skipped");
+      }
+    }
+  });
+
   test("accepts the Linear project flag and its published alias", async () => {
     for (const flag of ["--linear-project", "--project"]) {
       let projectId: string | undefined;
@@ -708,13 +919,11 @@ describe("publish scan", () => {
 
     const stdout = capture();
     const stderr = capture(true);
-    const deps = dependencies();
-    let observedSignals = false;
-    deps.addSignalListener = () => {
-      observedSignals = true;
-    };
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
     deps.publishScan = async (_scanDirectory, options) => {
       expect(options.onProgress).toBeUndefined();
+      expect(options.signal).toBeInstanceOf(AbortSignal);
       return { ...publicationResult(), dryRun: true, issues: [] };
     };
 
@@ -735,7 +944,8 @@ describe("publish scan", () => {
     expect(stdout.text()).toContain("dryRun: true");
     expect(stdout.text()).not.toContain("Linear publication complete");
     expect(stderr.text()).toBe("");
-    expect(observedSignals).toBe(false);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });
 
   test("reports every created Linear issue with a successful exit code", async () => {

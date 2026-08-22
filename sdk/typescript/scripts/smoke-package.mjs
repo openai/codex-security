@@ -348,7 +348,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "checkScanPublication"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
     ],
     { cwd: consumer },
   );
@@ -470,6 +470,43 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
+  assert.match(
+    run(process.execPath, [launcher, "publish", "scan", "--help"], {
+      cwd: consumer,
+      capture: true,
+    }),
+    /--skip-existing/u,
+  );
+  const missingHistory = spawnSync(
+    process.execPath,
+    [
+      launcher,
+      "publish",
+      "check",
+      publicationScan,
+      "--to",
+      "linear",
+      "--linear-team",
+      "team-example",
+      "--json",
+    ],
+    {
+      cwd: consumer,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_SECURITY_LINEAR_API_KEY: "",
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+      },
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  assert.equal(missingHistory.status, 2, missingHistory.stderr);
+  assert.match(missingHistory.stderr, /scan-history database does not exist/u);
+  await assert.rejects(stat(join(consumer, "publication-state")), {
+    code: "ENOENT",
+  });
 
   const networkGuard = join(consumer, "reject-publication-network.cjs");
   await writeFile(

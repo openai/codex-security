@@ -1753,9 +1753,9 @@ describe("plugin runtime preparation", () => {
     }
   });
 
-  test("refreshes cached plugins before forwarding delegated scan attribution", async () => {
+  test("refreshes the prior bundle before using new runtime helpers", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "0.1.19");
+    const previous = await plugin(join(root, "previous"), "0.1.22");
     await writeFile(
       join(previous, ".mcp.json"),
       JSON.stringify({
@@ -1798,7 +1798,7 @@ describe("plugin runtime preparation", () => {
     };
 
     expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "0.1.19",
+      "0.1.22",
     );
     const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
     const configuration = JSON.parse(
@@ -1809,10 +1809,22 @@ describe("plugin runtime preparation", () => {
     ) as { mcpServers: Record<string, { env_vars: string[] }> };
 
     expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-    expect(upgraded.version).not.toBe("0.1.19");
+    expect(upgraded.version).not.toBe("0.1.22");
     expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
       "CODEX_SECURITY_SURFACE",
     );
+    expect(
+      await readFile(
+        join(
+          marketplace,
+          "plugins",
+          "codex-security",
+          "scripts",
+          "workbench_cli.py",
+        ),
+        "utf8",
+      ),
+    ).toContain('"inspect-linear-publication"');
   });
 
   test("rejects plugin installs without the selected path and version", async () => {

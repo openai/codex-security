@@ -23,6 +23,7 @@ import type {
   ScanManifest,
 } from "../src/models.js";
 import {
+  checkScanPublicationInternal,
   publishScanInternal,
   type PublishScanDependencies,
   type PublishScanProgress,
@@ -280,6 +281,158 @@ function receiptPath(fixture: PublicationFixture): string {
 }
 
 describe("database-backed Linear publication integration", () => {
+  test("checks and retries a partial publication without duplicating recorded successes", async () => {
+    const completed = await fixture(2);
+    const sealed = await artifactDigests(completed.scanDirectory);
+    const environment = {
+      ...completed.environment,
+      CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_RETRY_KEY",
+    };
+    const cli = dependencies({ environment });
+    type LinearClient = ReturnType<
+      NonNullable<PublishScanDependencies["linearClient"]>
+    >;
+    type IssueInput = Parameters<LinearClient["createIssue"]>[0];
+    const attempted: string[] = [];
+    let failSecond = true;
+    let issueNumber = 500;
+    cli.publishScan = (directory, options) =>
+      publishScanInternal(directory, options, {
+        environment,
+        resolveCodex: () => {
+          throw new Error("Direct publication must not start Codex.");
+        },
+        linearClient: () =>
+          ({
+            users: async () => {
+              throw new Error("Unassigned publication must not look up users.");
+            },
+            createIssue: async (input: IssueInput) => {
+              const index = completed.findings.findIndex(({ findingId }) =>
+                input.description?.includes(findingId),
+              );
+              expect(index).toBeGreaterThanOrEqual(0);
+              attempted.push(completed.findings[index]!.findingId);
+              if (failSecond && index === 1)
+                throw new Error("Synthetic creation failure.");
+              const identifier = `EXAMPLE-${++issueNumber}`;
+              return {
+                success: true,
+                issue: Promise.resolve({
+                  identifier,
+                  url: `https://linear.app/example/issue/${identifier}`,
+                }),
+              };
+            },
+          }) as unknown as LinearClient,
+      });
+    const command = [
+      "publish",
+      "scan",
+      completed.scanDirectory,
+      "--to",
+      "linear",
+      "--linear-team",
+      OPTIONS.teamId,
+      "--project",
+      OPTIONS.projectId,
+      "--json",
+    ];
+    const run = async (flags: string[] = []) => {
+      const stdout = capture();
+      const stderr = capture();
+      const code = await main(
+        [...command, ...flags],
+        stdout.stream,
+        stderr.stream,
+        cli,
+      );
+      return { code, result: JSON.parse(stdout.text()) as PublishScanResult };
+    };
+
+    const initial = await run();
+    expect(initial.code).toBe(2);
+    expect(initial.result.counts).toEqual({
+      findings: 2,
+      created: 1,
+      failed: 1,
+    });
+    expect(storedPublications(completed)).toHaveLength(1);
+
+    const localEnvironment = {
+      ...completed.environment,
+      CODEX_SECURITY_LINEAR_API_KEY: undefined,
+    };
+    const checkCli = dependencies({ environment: localEnvironment });
+    checkCli.checkScanPublication = (directory, options) =>
+      checkScanPublicationInternal(directory, options, {
+        environment: localEnvironment,
+      });
+    const checkOutput = capture();
+    const database = join(completed.stateDirectory, "workbench.sqlite3");
+    const before = sha256(await readFile(database));
+    expect(
+      await main(
+        [
+          "publish",
+          "check",
+          completed.scanDirectory,
+          "--to",
+          "linear",
+          "--linear-team",
+          OPTIONS.teamId,
+          "--project",
+          OPTIONS.projectId,
+          "--json",
+        ],
+        checkOutput.stream,
+        capture().stream,
+        checkCli,
+      ),
+    ).toBe(0);
+    const checked = JSON.parse(checkOutput.text());
+    expect(checked.counts).toEqual({ findings: 2, recorded: 1, pending: 1 });
+    expect(checked.access.issueCreation).toBe("not-tested");
+    expect(checked.recorded).toEqual(initial.result.created);
+    expect(sha256(await readFile(database))).toBe(before);
+
+    failSecond = false;
+    attempted.length = 0;
+    const retry = await run(["--skip-existing"]);
+    expect(retry.code).toBe(0);
+    expect(attempted).toEqual([completed.findings[1]!.findingId]);
+    expect(retry.result.skipped).toEqual(initial.result.created);
+    expect(retry.result.counts).toEqual({
+      findings: 2,
+      created: 1,
+      failed: 0,
+      skipped: 1,
+    });
+    expect(storedPublications(completed)).toHaveLength(2);
+
+    const receipt = await readFile(receiptPath(completed), "utf8");
+    attempted.length = 0;
+    const repeated = await run(["--skip-existing"]);
+    expect(repeated.code).toBe(0);
+    expect(repeated.result.counts).toEqual({
+      findings: 2,
+      created: 0,
+      failed: 0,
+      skipped: 2,
+    });
+    expect(attempted).toEqual([]);
+    expect(await readFile(receiptPath(completed), "utf8")).toBe(receipt);
+    expect(storedPublications(completed)).toHaveLength(2);
+
+    expect((await run()).result.counts).toEqual({
+      findings: 2,
+      created: 2,
+      failed: 0,
+    });
+    expect(storedPublications(completed)).toHaveLength(4);
+    expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+  });
+
   test("persists unassigned direct team-only publication", async () => {
     const completed = await fixture(23);
     const sealed = await artifactDigests(completed.scanDirectory);
