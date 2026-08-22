@@ -280,6 +280,11 @@ describe("live scan dashboard", () => {
         output_tokens: 236,
       }).cost!,
     );
+    dashboard.setFiles({
+      phase: "discovery",
+      filesCompleted: 3,
+      filesTotal: 1_258,
+    });
     dashboard.stop();
 
     const text = stripVTControlCharacters(stderr.text());
@@ -295,7 +300,9 @@ describe("live scan dashboard", () => {
     expect(text).toContain("               routes/login.ts");
     expect(text).not.toContain("[09:41:19]   routes/login.ts");
     expect(text).toContain("routes/login.ts");
-    expect(text).toContain("0 / 1,258 reviewed");
+    expect(text).toContain("1,258 in scope");
+    expect(text).not.toContain("0 / 1,258 reviewed");
+    expect(text).toContain("3 / 1,258 reviewed");
     expect(text).not.toContain("opened");
     expect(text).not.toContain("3 / 6 active");
     expect(text).toContain("17,985 in · 10,496 cached · 236 out");
