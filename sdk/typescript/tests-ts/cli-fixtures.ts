@@ -190,10 +190,18 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (...args: Parameters<MainDependencies["runCodex"]>) => number;
+    onCodex?: (
+      ...arguments_: Parameters<MainDependencies["runCodex"]>
+    ) => number | Promise<number>;
     linearClient?: MainDependencies["linearClient"];
+    onRepositoryCommand?: (
+      ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
+    ) => string | Promise<string>;
     bulkScan?: MainDependencies["bulkScan"];
-    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
+    onWorkbench?: (
+      args: readonly string[],
+      input?: string,
+    ) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -254,13 +262,15 @@ export function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (...args) => options.onCodex?.(...args) ?? 0,
+    runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
+    runRepositoryCommand: async (command, args, repository) =>
+      (await options.onRepositoryCommand?.(command, args, repository)) ?? "",
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
-    runWorkbench: async (args) =>
-      (await options.onWorkbench?.(args)) ?? { scans: [] },
+    runWorkbench: async (args, input) =>
+      (await options.onWorkbench?.(args, input)) ?? { scans: [] },
     matchFindings: async (input) =>
       (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
     exportFindings: async (arguments_) =>

@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
-import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
+import {
+  type AttackPathDataflow,
+  type AttackPathReachability,
+  CodexSecurity,
+  CodexSecurityError,
+  VERSION,
+} from "../src/index.js";
 import { main } from "../src/cli.js";
 
 function capture(): {
@@ -21,6 +27,22 @@ function capture(): {
 }
 
 describe("TypeScript package skeleton", () => {
+  test("exports typed attack-path aliases", () => {
+    const dataflow: AttackPathDataflow = {
+      transformations: ["decode archive entry"],
+    };
+    const reachability: AttackPathReachability = {
+      attacker: "authenticated uploader",
+      entrypoint: "archive upload endpoint",
+      preconditions: ["archive extraction is enabled"],
+    };
+    const transformations: string[] | undefined = dataflow.transformations;
+    const attacker: string | undefined = reachability.attacker;
+
+    expect(transformations).toEqual(["decode archive entry"]);
+    expect(attacker).toBe("authenticated uploader");
+  });
+
   test("advertises the tested Node.js 22, 24, and 26 release lines", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -63,7 +85,7 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("randomizes tests with the default timeout across CI platforms", async () => {
+  test("randomizes tests and keeps the default and Windows CI timeouts", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -81,6 +103,9 @@ describe("TypeScript package skeleton", () => {
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(ciWorkflow).toContain(
       "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+    );
+    expect(ciWorkflow).toContain(
+      "run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
     );
     expect(ciWorkflow).toContain(
       "name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",

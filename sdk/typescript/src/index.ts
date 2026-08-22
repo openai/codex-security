@@ -1,6 +1,7 @@
 export { CodexSecurity, createSecurity } from "./api.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent } from "./cost.js";
+export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export type {
   CodexSecurityMetadata,

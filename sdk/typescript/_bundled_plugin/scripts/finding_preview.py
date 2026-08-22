@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from report_projection import merged_root_cause
 from workbench_constants import (
     FINDING_ATTACK_PATH_PREVIEW_BYTES,
     FINDING_CODE_EVIDENCE_LIMIT,
@@ -61,6 +63,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 "evidence_refs",
                 "assertions",
                 "evidence",
+                "counterEvidence",
                 "limitations",
             ),
             (
@@ -70,6 +73,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
                 (("evidenceRefs", "evidence_refs"), 400),
                 (("assertions",), 400),
                 (("evidence",), 400),
+                (("counterEvidence",), 400),
                 (("limitations",), 400),
             ),
         ),
@@ -109,14 +113,27 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
             ),
         ),
     ):
-        key = next((alias for alias in aliases if alias in value), None)
+        if aliases == ("rootCause", "root_cause"):
+            key, section = merged_root_cause(value)
+        else:
+            key = next((alias for alias in aliases if alias in value), None)
+            section = value[key] if key is not None else None
         if key is not None:
-            section = value[key]
             if key == "attackPath" and isinstance(section, dict):
                 section = dict(section)
                 for assessment in ("impact", "likelihood"):
                     if isinstance(section.get(assessment), str):
-                        section[assessment] = {"level": section[assessment]}
+                        assessment_value = section[assessment]
+                        assessment_key = (
+                            "level"
+                            if re.fullmatch(
+                                r"critical|high|medium|low|informational|ignore|unknown",
+                                assessment_value,
+                                flags=re.IGNORECASE,
+                            )
+                            else "rationale"
+                        )
+                        section[assessment] = {assessment_key: assessment_value}
             prepared[key] = bounded_finding_section(
                 section,
                 maximum_bytes,
@@ -128,12 +145,9 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str):
         prepared["writeup"] = {"reportPath": bounded_json_text(writeup["reportPath"], 512)[0]}
 
-    evidence_key = next(
-        (key for key in ("codeEvidence", "code_evidence") if key in value),
-        None,
-    )
+    evidence_key, evidence = merged_code_evidence(value)
     if evidence_key is not None:
-        prepared[evidence_key] = bounded_code_evidence(value[evidence_key])
+        prepared[evidence_key] = bounded_code_evidence(evidence)
 
     for key in (
         "confidence",
@@ -185,9 +199,7 @@ def bounded_finding_details(value: Any) -> dict[str, Any]:
     )
     core = {key: prepared[key] for key in core_keys if key in prepared}
     extras = {
-        key: item
-        for key, item in prepared.items()
-        if key not in core and key not in guidance
+        key: item for key, item in prepared.items() if key not in core and key not in guidance
     }
     complete_guidance = {key: items[:1] for key, items in guidance.items()}
     minimum_guidance = {
@@ -233,25 +245,75 @@ def bounded_finding_section(
     for key in (*priority_keys, *value):
         if key in value and key not in ordered:
             ordered[key] = value[key]
-    evidence_key = next(
-        (key for key in ("codeEvidence", "code_evidence") if key in ordered),
-        None,
-    )
+    evidence_key, evidence = merged_code_evidence(ordered)
     if evidence_key is not None:
-        ordered[evidence_key] = bounded_code_evidence(ordered[evidence_key])
+        ordered[evidence_key] = bounded_code_evidence(evidence)
         ordered.pop("code_evidence" if evidence_key == "codeEvidence" else "codeEvidence", None)
     return bounded_json_value(ordered, [maximum_bytes])
+
+
+def merged_code_evidence(value: dict[str, Any]) -> tuple[str | None, Any]:
+    evidence_keys = [key for key in ("codeEvidence", "code_evidence") if key in value]
+    if not evidence_keys:
+        return None, None
+    catalogs = [value[key] for key in evidence_keys if isinstance(value[key], list)]
+    if catalogs:
+        merged = []
+        seen_ids: set[str] = set()
+        for catalog in catalogs:
+            for item in catalog:
+                if not _is_valid_code_evidence(item):
+                    continue
+                evidence_id = item["id"]
+                if evidence_id in seen_ids:
+                    continue
+                seen_ids.add(evidence_id)
+                merged.append(item)
+        return evidence_keys[0], merged
+    return evidence_keys[0], value[evidence_keys[0]]
+
+
+def _is_valid_code_evidence(item: Any) -> bool:
+    return (
+        isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and bool(item["id"].strip())
+        and isinstance(item.get("code"), str)
+        and bool(item["code"].strip())
+    )
 
 
 def bounded_code_evidence(value: Any) -> Any:
     if not isinstance(value, list):
         return value
     bounded = []
-    for item in value[:FINDING_CODE_EVIDENCE_LIMIT]:
-        if not isinstance(item, dict):
-            bounded.append(item)
+    for item in value:
+        if not _is_valid_code_evidence(item):
             continue
+        if len(bounded) >= FINDING_CODE_EVIDENCE_LIMIT:
+            break
         evidence = dict(item)
+        for field in ("explanation", "label", "language", "path"):
+            if field in evidence and not isinstance(evidence[field], str):
+                evidence.pop(field)
+        if (
+            "role" in evidence
+            and evidence["role"] is not None
+            and not isinstance(evidence["role"], str)
+        ):
+            evidence.pop("role")
+        start_line = evidence.get("startLine")
+        if "startLine" in evidence and (
+            not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1
+        ):
+            evidence.pop("startLine")
+        end_line = evidence.get("endLine")
+        if (
+            "endLine" in evidence
+            and end_line is not None
+            and (not isinstance(end_line, int) or isinstance(end_line, bool) or end_line < 1)
+        ):
+            evidence.pop("endLine")
         code = evidence.get("code")
         if isinstance(code, str):
             evidence["code"] = bounded_json_text(

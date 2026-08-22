@@ -44,7 +44,7 @@ interface DashboardInput {
 
 interface ScanDashboardOptions {
   repository: string;
-  presentation?: "scan" | "publication";
+  presentation?: "scan" | "publication" | "verification";
   mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
@@ -132,7 +132,11 @@ export class ScanDashboard {
         this.#options.onInterrupt?.();
         lines = 0;
       } else if (/^[dam1-9]$/u.test(key)) {
-        if (this.#options.presentation === "publication") continue;
+        if (
+          this.#options.presentation !== undefined &&
+          this.#options.presentation !== "scan"
+        )
+          continue;
         if (key !== "d" && this.#view !== "details") continue;
         if (lines !== 0) this.scroll(lines);
         if (key === "d") {
@@ -357,6 +361,8 @@ export class ScanDashboard {
 
   #render(): void {
     const publication = this.#options.presentation === "publication";
+    const verification = this.#options.presentation === "verification";
+    const findingProgress = publication || verification;
     const width = this.#width();
     const activityRows = this.#activityRows();
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
@@ -390,7 +396,7 @@ export class ScanDashboard {
     const activity = history.slice(first, first + activityRows);
     if (activity.length === 0) {
       activity.push({
-        text: `  [${formatLocalTime(this.#options.clock.now())}] · Waiting for ${this.#view === "details" ? "session events" : publication ? "publication activity" : "scan activity"}…`,
+        text: `  [${formatLocalTime(this.#options.clock.now())}] · Waiting for ${this.#view === "details" ? "session events" : publication ? "publication activity" : verification ? "verification activity" : "scan activity"}…`,
         kind: "path",
       });
     }
@@ -401,7 +407,7 @@ export class ScanDashboard {
       this.#scrollOffset === 0
         ? "Ctrl+C to exit"
         : `${formatCount(this.#scrollOffset)} ${this.#scrollOffset === 1 ? "line" : "lines"} above live · Ctrl+C to exit`;
-    if (!publication && this.#options.input?.isTTY === true) {
+    if (!findingProgress && this.#options.input?.isTTY === true) {
       scrollStatus =
         this.#view === "details"
           ? `d activity · a/m/1-9 source · ${scrollStatus}`
@@ -410,11 +416,11 @@ export class ScanDashboard {
     const model = this.#options.model;
 
     const lines = [
-      `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : ""}${basename(this.#options.repository)}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
+      `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
       divider,
-      ...(publication
+      ...(findingProgress
         ? [
             `  STAGE     ${this.#stage}`,
             `  FINDINGS  ${this.#publicationProgress === null ? "waiting for findings" : `${formatCount(this.#publicationProgress.completed)} / ${formatCount(this.#publicationProgress.total)} processed`}`,

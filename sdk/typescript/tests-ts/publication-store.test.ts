@@ -165,6 +165,72 @@ function publishedIssue(
 }
 
 describe("persisted finding publication associations", () => {
+  test("rolls back failed migrations without losing populated scan history", async () => {
+    const fixture = await publicationFixture({ count: 1 });
+    await recordPublishedIssues(
+      fixture.publication,
+      [publishedIssue(fixture.publication, 0)],
+      fixture.environment,
+    );
+    databaseRows(
+      fixture,
+      "INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at) VALUES (?, 'closed', 'false_positive', 'synthetic triage note', '2026-08-01T00:00:00Z')",
+      [fixture.publication.issues[0]!.occurrenceId],
+    );
+
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        `import json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+import workbench_db as db
+import workbench_schema as schema
+
+connection = sqlite3.connect(sys.argv[2])
+connection.row_factory = sqlite3.Row
+connection.execute("PRAGMA foreign_keys = ON")
+db.apply_migrations(connection)
+before = list(connection.iterdump())
+next_version = max(version for version, _, _ in schema.MIGRATIONS) + 1
+failing = (next_version, "synthetic failing migration", """
+CREATE TABLE synthetic_migration_probe (value TEXT);
+INSERT INTO synthetic_migration_probe VALUES ('synthetic');
+DELETE FROM finding_triage;
+INSERT INTO synthetic_missing_table VALUES (1);
+""")
+try:
+    schema.apply_migrations(connection, (*schema.MIGRATIONS, failing), db.now, db.backfill_security_targets)
+except sqlite3.OperationalError as error:
+    assert "synthetic_missing_table" in str(error), error
+else:
+    raise AssertionError("The injected migration must fail")
+assert not connection.in_transaction
+assert list(connection.iterdump()) == before, "Failed migration changed committed data or schema"
+db.apply_migrations(connection)
+db.apply_migrations(connection)
+assert list(connection.iterdump()) == before, "Reapplying migrations changed existing history"
+assert list(connection.execute("PRAGMA foreign_key_check")) == []
+assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+print(json.dumps({table: connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0] for table in ("scans", "finding_occurrences", "finding_triage", "finding_publications")}))
+connection.close()
+`,
+        join(PLUGIN_ROOT, "scripts"),
+        join(fixture.stateDirectory, "workbench.sqlite3"),
+      ],
+      { encoding: "utf8", env: fixture.environment },
+    );
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual({
+      scans: 1,
+      finding_occurrences: 1,
+      finding_triage: 1,
+      finding_publications: 1,
+    });
+  });
+
   test("upgrades existing scan history and verifies every completed finding before publication", async () => {
     const fixture = await publicationFixture();
     databaseRows(fixture, "DROP TABLE finding_publications");
