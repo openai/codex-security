@@ -62,6 +62,15 @@ Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
 
+Saved-history source excerpts use the Git objects selected when the scan began.
+They do not fetch missing objects. Working-tree diff scans omit excerpts because
+their uncommitted bytes do not have immutable Git objects. An excerpt can also
+be omitted when the original source is unavailable, replacement refs were
+present when the scan began, or an older scan did not record enough information
+to establish its scope. Later replacement-ref changes do not alter saved source
+objects. The finding itself remains available.
+Exact, unambiguous historical scopes remain readable for older scans.
+
 ### SDK configuration and scan options
 
 Pass runtime configuration to the `CodexSecurity` constructor:

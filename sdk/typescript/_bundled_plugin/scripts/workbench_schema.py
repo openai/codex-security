@@ -683,6 +683,13 @@ MIGRATIONS = (
         WHERE project_id IS NULL;
         """,
     ),
+    (
+        34,
+        "persist authorized source excerpt scopes",
+        """
+        ALTER TABLE scans ADD COLUMN source_scopes_json TEXT;
+        """,
+    ),
 )
 
 
@@ -744,11 +751,15 @@ def apply_migrations(
                         "max_time_hours",
                         "REAL NOT NULL DEFAULT 96",
                     )
+                elif version == 34:
+                    add_column_if_missing(connection, "scans", "source_scopes_json", "TEXT")
                 continue
             if version == 6:
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
+            elif version == 34:
+                add_column_if_missing(connection, "scans", "source_scopes_json", "TEXT")
             else:
                 for statement in sql_statements(sql):
                     connection.execute(statement)
@@ -883,6 +894,17 @@ def normalize_pre_release_execution_profile_migrations(
 
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
+    source_scope_migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 34"
+    ).fetchone()
+    if (
+        source_scope_migration is not None
+        and source_scope_migration["name"] != "persist authorized source excerpt scopes"
+    ):
+        raise SystemExit(
+            "The Codex Security database has an unsupported source-scope migration history."
+        )
+
     completion_warning_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 25"
     ).fetchone()
