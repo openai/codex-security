@@ -164,6 +164,16 @@ when the dedicated home does not already contain stored credentials. Logging
 out prevents later scans from automatically reimporting that ambient sign-in
 until you explicitly log in again.
 
+Scan runtime preparation uses a process-owned lock on this home. Pausing a
+process does not release its lock; exiting or crashing does. The internal
+`.codex-security-scan.sqlite3` file stays in the home between operations. Do not
+remove it while any operation is running.
+
+Older releases recorded only a PID. If an old `.codex-security-scan.lock`
+directory names a PID that has been reused, automatic recovery cannot safely
+distinguish it from a live owner. Stop all operations using that credential home
+before removing the old lock directory manually.
+
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
 interactive scan asks which credential to use. JSON output, dry runs, CI, and
