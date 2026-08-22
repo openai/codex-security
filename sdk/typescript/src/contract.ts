@@ -480,6 +480,14 @@ function validateCanonicalContract(
           { cause: error },
         );
       }
+      if (
+        location.endLine !== undefined &&
+        location.endLine < location.startLine
+      ) {
+        throw new ContractValidationError(
+          `${locationContext}.endLine: expected an integer >= startLine.`,
+        );
+      }
     }
 
     const fingerprint = `codex-security/v1:sha256:${sha256Text(
