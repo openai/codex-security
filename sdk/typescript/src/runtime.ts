@@ -1378,7 +1378,7 @@ export function requireOutputOutsideRepositories(
 
 export async function preparePersistentOutputRoot(
   stateDirectory: string,
-  category: "scans" | "policies",
+  category: "scans" | "policies" | "validations",
   repositoryName: string,
 ): Promise<string> {
   requireModelSafeOutputDir(stateDirectory);
@@ -1389,7 +1389,7 @@ export async function preparePersistentOutputRoot(
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (!(await lstat(root)).isDirectory()) {
       throw new OutputDirectoryError(
-        `Persistent ${category === "scans" ? "scan" : "policy"} output must use real directories: ${root}`,
+        `Persistent ${category === "scans" ? "scan" : category === "policies" ? "policy" : "validation"} output must use real directories: ${root}`,
       );
     }
   }
