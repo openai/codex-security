@@ -37,8 +37,9 @@ describe("read-only finding verification", () => {
             ({
               issue: async (id: string) => linearIssue(id),
             }) as ReturnType<LinearClientFactory>,
-          onCodex: (args, output, processEnvironment) => {
+          onCodex: (args, output, processEnvironment, input) => {
             expect(args[0]).toBe("app-server");
+            expect(input).toBeUndefined();
             expect(args).toContain('approval_policy="on-request"');
             expect(args).toContain('approvals_reviewer="auto_review"');
             expect(args).not.toContain('approval_policy="never"');

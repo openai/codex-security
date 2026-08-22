@@ -652,7 +652,7 @@ export function PatchTui({
         <Text color={createPullRequest ? success : muted}>
           {createPullRequest ? "[✓]" : "[ ]"}
         </Text>
-        {" Create GitHub pull request after patching "}
+        {" Create draft GitHub pull request after patching "}
         <Text dimColor>(r toggle)</Text>
       </Text>
 

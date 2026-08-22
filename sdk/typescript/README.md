@@ -352,11 +352,11 @@ ask whether to open a color-coded finding browser with complete finding details
 and a separate patch-instructions panel. Use the arrow keys to
 browse, `Tab` to inspect details, `Space` to select individual findings, `i` to
 edit instructions for the focused finding, `1`–`4` to select by severity, and
-`r` to optionally create a GitHub pull request after patching. Press `Enter` to
-patch or `q` to keep the checkout unchanged. Each selected finding runs in its
-own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
+`r` to optionally create a draft GitHub pull request after patching. Press
+`Enter` to patch or `q` to keep the checkout unchanged. Each selected finding
+runs in its own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
 saved-finding `patch` command to commit only verified patch files and open a
-pull request with `gh`. If the push or pull request fails, run the printed
+draft pull request with `gh`. If the push or pull request fails, run the printed
 `patch --resume-pr BRANCH` command from the same repository. It uses the saved
 commit without running Codex again and refuses to publish if the branch changed.
 JSON scan results include `patchSeverity`. Scan and
@@ -585,6 +585,72 @@ and scans stopped at their configured cost limit do not start another turn.
 `4`. `--max-attempts` sets how many times each pending repository can run per
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
+
+### Custom validation
+
+Use a prompt file to replace the final validation step in a standard or diff
+scan. The ordinary source review still runs. The supplied text goes directly
+into a separate validation turn and is not sent to discovery workers.
+The SDK adapts the bundled discovery workflow without changing the plugin.
+An incompatible plugin workflow stops the scan instead of using default validation.
+
+```bash
+npx @openai/codex-security scan . --validation-prompt-file validation.md
+```
+
+The SDK accepts the same text as `validationPrompt`:
+
+```ts
+const result = await security.run(repository, {
+  validationPrompt:
+    "Run scripts/validate.sh, test each candidate through the local API, and stop the test environment when finished.",
+});
+```
+
+Describe setup, allowed test targets, expected evidence, and cleanup in the
+prompt. Refer to credentials through environment variables; do not put secrets
+in the prompt or validation output. There are no separate setup or teardown
+hooks. Deep scans reject this option. Empty candidate sets skip the custom turn.
+
+The SDK supplies the candidate IDs and requires a `CustomValidationResult`:
+
+```json
+{
+  "status": "complete",
+  "reason": null,
+  "validations": [
+    {
+      "candidateId": "candidate-1",
+      "validation": {
+        "disposition": "reportable",
+        "method": "integration test",
+        "confidence": "high",
+        "confidence_rationale": "The test reproduced the reported behavior.",
+        "rubric": "Check the protected operation.",
+        "evidence": ["The unauthorized request succeeded."],
+        "counterevidence_or_proof_gap": "",
+        "remaining_uncertainty": "",
+        "artifact_paths": []
+      },
+      "severity": null,
+      "impact": null
+    }
+  ]
+}
+```
+
+Each candidate needs exactly one result. The disposition is `reportable`,
+`suppressed`, `not_applicable`, or `deferred`. Optional assessment changes use
+`{ "level": "medium", "rationale": "..." }` in `severity` or `impact`; use
+`null` to retain the original assessment. Finding identity and source locations
+do not change. Deferred candidates make coverage partial. Suppressed and
+deferred candidates remain in the saved validation artifacts.
+
+The scan directory contains `artifacts/custom-validation/candidates.json` and
+`results.json`. Setup failure, incomplete output, or invalid output leaves the
+scan incomplete. There is no automatic fallback to default validation. When
+rerunning a saved custom-validation scan, supply
+`scans rerun SCAN_ID --validation-prompt-file validation.md` again.
 
 ### Publish completed scans to Linear
 

@@ -417,6 +417,92 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
+  test("streams maximum-size preflight checks through the MCP workbench", async () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/handler.py", "value = 1\n");
+    mkdirSync(join(root, "scans"));
+    mkdirSync(join(root, "state"));
+    const client = await startMcp(root);
+    const owner = "preflight-stdin-owner";
+
+    try {
+      const started = await client.call(
+        "start_codex_security_prompt_only_scan",
+        { mode: "standard", targetPath: repository, scope: "." },
+        owner,
+      );
+      const scanId = (started["scan"] as JsonObject)["scanId"] as string;
+      const preflightChecks = Array.from({ length: 32 }, (_, index) => ({
+        capability: `windows_process_boundary_${index}`,
+        reason: "é".repeat(1_200),
+        severity: "warn",
+        status: "fail",
+      }));
+      expect(JSON.stringify(preflightChecks).length).toBeGreaterThan(
+        32 * 1_024,
+      );
+
+      await client.call(
+        "update_codex_security_scan_progress",
+        { scanId, phase: "preflight", preflightChecks },
+        owner,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("streams oversized option-like user context through the MCP workbench", async () => {
+    const { root, repository } = createRepository();
+    writeSource(repository, "src/handler.py", "value = 1\n");
+    mkdirSync(join(root, "scans"));
+    mkdirSync(join(root, "state"));
+    const client = await startMcp(root);
+    const userContext = `--${"é".repeat(64 * 1_024)}`;
+
+    try {
+      const selection = {
+        mode: "standard",
+        targetPath: repository,
+        scope: ".",
+        userContext,
+      };
+      const opened = await client.call(
+        "open_codex_security_workspace",
+        selection,
+        "user-context-stdin-owner",
+      );
+      expect((opened["workspace"] as JsonObject)["userContext"]).toBe(
+        userContext,
+      );
+      const sessionId = (opened["workspace"] as JsonObject)["id"] as string;
+      const saved = await client.call(
+        "submit_codex_security_setup",
+        { ...selection, sessionId },
+        "user-context-stdin-owner",
+      );
+      expect((saved["workspace"] as JsonObject)["userContext"]).toBe(
+        userContext,
+      );
+
+      const started = await client.call(
+        "start_codex_security_prompt_only_scan",
+        selection,
+        "user-context-stdin-owner",
+      );
+      const scan = started["scan"] as JsonObject;
+      expect(scan["userContext"]).toBe(userContext);
+      const updated = await client.call(
+        "update_codex_security_scan_context",
+        { scanId: scan["scanId"], userContext: "" },
+        "user-context-stdin-owner",
+      );
+      expect((updated["scan"] as JsonObject)["userContext"]).toBeNull();
+    } finally {
+      await client.close();
+    }
+  }, 30_000);
+
   test.each(["object", "Markdown"])("MCP diff retains %s", async (format) => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
