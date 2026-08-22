@@ -49,6 +49,7 @@
     "lint": "tsc --noEmit",
     "prepack": "node --run build",
     "test": "bun test --timeout 30000 ./tests-ts",
+    "test:ci": "node -e \"require('node:fs').mkdirSync('reports',{recursive:true})\" && pnpm run test --coverage --coverage-reporter=text --coverage-reporter=lcov --reporter=junit --reporter-outfile=reports/junit.xml",
     "test:mutation": "stryker run",
     "test:package": "node scripts/smoke-package.mjs",
     "types": "pnpm run generate:models:check && tsc --noEmit"
