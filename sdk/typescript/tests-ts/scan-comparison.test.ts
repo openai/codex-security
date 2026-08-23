@@ -1,4 +1,5 @@
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   realpath,
@@ -8,8 +9,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import {
+  Codex,
+  type CodexOptions,
+  type ThreadOptions,
+  type TurnOptions,
+} from "@openai/codex-sdk";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { resolveCodexCommand, runCodexCommand } from "../src/runtime.js";
 import {
   comparisonEnvironment,
   matchCompletedScan,
@@ -60,6 +67,93 @@ function fakeCodex(response: unknown) {
 }
 
 describe("semantic scan comparison", () => {
+  test("disables explicit and inherited MCP servers for read-only helper turns", async () => {
+    const home = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(home);
+    await writeFile(
+      join(home, "config.toml"),
+      '[mcp_servers.inherited]\ncommand = "synthetic-inherited"\n',
+    );
+    const executable = join(
+      home,
+      process.platform === "win32" ? "custom-codex.exe" : "custom-codex",
+    );
+    await copyFile(resolveCodexCommand({}).command, executable);
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      TEMP: process.env["TEMP"],
+      TMP: process.env["TMP"],
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: executable,
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    const { codex } = fakeCodex({ matches: [], uncertain: [] });
+    let config: CodexOptions["config"];
+    let codexPath: string | undefined;
+    const startThread = spyOn(
+      Codex.prototype,
+      "startThread",
+    ).mockImplementation(function (this: Codex, options) {
+      config = (this as unknown as { options: CodexOptions }).options.config;
+      codexPath = (this as unknown as { options: CodexOptions }).options
+        .codexPathOverride;
+      return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+    });
+    try {
+      await matchScanFindings(
+        { before: [], after: [] },
+        {
+          environment,
+          workingDirectory: home,
+          config: {
+            codexOverrides: {
+              mcp_servers: {
+                synthetic: { command: "synthetic-integration", enabled: true },
+              },
+            },
+          },
+        },
+      );
+      expect(config?.["mcp_servers"]).toEqual({
+        synthetic: { command: "synthetic-integration", enabled: false },
+        inherited: { enabled: false },
+      });
+      expect(codexPath).toBe(executable);
+      const effective = await runCodexCommand(
+        resolveCodexCommand(environment),
+        [
+          "-C",
+          home,
+          "-c",
+          'mcp_servers.synthetic.command="synthetic-integration"',
+          ...Object.keys(config!["mcp_servers"]!).flatMap((name) => [
+            "-c",
+            `mcp_servers.${name}.enabled=false`,
+          ]),
+          "mcp",
+          "list",
+          "--json",
+        ],
+        environment,
+      );
+      expect(effective.success).toBe(true);
+      expect(
+        JSON.parse(effective.stdout).map(
+          (server: { name: string; enabled: boolean }) => ({
+            name: server.name,
+            enabled: server.enabled,
+          }),
+        ),
+      ).toEqual([
+        { name: "inherited", enabled: false },
+        { name: "synthetic", enabled: false },
+      ]);
+    } finally {
+      startThread.mockRestore();
+    }
+  });
+
   test("preserves environment API-key precedence over managed credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
     temporaryDirectories.push(root);
@@ -93,6 +187,8 @@ describe("semantic scan comparison", () => {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_SCAN_ID: "scan",
       CODEX_HOME: "/provider-home",
+      CODEX_CLI_PATH: "/compatible-codex",
+      CODEX_SAFETY_IDENTIFIER: "synthetic-user",
       FIREWORKS_API_KEY: "provider-key",
     };
     expect(await comparisonEnvironment(provider, account)).toEqual(provider);
@@ -337,11 +433,37 @@ describe("semantic scan comparison", () => {
     expect(calls.prompt).toContain(JSON.stringify(input));
   });
 
+  test("uses the requested scan model and effort for component matching", async () => {
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    const config = {
+      codexOverrides: {
+        model: "configured-model",
+        model_reasoning_effort: "high",
+        model_provider: "synthetic-provider",
+      },
+    };
+    await matchScanFindings({ before: [], after: [] }, { config, codex });
+    expect(calls.threadOptions).toMatchObject({
+      model: "configured-model",
+      modelReasoningEffort: "high",
+      sandboxMode: "read-only",
+      networkAccessEnabled: false,
+    });
+    await matchScanFindings(
+      { before: [], after: [] },
+      { config, codex, model: "explicit-model", reasoningEffort: "low" },
+    );
+    expect(calls.threadOptions).toMatchObject({
+      model: "explicit-model",
+      modelReasoningEffort: "low",
+    });
+  });
+
   test("matches open and dismissed findings from the same target", async () => {
     const open = { findingId: "open", occurrenceId: "old-open" };
     const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
     const after = { findingId: "renamed", occurrenceId: "new-renamed" };
-    const commands: (readonly string[])[] = [];
+    const commands: Array<{ args: readonly string[]; input?: string }> = [];
     let input: ScanComparisonInput | undefined;
     await matchCompletedScan({
       scanId: "current",
@@ -354,8 +476,8 @@ describe("semantic scan comparison", () => {
         CODEX_SECURITY_SCAN_ID: "current",
         FIREWORKS_API_KEY: "synthetic-provider-key",
       },
-      async workbench(args) {
-        commands.push(args);
+      async workbench(args, commandInput) {
+        commands.push({ args, input: commandInput });
         return args[0] === "list-unmatched-scan-pairs"
           ? {
               batches: [
@@ -402,11 +524,12 @@ describe("semantic scan comparison", () => {
       },
     });
     expect(input).toEqual({ before: [open, dismissed], after: [after] });
-    expect(commands.map(([command]) => command)).toEqual([
+    expect(commands.map(({ args: [command] }) => command)).toEqual([
       "list-unmatched-scan-pairs",
       "save-scan-comparison",
     ]);
-    const saved = JSON.parse(commands[1]!.at(-1)!) as ScanComparisonResult;
+    expect(commands[1]!.args.at(-1)).toBe("--matches-json-stdin");
+    const saved = JSON.parse(commands[1]!.input!) as ScanComparisonResult;
     expect(
       saved.matches.map(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
     ).toEqual([["old-dismissed"]]);

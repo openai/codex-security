@@ -26,7 +26,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, require_uuid, user_text
+from workbench_validation import optional_text, require_uuid, user_context_argument
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
 DEEP_SCAN_WORKER_STATUSES = ("queued", "running", "succeeded", "failed", "canceled")
@@ -48,7 +48,9 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     begin_target.add_argument("--scan-id")
     begin_target.add_argument("--target-path")
     begin_deep_scan.add_argument("--scope", default=".")
-    begin_deep_scan.add_argument("--user-context")
+    begin_user_context = begin_deep_scan.add_mutually_exclusive_group()
+    begin_user_context.add_argument("--user-context")
+    begin_user_context.add_argument("--user-context-stdin", action="store_true")
     begin_deep_scan.add_argument("--scan-root")
     begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--model")
@@ -795,7 +797,7 @@ def begin_deep_scan_for_target(
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
         target_root.mkdir(parents=True, exist_ok=True)
-        user_context = user_text(args.user_context)
+        user_context = user_context_argument(args)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
@@ -884,7 +886,7 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
     if thread_id is None:
         raise SystemExit("thread-id is required.")
     if args.scan_id:
-        if args.user_context is not None or args.scope != ".":
+        if args.user_context is not None or args.user_context_stdin or args.scope != ".":
             raise SystemExit("scan-id cannot be combined with target setup fields.")
         return begin_deep_scan_for_scan(connection, args.scan_id, thread_id, args)
     if args.claim_token is not None:
