@@ -14,6 +14,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_constants import CLAIM_LEASE_SECONDS, DELIVERED_ACTION_LEASE_SECONDS
 from workbench_validation import require_occurrence, require_uuid
 
+COMMANDS = {
+    "request-finding-remediation",
+    "request-finding-remediation-action",
+    "claim-finding-remediation-resend",
+    "mark-finding-remediation-delivered",
+    "release-finding-remediation-claim",
+    "cancel-finding-remediation-request",
+    "set-finding-remediation",
+}
+SCAN_STATUS_ERROR = "Remediation is available only for successfully completed scans."
+
+
+def require_available(connection: sqlite3.Connection, args: Any, require_scan: Any) -> None:
+    if args.command not in COMMANDS:
+        return
+    occurrence = require_occurrence(connection, args.occurrence_id)
+    if require_scan(connection, occurrence["scan_id"])["status"] != "complete":
+        raise SystemExit(SCAN_STATUS_ERROR)
+
 
 def remediation_claim_is_active(remediation: sqlite3.Row) -> bool:
     if remediation["pending_action_claim_token"] is None:

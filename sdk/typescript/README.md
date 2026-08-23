@@ -118,20 +118,21 @@ Pass runtime configuration to the `CodexSecurity` constructor:
 Pass scan configuration to `security.run(repository, options)` or
 `security.preflight(repository, options)`:
 
-| Option                  | Description                                                                           |
-| ----------------------- | ------------------------------------------------------------------------------------- |
-| `auth`                  | Select `"auto"`, `"chatgpt"`, or `"api-key"`.                                         |
-| `target`                | Select a repository, repository-relative paths, committed diff, or working-tree diff. |
-| `mode`                  | Select `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
-| `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.         |
-| `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
-| `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
-| `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
-| `maxTimeHours`          | Limit deep-scan discovery to a positive number of hours, up to 96.                    |
-| `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                            |
-| `parentScanId`          | Link a rerun to an existing parent scan.                                              |
-| `expectedPluginVersion` | Require the original plugin version when replaying a scan.                            |
-| `signal`                | Cancel a scan with an `AbortSignal`.                                                  |
+| Option                  | Description                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------ |
+| `auth`                  | Select `"auto"`, `"chatgpt"`, or `"api-key"`.                                              |
+| `safetyIdentifier`      | Stable hashed end-user ID for this scan's model requests; requires API-key authentication. |
+| `target`                | Select a repository, repository-relative paths, committed diff, or working-tree diff.      |
+| `mode`                  | Select `"standard"` or `"deep"`; deep mode supports repositories and paths.                |
+| `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.              |
+| `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                           |
+| `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                             |
+| `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                         |
+| `maxTimeHours`          | Limit deep-scan discovery to a positive number of hours, up to 96.                         |
+| `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                                 |
+| `parentScanId`          | Link a rerun to an existing parent scan.                                                   |
+| `expectedPluginVersion` | Require the original plugin version when replaying a scan.                                 |
+| `signal`                | Cancel a scan with an `AbortSignal`.                                                       |
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
 `onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
@@ -334,6 +335,35 @@ the parent repository.
 Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
 shares them with every repository. Directories are searched recursively for
 Markdown, text, PDF, and Word (`.docx`) files.
+
+### Attribute scans to end users
+
+For an application that serves multiple users, pass the originating user's
+stable hashed ID on each scan:
+
+```ts
+await security.run("/path/to/repository", {
+  auth: "api-key",
+  safetyIdentifier: hashedUserId,
+});
+```
+
+```bash
+codex-security scan /path/to/repository --auth api-key --safety-identifier hashed-user-id
+```
+
+The ID must contain 1–64 characters and cannot be blank or contain NUL.
+Do not use an email address or other personal data. The ID is passed to Codex
+for the scan, nested workers, retries, and follow-up work. It is not saved in
+shared configuration or the scan recipe. Supply it again for a later rerun.
+Concurrent SDK clients can use different IDs without changing `process.env`.
+
+This requires a Codex runtime with native `--safety-identifier` support and a
+plugin that forwards it to workers. The current bundled runtime does not yet
+support this option. Use `CODEX_CLI_PATH` to select a compatible build.
+The SDK does not check runtime or plugin compatibility; older versions may
+omit the identifier. Omitting the option leaves ordinary scans unchanged.
+Preflight checks the ID's format; authentication is checked when the scan starts.
 
 ### Scan project components
 

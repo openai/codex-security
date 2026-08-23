@@ -1,13 +1,13 @@
-# Completed Scan Contract
+# Sealed Scan Contract
 
-This contract defines the canonical machine-readable documents for completed scans and their readable markdown report projection.
+This contract defines the canonical machine-readable documents for scans that reached a sealed terminal outcome and their readable markdown report projection.
 
 ## Canonical Documents
 
-A completed semantic bundle contains these files under `<scan_dir>`:
+A sealed terminal bundle contains these files under `<scan_dir>`:
 
-- `scan-manifest.json`: immutable completed-scan receipt after finalization
-- `findings.json`: semantic finding records for the completed scan
+- `scan-manifest.json`: immutable terminal scan receipt after finalization
+- `findings.json`: semantic finding records retained when the scan reached its terminal outcome
 - `coverage.json`: structured coverage summary with detailed receipt references
 
 Canonical UTF-8 document sizes are bounded consistently by the producer and SDK: `scan-manifest.json` is limited to 16 MiB, `findings.json` to 128 MiB, and `coverage.json` to 32 MiB. Finalization rejects oversized inputs or generated documents before sealing or changing scan outputs. Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
@@ -20,11 +20,22 @@ Deep-scan SARIF results and CSV rows preserve their existing instance-level pres
 
 This bundle records immutable scan observations. It is not a workflow-state database. Consumers must store mutable annotations, lifecycle decisions, external links, retention policy, and synchronization state separately.
 
-Retention is an explicit consumer decision. Producing a completed-scan bundle must not silently copy it into an archive.
+Retention is an explicit consumer decision. Producing a sealed bundle must not silently copy it into an archive.
 
 ## Manifest Semantics
 
-A sealed manifest records the completed timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
+A sealed manifest records the terminal timestamp and hashes for the canonical documents and immutable evidence receipts included in that bundle. Readable reports and generated exports are projections and are not included in the canonical seal. Later adapters may read the sealed bundle to create projections, but must not mutate the sealed manifest or canonical documents. Store projections separately. Every sealed manifest includes exactly one artifact record for each canonical JSON document, and artifact paths must not repeat.
+
+`scan.status` records why the bundle was sealed:
+
+| Status | Meaning |
+| --- | --- |
+| `completed` | The requested scan reached normal completion. |
+| `failed` | The scan stopped after an unrecoverable failure; retained artifacts may be partial. |
+| `canceled` | The scan stopped after an explicit cancellation; retained artifacts may be partial. |
+| `interrupted` | The scan stopped before normal completion because execution was interrupted; retained artifacts may be partial. |
+
+Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and coverage while treating absence of findings as inconclusive.
 
 ## Target Snapshots
 

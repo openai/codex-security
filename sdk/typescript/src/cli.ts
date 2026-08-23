@@ -211,6 +211,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
 } as const;
 const VALUE_OPTIONS = new Set([
   "--auth",
+  "--safety-identifier",
   "--path",
   "--component",
   "--components-file",
@@ -844,6 +845,7 @@ export function resolveCliPath(directory: string, value: string): string {
 
 interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
+  safetyIdentifier?: string;
   verbose?: boolean;
   repository?: string;
   paths: string[];
@@ -935,6 +937,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
@@ -2249,6 +2252,11 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Print scan diagnostics to stderr."),
+          safetyIdentifier: optionValue("--safety-identifier")
+            .optional()
+            .describe(
+              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+            ),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -2423,6 +2431,7 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            safetyIdentifier: options.safetyIdentifier,
             verbose: options.verbose,
             repository: args.repository,
             paths: options.path,
@@ -4703,6 +4712,12 @@ async function runSkill(
       ...(verify ? ["--config", 'approvals_reviewer="auto_review"'] : []),
       "--config",
       'responses_api_metadata.codex_security_surface="cli"',
+      ...(options.safetyIdentifier === undefined
+        ? []
+        : [
+            "--config",
+            `safety_identifier=${JSON.stringify(options.safetyIdentifier)}`,
+          ]),
       ...(appServer
         ? []
         : [
@@ -5479,6 +5494,7 @@ async function executeScan(
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
       auth,
+      safetyIdentifier: arguments_.safetyIdentifier,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
@@ -5947,6 +5963,7 @@ async function executeScan(
         dependencies,
         {
           ...providerOptions,
+          safetyIdentifier: arguments_.safetyIdentifier,
           environment,
           findingInstructions: patchSelection?.instructions,
         },

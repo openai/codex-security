@@ -241,6 +241,19 @@ def parse_args(description: str) -> argparse.Namespace:
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
 
+    preserve_scan = subparsers.add_parser("preserve-scan-results")
+    preserve_scan.add_argument("--scan-id", required=True)
+    preserve_scan.add_argument("--thread-id")
+    preserve_scan.add_argument("--claim-token")
+    preserve_scan.add_argument("--coordinator-generation", type=positive_int)
+
+    write_scan_draft = subparsers.add_parser("write-scan-draft")
+    write_scan_draft.add_argument("--scan-id", required=True)
+    write_scan_draft.add_argument("--draft-path", required=True)
+    write_scan_draft.add_argument("--checkpoint-path")
+    write_scan_draft.add_argument("--expected-draft-digest")
+    write_scan_draft.add_argument("--claim-token")
+
     mark_handoff_delivered = subparsers.add_parser("mark-handoff-delivered")
     mark_handoff_delivered.add_argument("--scan-id", required=True)
     mark_handoff_delivered.add_argument("--claim-token", required=True)

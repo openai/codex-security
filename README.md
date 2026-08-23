@@ -102,6 +102,10 @@ Scan history is stored in the Codex Security workbench state directory. If that
 directory cannot be written, set `CODEX_SECURITY_STATE_DIR` to a writable
 directory outside the repository.
 
+Applications can attribute API-key scans to an end user with
+`scan --safety-identifier ID` or the SDK's per-run `safetyIdentifier` option.
+See [Safety ID setup and runtime requirements](sdk/typescript/README.md#attribute-scans-to-end-users).
+
 `findings list [repository]` shows open findings across a repository's scans
 and identifies findings not confirmed in its latest scan.
 

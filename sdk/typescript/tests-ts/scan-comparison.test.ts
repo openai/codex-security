@@ -187,6 +187,8 @@ describe("semantic scan comparison", () => {
       CODEX_SECURITY_STATE_DIR: stateDirectory,
       CODEX_SECURITY_SCAN_ID: "scan",
       CODEX_HOME: "/provider-home",
+      CODEX_CLI_PATH: "/compatible-codex",
+      CODEX_SAFETY_IDENTIFIER: "synthetic-user",
       FIREWORKS_API_KEY: "provider-key",
     };
     expect(await comparisonEnvironment(provider, account)).toEqual(provider);
