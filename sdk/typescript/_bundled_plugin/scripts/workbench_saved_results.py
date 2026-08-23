@@ -910,6 +910,12 @@ def preserve_scan_results_locked(
     ]
 
     def record_publication(manifest: dict[str, Any], findings: dict[str, Any]) -> None:
+        retained_sources = manifest.get("scan", {}).get("preservedSources")
+        if not isinstance(retained_sources, dict) or not all(
+            isinstance(relative, str) and isinstance(source_digest, str)
+            for relative, source_digest in retained_sources.items()
+        ):
+            raise ContractError("Stopped scan source digests could not be frozen.")
         digest = db.published_manifest_digest(scan_dir, manifest)
         timestamp = db.now()
         with connection:
@@ -934,9 +940,16 @@ def preserve_scan_results_locked(
             )
             db.index_findings(connection, scan_id, findings, scan["completed_at"])
             connection.execute(
-                "UPDATE scans SET seal_manifest_digest = ?, completion_warnings_json = ?, "
+                "UPDATE scans SET seal_manifest_digest = ?, retained_source_digests_json = "
+                "COALESCE(retained_source_digests_json, ?), completion_warnings_json = ?, "
                 "updated_at = ? WHERE id = ? AND status = 'failed'",
-                (digest, json.dumps(list(dict.fromkeys(warnings))), timestamp, scan_id),
+                (
+                    digest,
+                    json.dumps(retained_sources, sort_keys=True),
+                    json.dumps(list(dict.fromkeys(warnings))),
+                    timestamp,
+                    scan_id,
+                ),
             )
             connection.execute(
                 "UPDATE scan_progress SET reportable_findings_count = ?, updated_at = ? "
@@ -965,15 +978,13 @@ def preserve_scan_results_locked(
                     for relative, digest in existing_sources.items()
                 ):
                     raise ContractError("Stopped scan source digests could not be frozen.")
-                with connection:
-                    connection.execute(
-                        "UPDATE scans SET retained_source_digests_json = ? "
-                        "WHERE id = ? AND retained_source_digests_json IS NULL",
-                        (json.dumps(existing_sources, sort_keys=True), scan_id),
-                    )
                 frozen_source_digests = existing_sources
             if existing_sources == frozen_source_digests:
-                if scan["seal_manifest_digest"] is not None and not publication_follow_up_warnings:
+                if (
+                    raw_frozen_sources is not None
+                    and scan["seal_manifest_digest"] is not None
+                    and not publication_follow_up_warnings
+                ):
                     return True
                 record_publication(existing, existing_findings)
                 return True
@@ -1005,19 +1016,6 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
-    if frozen_source_digests is None:
-        retained_sources = documents[0].get("scan", {}).get("preservedSources")
-        if not isinstance(retained_sources, dict) or not all(
-            isinstance(relative, str) and isinstance(digest, str)
-            for relative, digest in retained_sources.items()
-        ):
-            raise ContractError("Stopped scan source digests could not be frozen.")
-        with connection:
-            connection.execute(
-                "UPDATE scans SET retained_source_digests_json = ? "
-                "WHERE id = ? AND retained_source_digests_json IS NULL",
-                (json.dumps(retained_sources, sort_keys=True), scan_id),
-            )
     prepared = _prepare_scan_finalization(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),

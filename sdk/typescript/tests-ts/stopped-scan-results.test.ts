@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 const stoppedScanProbe = [
-  "import hashlib, json, os, pathlib, subprocess, sys, uuid",
+  "import hashlib, json, os, pathlib, shutil, subprocess, sys, uuid",
   "plugin = pathlib.Path(sys.argv[1])",
   "root = pathlib.Path(sys.argv[2])",
   "source = sys.argv[3]",
@@ -68,6 +68,35 @@ const stoppedScanProbe = [
   "        (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text('{incomplete', encoding='utf-8')",
   "run('fail-deep-scan', '--scan-id', scan_id, '--message', 'Synthetic worker stopped.', '--deep-status', terminal_status)",
+  "if source == 'legacy-seal-io-retry':",
+  "    shutil.rmtree(artifact_dir)",
+  "    manifest_path = scan_dir / 'scan-manifest.json'",
+  "    legacy_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
+  "    legacy_manifest['scan']['status'] = 'completed'",
+  "    legacy_manifest['scan'].pop('preservedSources', None)",
+  "    manifest_path.write_text(json.dumps(legacy_manifest, indent=2, sort_keys=True) + '\\n', encoding='utf-8')",
+  "    os.environ.update(environment)",
+  "    sys.path.insert(0, str(plugin / 'scripts'))",
+  "    import workbench_db",
+  "    connection = workbench_db.connect()",
+  "    connection.execute('UPDATE scans SET seal_manifest_digest = NULL, retained_source_digests_json = NULL WHERE id = ?', (scan_id,))",
+  "    connection.commit()",
+  "    original_write = workbench_db.saved_results._write_prepared_scan_finalization",
+  "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared: (_ for _ in ()).throw(OSError('synthetic publication failure'))",
+  "    first_failed = False",
+  "    try:",
+  "        workbench_db.preserve_scan_results_locked(connection, scan_id)",
+  "    except OSError:",
+  "        first_failed = True",
+  "    frozen_after_failure = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
+  "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
+  "    retry_published = workbench_db.preserve_scan_results_locked(connection, scan_id)",
+  "    frozen_after_success = connection.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
+  "    final_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))",
+  "    final_findings = json.loads((scan_dir / 'findings.json').read_text(encoding='utf-8'))['findings']",
+  "    connection.close()",
+  "    print(json.dumps({'firstFailed': first_failed, 'frozenAfterFailure': frozen_after_failure, 'retryPublished': retry_published, 'frozenAfterSuccess': json.loads(frozen_after_success) if frozen_after_success else None, 'status': final_manifest['scan']['status'], 'findingCount': len(final_findings)}))",
+  "    raise SystemExit(0)",
   "if source == 'late-checkpoint':",
   "    manifest_before = (scan_dir / 'scan-manifest.json').read_bytes()",
   "    findings_before = (scan_dir / 'findings.json').read_bytes()",
@@ -176,3 +205,32 @@ test.each(["failed", "interrupted"] as const)(
   },
   30_000,
 );
+
+test("retries a legacy stopped seal after transient publication failure", () => {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(join(tmpdir(), "codex-security-legacy-seal-retry-"));
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      stoppedScanProbe,
+      PLUGIN_ROOT,
+      root,
+      "legacy-seal-io-retry",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    firstFailed: true,
+    frozenAfterFailure: null,
+    retryPublished: true,
+    frozenAfterSuccess: {},
+    status: "failed",
+    findingCount: 1,
+  });
+}, 30_000);
