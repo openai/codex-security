@@ -140,6 +140,20 @@ def _finding_key(finding: dict[str, Any]) -> str:
     )
 
 
+def _worker_candidate_key(
+    worker_id: str, candidate_id: str, finding: dict[str, Any]
+) -> tuple[str, str, Any, Any]:
+    """Identify one worker-local candidate without merging unrelated locations."""
+    provenance = finding.get("provenance")
+    identity = (
+        provenance.get("preservedIdentity", finding.get("identity"))
+        if isinstance(provenance, dict)
+        else finding.get("identity")
+    )
+    anchor = identity.get("anchor") if isinstance(identity, dict) else None
+    return worker_id, candidate_id, finding.get("ruleId"), anchor
+
+
 def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     """Return substantive finding content without generated identity or provenance."""
     return {
@@ -460,9 +474,9 @@ def merge_saved_results(
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
     represented: dict[str, str | None] = {}
-    represented_candidates: dict[tuple[str, str], str | None] = {}
+    represented_candidates: dict[tuple[str, str, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
-    represented_candidate_history: dict[tuple[str, str], set[str]] = {}
+    represented_candidate_history: dict[tuple[str, str, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
@@ -529,7 +543,11 @@ def merge_saved_results(
                         source_id = original.get("id")
                         candidate_id = finding_candidate_id(original["finding"])
                         if isinstance(source_id, str) and ":" in source_id and candidate_id:
-                            candidate_key = (source_id.rsplit(":", 1)[0], candidate_id)
+                            candidate_key = _worker_candidate_key(
+                                source_id.rsplit(":", 1)[0],
+                                candidate_id,
+                                original["finding"],
+                            )
                             previous_key = represented_candidates.get(candidate_key)
                             if candidate_key not in represented_candidates:
                                 represented_candidates[candidate_key] = canonical_key
@@ -647,8 +665,12 @@ def merge_saved_results(
                     mapped_key = represented[key]
                     historical_contents = represented_history.get(key, set())
                 elif worker_id and candidate_id:
-                    candidate_key = (worker_id, candidate_id)
-                    mapped_key = represented_candidates.get(candidate_key)
+                    candidate_key = _worker_candidate_key(
+                        worker_id, candidate_id, finding
+                    )
+                    if candidate_key not in represented_candidates:
+                        represented_candidates[candidate_key] = key
+                    mapped_key = represented_candidates[candidate_key]
                     historical_contents = represented_candidate_history.get(candidate_key, set())
                 else:
                     mapped_key = None

@@ -830,11 +830,10 @@ describe("compact diff scan", () => {
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",
       );
-      expect(
-        ((completed["findings"] as JsonObject)["findings"] as JsonObject[]).map(
-          (completedFinding) => completedFinding["identity"],
-        ),
-      ).toEqual([
+      const completedIdentities = (
+        (completed["findings"] as JsonObject)["findings"] as JsonObject[]
+      ).map((completedFinding) => completedFinding["identity"]);
+      expect(completedIdentities.slice(0, 8)).toEqual([
         { anchor: "candidate-singleton", instance: "dss-144-a" },
         { anchor: "unsafe-archive-extraction" },
         { anchor: "candidate-cross-rule", instance: "shared-report" },
@@ -846,12 +845,18 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        { anchor: "candidate-singleton" },
-        { anchor: "candidate-cross-rule" },
-        { anchor: "candidate-authored-instance" },
-        { anchor: "candidate-duplicate-instance" },
       ]);
+      const recoveredIdentities = completedIdentities.slice(8);
+      expect(recoveredIdentities).toHaveLength(5);
+      expect(recoveredIdentities).toEqual(
+        expect.arrayContaining([
+          { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+          { anchor: "candidate-singleton" },
+          { anchor: "candidate-cross-rule" },
+          { anchor: "candidate-authored-instance" },
+          { anchor: "candidate-duplicate-instance" },
+        ]),
+      );
       const legacyFinding = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
       )[1];
