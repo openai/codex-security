@@ -526,10 +526,50 @@ describe("reviewed release note helpers", () => {
     ["mismatched version", "<!-- release-version: 1.2.2 -->\nSummary"],
     ["missing body", "<!-- release-version: 1.2.3 -->"],
     ["blank body", "<!-- release-version: 1.2.3 -->\n \t\n"],
+    ["NUL-only body", "<!-- release-version: 1.2.3 -->\n\0"],
+    ["NUL-bearing body", "<!-- release-version: 1.2.3 -->\nReviewed\0summary"],
   ])("rejects %s", (_name, notes) => {
     expect(() => parseReviewedReleaseNotes("1.2.3", notes)).toThrow(
       "Release notes must start with <!-- release-version: 1.2.3 --> and include a reviewed summary.",
     );
+  });
+
+  test("rejects NUL bytes before shell composition", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "release-notes-nul-"));
+    try {
+      const taggedNotes = join(workspace, "tagged-notes.md");
+      const generatedNotes = join(workspace, "generated-notes.md");
+      writeFileSync(taggedNotes, "<!-- release-version: 1.2.3 -->\n\0\n");
+      writeFileSync(generatedNotes, "Generated release notes\n");
+
+      const result = spawnSync(
+        bash,
+        [
+          "-c",
+          [
+            "set -euo pipefail",
+            'published_notes="$(node "$AUTOMATION_SCRIPT" compose-release-notes 1.2.3 "$GENERATED_NOTES" --tagged-notes-file "$TAGGED_NOTES")"',
+            'printf "%s" "$published_notes"',
+          ].join("\n"),
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            AUTOMATION_SCRIPT: fileURLToPath(automationScript),
+            GENERATED_NOTES: generatedNotes,
+            TAGGED_NOTES: taggedNotes,
+          },
+          timeout: 10_000,
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("include a reviewed summary");
+      expect(result.stderr).not.toContain("ignored null byte");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   test.each([
@@ -597,6 +637,16 @@ describe("reviewed release note helpers", () => {
     [
       "blank historical summary",
       "<!-- codex-security-release-summary:start -->\n \t\n<!-- codex-security-release-summary:end -->",
+      "Existing release summary is empty.",
+    ],
+    [
+      "NUL-only historical summary",
+      "<!-- codex-security-release-summary:start -->\n\0\n<!-- codex-security-release-summary:end -->",
+      "Existing release summary is empty.",
+    ],
+    [
+      "NUL-bearing historical summary",
+      "<!-- codex-security-release-summary:start -->\nReviewed\0summary\n<!-- codex-security-release-summary:end -->",
       "Existing release summary is empty.",
     ],
   ])("rejects %s", (_name, notes, message) => {

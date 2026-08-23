@@ -38,6 +38,10 @@ export function releaseVersion(packageJson) {
   return packageJson.version;
 }
 
+function hasReviewedText(value) {
+  return !value.includes("\0") && /\S/u.test(value);
+}
+
 export function parseReviewedReleaseNotes(version, notes) {
   const expectedHeader = `<!-- release-version: ${version} -->`;
   const normalized =
@@ -47,7 +51,7 @@ export function parseReviewedReleaseNotes(version, notes) {
   if (
     firstNewline === -1 ||
     normalized.slice(0, firstNewline) !== expectedHeader ||
-    !/\S/u.test(summary)
+    !hasReviewedText(summary)
   ) {
     throw new Error(
       `Release notes must start with ${expectedHeader} and include a reviewed summary.`,
@@ -84,7 +88,7 @@ export function extractHistoricalReleaseSummary(notes) {
     .slice(startMarker.index + startMarker[0].length, endMarker.index)
     .replace(/^\r?\n/u, "")
     .replace(/\r?\n$/u, "");
-  if (!/\S/u.test(summary)) {
+  if (!hasReviewedText(summary)) {
     throw new Error("Existing release summary is empty.");
   }
   return summary;
