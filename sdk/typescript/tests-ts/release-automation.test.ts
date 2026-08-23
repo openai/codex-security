@@ -209,6 +209,10 @@ const nodeCiWorkflow = readFileSync(
   new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
   "utf8",
 );
+const titleWorkflow = readFileSync(
+  new URL("../../../.github/workflows/validate-pr-title.yml", import.meta.url),
+  "utf8",
+);
 
 function publishedMetadata(): ReleaseMetadata {
   return {
@@ -3275,9 +3279,13 @@ describe("GitHub release workflow safeguards", () => {
       releaseLabelsWorkflow,
     )?.[1];
     const ciPattern = /conventional_title='([^']+)'/u.exec(nodeCiWorkflow)?.[1];
+    const titlePattern = /conventional_title='([^']+)'/u.exec(
+      titleWorkflow,
+    )?.[1];
 
     expect(releasePattern).toBeDefined();
     expect(ciPattern).toBe(releasePattern);
+    expect(titlePattern).toBe(releasePattern);
     expect(nodeCiWorkflow).toContain(
       "types: [opened, edited, reopened, synchronize]",
     );
