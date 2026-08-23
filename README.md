@@ -4,6 +4,9 @@
 
 **See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for more details.
 
+See [GitHub Releases](https://github.com/openai/codex-security/releases) for
+the canonical changelog and upgrade notes.
+
 Some cybersecurity requests and protected findings require approval through
 Trusted Access for Cyber. To apply or check your access, visit
 [chatgpt.com/cyber](https://chatgpt.com/cyber).
