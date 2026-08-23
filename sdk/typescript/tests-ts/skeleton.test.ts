@@ -117,7 +117,11 @@ describe("TypeScript package skeleton", () => {
     expect(jobs["windows"]?.name).toBe(
       "windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
     );
-    expect(jobs["windows"]?.needs).toEqual(["windows-test", "windows-verify"]);
+    expect(jobs["windows"]?.needs).toEqual([
+      "validate-title",
+      "windows-test",
+      "windows-verify",
+    ]);
     expect(jobs["windows-test"]?.strategy?.matrix["node"]).toEqual([
       "22.13.0",
       "24",
