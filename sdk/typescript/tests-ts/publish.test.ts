@@ -438,6 +438,407 @@ describe("direct Linear API publication", () => {
       counts: { findings: 23, created: 1, failed: 22 },
     });
   });
+  test("redacts Linear credentials from persisted direct-publication failures", async () => {
+    const publication = preparedPublication();
+    const key = "lin_api_SYNTHETIC_SECRET";
+    let receipt = "";
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      { ...OPTIONS, linearApiKey: key },
+      dependencies(
+        publication,
+        {},
+        {
+          linearClient: linearApiClient(publication, {
+            create: () => {
+              throw new Error(`Linear rejected ${key}`);
+            },
+          }),
+          writeReceipt: async (value) => {
+            receipt = JSON.stringify(value);
+          },
+        },
+      ),
+    );
+
+    expect(result.failed).toEqual([
+      { findingId: "finding-1", error: "Linear rejected [redacted]" },
+    ]);
+    expect(receipt).not.toContain(key);
+  });
+
+  test("preserves severity priority and skips enrichment without a knowledge base", async () => {
+    const publication = preparedPublication();
+    const inputs: LinearIssueInput[] = [];
+    await publishScanInternal(
+      publication.scanDirectory,
+      { ...OPTIONS, linearApiKey: "synthetic-key" },
+      dependencies(
+        publication,
+        {},
+        {
+          linearClient: linearApiClient(publication, {
+            create: (input) => {
+              inputs.push(input);
+            },
+          }),
+          loadLinearPublicationContext: async () => {
+            throw new Error("No-policy publication must not read labels.");
+          },
+          enrichPublicationIssues: async () => {
+            throw new Error("No-policy publication must not run enrichment.");
+          },
+        },
+      ),
+    );
+
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({ priority: 2 });
+    expect(inputs[0]).not.toHaveProperty("labelIds");
+  });
+
+  test("includes applied metadata in interrupted direct publication receipts", async () => {
+    const publication = preparedPublication(23);
+    const labels = [{ id: "label-security", name: "Security" }];
+    const controller = new AbortController();
+    let started = 0;
+    let stopped = 0;
+    let persisted: string[] = [];
+    let receipt: unknown;
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        linearClient: linearApiClient(publication, {
+          create: async (input, signal) => {
+            started += 1;
+            if (input.title === publication.issues[0]!.title) return;
+            await new Promise<void>((_resolve, reject) => {
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  stopped += 1;
+                  reject(new Error("Publication canceled."));
+                },
+                { once: true },
+              );
+            });
+          },
+        }),
+        recordPublishedIssues: async (_prepared, issues) => {
+          persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
+          return [...issues];
+        },
+        writeReceipt: async (result) => {
+          receipt = result;
+        },
+        loadLinearPublicationContext: async () => ({ labels }),
+        enrichPublicationIssues: async (source) =>
+          source.map((issue) => ({ ...issue, labels })),
+      },
+    );
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: "synthetic-key",
+          knowledgeBasePaths: ["C:\\publication-policy.md"],
+          signal: controller.signal,
+          onProgress: ({ type }) => {
+            if (type === "issue_completed") controller.abort("SIGINT");
+          },
+        },
+        injected,
+      ),
+    ).rejects.toThrow(/publication handoff remains at/u);
+
+    expect({ started, stopped, persisted }).toEqual({
+      started: 20,
+      stopped: 19,
+      persisted: ["SEC-1"],
+    });
+    expect(receipt).toMatchObject({
+      counts: { findings: 23, created: 1, failed: 22 },
+      appliedMetadata: [
+        {
+          findingId: "finding-1",
+          priority: 2,
+          labels,
+        },
+        ...publication.issues.slice(1).map((issue) => ({
+          findingId: issue.findingId,
+          priority: 2,
+          labels,
+        })),
+      ],
+    });
+  });
+});
+
+describe("knowledge-based Linear publication", () => {
+  test("requires a direct Linear API key before reading the scan", async () => {
+    const publication = preparedPublication();
+    let prepared = false;
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, knowledgeBasePaths: ["policy.md"] },
+        dependencies(
+          publication,
+          {},
+          {
+            environment: {},
+            prepare: async () => {
+              prepared = true;
+              return publication;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("Linear API key is required");
+    expect(prepared).toBe(false);
+  });
+
+  test("dry-run resolves exact metadata with read-only validation and no publication mutation", async () => {
+    const publication = preparedPublication(2);
+    for (const issue of publication.issues) delete issue.priority;
+    const events: PublishScanProgress[] = [];
+    const calls: string[] = [];
+    let createCalled = false;
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "synthetic-key",
+        knowledgeBasePaths: ["policy.md", "labels.docx"],
+        dryRun: true,
+        onProgress: (event) => events.push(event),
+      },
+      dependencies(
+        publication,
+        {},
+        {
+          linearClient: linearApiClient(publication, {
+            create: () => {
+              createCalled = true;
+            },
+          }),
+          loadLinearPublicationContext: async (_client, teamId, projectId) => {
+            calls.push("linear-read");
+            expect({ teamId, projectId }).toEqual({
+              teamId: "team-example",
+              projectId: "project-example",
+            });
+            return {
+              labels: [
+                { id: "label-internet", name: "Internet exposed" },
+                { id: "label-exploit", name: "Exploitable" },
+              ],
+            };
+          },
+          enrichPublicationIssues: async (source, labels, paths, options) => {
+            calls.push("codex-enrichment");
+            expect(labels).toHaveLength(2);
+            expect(paths).toEqual(["policy.md", "labels.docx"]);
+            expect(options!.environment).not.toHaveProperty(
+              "CODEX_SECURITY_LINEAR_API_KEY",
+            );
+            return source.map((issue, index) =>
+              index === 0
+                ? {
+                    ...issue,
+                    priority: 1,
+                    labels: [
+                      { id: "label-internet", name: "Internet exposed" },
+                      { id: "label-exploit", name: "Exploitable" },
+                    ],
+                  }
+                : { ...issue },
+            );
+          },
+          preparePublicationStore: async () => {
+            throw new Error("dry runs must not mutate publication history");
+          },
+          writeReceipt: async () => {
+            throw new Error("dry runs must not write receipts");
+          },
+        },
+      ),
+    );
+
+    expect(calls).toEqual(["linear-read", "codex-enrichment"]);
+    expect(createCalled).toBe(false);
+    expect(events.map(({ type }) => type)).toEqual([
+      "enrichment_started",
+      "enrichment_completed",
+    ]);
+    expect(result).toMatchObject({
+      dryRun: true,
+      appliedMetadata: [
+        {
+          findingId: "finding-1",
+          priority: 1,
+          labels: [
+            { id: "label-internet", name: "Internet exposed" },
+            { id: "label-exploit", name: "Exploitable" },
+          ],
+        },
+        { findingId: "finding-2", labels: [] },
+      ],
+    });
+    expect(result.issues?.[0]).toMatchObject({
+      priority: 1,
+      labels: [
+        { id: "label-internet", name: "Internet exposed" },
+        { id: "label-exploit", name: "Exploitable" },
+      ],
+    });
+  });
+
+  test("supplies the resolved dry-run metadata unchanged to createIssue and receipts", async () => {
+    const publication = preparedPublication();
+    delete publication.issues[0]!.priority;
+    const created: LinearIssueInput[] = [];
+    let receipt: unknown;
+    const labels = [
+      { id: "label-internet", name: "Internet exposed" },
+      { id: "label-exploit", name: "Exploitable" },
+    ];
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "synthetic-key",
+        knowledgeBasePaths: ["policy.md"],
+      },
+      dependencies(
+        publication,
+        {},
+        {
+          linearClient: linearApiClient(publication, {
+            create: (input) => {
+              created.push(input);
+            },
+          }),
+          loadLinearPublicationContext: async () => ({ labels }),
+          enrichPublicationIssues: async (source) =>
+            source.map((issue) => ({ ...issue, priority: 2, labels })),
+          writeReceipt: async (value) => {
+            receipt = value;
+          },
+        },
+      ),
+    );
+
+    expect(created).toEqual([
+      {
+        teamId: "team-example",
+        projectId: "project-example",
+        title: publication.issues[0]!.title,
+        description: publication.issues[0]!.description,
+        priority: 2,
+        labelIds: ["label-internet", "label-exploit"],
+      },
+    ]);
+    expect(result.appliedMetadata).toEqual([
+      {
+        findingId: "finding-1",
+        priority: 2,
+        labels,
+      },
+    ]);
+    expect(receipt).toMatchObject({
+      appliedMetadata: result.appliedMetadata,
+    });
+  });
+
+  test("aborts before the first mutation when validation or enrichment fails", async () => {
+    for (const failure of ["linear-read", "codex-enrichment"] as const) {
+      const publication = preparedPublication();
+      let historyMutated = false;
+      let issueCreated = false;
+      const key = "lin_api_SYNTHETIC_SECRET";
+      const thrown = await publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: key,
+          knowledgeBasePaths: ["policy.md"],
+        },
+        dependencies(
+          publication,
+          {},
+          {
+            linearClient: linearApiClient(publication, {
+              create: () => {
+                issueCreated = true;
+              },
+            }),
+            loadLinearPublicationContext: async () => {
+              if (failure === "linear-read") {
+                throw new Error(`Linear rejected ${key}`);
+              }
+              return { labels: [] };
+            },
+            enrichPublicationIssues: async () => {
+              throw new Error(
+                `Publication policy is contradictory for ${key}.`,
+              );
+            },
+            preparePublicationStore: async () => {
+              historyMutated = true;
+            },
+          },
+        ),
+      ).catch((error: unknown) => error);
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe(
+        failure === "linear-read"
+          ? "Linear publication validation failed: Linear rejected [redacted]"
+          : "Publication policy is contradictory for [redacted].",
+      );
+      expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
+      expect(JSON.stringify(thrown)).not.toContain(key);
+      expect(historyMutated).toBe(false);
+      expect(issueCreated).toBe(false);
+    }
+  });
+
+  test("validates the Linear destination for an empty knowledge-based dry-run", async () => {
+    const publication = preparedPublication(0);
+    let validated = false;
+    let enriched = false;
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      {
+        ...OPTIONS,
+        linearApiKey: "synthetic-key",
+        knowledgeBasePaths: ["policy.md"],
+        dryRun: true,
+      },
+      dependencies(
+        publication,
+        {},
+        {
+          linearClient: linearApiClient(publication),
+          loadLinearPublicationContext: async () => {
+            validated = true;
+            return { labels: [] };
+          },
+          enrichPublicationIssues: async () => {
+            enriched = true;
+            return [];
+          },
+        },
+      ),
+    );
+
+    expect(validated).toBe(true);
+    expect(enriched).toBe(false);
+    expect(result.appliedMetadata).toEqual([]);
+  });
 });
 
 describe("connected Linear publication", () => {

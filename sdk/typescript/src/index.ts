@@ -69,6 +69,11 @@ export type {
   PublishScanProgress,
   PublishScanResult,
 } from "./publish.js";
+export type {
+  AppliedPublicationMetadata,
+  LinearPublicationLabel,
+  PreparedPublicationIssue,
+} from "./publication.js";
 export { ScanResult } from "./result.js";
 export type {
   RepositoryFinding,

@@ -182,6 +182,7 @@ const distFiles = new Set(
     "multiscan",
     "patch-tui",
     "publication",
+    "publication-enrichment",
     "publication-events",
     "publication-store",
     "publish",

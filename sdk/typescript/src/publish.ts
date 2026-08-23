@@ -17,11 +17,17 @@ import {
 } from "./errors.js";
 import {
   createLinearClient,
+  loadLinearPublicationContext,
   resolveLinearApiKey,
+  safeLinearErrorMessage,
   type LinearClientFactory,
 } from "./linear.js";
+import { enrichPublicationIssues } from "./publication-enrichment.js";
 import {
+  appliedPublicationMetadata,
   prepareScanPublication,
+  publicationIssueFields,
+  type AppliedPublicationMetadata,
   type LinearPublicationDestination,
   type PreparedPublicationIssue,
   type PreparedScanPublication,
@@ -45,6 +51,7 @@ export interface PublishScanOptions {
   teamId: string;
   projectId?: string;
   linearApiKey?: string;
+  knowledgeBasePaths?: string[];
   assigneeId?: string;
   dryRun?: boolean;
   signal?: AbortSignal;
@@ -52,6 +59,8 @@ export interface PublishScanOptions {
 }
 
 export type PublishScanProgress =
+  | { type: "enrichment_started"; total: number }
+  | { type: "enrichment_completed"; total: number }
   | { type: "started"; scanId: string; total: number }
   | { type: "codex_event"; event: unknown }
   | {
@@ -89,6 +98,7 @@ export interface PublishScanResult {
   };
   dryRun?: boolean;
   issues?: PreparedPublicationIssue[];
+  appliedMetadata?: AppliedPublicationMetadata[];
   warnings?: string[];
 }
 
@@ -100,8 +110,12 @@ export interface PublicationCodexResult {
 
 export interface PublishScanDependencies {
   environment?: NodeJS.ProcessEnv;
-  linearClient?: LinearClientFactory<"users" | "createIssue">;
+  linearClient?: LinearClientFactory<
+    "users" | "createIssue" | "team" | "project" | "issueLabels"
+  >;
   prepare?: typeof prepareScanPublication;
+  enrichPublicationIssues?: typeof enrichPublicationIssues;
+  loadLinearPublicationContext?: typeof loadLinearPublicationContext;
   resolveCodex?: (environment: NodeJS.ProcessEnv) => CodexCommand;
   runCodex?: (
     command: CodexCommand,
@@ -146,17 +160,79 @@ export async function publishScanInternal(
 
   const environment = dependencies.environment ?? process.env;
   const linearApiKey = resolveLinearApiKey(environment, options.linearApiKey);
+  const knowledgeBasePaths = options.knowledgeBasePaths ?? [];
+  if (knowledgeBasePaths.length > 0 && linearApiKey === undefined) {
+    throw new ConfigurationError(
+      "A Linear API key is required to apply a publication knowledge base.",
+    );
+  }
   if (options.assigneeId !== undefined && linearApiKey === undefined) {
     throw new ConfigurationError(
       "A Linear API key is required to select a publication assignee.",
     );
   }
 
-  const prepared = await (dependencies.prepare ?? prepareScanPublication)(
+  let prepared = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
     options,
   );
   options.signal?.throwIfAborted();
+  let linearClient =
+    knowledgeBasePaths.length === 0
+      ? undefined
+      : createLinearClient(
+          {
+            apiKey: linearApiKey!,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          },
+          dependencies.linearClient,
+        );
+  if (knowledgeBasePaths.length > 0) {
+    reportPublicationProgress(options.onProgress, {
+      type: "enrichment_started",
+      total: prepared.issues.length,
+    });
+    let context;
+    try {
+      context = await (
+        dependencies.loadLinearPublicationContext ??
+        loadLinearPublicationContext
+      )(
+        linearClient!,
+        prepared.destination.teamId,
+        prepared.destination.projectId,
+      );
+    } catch (error) {
+      throw new CodexSecurityError(
+        `Linear publication validation failed: ${safeLinearErrorMessage(error, linearApiKey!)}`,
+      );
+    }
+    if (prepared.issues.length > 0) {
+      try {
+        prepared = {
+          ...prepared,
+          issues: await (
+            dependencies.enrichPublicationIssues ?? enrichPublicationIssues
+          )(prepared.issues, context.labels, knowledgeBasePaths, {
+            environment,
+            findings: prepared.policyFindings ?? [],
+            signal: options.signal,
+          }),
+        };
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        const safeMessage = safeLinearErrorMessage(error, linearApiKey!);
+        if (safeMessage === message) throw error;
+        throw new CodexSecurityError(safeMessage);
+      }
+    }
+    options.signal?.throwIfAborted();
+    reportPublicationProgress(options.onProgress, {
+      type: "enrichment_completed",
+      total: prepared.issues.length,
+    });
+  }
   const result: PublishScanResult = {
     scanId: prepared.scanId,
     uploadId: prepared.scanId,
@@ -168,6 +244,9 @@ export async function publishScanInternal(
       created: 0,
       failed: 0,
     },
+    ...(knowledgeBasePaths.length === 0
+      ? {}
+      : { appliedMetadata: appliedPublicationMetadata(prepared.issues) }),
   };
   if (options.dryRun) {
     return { ...result, dryRun: true, issues: prepared.issues };
@@ -179,8 +258,9 @@ export async function publishScanInternal(
     environment,
   );
   options.signal?.throwIfAborted();
-  const linearClient =
-    linearApiKey === undefined
+  linearClient =
+    linearClient ??
+    (linearApiKey === undefined
       ? undefined
       : createLinearClient(
           {
@@ -188,13 +268,20 @@ export async function publishScanInternal(
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           },
           dependencies.linearClient,
-        );
+        ));
   let assigneeId = options.assigneeId;
   if (linearClient !== undefined && assigneeId?.includes("@")) {
-    const users = await linearClient.users({
-      filter: { email: { eqIgnoreCase: assigneeId } },
-      first: 2,
-    });
+    let users;
+    try {
+      users = await linearClient.users({
+        filter: { email: { eqIgnoreCase: assigneeId } },
+        first: 2,
+      });
+    } catch (error) {
+      throw new CodexSecurityError(
+        `Linear assignee lookup failed: ${safeLinearErrorMessage(error, linearApiKey!)}`,
+      );
+    }
     if (users.nodes.length !== 1) {
       throw new ConfigurationError(
         "Linear could not resolve exactly one matching issue assignee.",
@@ -222,6 +309,7 @@ export async function publishScanInternal(
       handoff.file,
       linearClient,
       assigneeId,
+      linearApiKey!,
       completedFindings,
       progressObserver,
       options.signal,
@@ -382,6 +470,7 @@ async function publishLinearApiIssues(
   handoffFile: string,
   client: Pick<LinearClient, "createIssue">,
   assigneeId: string | undefined,
+  linearApiKey: string,
   completed: Set<string>,
   observer: PublishScanOptions["onProgress"],
   signal?: AbortSignal,
@@ -402,18 +491,8 @@ async function publishLinearApiIssues(
     const batch = publication.issues.slice(index, index + 20);
     const settled = await Promise.allSettled(
       batch.map(async (issue) => {
-        const content = {
-          title: issue.title,
-          description: issue.description,
-          ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-        };
-        const arguments_ = {
-          team: publication.destination.teamId,
-          ...(publication.destination.projectId === undefined
-            ? {}
-            : { project: publication.destination.projectId }),
-          ...content,
-        };
+        const content = publicationIssueFields(issue);
+        const arguments_ = publicationHandoffArguments(publication, issue);
         let outcome:
           | { issueIdentifier: string; url: string }
           | { error: string };
@@ -433,7 +512,7 @@ async function publishLinearApiIssues(
           outcome = { issueIdentifier: result.identifier, url: result.url };
         } catch (error) {
           if (signal?.aborted) return;
-          outcome = { error: safeErrorMessage(error) };
+          outcome = { error: safeLinearErrorMessage(error, linearApiKey) };
         }
 
         await appendHandoff({
@@ -609,15 +688,7 @@ async function createPublicationHandoff(
   const issues = publication.issues.map((issue) => ({
     findingId: issue.findingId,
     occurrenceId: issue.occurrenceId,
-    arguments: {
-      team: publication.destination.teamId,
-      ...(publication.destination.projectId === undefined
-        ? {}
-        : { project: publication.destination.projectId }),
-      title: issue.title,
-      description: issue.description,
-      ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-    },
+    arguments: publicationHandoffArguments(publication, issue),
   }));
   const batches = Array.from(
     { length: Math.ceil(issues.length / 20) },
@@ -1078,6 +1149,19 @@ async function writePublicationReceipt(
     encoding: "utf8",
     mode: 0o600,
   });
+}
+
+function publicationHandoffArguments(
+  publication: PreparedScanPublication,
+  issue: PreparedPublicationIssue,
+): Record<string, unknown> {
+  return {
+    team: publication.destination.teamId,
+    ...(publication.destination.projectId === undefined
+      ? {}
+      : { project: publication.destination.projectId }),
+    ...publicationIssueFields(issue),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

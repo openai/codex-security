@@ -21,6 +21,7 @@ export interface PrepareScanPublicationOptions {
   destination: "linear";
   teamId: string;
   projectId?: string;
+  knowledgeBasePaths?: string[];
   uploadedAt?: string;
 }
 
@@ -30,6 +31,18 @@ export interface PreparedPublicationIssue {
   title: string;
   description: string;
   priority?: 1 | 2 | 3 | 4;
+  labels?: LinearPublicationLabel[];
+}
+
+export interface LinearPublicationLabel {
+  id: string;
+  name: string;
+}
+
+export interface AppliedPublicationMetadata {
+  findingId: string;
+  priority?: 1 | 2 | 3 | 4;
+  labels: LinearPublicationLabel[];
 }
 
 export interface PreparedScanPublication {
@@ -38,6 +51,7 @@ export interface PreparedScanPublication {
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
+  policyFindings?: Finding[];
 }
 
 const LINEAR_PRIORITIES = {
@@ -70,6 +84,10 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
+    ...(options.knowledgeBasePaths === undefined ||
+    options.knowledgeBasePaths.length === 0
+      ? {}
+      : { policyFindings: contract.findings.findings }),
     issues: contract.findings.findings.map((finding) => {
       const priority = LINEAR_PRIORITIES[finding.severity.level];
       return {
@@ -81,6 +99,32 @@ export async function prepareScanPublication(
       };
     }),
   };
+}
+
+export function publicationIssueFields(issue: PreparedPublicationIssue): {
+  title: string;
+  description: string;
+  priority?: 1 | 2 | 3 | 4;
+  labelIds?: string[];
+} {
+  return {
+    title: issue.title,
+    description: issue.description,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+    ...(issue.labels === undefined || issue.labels.length === 0
+      ? {}
+      : { labelIds: issue.labels.map(({ id }) => id) }),
+  };
+}
+
+export function appliedPublicationMetadata(
+  issues: readonly PreparedPublicationIssue[],
+): AppliedPublicationMetadata[] {
+  return issues.map((issue) => ({
+    findingId: issue.findingId,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+    labels: issue.labels?.map((label) => ({ ...label })) ?? [],
+  }));
 }
 
 function renderFindingDescription(
