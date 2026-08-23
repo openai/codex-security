@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 const stoppedScanProbe = [
-  "import hashlib, json, os, pathlib, shutil, subprocess, sys, uuid",
+  "import argparse, hashlib, json, os, pathlib, shutil, sqlite3, subprocess, sys, uuid",
   "plugin = pathlib.Path(sys.argv[1])",
   "root = pathlib.Path(sys.argv[2])",
   "source = sys.argv[3]",
@@ -64,9 +64,32 @@ const stoppedScanProbe = [
   "            (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text(json.dumps(later), encoding='utf-8')",
   "    else:",
+  "        if source == 'distinct-instances':",
+  "            first = json.loads(json.dumps(finding))",
+  "            first['identity'] = {'anchor': 'shared-anchor', 'instance': 'first'}",
+  "            second = json.loads(json.dumps(finding))",
+  "            second['identity'] = {'anchor': 'shared-anchor', 'instance': 'second'}",
+  "            checkpoint['findings'] = [first, second]",
   "        encoded = json.dumps(checkpoint).encode()",
   "        (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text('{incomplete', encoding='utf-8')",
+  "if source == 'cancel-io-retry':",
+  "    os.environ.update(environment)",
+  "    sys.path.insert(0, str(plugin / 'scripts'))",
+  "    import workbench_db",
+  "    connection = workbench_db.connect()",
+  "    original_write = workbench_db.saved_results._write_prepared_scan_finalization",
+  "    workbench_db.saved_results._write_prepared_scan_finalization = lambda prepared: (_ for _ in ()).throw(OSError('synthetic cancellation publication failure'))",
+  "    workbench_db.cancel_scan_locked(connection, argparse.Namespace(scan_id=scan_id, thread_id=None))",
+  "    workbench_db.saved_results._write_prepared_scan_finalization = original_write",
+  "    connection.close()",
+  "    stored = run('get-scan', '--scan-id', scan_id)['scan']",
+  "    findings_path = scan_dir / 'findings.json'",
+  "    findings = json.loads(findings_path.read_text(encoding='utf-8'))['findings'] if findings_path.exists() else []",
+  "    with sqlite3.connect(state / 'workbench.sqlite3') as database:",
+  "        frozen = database.execute('SELECT retained_source_digests_json FROM scans WHERE id = ?', (scan_id,)).fetchone()[0]",
+  "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'frozen': json.loads(frozen) if frozen else None}))",
+  "    raise SystemExit(0)",
   "run('fail-deep-scan', '--scan-id', scan_id, '--message', 'Synthetic worker stopped.', '--deep-status', terminal_status)",
   "if source == 'legacy-seal-io-retry':",
   "    shutil.rmtree(artifact_dir)",
@@ -118,6 +141,8 @@ const stoppedScanProbe = [
   "elif source == 'refined-checkpoint':",
   "    histories = [item for finding in findings for item in finding.get('provenance', {}).get('previousFindings', [])]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'historyCount': len(histories), 'representedStartLines': sorted([finding['locations'][0]['startLine'] for finding in findings] + [finding['locations'][0]['startLine'] for finding in histories])}))",
+  "elif source == 'distinct-instances':",
+  "    print(json.dumps({'findingCount': stored['findingCount'], 'artifactFindingCount': len(findings), 'instances': sorted(finding['identity']['instance'] for finding in findings)}))",
   "else:",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings)}))",
 ].join("\n");
@@ -232,5 +257,52 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     frozenAfterSuccess: {},
     status: "failed",
     findingCount: 1,
+  });
+}, 30_000);
+
+test("preserves distinct instances from one worker candidate", () => {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(
+    join(tmpdir(), "codex-security-distinct-instances-"),
+  );
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    [
+      "-I",
+      "-B",
+      "-c",
+      stoppedScanProbe,
+      PLUGIN_ROOT,
+      root,
+      "distinct-instances",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    findingCount: 2,
+    artifactFindingCount: 2,
+    instances: ["first", "second"],
+  });
+}, 30_000);
+
+test("retries canceled result publication after a transient failure", () => {
+  const python = Bun.which("python3") ?? Bun.which("python");
+  expect(python).not.toBeNull();
+  const root = mkdtempSync(join(tmpdir(), "codex-security-cancel-retry-"));
+  temporaryDirectories.push(root);
+  const result = spawnSync(
+    python!,
+    ["-I", "-B", "-c", stoppedScanProbe, PLUGIN_ROOT, root, "cancel-io-retry"],
+    { encoding: "utf8" },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    findingCount: 1,
+    progressStatus: "canceled",
+    artifactFindingCount: 1,
+    frozen: expect.any(Object),
   });
 }, 30_000);

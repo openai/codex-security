@@ -142,7 +142,7 @@ def _finding_key(finding: dict[str, Any]) -> str:
 
 def _worker_candidate_key(
     worker_id: str, candidate_id: str, finding: dict[str, Any]
-) -> tuple[str, str, Any, Any]:
+) -> tuple[str, str, Any, Any, Any]:
     """Identify one worker-local candidate without merging unrelated locations."""
     provenance = finding.get("provenance")
     identity = (
@@ -151,7 +151,8 @@ def _worker_candidate_key(
         else finding.get("identity")
     )
     anchor = identity.get("anchor") if isinstance(identity, dict) else None
-    return worker_id, candidate_id, finding.get("ruleId"), anchor
+    instance = identity.get("instance") if isinstance(identity, dict) else None
+    return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
 
 
 def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
@@ -474,9 +475,9 @@ def merge_saved_results(
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
     represented: dict[str, str | None] = {}
-    represented_candidates: dict[tuple[str, str, Any, Any], str | None] = {}
+    represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
-    represented_candidate_history: dict[tuple[str, str, Any, Any], set[str]] = {}
+    represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
@@ -869,17 +870,13 @@ def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None
             write_scan_local_bytes(scan_dir, relative, contents)
 
 
-def preserve_scan_results_locked(
-    db: Any, connection: Any, scan_id: str, *, during_transition: bool = False
-) -> bool:
+def preserve_scan_results_locked(db: Any, connection: Any, scan_id: str) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
     scan = db.require_scan(connection, scan_id)
     if scan["status"] != "failed":
         return False
     frozen_source_digests: dict[str, str] | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
-    if raw_frozen_sources is None and scan["canceled_at"] is not None and not during_transition:
-        return False
     if raw_frozen_sources is not None:
         parsed_frozen_sources = json.loads(raw_frozen_sources)
         if not isinstance(parsed_frozen_sources, dict) or not all(
@@ -1046,9 +1043,7 @@ def refresh_stopped_scan_results(
             if preserve_scan_results_locked(db, connection, scan_id):
                 db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)
         else:
-            preserve_stopped_results_after_transition(
-                db, connection, scan_id, during_transition=False
-            )
+            preserve_stopped_results_after_transition(db, connection, scan_id)
 
 
 def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
@@ -1272,12 +1267,10 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
 
 
 def preserve_stopped_results_after_transition(
-    db: Any, connection: Any, scan_id: str, *, during_transition: bool = True
+    db: Any, connection: Any, scan_id: str
 ) -> None:
     try:
-        published = preserve_scan_results_locked(
-            db, connection, scan_id, during_transition=during_transition
-        )
+        published = preserve_scan_results_locked(db, connection, scan_id)
     except (ContractError, OSError, SystemExit, ValueError) as exc:
         scan = db.require_scan(connection, scan_id)
         warnings = json.loads(scan["completion_warnings_json"])
