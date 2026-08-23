@@ -875,18 +875,17 @@ def preserve_scan_results_locked(
     if scan["status"] != "failed":
         return False
     frozen_source_digests: dict[str, str] | None = None
-    if scan["canceled_at"] is not None:
-        raw_frozen_sources = scan["retained_source_digests_json"]
-        if raw_frozen_sources is None and not during_transition:
-            return False
-        if raw_frozen_sources is not None:
-            parsed_frozen_sources = json.loads(raw_frozen_sources)
-            if not isinstance(parsed_frozen_sources, dict) or not all(
-                isinstance(relative, str) and isinstance(digest, str)
-                for relative, digest in parsed_frozen_sources.items()
-            ):
-                raise ContractError("Saved stopped-scan source digests are malformed.")
-            frozen_source_digests = parsed_frozen_sources
+    raw_frozen_sources = scan["retained_source_digests_json"]
+    if raw_frozen_sources is None and scan["canceled_at"] is not None and not during_transition:
+        return False
+    if raw_frozen_sources is not None:
+        parsed_frozen_sources = json.loads(raw_frozen_sources)
+        if not isinstance(parsed_frozen_sources, dict) or not all(
+            isinstance(relative, str) and isinstance(digest, str)
+            for relative, digest in parsed_frozen_sources.items()
+        ):
+            raise ContractError("Saved stopped-scan source digests are malformed.")
+        frozen_source_digests = parsed_frozen_sources
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -943,7 +942,6 @@ def preserve_scan_results_locked(
                 (len(findings["findings"]), timestamp, scan_id),
             )
 
-    verified_existing_output: tuple[dict[str, Any], dict[str, Any]] | None = None
     existing_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
     existing_scan = db.read_json_object(existing_path).get("scan", {}) if existing_path else {}
     if scan["seal_manifest_digest"] is not None or (
@@ -958,16 +956,26 @@ def preserve_scan_results_locked(
         )
         db.verify_manifest_binding(scan, existing)
         if existing_scan.get("status") == outcome:
-            if outcome == "canceled" and (
-                frozen_source_digests is not None
-                and existing_scan.get("preservedSources") == frozen_source_digests
-            ):
+            existing_sources = existing_scan.get("preservedSources")
+            if frozen_source_digests is None:
+                if not isinstance(existing_sources, dict) or not all(
+                    isinstance(relative, str) and isinstance(digest, str)
+                    for relative, digest in existing_sources.items()
+                ):
+                    raise ContractError("Stopped scan source digests could not be frozen.")
+                with connection:
+                    connection.execute(
+                        "UPDATE scans SET retained_source_digests_json = ? "
+                        "WHERE id = ? AND retained_source_digests_json IS NULL",
+                        (json.dumps(existing_sources, sort_keys=True), scan_id),
+                    )
+                frozen_source_digests = existing_sources
+            if existing_sources == frozen_source_digests:
                 if scan["seal_manifest_digest"] is not None and not publication_follow_up_warnings:
                     return True
                 record_publication(existing, existing_findings)
                 return True
-            if outcome != "canceled":
-                verified_existing_output = (existing, existing_findings)
+            raise ContractError("Stopped scan sources changed after terminal publication.")
     binding = {**db.workbench_completion_binding(scan, scan["completed_at"]), "status": outcome}
     documents = merge_saved_results(
         scan_dir,
@@ -986,11 +994,6 @@ def preserve_scan_results_locked(
         frozen_source_digests=frozen_source_digests,
     )
     if documents is None:
-        if verified_existing_output is not None:
-            if scan["seal_manifest_digest"] is not None and not publication_follow_up_warnings:
-                return True
-            record_publication(*verified_existing_output)
-            return True
         unpublished_warnings = list(dict.fromkeys([*warnings, *publication_follow_up_warnings]))
         if unpublished_warnings != stored_warnings:
             with connection:
@@ -1000,13 +1003,13 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
-    if scan["canceled_at"] is not None and frozen_source_digests is None:
+    if frozen_source_digests is None:
         retained_sources = documents[0].get("scan", {}).get("preservedSources")
         if not isinstance(retained_sources, dict) or not all(
             isinstance(relative, str) and isinstance(digest, str)
             for relative, digest in retained_sources.items()
         ):
-            raise ContractError("Canceled scan source digests could not be frozen.")
+            raise ContractError("Stopped scan source digests could not be frozen.")
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ? "

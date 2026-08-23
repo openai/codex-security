@@ -18,6 +18,7 @@ const stoppedScanProbe = [
   "plugin = pathlib.Path(sys.argv[1])",
   "root = pathlib.Path(sys.argv[2])",
   "source = sys.argv[3]",
+  "terminal_status = sys.argv[4] if len(sys.argv) > 4 else 'failed'",
   "state = root / 'state'",
   "home = root / 'codex-home'",
   "target = root / 'target'",
@@ -66,11 +67,26 @@ const stoppedScanProbe = [
   "        encoded = json.dumps(checkpoint).encode()",
   "        (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "        result_path.write_text('{incomplete', encoding='utf-8')",
-  "run('fail-deep-scan', '--scan-id', scan_id, '--message', 'Synthetic worker stopped.', '--deep-status', 'failed')",
+  "run('fail-deep-scan', '--scan-id', scan_id, '--message', 'Synthetic worker stopped.', '--deep-status', terminal_status)",
+  "if source == 'late-checkpoint':",
+  "    manifest_before = (scan_dir / 'scan-manifest.json').read_bytes()",
+  "    findings_before = (scan_dir / 'findings.json').read_bytes()",
+  "    late = json.loads(json.dumps(checkpoint))",
+  "    late_finding = json.loads(json.dumps(finding))",
+  "    late_finding['occurrenceId'] = 'occ_111111111111111111111111'",
+  "    late_finding['ruleId'] = 'late.checkpoint'",
+  "    late_finding['title'] = 'Late checkpoint finding'",
+  "    late_finding['locations'][0].update({'startLine': 10, 'endLine': 12})",
+  "    late_finding.setdefault('provenance', {})['candidateId'] = 'late-checkpoint-candidate'",
+  "    late['findings'].append(late_finding)",
+  "    encoded = json.dumps(late).encode()",
+  "    (checkpoint_dir / f'{hashlib.sha256(encoded).hexdigest()}.json').write_bytes(encoded)",
   "stored = run('get-scan', '--scan-id', scan_id)['scan']",
   "findings_path = scan_dir / 'findings.json'",
   "findings = json.loads(findings_path.read_text(encoding='utf-8'))['findings'] if findings_path.exists() else []",
-  "if source == 'refined-checkpoint':",
+  "if source == 'late-checkpoint':",
+  "    print(json.dumps({'findingCount': stored['findingCount'], 'artifactFindingCount': len(findings), 'manifestUnchanged': manifest_before == (scan_dir / 'scan-manifest.json').read_bytes(), 'findingsUnchanged': findings_before == (scan_dir / 'findings.json').read_bytes()}))",
+  "elif source == 'refined-checkpoint':",
   "    histories = [item for finding in findings for item in finding.get('provenance', {}).get('previousFindings', [])]",
   "    print(json.dumps({'findingCount': stored['findingCount'], 'progressStatus': stored['progress']['status'], 'artifactFindingCount': len(findings), 'historyCount': len(histories), 'representedStartLines': sorted([finding['locations'][0]['startLine'] for finding in findings] + [finding['locations'][0]['startLine'] for finding in histories])}))",
   "else:",
@@ -128,3 +144,35 @@ test("keeps refined checkpoints as one finding with retained history", () => {
     representedStartLines: [21, 24],
   });
 }, 30_000);
+
+test.each(["failed", "interrupted"] as const)(
+  "keeps the first %s seal immutable when a worker writes late",
+  (terminalStatus) => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const root = mkdtempSync(join(tmpdir(), "codex-security-late-checkpoint-"));
+    temporaryDirectories.push(root);
+    const result = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        stoppedScanProbe,
+        PLUGIN_ROOT,
+        root,
+        "late-checkpoint",
+        terminalStatus,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      findingCount: 1,
+      artifactFindingCount: 1,
+      manifestUnchanged: true,
+      findingsUnchanged: true,
+    });
+  },
+  30_000,
+);
