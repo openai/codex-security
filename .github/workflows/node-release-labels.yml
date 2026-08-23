@@ -57,12 +57,18 @@ jobs:
             esac
           }
 
+          title_sentinel="__CODEX_SECURITY_TITLE_END__"
           current_title="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER" \
-              --jq '.title'
+              --jq '.title | @base64' |
+              base64 --decode &&
+              printf '%s' "$title_sentinel"
           )"
-          conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
-          if [[ ! "$current_title" =~ $conventional_title ]]; then
+          current_title="${current_title%"$title_sentinel"}"
+          conventional_title='^(build|chore|ci|docs|feat|fix|perf|refactor|release|revert|style|test)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
+          if [[ "$current_title" == *$'\n'* ||
+                "$current_title" == *$'\r'* ||
+                ! "$current_title" =~ $conventional_title ]]; then
             echo "Pull request title must follow <type>[optional scope][!]: <description>." >&2
             exit 1
           fi
