@@ -1454,6 +1454,71 @@ describe("GitHub release workflow safeguards", () => {
     expect(protectedReleaseWorkflow).toContain('"$GITHUB_REF"');
   });
 
+  test("requires reviewed notes only for new npm publications", () => {
+    expect(protectedReleaseWorkflow).toContain(
+      [
+        "      - name: Validate reviewed release notes",
+        "        if: steps.release.outputs.mode == 'publish'",
+      ].join("\n"),
+    );
+  });
+
+  test.each([
+    {
+      scenario: "a missing reviewed summary",
+      summary: "__missing__",
+      status: 1,
+      message: "The tagged commit must include .github/release-notes.md.",
+    },
+    {
+      scenario: "a summary for another version",
+      summary: "<!-- release-version: 0.1.5 -->\nReviewed summary",
+      status: 1,
+      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
+    },
+    {
+      scenario: "an empty reviewed summary",
+      summary: "<!-- release-version: 0.1.6 -->\n   ",
+      status: 1,
+      message: "Release notes must start with <!-- release-version: 0.1.6 -->",
+    },
+    {
+      scenario: "a matching reviewed summary",
+      summary: "<!-- release-version: 0.1.6 -->\nReviewed summary",
+      status: 0,
+      message: "",
+    },
+  ])(
+    "validates $scenario before protected npm publication",
+    ({ summary, status, message }) => {
+      const script = workflowStepShell(
+        protectedReleaseWorkflow,
+        "Validate reviewed release notes",
+      );
+      const mock = [
+        "git() {",
+        '  if [[ "$MOCK_RELEASE_SUMMARY" == "__missing__" ]]; then return 1; fi',
+        "  printf '%s\\n' \"$MOCK_RELEASE_SUMMARY\"",
+        "}",
+      ].join("\n");
+      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_SHA: releaseCommit,
+          MOCK_RELEASE_SUMMARY: summary,
+          RELEASE_VERSION: "0.1.6",
+        },
+        timeout: 10_000,
+      });
+
+      expect(result.status).toBe(status);
+      if (message !== "") {
+        expect(result.stderr).toContain(message);
+      }
+    },
+  );
+
   test("pins both supported-minimum verification and protected signing runtimes", () => {
     expect(protectedReleaseWorkflow).toContain('node-version: "22.13.0"');
     expect(protectedReleaseWorkflow).toContain('node-version: "24.15.0"');

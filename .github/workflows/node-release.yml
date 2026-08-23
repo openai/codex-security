@@ -115,6 +115,30 @@ jobs:
             printf 'mode=%s\n' "$mode"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Validate reviewed release notes
+        if: steps.release.outputs.mode == 'publish'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if ! release_summary="$(
+            git show "$GITHUB_SHA:.github/release-notes.md" 2>/dev/null
+          )"; then
+            echo "The tagged commit must include .github/release-notes.md." >&2
+            exit 1
+          fi
+          summary_header="${release_summary%%$'\n'*}"
+          summary_body="${release_summary#*$'\n'}"
+          expected_header="<!-- release-version: $RELEASE_VERSION -->"
+          if [[ "$summary_header" != "$expected_header" ||
+                "$summary_body" == "$release_summary" ||
+                -z "${summary_body//[[:space:]]/}" ]]; then
+            echo "Release notes must start with $expected_header and include a reviewed summary." >&2
+            exit 1
+          fi
+
       - name: Install dependencies
         run: sfw pnpm --dir sdk/typescript install --frozen-lockfile
 
