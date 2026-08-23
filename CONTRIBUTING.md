@@ -48,5 +48,9 @@ canonical repository. The public release workflow installs that locked graph,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
 
+[GitHub Releases](https://github.com/openai/codex-security/releases) is the
+canonical changelog. Maintainers should follow [RELEASING.md](RELEASING.md) to
+prepare, publish, verify, or repair a release.
+
 See the [SDK testing guide](sdk/typescript/TESTING.md) for local checks,
 test conventions, and the required and experimental CI jobs.

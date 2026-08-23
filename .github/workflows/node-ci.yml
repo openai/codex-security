@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, edited, reopened, synchronize]
 
 permissions:
   contents: read
@@ -13,8 +14,28 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-title:
+    name: validate pull request title
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require a Conventional Commit pull request title
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
+          if [[ ! "$PR_TITLE" =~ $conventional_title ]]; then
+            echo "Pull request title must follow <type>[optional scope][!]: <description>." >&2
+            exit 1
+          fi
+
   test:
     name: ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    needs: validate-title
+    if: always()
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -33,6 +54,10 @@ jobs:
             node: "26"
 
     steps:
+      - name: Require a valid pull request title
+        if: needs.validate-title.result != 'success'
+        run: exit 1
+
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -106,6 +131,7 @@ jobs:
 
   windows-test:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
+    needs: validate-title
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -164,6 +190,7 @@ jobs:
 
   windows-verify:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
+    needs: validate-title
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -204,7 +231,7 @@ jobs:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [windows-test, windows-verify]
+    needs: [validate-title, windows-test, windows-verify]
     strategy:
       fail-fast: false
       matrix:
@@ -212,5 +239,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
+        if: needs.validate-title.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
         run: exit 1

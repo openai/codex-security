@@ -65,6 +65,21 @@ jobs:
           fi
 
           version="$(node sdk/typescript/scripts/release-automation.mjs version sdk/typescript/package.json)"
+          if ! release_summary="$(
+            git show "$RELEASE_SHA:.github/release-notes.md" 2>/dev/null
+          )"; then
+            echo "The tagged commit must include .github/release-notes.md." >&2
+            exit 1
+          fi
+          summary_header="${release_summary%%$'\n'*}"
+          summary_body="${release_summary#*$'\n'}"
+          expected_header="<!-- release-version: $version -->"
+          if [[ "$summary_header" != "$expected_header" ||
+                "$summary_body" == "$release_summary" ||
+                -z "${summary_body//[[:space:]]/}" ]]; then
+            echo "Release notes must start with $expected_header and include a reviewed summary." >&2
+            exit 1
+          fi
 
           if ! published_versions="$(
             npm view @openai/codex-security versions \
