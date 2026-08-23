@@ -2853,6 +2853,75 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: string[] = [];
+    const terminalFailure =
+      "Deep Scan reached its discovery limit after worker policy refusals.";
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          commands.push(args[0]!);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args, input);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          if (args[0] === "prepare-scan-completion") {
+            throw new Error("Only a running scan can be completed.");
+          }
+          if (args[0] === "get-scan") {
+            return {
+              scan: {
+                failureMessage: terminalFailure,
+                progress: { status: "failed" },
+              },
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+      terminalFailure,
+    );
+    expect(commands).toContain("prepare-scan-completion");
+    expect(commands).toContain("get-scan");
+    await client.close();
+  });
+
   test.each([
     ["without", false],
     ["with", true],

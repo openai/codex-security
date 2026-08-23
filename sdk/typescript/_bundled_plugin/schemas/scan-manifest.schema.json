@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openai.com/codex-security/schemas/scan-manifest.schema.json",
-  "title": "Codex Security completed scan manifest",
+  "title": "Codex Security sealed scan manifest",
   "type": "object",
   "required": [
     "documentType",
@@ -53,7 +53,7 @@
           }
         },
         "status": {
-          "const": "completed"
+          "enum": ["completed", "failed", "canceled", "interrupted"]
         },
         "startedAt": {
           "type": "string",

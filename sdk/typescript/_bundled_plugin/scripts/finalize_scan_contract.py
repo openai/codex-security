@@ -857,6 +857,20 @@ def _recover_unsealed_findings(
 
         if previous_position is not None:
             previous = recovered[previous_position]
+            strongest, earlier = (
+                (previous, finding)
+                if _finding_strength(finding) <= _finding_strength(previous)
+                else (finding, previous)
+            )
+            if strongest != earlier:
+                original = copy.deepcopy(earlier)
+                older = original["provenance"].pop("previousFindings", [])
+                if not isinstance(strongest["provenance"].get("previousFindings"), list):
+                    strongest["provenance"]["previousFindings"] = []
+                history = strongest["provenance"]["previousFindings"]
+                for record in [*(older if isinstance(older, list) else []), original]:
+                    if record not in history:
+                        history.append(record)
             if _finding_strength(finding) <= _finding_strength(previous):
                 warnings.append(
                     f"Skipped malformed finding {index + 1}: duplicate logical finding."
@@ -1060,7 +1074,9 @@ def _populate_unsealed_manifest_envelope(
 
     manifest["documentType"] = "codex-security.scan-manifest"
     manifest["schemaVersion"] = SCHEMA_VERSION
-    scan["status"] = "completed"
+    scan["status"] = (
+        completion_binding.get("status", "completed") if completion_binding else "completed"
+    )
     scan["coverageRef"] = "coverage.json"
     scan["findingsRef"] = "findings.json"
     if completion_binding is None:
@@ -1188,6 +1204,8 @@ def _validate_completion_binding(
     scan = _require_dict(manifest, "scan", "manifest")
     if scan.get("id") != completion_binding["scanId"]:
         raise ContractError("manifest.scan.id: must match the workbench scan")
+    if scan.get("status") != completion_binding.get("status", "completed"):
+        raise ContractError("manifest.scan.status: must match the workbench outcome")
     if scan.get("startedAt") != completion_binding["startedAt"]:
         raise ContractError("manifest.scan.startedAt: must match the workbench scan")
     if scan.get("completedAt") != completion_binding["completedAt"]:
@@ -1370,8 +1388,8 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     for key in ("id", "startedAt", "completedAt", "sealedAt"):
         _require_str(scan, key, "manifest.scan")
-    if scan.get("status") != "completed":
-        raise ContractError("manifest.scan.status: expected completed")
+    if scan.get("status") not in {"completed", "failed", "canceled", "interrupted"}:
+        raise ContractError("manifest.scan.status: expected a terminal scan outcome")
     producer = _require_dict(scan, "producer", "manifest.scan")
     _require_str(producer, "name", "manifest.scan.producer")
     _require_str(producer, "version", "manifest.scan.producer")
@@ -2175,7 +2193,7 @@ def _artifact_record(
 ) -> dict[str, str]:
     relative_path = _require_portable_relative_path(relative_path, "artifact path")
     if contents is not None:
-        _require_scan_local_file(scan_dir, relative_path, relative_path)
+        _validate_scan_local_output_path(scan_dir, scan_dir / relative_path, relative_path)
     return {
         "mediaType": media_type,
         "path": relative_path,
@@ -2292,12 +2310,18 @@ def build_sarif_projection(
     sarif = build_sarif(manifest, findings, source_root)
     run = sarif["runs"][0]
     completeness = coverage["completeness"]
-    run["invocations"] = [{"executionSuccessful": completeness == "complete"}]
-    if completeness != "complete":
+    scan_status = manifest["scan"]["status"]
+    execution_successful = scan_status == "completed" and completeness == "complete"
+    run["invocations"] = [{"executionSuccessful": execution_successful}]
+    if not execution_successful:
         run["properties"]["codexSecurityCoverageCompleteness"] = completeness
-        reasons = [item["reason"] for item in coverage["deferred"]] or [
-            f"Scan coverage is {completeness}; results may be incomplete."
-        ]
+        reasons = [item["reason"] for item in coverage["deferred"]]
+        if not reasons:
+            reasons = [
+                f"Scan status is {scan_status}; results may be incomplete."
+                if scan_status != "completed"
+                else f"Scan coverage is {completeness}; results may be incomplete."
+            ]
         run["invocations"][0]["toolExecutionNotifications"] = [
             {"level": "warning", "message": {"text": reason}} for reason in reasons
         ]
@@ -2326,6 +2350,13 @@ def csv_cell(value: Any) -> Any:
 
 
 def finding_candidate_id(finding: dict[str, Any]) -> str | None:
+    provenance = finding.get("provenance")
+    if (
+        isinstance(provenance, dict)
+        and isinstance(value := provenance.get("candidateId"), str)
+        and value.strip()
+    ):
+        return value
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
         return None
@@ -2517,23 +2548,32 @@ def _prepare_scan_finalization(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
+    draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
 
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
-    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
+    manifest = (
+        copy.deepcopy(draft_documents[0])
+        if draft_documents is not None
+        else _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
+    )
     scan = _require_dict(manifest, "scan", "manifest")
     was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
-    findings, findings_input_bytes = _read_scan_local_json_bytes(
-        scan_dir, scan["findingsRef"], scan["findingsRef"]
-    )
-    coverage, coverage_input_bytes = _read_scan_local_json_bytes(
-        scan_dir, scan["coverageRef"], scan["coverageRef"]
-    )
+    if draft_documents is None:
+        findings, findings_input_bytes = _read_scan_local_json_bytes(
+            scan_dir, scan["findingsRef"], scan["findingsRef"]
+        )
+        coverage, coverage_input_bytes = _read_scan_local_json_bytes(
+            scan_dir, scan["coverageRef"], scan["coverageRef"]
+        )
+    else:
+        findings, coverage = copy.deepcopy(draft_documents[1:])
+        findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
     if not was_sealed:
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, completion_binding)
         _normalize_unsealed_deep_repository_inventory_strategy(
@@ -2544,8 +2584,8 @@ def _prepare_scan_finalization(
 
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
         raise ContractError(f"manifest.schemaVersion: expected {SCHEMA_VERSION}")
-    if scan.get("status") != "completed":
-        raise ContractError("manifest.scan.status: expected completed before sealing")
+    if scan.get("status") not in {"completed", "failed", "canceled", "interrupted"}:
+        raise ContractError("manifest.scan.status: expected a terminal scan outcome before sealing")
     if (
         expected_coverage_mode is not None
         and completion_binding is not None

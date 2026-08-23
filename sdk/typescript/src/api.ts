@@ -1248,11 +1248,36 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
-          const preparation = await workbench(workbenchOptions, [
-            "prepare-scan-completion",
-            "--scan-id",
-            scanId,
-          ]);
+          let preparation: JsonObject;
+          try {
+            preparation = await workbench(workbenchOptions, [
+              "prepare-scan-completion",
+              "--scan-id",
+              scanId,
+            ]);
+          } catch (error) {
+            const saved = await workbench(workbenchOptions, [
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]).catch(() => null);
+            const savedScan = isRecord(saved) ? saved["scan"] : undefined;
+            const progress = isRecord(savedScan)
+              ? savedScan["progress"]
+              : undefined;
+            const failureMessage = isRecord(savedScan)
+              ? savedScan["failureMessage"]
+              : undefined;
+            if (
+              isRecord(progress) &&
+              progress["status"] === "failed" &&
+              typeof failureMessage === "string" &&
+              failureMessage.trim() !== ""
+            ) {
+              throw new IncompleteScanError(failureMessage);
+            }
+            throw error;
+          }
           preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
             ? preparation["targetWarnings"].filter(
                 (warning): warning is string => typeof warning === "string",
