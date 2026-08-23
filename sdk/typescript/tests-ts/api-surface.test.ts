@@ -39,8 +39,11 @@ async function scanResponseSurface(runtimeOptions?: {
       resolvePluginPython: async () => "/managed/python",
       prepareOutputDir: async () => scanDir,
       repositoryRevision: async () => "deadbeef",
-      runWorkbench: async (_options: unknown, args: readonly string[]) =>
-        mockWorkbench(args),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ) => mockWorkbench(args, input),
       createCodex: (options: CodexOptions) => {
         codexOptions = options;
         return {

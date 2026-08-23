@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -16,7 +17,11 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, test } from "bun:test";
 import { exportEnvironment, main } from "../src/cli.js";
-import { CodexSecurityError } from "../src/index.js";
+import {
+  CodexSecurityError,
+  type CoverageDocument,
+  type ScanManifest,
+} from "../src/index.js";
 import {
   SYNTHETIC_CREDENTIALS,
   capture,
@@ -48,6 +53,7 @@ describe("CLI", () => {
     ).toEqual({
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
+      PYTHONUTF8: "1",
       TMPDIR: "/tmp",
     });
   });
@@ -338,15 +344,43 @@ describe("CLI", () => {
     30_000,
   );
 
-  test("writes exported findings to the requested file", async () => {
+  test.each([
+    ["complete", false],
+    ["partial", true],
+    ["unknown", true],
+    ["partial", false],
+    ["unknown", false],
+  ] as const)("exports %s, deferred: %j", async (completeness, hasDeferred) => {
     const directory = await mkdtemp(join(tmpdir(), "codex-security-export-"));
     try {
       const scan = await copyCompletedScan(directory);
+      const manifestPath = join(scan, "scan-manifest.json");
+      const manifest = JSON.parse(
+        await readFile(manifestPath, "utf8"),
+      ) as ScanManifest;
+      const coveragePath = join(scan, manifest.scan.coverageRef);
+      const coverage = JSON.parse(
+        await readFile(coveragePath, "utf8"),
+      ) as CoverageDocument;
+      coverage.completeness = completeness;
+      coverage.deferred = hasDeferred
+        ? [
+            { id: "review", reason: "Source review did not finish." },
+            { id: "validation", reason: "Validation did not finish." },
+          ]
+        : [];
+      const coverageBytes = JSON.stringify(coverage);
+      await writeFile(coveragePath, coverageBytes);
+      manifest.scan.artifacts.find(
+        (artifact) => artifact.path === manifest.scan.coverageRef,
+      )!.sha256 = createHash("sha256").update(coverageBytes).digest("hex");
+      await writeFile(manifestPath, JSON.stringify(manifest));
+
       const paths = [
-        "scan-manifest.json",
-        "findings.json",
-        "coverage.json",
-      ].map((name) => join(scan, name));
+        manifestPath,
+        join(scan, manifest.scan.findingsRef),
+        coveragePath,
+      ];
       const before = await Promise.all(paths.map((path) => readFile(path)));
       const source = JSON.parse(before[1]!.toString()).findings[0];
       for (const [format, filename] of [
@@ -375,6 +409,27 @@ describe("CLI", () => {
           const sarif = JSON.parse(contents);
           expect(sarif.version).toBe("2.1.0");
           const run = sarif.runs[0];
+          expect(run.invocations).toHaveLength(1);
+          const invocation = run.invocations[0];
+          expect(invocation.executionSuccessful).toBe(
+            completeness === "complete",
+          );
+          expect(run.properties.codexSecurityCoverageCompleteness).toBe(
+            completeness === "complete" ? undefined : completeness,
+          );
+          if (completeness === "complete") {
+            expect(invocation.toolExecutionNotifications).toBeUndefined();
+          } else {
+            const reasons = hasDeferred
+              ? coverage.deferred.map((item) => item.reason)
+              : [expect.stringContaining(completeness)];
+            expect(invocation.toolExecutionNotifications).toEqual(
+              reasons.map((text) => ({
+                level: "warning",
+                message: { text },
+              })),
+            );
+          }
           expect(run.tool.driver.rules[0]).toMatchObject({
             id: source.ruleId,
             help: { markdown: expect.stringContaining(source.remediation) },
@@ -386,6 +441,7 @@ describe("CLI", () => {
               ]),
             },
           });
+          expect(run.results).toHaveLength(1);
           expect(run.results[0]).toMatchObject({
             ruleId: source.ruleId,
             message: { text: expect.stringContaining(source.remediation) },
@@ -399,6 +455,7 @@ describe("CLI", () => {
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toBe(`${format.toUpperCase()}: ${output}\n`);
       }
+      expect(manifest.scan.status).toBe("completed");
       expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
         before,
       );

@@ -916,12 +916,22 @@ describe("bundled plugin finding detail contracts", () => {
       "findings = json.loads((plugin / 'examples' / 'completed-scan' / 'findings.json').read_text())",
       "finding = findings['findings'][0]",
       "finding['code_evidence'] = [{'id': 'legacy-source', 'code': 'legacy_source()'}]",
+      "finding['rootCause'] = {'summary': 'Canonical root cause.', 'evidenceRefs': ['legacy-source', 'missing-source']}",
       "finding['validation'] = {'evidenceRefs': [None, '', 42, 'legacy-source', 'missing-source']}",
       "finding['attackPath'] = {'dataflow': {'evidence_refs': [None, '', 42, 'legacy-source', 'missing-source']}}",
+      "original = json.dumps(findings, sort_keys=True)",
       "finalizer = runpy.run_path(str(plugin / 'scripts' / 'finalize_scan_contract.py'))",
       "compatible = finalizer['_legacy_sealed_findings_for_validation'](findings)",
       "finalizer['_validate_finding'](compatible['findings'][0], 'findings[0]')",
-      "print(json.dumps({'originalValidation': finding['validation']['evidenceRefs'], 'compatibleValidation': compatible['findings'][0]['validation']['evidenceRefs'], 'originalDataflow': finding['attackPath']['dataflow']['evidence_refs'], 'compatibleDataflow': compatible['findings'][0]['attackPath']['dataflow']['evidence_refs']}))",
+      "print(json.dumps({",
+      "    'originalUnchanged': json.dumps(findings, sort_keys=True) == original,",
+      "    'originalRootCause': finding['rootCause'],",
+      "    'compatibleRootCause': compatible['findings'][0]['rootCause'],",
+      "    'originalValidation': finding['validation']['evidenceRefs'],",
+      "    'compatibleValidation': compatible['findings'][0]['validation']['evidenceRefs'],",
+      "    'originalDataflow': finding['attackPath']['dataflow']['evidence_refs'],",
+      "    'compatibleDataflow': compatible['findings'][0]['attackPath']['dataflow']['evidence_refs'],",
+      "}))",
     ].join("\n");
     const result = Bun.spawnSync(
       [python!, "-I", "-B", "-c", script, PLUGIN_ROOT],
@@ -930,6 +940,15 @@ describe("bundled plugin finding detail contracts", () => {
 
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      originalUnchanged: true,
+      originalRootCause: {
+        summary: "Canonical root cause.",
+        evidenceRefs: ["legacy-source", "missing-source"],
+      },
+      compatibleRootCause: {
+        summary: "Canonical root cause.",
+        evidenceRefs: ["legacy-source"],
+      },
       originalValidation: [null, "", 42, "legacy-source", "missing-source"],
       compatibleValidation: ["legacy-source"],
       originalDataflow: [null, "", 42, "legacy-source", "missing-source"],

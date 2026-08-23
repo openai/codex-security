@@ -14,6 +14,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -28,6 +29,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
+import * as timersPromises from "node:timers/promises";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
@@ -51,6 +53,7 @@ import {
 import {
   acquireCodexSecurityCredentialHomeLock,
   bundledPluginCandidates,
+  canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
@@ -95,6 +98,104 @@ async function temporaryDirectory(
   return path;
 }
 
+async function plantCredentialHomeLock(
+  home: string,
+  pid: number,
+  modifiedAt?: Date,
+): Promise<string> {
+  const lock = join(home, ".codex-security-scan.lock");
+  await mkdir(lock, { mode: 0o700 });
+  await writeFile(
+    join(lock, "owner.json"),
+    `${JSON.stringify({ pid, token: "planted-owner" })}\n`,
+    { mode: 0o600 },
+  );
+  if (modifiedAt !== undefined) await utimes(lock, modifiedAt, modifiedAt);
+  return lock;
+}
+
+async function acquireCredentialHomeLockWithTimeout(
+  home: string,
+): Promise<() => Promise<void>> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException("timed out", "AbortError")),
+    10_000,
+  );
+  timeout.unref();
+  try {
+    return await acquireCodexSecurityCredentialHomeLock(
+      home,
+      controller.signal,
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function abortCredentialLockWaitWhenOwnerIsInspected(
+  controller: AbortController,
+): ReturnType<typeof spyOn> {
+  const killProcess = process.kill.bind(process);
+  return spyOn(process, "kill").mockImplementation(((
+    pid: number,
+    signal: number,
+  ) => {
+    const result = killProcess(pid, signal);
+    controller.abort(new DOMException("canceled", "AbortError"));
+    return result;
+  }) as typeof process.kill);
+}
+
+function captureCredentialLockHeartbeatTimer() {
+  const realSetInterval = globalThis.setInterval.bind(globalThis);
+  const realClearInterval = globalThis.clearInterval.bind(globalThis);
+  const unref = mock(() => undefined);
+  const interval = { unref } as unknown as NodeJS.Timeout;
+  let callback: (() => Promise<void>) | undefined;
+  let milliseconds: number | undefined;
+  let cleared = false;
+  const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
+    candidate: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    if (delay === 5_000 && callback === undefined) {
+      callback = candidate as () => Promise<void>;
+      milliseconds = delay;
+      return interval;
+    }
+    return realSetInterval(candidate, delay, ...args);
+  }) as typeof setInterval);
+  const clearIntervalSpy = spyOn(
+    globalThis,
+    "clearInterval",
+  ).mockImplementation(((timer: NodeJS.Timeout) => {
+    if (timer === interval) {
+      cleared = true;
+      return;
+    }
+    realClearInterval(timer);
+  }) as typeof clearInterval);
+
+  return {
+    get callback() {
+      return callback;
+    },
+    get cleared() {
+      return cleared;
+    },
+    get milliseconds() {
+      return milliseconds;
+    },
+    restore() {
+      clearIntervalSpy.mockRestore();
+      setIntervalSpy.mockRestore();
+    },
+    unref,
+  };
+}
+
 async function plugin(root: string, version = "1.2.3"): Promise<string> {
   const path = join(root, "plugin");
   await mkdir(join(path, ".codex-plugin"), { recursive: true });
@@ -105,6 +206,49 @@ async function plugin(root: string, version = "1.2.3"): Promise<string> {
   await mkdir(join(path, "scripts"));
   await writeFile(join(path, "scripts", "helper.py"), "print('ok')\n");
   return path;
+}
+
+interface McpServerResponse {
+  id: number;
+  result: {
+    capabilities?: Record<string, unknown>;
+    tools?: Array<{
+      name: string;
+      inputSchema: {
+        properties: { userContext?: { maxLength?: number } };
+      };
+    }>;
+  };
+}
+
+async function inspectMcpServer(): Promise<McpServerResponse[]> {
+  const messages = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "codex-security-test", version: "1.0.0" },
+      },
+    },
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  ];
+  const execution = promisify(execFile)(
+    "node",
+    [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+  );
+  execution.child.stdin?.end(
+    `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+  );
+  const { stdout } = await execution;
+  return stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as McpServerResponse);
 }
 
 describe("plugin runtime preparation", () => {
@@ -407,6 +551,63 @@ describe("plugin runtime preparation", () => {
     }
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "rejects alternate data streams in bundled scan scopes",
+    async () => {
+      const root = await temporaryDirectory("codex-security-scope-ads-");
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await writeFile(
+        join(repository, "source.ts"),
+        "export const safe = true;\n",
+      );
+      await writeFile(
+        join(repository, "source.ts:synthetic-stream"),
+        "export const hidden = true;\n",
+      );
+      const python =
+        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const inventory = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "inventory.txt"),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(inventory.status).toBe(2);
+      expect(inventory.stderr).toContain("NTFS alternate data streams");
+
+      const rankInput = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-rank-input",
+          "--repo",
+          repository,
+          "--scope",
+          "source.ts:synthetic-stream",
+          "--out",
+          join(root, "rank-input.jsonl"),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(rankInput.status).toBe(1);
+      expect(rankInput.stderr).toContain("NTFS alternate data stream");
+    },
+  );
+
   test("preserves remediation when the filesystem device changes", async () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
@@ -461,48 +662,8 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("accepts preserved context before starting a headless scan", () => {
-    const messages = [
-      {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: { name: "codex-security-test", version: "1.0.0" },
-        },
-      },
-      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
-      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    ];
-    const server = spawnSync(
-      process.execPath,
-      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
-      {
-        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
-        encoding: "utf8",
-        timeout: 10_000,
-      },
-    );
-    expect(server.status, server.stderr).toBe(0);
-    const responses = server.stdout
-      .trim()
-      .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            id: number;
-            result: {
-              tools?: Array<{
-                name: string;
-                inputSchema: {
-                  properties: { userContext?: { maxLength?: number } };
-                };
-              }>;
-            };
-          },
-      );
+  test("accepts preserved context before starting a headless scan", async () => {
+    const responses = await inspectMcpServer();
     const tool = responses
       .find((response) => response.id === 2)
       ?.result.tools?.find(
@@ -521,43 +682,7 @@ describe("plugin runtime preparation", () => {
     expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
     expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
 
-    const messages = [
-      {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: { name: "codex-security-test", version: "1.0.0" },
-        },
-      },
-      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
-      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    ];
-    const server = spawnSync(
-      process.execPath,
-      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
-      {
-        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
-        encoding: "utf8",
-        timeout: 10_000,
-      },
-    );
-    expect(server.status, server.stderr).toBe(0);
-    const responses = server.stdout
-      .trim()
-      .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            id: number;
-            result: {
-              capabilities?: Record<string, unknown>;
-              tools?: Array<{ name: string }>;
-            };
-          },
-      );
+    const responses = await inspectMcpServer();
     expect(
       responses.find((response) => response.id === 1)?.result.capabilities,
     ).not.toHaveProperty("resources");
@@ -833,8 +958,9 @@ describe("plugin runtime preparation", () => {
           inScope: true,
           contractValid:
             item.path.trim().length > 0 &&
+            !/^[A-Za-z]:/.test(item.path) &&
             !item.path.includes("\\") &&
-            !item.path.includes(":"),
+            !/[\u0000-\u001f]/u.test(item.path),
         })),
       );
     },
@@ -1237,7 +1363,7 @@ describe("plugin runtime preparation", () => {
     ).toBe(false);
   });
 
-  test("rejects traversal, Windows-qualified, duplicate, and symlink ZIP paths", async () => {
+  test("rejects unsafe, Windows-ambiguous, duplicate, and symlink ZIP paths", async () => {
     const unsafeArchives: Array<[string, Uint8Array]> = [
       ["traversal", zipSync({ "../escape": strToU8("bad") })],
       ["drive", zipSync({ "D:/escape": strToU8("bad") })],
@@ -1254,6 +1380,53 @@ describe("plugin runtime preparation", () => {
         zipSync({
           "release/scripts/File.py": strToU8("safe"),
           "release/scripts/file.py": strToU8("overwrite"),
+        }),
+      ],
+      [
+        "trailing-dot-collision",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/helper.py": strToU8("same"),
+          "release/helper.py.": strToU8("same"),
+        }),
+      ],
+      [
+        "trailing-space-collision",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/helper.py": strToU8("same"),
+          "release/helper.py ": strToU8("same"),
+        }),
+      ],
+      [
+        "reserved-device-name",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/CON.txt": strToU8("bad"),
+        }),
+      ],
+      [
+        "reserved-console-device-name",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/CONIN$.txt": strToU8("bad"),
+        }),
+      ],
+      [
+        "invalid-windows-character",
+        zipSync({
+          "release/.codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+          "release/helper?.py": strToU8("bad"),
         }),
       ],
       [
@@ -1954,6 +2127,7 @@ describe("plugin runtime preparation", () => {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
+    expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     const globalCodex = spawnSync("codex", ["--version"], {
       encoding: "utf8",
       env: workerEnvironment,
@@ -1985,6 +2159,7 @@ describe("plugin runtime preparation", () => {
       CODEX_CLI_PATH: configured,
       PATH: "",
       PYTHON: "/managed/python",
+      PYTHONUTF8: "1",
     });
     expect(
       pluginExecutionEnvironment("/managed/python", {
@@ -2205,24 +2380,70 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
   });
 
-  test("cancels a scan waiting for the persistent credential-home lock", async () => {
+  test("keeps a fresh live credential-home lock and cancels the waiter", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     });
     const release = await acquireCodexSecurityCredentialHomeLock(home);
     const controller = new AbortController();
-    const waiting = acquireCodexSecurityCredentialHomeLock(
-      home,
-      controller.signal,
-    );
-    controller.abort(new DOMException("canceled", "AbortError"));
+    const inspectOwner =
+      abortCredentialLockWaitWhenOwnerIsInspected(controller);
 
     try {
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+      );
       await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(inspectOwner).toHaveBeenCalledWith(process.pid, 0);
+      expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(true);
     } finally {
+      inspectOwner.mockRestore();
       await release();
     }
+    expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
+  });
+
+  test("heartbeats a held credential-home lock across the stale horizon", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    const heartbeatTimer = captureCredentialLockHeartbeatTimer();
+    let release: (() => Promise<void>) | undefined;
+    let inspectOwner: ReturnType<typeof spyOn> | undefined;
+
+    try {
+      release = await acquireCodexSecurityCredentialHomeLock(home);
+      expect(heartbeatTimer.milliseconds).toBe(5_000);
+      expect(heartbeatTimer.unref).toHaveBeenCalledTimes(1);
+      expect(heartbeatTimer.callback).toBeDefined();
+
+      const stale = new Date(Date.now() - 60_000);
+      await utimes(lock, stale, stale);
+      await heartbeatTimer.callback!();
+      expect(Date.now() - (await stat(lock)).mtimeMs).toBeLessThan(30_000);
+
+      const controller = new AbortController();
+      inspectOwner = abortCredentialLockWaitWhenOwnerIsInspected(controller);
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+      );
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      inspectOwner?.mockRestore();
+      try {
+        if (release !== undefined) await release();
+      } finally {
+        heartbeatTimer.restore();
+      }
+    }
+    expect(heartbeatTimer.cleared).toBe(true);
+    expect(existsSync(lock)).toBe(false);
   });
 
   test("does not rewrite Windows credential ACLs while polling a held lock", async () => {
@@ -2285,6 +2506,141 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(lock)).toBe(true);
     await release();
     expect(existsSync(lock)).toBe(false);
+  });
+
+  test("recovers a stale credential-home lock naming a live process", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const stale = new Date(Date.now() - 10 * 60_000);
+    const lock = await plantCredentialHomeLock(home, process.pid, stale);
+    let release: (() => Promise<void>) | undefined;
+
+    try {
+      release = await acquireCredentialHomeLockWithTimeout(home);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      if (release !== undefined) await release();
+    }
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("recovers a stale credential-home lock when PID inspection is denied", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const stale = new Date(Date.now() - 10 * 60_000);
+    const lock = await plantCredentialHomeLock(home, process.pid, stale);
+    const inspectOwner = spyOn(process, "kill").mockImplementation((() => {
+      const error = new Error(
+        "operation not permitted",
+      ) as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    }) as typeof process.kill);
+    let release: (() => Promise<void>) | undefined;
+
+    try {
+      release = await acquireCredentialHomeLockWithTimeout(home);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      inspectOwner.mockRestore();
+      if (release !== undefined) await release();
+    }
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("abandons stale recovery when the owner heartbeat advances", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "abandons stale recovery when the owner heartbeat advances",
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    const controller = new AbortController();
+    const heartbeatTimer = captureCredentialLockHeartbeatTimer();
+    const realDelay = timersPromises.setTimeout;
+    let waitedForHeartbeat = false;
+    let observedDelaySignal: AbortSignal | undefined;
+    mock.module("node:timers/promises", () => ({
+      ...timersPromises,
+      setTimeout: (async (
+        milliseconds: number,
+        value?: unknown,
+        options?: { signal?: AbortSignal },
+      ) => {
+        observedDelaySignal = options?.signal;
+        if (milliseconds === 5_000) {
+          waitedForHeartbeat = true;
+          await heartbeatTimer.callback!();
+          return value;
+        }
+        controller.abort(new DOMException("canceled", "AbortError"));
+        return await realDelay(0, value, { signal: controller.signal });
+      }) as typeof timersPromises.setTimeout,
+    }));
+    let release: (() => Promise<void>) | undefined;
+
+    try {
+      release = await acquireCodexSecurityCredentialHomeLock(home);
+      expect(heartbeatTimer.milliseconds).toBe(5_000);
+      expect(heartbeatTimer.unref).toHaveBeenCalledTimes(1);
+      expect(heartbeatTimer.callback).toBeDefined();
+      const stale = new Date(Date.now() - 10 * 60_000);
+      await utimes(lock, stale, stale);
+
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+      );
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(waitedForHeartbeat).toBe(true);
+      expect(observedDelaySignal).toBe(controller.signal);
+      expect(Date.now() - (await stat(lock)).mtimeMs).toBeLessThan(30_000);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      mock.module("node:timers/promises", () => ({
+        ...timersPromises,
+        setTimeout: realDelay,
+      }));
+      try {
+        if (release !== undefined) await release();
+      } finally {
+        heartbeatTimer.restore();
+      }
+    }
+  });
+
+  test("recovers credential-home locks whose owner names no process", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    for (const pid of [0, -1, 0.5, 2 ** 31, 2 ** 53]) {
+      await mkdir(lock, { mode: 0o700 });
+      await writeFile(
+        join(lock, "owner.json"),
+        `${JSON.stringify({ pid, token: "unidentifiable-owner" })}\n`,
+        { mode: 0o600 },
+      );
+      const aged = new Date(Date.now() - 10 * 60_000);
+      await utimes(lock, aged, aged);
+
+      const release = await acquireCredentialHomeLockWithTimeout(home);
+      expect(existsSync(lock)).toBe(true);
+      await release();
+      expect(existsSync(lock)).toBe(false);
+    }
   });
 
   test("prevents ambient credential imports after an explicit logout", async () => {
@@ -3505,6 +3861,20 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "explicit-state"),
       }),
     ).toBe(join(root, "explicit-state"));
+    if (process.platform === "win32") {
+      expect(() =>
+        codexSecurityStateDirectory({
+          CODEX_SECURITY_STATE_DIR: join(root, "ambiguous-state."),
+        }),
+      ).toThrow("Windows-ambiguous components");
+      await expect(
+        preparePersistentOutputRoot(
+          join(root, "ambiguous-state."),
+          "scans",
+          "repo",
+        ),
+      ).rejects.toThrow("Windows-ambiguous components");
+    }
     const scanRoot = await preparePersistentOutputRoot(
       join(root, "state"),
       "scans",
@@ -3806,7 +4176,8 @@ describe("runtime directories and plugin Python boundary", () => {
         "assert os.environ.get('CODEX_API_KEY') is None",
         "assert os.environ.get('OPENROUTER_API_KEY') is None",
         "assert os.environ.get('FIREWORKS_API_KEY') is None",
-        "print(json.dumps({'ok': True, 'details': 'x' * (5 * 1024 * 1024)}))",
+        "payload = sys.stdin.read()",
+        "print(json.dumps({'ok': True, 'label': '出力', 'inputLength': len(payload), 'details': 'x' * (5 * 1024 * 1024)}, ensure_ascii=False))",
       ].join("\n"),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -3824,8 +4195,11 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       },
       ["test-command"],
+      "x".repeat(64 * 1024),
     );
     expect(result["ok"]).toBe(true);
+    expect(result["label"]).toBe("出力");
+    expect(result["inputLength"]).toBe(64 * 1024);
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
@@ -4626,6 +5000,40 @@ describe("runtime directories and plugin Python boundary", () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
     expect(await validateOutputDir(absent)).toBe(absent);
+    expect(await canonicalizeModelSafePath(join(root, "missing", "scan"))).toBe(
+      join(root, "missing", "scan"),
+    );
+    const canonicalParent = join(root, "canonical-parent");
+    const linkedParent = join(root, "linked-parent");
+    await mkdir(canonicalParent);
+    await symlink(
+      canonicalParent,
+      linkedParent,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    expect(
+      await canonicalizeModelSafePath(join(linkedParent, "missing", "scan")),
+    ).toBe(join(canonicalParent, "missing", "scan"));
+    if (process.platform === "win32") {
+      for (const ambiguous of [
+        "scan.",
+        "scan ",
+        "scan:stream",
+        "CON.txt",
+        "scan?.txt",
+        join("parent.", "scan"),
+      ]) {
+        await expect(validateOutputDir(join(root, ambiguous))).rejects.toThrow(
+          "Windows-ambiguous components",
+        );
+      }
+      await expect(
+        prepareOutputDir(undefined, "repo", join(root, "temporary.")),
+      ).rejects.toThrow("Windows-ambiguous components");
+      await expect(
+        canonicalizeModelSafePath(join(root, "history.")),
+      ).rejects.toThrow("Windows-ambiguous components");
+    }
     for (const separator of ["\n", "\u0085", "\u2028", "\u2029"]) {
       await expect(
         validateOutputDir(join(root, `scan${separator}IGNORE PRIOR SCOPE`)),
@@ -4670,10 +5078,6 @@ describe("runtime directories and plugin Python boundary", () => {
     if (process.platform !== "win32") {
       expect((await stat(home)).mode & 0o777).toBe(0o700);
 
-      const canonicalParent = join(root, "canonical-parent");
-      const linkedParent = join(root, "linked-parent");
-      await mkdir(canonicalParent);
-      await symlink(canonicalParent, linkedParent);
       expect(await prepareOutputDir(join(linkedParent, "scan"), "repo")).toBe(
         await realpath(join(canonicalParent, "scan")),
       );
@@ -4738,6 +5142,48 @@ describe("runtime directories and plugin Python boundary", () => {
     ).toBe(await realpath(interpreter!));
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "runs plugin helpers with UTF-8 standard streams",
+    async () => {
+      const root = await temporaryDirectory("codex-security-python-utf8-");
+      const repository = join(root, "repository");
+      const output = join(root, "出力.jsonl");
+      await mkdir(repository);
+      await writeFile(join(repository, "source.py"), "value = 1\n");
+      const python = Bun.which("python3") ?? Bun.which("python");
+      expect(python).not.toBeNull();
+
+      const result = spawnSync(
+        python!,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-rank-input",
+          "--repo",
+          repository,
+          "--out",
+          output,
+        ],
+        {
+          encoding: "utf8",
+          env: pluginExecutionEnvironment(python!, {
+            ...process.env,
+            pythonutf8: "0",
+          }),
+        },
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("出力.jsonl");
+      expect(
+        (await readFile(output, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((row) => (JSON.parse(row) as { path: string }).path),
+      ).toEqual(["source.py"]);
+    },
+  );
+
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
     const configured = join(root, "configured-python");
@@ -4784,6 +5230,7 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,
+      PYTHONUTF8: "1",
       CODEX_CLI_PATH: resolveCodexCommand().command,
     });
     await expect(

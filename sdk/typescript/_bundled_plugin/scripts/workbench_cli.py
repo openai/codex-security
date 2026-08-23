@@ -24,6 +24,12 @@ from workbench_constants import (
 )
 
 
+def add_user_context(parser: argparse.ArgumentParser, *, required: bool = False) -> None:
+    context = parser.add_mutually_exclusive_group(required=required)
+    context.add_argument("--user-context")
+    context.add_argument("--user-context-stdin", action="store_true")
+
+
 def parse_args(description: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -34,7 +40,7 @@ def parse_args(description: str) -> argparse.Namespace:
     create_workspace.add_argument("--target-path")
     create_workspace.add_argument("--target-title")
     create_workspace.add_argument("--target-summary")
-    create_workspace.add_argument("--user-context")
+    add_user_context(create_workspace)
     create_workspace.add_argument("--scope")
     create_workspace.add_argument("--mode", choices=MODES, default="standard")
     create_workspace.add_argument("--diff-target-kind", choices=DIFF_TARGET_KINDS)
@@ -64,7 +70,7 @@ def parse_args(description: str) -> argparse.Namespace:
     save_workspace.add_argument("--scope", required=True)
     save_workspace.add_argument("--mode", choices=MODES, required=True)
     save_workspace.add_argument("--target-summary")
-    save_workspace.add_argument("--user-context")
+    add_user_context(save_workspace)
     save_workspace.add_argument("--diff-target-kind", choices=DIFF_TARGET_KINDS)
     save_workspace.add_argument("--diff-base-revision")
     save_workspace.add_argument("--diff-head-revision")
@@ -82,7 +88,7 @@ def parse_args(description: str) -> argparse.Namespace:
     start_prompt_only_scan.add_argument("--scope", required=True)
     start_prompt_only_scan.add_argument("--mode", choices=("diff", "standard"), required=True)
     start_prompt_only_scan.add_argument("--target-summary")
-    start_prompt_only_scan.add_argument("--user-context")
+    add_user_context(start_prompt_only_scan)
     start_prompt_only_scan.add_argument("--diff-target-kind", choices=DIFF_TARGET_KINDS)
     start_prompt_only_scan.add_argument("--diff-base-revision")
     start_prompt_only_scan.add_argument("--diff-head-revision")
@@ -96,7 +102,7 @@ def parse_args(description: str) -> argparse.Namespace:
     start_headless_standard_scan.add_argument("--target-path", required=True)
     start_headless_standard_scan.add_argument("--scope", required=True)
     start_headless_standard_scan.add_argument("--target-summary")
-    start_headless_standard_scan.add_argument("--user-context")
+    add_user_context(start_headless_standard_scan)
     start_headless_standard_scan.add_argument("--scan-root")
     start_headless_standard_scan.add_argument("--model")
     start_headless_standard_scan.add_argument("--reasoning-effort")
@@ -119,7 +125,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     update_scan_context = subparsers.add_parser("update-scan-context")
     update_scan_context.add_argument("--scan-id", required=True)
-    update_scan_context.add_argument("--user-context", required=True)
+    add_user_context(update_scan_context, required=True)
     update_scan_context_owner = update_scan_context.add_mutually_exclusive_group(required=True)
     update_scan_context_owner.add_argument("--workspace-id")
     update_scan_context_owner.add_argument("--thread-id")
@@ -142,7 +148,10 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan = subparsers.add_parser("register-cli-scan")
     register_cli_scan.add_argument("--scan-dir", required=True)
     register_cli_scan.add_argument("--repository", required=True)
-    register_cli_scan.add_argument("--recipe-json", required=True)
+    recipe = register_cli_scan.add_mutually_exclusive_group(required=True)
+    recipe.add_argument("--recipe-json")
+    recipe.add_argument("--recipe-json-stdin", action="store_true")
+    recipe.add_argument("--registration-json-stdin", action="store_true")
     register_cli_scan.add_argument("--parent-scan-id")
     register_cli_scan.add_argument("--archive-existing", action="store_true")
     register_cli_scan.add_argument("--archived-scan-dir")
@@ -163,7 +172,9 @@ def parse_args(description: str) -> argparse.Namespace:
     save_scan_comparison = subparsers.add_parser("save-scan-comparison")
     save_scan_comparison.add_argument("--before-scan-id", required=True)
     save_scan_comparison.add_argument("--after-scan-id", required=True)
-    save_scan_comparison.add_argument("--matches-json", required=True)
+    matches = save_scan_comparison.add_mutually_exclusive_group(required=True)
+    matches.add_argument("--matches-json")
+    matches.add_argument("--matches-json-stdin", action="store_true")
 
     list_global_findings = subparsers.add_parser("list-global-findings")
     list_global_findings.add_argument("--query")
@@ -193,7 +204,9 @@ def parse_args(description: str) -> argparse.Namespace:
     update_progress.add_argument("--phase-items-total", type=non_negative_int)
     update_progress.add_argument("--phase-items-completed", type=non_negative_int)
     update_progress.add_argument("--phase-progress-unit", choices=PHASE_PROGRESS_UNITS)
-    update_progress.add_argument("--preflight-issues-json")
+    preflight_issues = update_progress.add_mutually_exclusive_group()
+    preflight_issues.add_argument("--preflight-issues-json")
+    preflight_issues.add_argument("--preflight-issues-json-stdin", action="store_true")
     update_progress.add_argument("--review-items-total", type=non_negative_int)
     update_progress.add_argument("--review-items-completed", type=non_negative_int)
     update_progress.add_argument("--reportable-findings-count", type=non_negative_int)
@@ -309,13 +322,7 @@ def parse_args(description: str) -> argparse.Namespace:
         publication.add_argument("--input-file", required=True)
 
     subparsers.add_parser("database-info")
-    arguments = sys.argv[1:]
-    if "--user-context-stdin" in arguments:
-        if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
-            parser.error("pass exactly one user-context transport")
-        index = arguments.index("--user-context-stdin")
-        arguments[index : index + 1] = ["--user-context", sys.stdin.read()]
-    return parser.parse_args(arguments)
+    return parser.parse_args()
 
 
 def non_negative_int(value: str) -> int:

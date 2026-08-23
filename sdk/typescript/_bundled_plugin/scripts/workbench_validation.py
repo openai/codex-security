@@ -57,6 +57,15 @@ def user_text(value: str | None) -> str | None:
     return optional_text(value)
 
 
+def user_context_argument(args: argparse.Namespace) -> str | None:
+    value = (
+        sys.stdin.read()
+        if getattr(args, "user_context_stdin", False)
+        else args.user_context
+    )
+    return user_text(value)
+
+
 def reject_nonstandard_json_number(value: str) -> None:
     raise ValueError(f"invalid JSON number {value}")
 

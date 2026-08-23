@@ -5,8 +5,14 @@ type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 
 export const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
 
-export function mockScanRegistration(args: readonly string[]) {
-  const recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!) as {
+export function mockScanRegistration(
+  args: readonly string[],
+  input?: string,
+): JsonObject {
+  if (!args.includes("--registration-json-stdin") || input === undefined) {
+    throw new Error("missing stdin scan registration");
+  }
+  const recipe = JSON.parse(input).recipe as {
     repositoryRevision?: string;
     target: { kind: string };
   };
@@ -33,8 +39,13 @@ export function mockScanRegistration(args: readonly string[]) {
   };
 }
 
-export function mockWorkbench(args: readonly string[]): JsonObject {
-  if (args[0] === "register-cli-scan") return mockScanRegistration(args);
+export function mockWorkbench(
+  args: readonly string[],
+  input?: string,
+): JsonObject {
+  if (args[0] === "register-cli-scan") {
+    return mockScanRegistration(args, input);
+  }
   if (args[0] === "get-scan-feedback") {
     return {
       scanId: "scan_example_001",
@@ -57,7 +68,8 @@ export class TestClient extends CodexSecurity {
           throw new Error("Unexpected Codex invocation in test");
         },
         environment: {},
-        runWorkbench: async (_options, args) => mockWorkbench(args),
+        runWorkbench: async (_options, args, input) =>
+          mockWorkbench(args, input),
         ...dependencies,
       },
       { surface: "sdk" },
