@@ -47,3 +47,6 @@ Maintainers update package dependencies and the committed lockfile in the
 canonical repository. The public release workflow installs that locked graph,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
+
+See the [SDK testing guide](sdk/typescript/TESTING.md) for local checks,
+test conventions, and the required and experimental CI jobs.

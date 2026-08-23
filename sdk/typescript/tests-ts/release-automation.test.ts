@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,9 +8,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
+import { bashCommand } from "./support/shell.js";
 
 type ReleaseMetadata = Record<string, unknown>;
 
@@ -142,15 +142,7 @@ const releaseRun = "30481596229";
 const releaseRepository = "openai/codex-security";
 const releaseTagTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
-function releaseShell(): string {
-  if (process.platform !== "win32") return "bash";
-  const git = Bun.which("git");
-  if (git === null) return "bash";
-  const gitBash = join(dirname(dirname(git)), "bin", "bash.exe");
-  return existsSync(gitBash) ? gitBash : "bash";
-}
-
-const bash = releaseShell();
+const bash = bashCommand();
 const jqMock = [
   "jq() {",
   '  node -e \'const fs=require("node:fs");const filter=process.argv.at(-1);const value=JSON.parse(fs.readFileSync(0,"utf8"));if(filter==="[.object.type, .object.sha] | @tsv"){const fields=[value.object?.type,value.object?.sha];if(fields.some((field)=>typeof field!=="string"))process.exit(1);process.stdout.write(fields.join("\\t")+"\\n");}else if(filter===".status // empty"){if(value.status!=null)process.stdout.write(String(value.status)+"\\n");}else process.exit(64);\' -- "$@"',

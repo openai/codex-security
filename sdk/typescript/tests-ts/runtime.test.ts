@@ -29,6 +29,7 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
+import * as timersPromises from "node:timers/promises";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
@@ -95,6 +96,104 @@ async function temporaryDirectory(
   const path = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   temporaryDirectories.push(path);
   return path;
+}
+
+async function plantCredentialHomeLock(
+  home: string,
+  pid: number,
+  modifiedAt?: Date,
+): Promise<string> {
+  const lock = join(home, ".codex-security-scan.lock");
+  await mkdir(lock, { mode: 0o700 });
+  await writeFile(
+    join(lock, "owner.json"),
+    `${JSON.stringify({ pid, token: "planted-owner" })}\n`,
+    { mode: 0o600 },
+  );
+  if (modifiedAt !== undefined) await utimes(lock, modifiedAt, modifiedAt);
+  return lock;
+}
+
+async function acquireCredentialHomeLockWithTimeout(
+  home: string,
+): Promise<() => Promise<void>> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException("timed out", "AbortError")),
+    10_000,
+  );
+  timeout.unref();
+  try {
+    return await acquireCodexSecurityCredentialHomeLock(
+      home,
+      controller.signal,
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function abortCredentialLockWaitWhenOwnerIsInspected(
+  controller: AbortController,
+): ReturnType<typeof spyOn> {
+  const killProcess = process.kill.bind(process);
+  return spyOn(process, "kill").mockImplementation(((
+    pid: number,
+    signal: number,
+  ) => {
+    const result = killProcess(pid, signal);
+    controller.abort(new DOMException("canceled", "AbortError"));
+    return result;
+  }) as typeof process.kill);
+}
+
+function captureCredentialLockHeartbeatTimer() {
+  const realSetInterval = globalThis.setInterval.bind(globalThis);
+  const realClearInterval = globalThis.clearInterval.bind(globalThis);
+  const unref = mock(() => undefined);
+  const interval = { unref } as unknown as NodeJS.Timeout;
+  let callback: (() => Promise<void>) | undefined;
+  let milliseconds: number | undefined;
+  let cleared = false;
+  const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
+    candidate: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    if (delay === 5_000 && callback === undefined) {
+      callback = candidate as () => Promise<void>;
+      milliseconds = delay;
+      return interval;
+    }
+    return realSetInterval(candidate, delay, ...args);
+  }) as typeof setInterval);
+  const clearIntervalSpy = spyOn(
+    globalThis,
+    "clearInterval",
+  ).mockImplementation(((timer: NodeJS.Timeout) => {
+    if (timer === interval) {
+      cleared = true;
+      return;
+    }
+    realClearInterval(timer);
+  }) as typeof clearInterval);
+
+  return {
+    get callback() {
+      return callback;
+    },
+    get cleared() {
+      return cleared;
+    },
+    get milliseconds() {
+      return milliseconds;
+    },
+    restore() {
+      clearIntervalSpy.mockRestore();
+      setIntervalSpy.mockRestore();
+    },
+    unref,
+  };
 }
 
 async function plugin(root: string, version = "1.2.3"): Promise<string> {
@@ -2281,24 +2380,70 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
   });
 
-  test("cancels a scan waiting for the persistent credential-home lock", async () => {
+  test("keeps a fresh live credential-home lock and cancels the waiter", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     });
     const release = await acquireCodexSecurityCredentialHomeLock(home);
     const controller = new AbortController();
-    const waiting = acquireCodexSecurityCredentialHomeLock(
-      home,
-      controller.signal,
-    );
-    controller.abort(new DOMException("canceled", "AbortError"));
+    const inspectOwner =
+      abortCredentialLockWaitWhenOwnerIsInspected(controller);
 
     try {
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+      );
       await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(inspectOwner).toHaveBeenCalledWith(process.pid, 0);
+      expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(true);
     } finally {
+      inspectOwner.mockRestore();
       await release();
     }
+    expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
+  });
+
+  test("heartbeats a held credential-home lock across the stale horizon", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    const heartbeatTimer = captureCredentialLockHeartbeatTimer();
+    let release: (() => Promise<void>) | undefined;
+    let inspectOwner: ReturnType<typeof spyOn> | undefined;
+
+    try {
+      release = await acquireCodexSecurityCredentialHomeLock(home);
+      expect(heartbeatTimer.milliseconds).toBe(5_000);
+      expect(heartbeatTimer.unref).toHaveBeenCalledTimes(1);
+      expect(heartbeatTimer.callback).toBeDefined();
+
+      const stale = new Date(Date.now() - 60_000);
+      await utimes(lock, stale, stale);
+      await heartbeatTimer.callback!();
+      expect(Date.now() - (await stat(lock)).mtimeMs).toBeLessThan(30_000);
+
+      const controller = new AbortController();
+      inspectOwner = abortCredentialLockWaitWhenOwnerIsInspected(controller);
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+      );
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      inspectOwner?.mockRestore();
+      try {
+        if (release !== undefined) await release();
+      } finally {
+        heartbeatTimer.restore();
+      }
+    }
+    expect(heartbeatTimer.cleared).toBe(true);
+    expect(existsSync(lock)).toBe(false);
   });
 
   test("does not rewrite Windows credential ACLs while polling a held lock", async () => {
@@ -2363,6 +2508,118 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
+  test("recovers a stale credential-home lock naming a live process", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const stale = new Date(Date.now() - 10 * 60_000);
+    const lock = await plantCredentialHomeLock(home, process.pid, stale);
+    let release: (() => Promise<void>) | undefined;
+
+    try {
+      release = await acquireCredentialHomeLockWithTimeout(home);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      if (release !== undefined) await release();
+    }
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("recovers a stale credential-home lock when PID inspection is denied", async () => {
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const stale = new Date(Date.now() - 10 * 60_000);
+    const lock = await plantCredentialHomeLock(home, process.pid, stale);
+    const inspectOwner = spyOn(process, "kill").mockImplementation((() => {
+      const error = new Error(
+        "operation not permitted",
+      ) as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    }) as typeof process.kill);
+    let release: (() => Promise<void>) | undefined;
+
+    try {
+      release = await acquireCredentialHomeLockWithTimeout(home);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      inspectOwner.mockRestore();
+      if (release !== undefined) await release();
+    }
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("abandons stale recovery when the owner heartbeat advances", async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "abandons stale recovery when the owner heartbeat advances",
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = await prepareCodexSecurityCredentialHome({
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    });
+    const lock = join(home, ".codex-security-scan.lock");
+    const controller = new AbortController();
+    const heartbeatTimer = captureCredentialLockHeartbeatTimer();
+    const realDelay = timersPromises.setTimeout;
+    let waitedForHeartbeat = false;
+    let observedDelaySignal: AbortSignal | undefined;
+    mock.module("node:timers/promises", () => ({
+      ...timersPromises,
+      setTimeout: (async (
+        milliseconds: number,
+        value?: unknown,
+        options?: { signal?: AbortSignal },
+      ) => {
+        observedDelaySignal = options?.signal;
+        if (milliseconds === 5_000) {
+          waitedForHeartbeat = true;
+          await heartbeatTimer.callback!();
+          return value;
+        }
+        controller.abort(new DOMException("canceled", "AbortError"));
+        return await realDelay(0, value, { signal: controller.signal });
+      }) as typeof timersPromises.setTimeout,
+    }));
+    let release: (() => Promise<void>) | undefined;
+
+    try {
+      release = await acquireCodexSecurityCredentialHomeLock(home);
+      expect(heartbeatTimer.milliseconds).toBe(5_000);
+      expect(heartbeatTimer.unref).toHaveBeenCalledTimes(1);
+      expect(heartbeatTimer.callback).toBeDefined();
+      const stale = new Date(Date.now() - 10 * 60_000);
+      await utimes(lock, stale, stale);
+
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+      );
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(waitedForHeartbeat).toBe(true);
+      expect(observedDelaySignal).toBe(controller.signal);
+      expect(Date.now() - (await stat(lock)).mtimeMs).toBeLessThan(30_000);
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      mock.module("node:timers/promises", () => ({
+        ...timersPromises,
+        setTimeout: realDelay,
+      }));
+      try {
+        if (release !== undefined) await release();
+      } finally {
+        heartbeatTimer.restore();
+      }
+    }
+  });
+
   test("recovers credential-home locks whose owner names no process", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({
@@ -2379,19 +2636,9 @@ describe("runtime directories and plugin Python boundary", () => {
       const aged = new Date(Date.now() - 10 * 60_000);
       await utimes(lock, aged, aged);
 
-      // Bound acquisition so a false live-owner result cannot hang the test.
-      const abort = new AbortController();
-      const timer = setTimeout(() => abort.abort(), 5_000);
-      try {
-        const release = await acquireCodexSecurityCredentialHomeLock(
-          home,
-          abort.signal,
-        );
-        expect(existsSync(lock)).toBe(true);
-        await release();
-      } finally {
-        clearTimeout(timer);
-      }
+      const release = await acquireCredentialHomeLockWithTimeout(home);
+      expect(existsSync(lock)).toBe(true);
+      await release();
       expect(existsSync(lock)).toBe(false);
     }
   });

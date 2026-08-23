@@ -28,6 +28,19 @@ export interface ScanProgress {
   filesTotal: number;
 }
 
+export function scanPhaseLabel(value: ScanWorkerPhase | ScanPhase): string {
+  return {
+    preflight: "preflight",
+    threat_model: "building threat model",
+    discovery: "reviewing files",
+    ranking: "ranking scan targets",
+    file_review: "reviewing files",
+    validation: "validating findings",
+    attack_path: "analyzing attack paths",
+    reporting: "writing report",
+  }[value];
+}
+
 export type ScanWorkerStatus =
   | {
       kind: "preflight";

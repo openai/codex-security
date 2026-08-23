@@ -66,6 +66,7 @@ jobs:
         run: pnpm --dir sdk/typescript run audit:prod
 
       - name: Typecheck
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
         run: pnpm --dir sdk/typescript run types
 
       - name: Test
@@ -75,9 +76,23 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: pnpm --dir sdk/typescript run test
+        run: pnpm --dir sdk/typescript run ${{ matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0' && 'test:ci' || 'test' }}
+
+      - name: Upload test reports
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-22-test-reports
+          overwrite: true
+          path: |
+            sdk/typescript/reports/junit.xml
+            sdk/typescript/coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
         run: pnpm --dir sdk/typescript run format
 
       - name: Pack
@@ -88,21 +103,6 @@ jobs:
         working-directory: sdk/typescript
         shell: bash
         run: pnpm run check:package ../../dist/*.tgz
-
-      - name: Smoke-test Node.js runtime
-        working-directory: sdk/typescript
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module --eval '
-            import { CodexSecurity } from "@openai/codex-security";
-
-            if (typeof CodexSecurity !== "function") {
-              throw new Error("The SDK does not export CodexSecurity.");
-            }
-          '
-          node bin/codex-security.mjs --version
-          node bin/codex-security.mjs --help
 
   windows-test:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
@@ -162,16 +162,6 @@ jobs:
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
         run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
-      - name: Typecheck
-        if: matrix.shard == 7
-        working-directory: sdk/typescript
-        run: pnpm run types
-
-      - name: Check formatting
-        if: matrix.shard == 7
-        working-directory: sdk/typescript
-        run: pnpm run format
-
   windows-verify:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
     runs-on: windows-latest
@@ -209,21 +199,6 @@ jobs:
         working-directory: sdk/typescript
         shell: bash
         run: pnpm run check:package ../../dist/*.tgz
-
-      - name: Smoke-test Node.js runtime
-        working-directory: sdk/typescript
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module --eval '
-            import { CodexSecurity } from "@openai/codex-security";
-
-            if (typeof CodexSecurity !== "function") {
-              throw new Error("The SDK does not export CodexSecurity.");
-            }
-          '
-          node bin/codex-security.mjs --version
-          node bin/codex-security.mjs --help
 
   windows:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}

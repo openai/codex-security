@@ -14,11 +14,15 @@ import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 
 describe("CLI scan prompts", () => {
-  test("loads scan and post-scan prompt files", async () => {
+  test("loads scan, validation, and post-scan prompt files", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
     try {
       await Promise.all([
         writeFile(join(root, "scan.md"), "Review authentication boundaries.\n"),
+        writeFile(
+          join(root, "validation.md"),
+          "Run the integration fixture.\n",
+        ),
         writeFile(join(root, "follow-up.md"), "Draft confirmed fixes.\n"),
       ]);
       let options: unknown;
@@ -29,6 +33,8 @@ describe("CLI scan prompts", () => {
             ".",
             "--scan-prompt-file",
             "scan.md",
+            "--validation-prompt-file",
+            "validation.md",
             "--post-scan-prompt-file",
             "follow-up.md",
             "--json",
@@ -43,6 +49,7 @@ describe("CLI scan prompts", () => {
       ).toBe(0);
       expect(options).toMatchObject({
         scanPrompt: "Review authentication boundaries.\n",
+        validationPrompt: "Run the integration fixture.\n",
         postScanPrompt: "Draft confirmed fixes.\n",
       });
     } finally {
@@ -74,7 +81,11 @@ describe("CLI scan prompts", () => {
         process.platform === "win32" ? "junction" : "dir",
       );
 
-      for (const option of ["--scan-prompt-file", "--post-scan-prompt-file"]) {
+      for (const [option, property] of [
+        ["--scan-prompt-file", "scanPrompt"],
+        ["--validation-prompt-file", "validationPrompt"],
+        ["--post-scan-prompt-file", "postScanPrompt"],
+      ] as const) {
         for (const [directory, target, input] of [
           [repository, ".", "linked-prompt.md"],
           [repository, ".", join("linked-directory", "external-prompt.md")],
@@ -132,8 +143,7 @@ describe("CLI scan prompts", () => {
             ),
           ).toBe(0);
           expect(selected).toMatchObject({
-            [option === "--scan-prompt-file" ? "scanPrompt" : "postScanPrompt"]:
-              "SYNTHETIC_EXTERNAL_PROMPT\n",
+            [property]: "SYNTHETIC_EXTERNAL_PROMPT\n",
           });
         }
       }
@@ -176,6 +186,10 @@ describe("CLI scan prompts", () => {
           `id,repository,revision,prompt\nsample,${repository},${revision},Focus on authorization.\n`,
         ),
         writeFile(join(root, "scan.md"), "Review authentication boundaries.\n"),
+        writeFile(
+          join(root, "validation.md"),
+          "Run the integration fixture.\n",
+        ),
         writeFile(join(root, "follow-up.md"), "Draft confirmed fixes.\n"),
       ]);
       let options: unknown;
@@ -188,6 +202,8 @@ describe("CLI scan prompts", () => {
             "results",
             "--scan-prompt-file",
             "scan.md",
+            "--validation-prompt-file",
+            "validation.md",
             "--post-scan-prompt-file",
             "follow-up.md",
             "--json",
@@ -203,8 +219,77 @@ describe("CLI scan prompts", () => {
       expect(options).toMatchObject({
         scanPrompt:
           "Review authentication boundaries.\n\nFocus on authorization.",
+        validationPrompt: "Run the integration fixture.\n",
         postScanPrompt: "Draft confirmed fixes.\n",
       });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not silently drop custom validation on a saved rerun", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-cli-validation-"),
+    );
+    try {
+      await writeFile(
+        join(root, "validation.md"),
+        "Validate with the fixture.\n",
+      );
+      let selected: unknown;
+      const deps = dependencies({
+        currentDirectory: root,
+        onTurn: (_repository, value) => {
+          selected = value;
+        },
+        onWorkbench: () => ({
+          recipe: {
+            repository: root,
+            target: { kind: "repository", paths: [] },
+            mode: "standard",
+            config: {},
+            validationMode: "custom",
+          },
+        }),
+      });
+      const error = capture();
+      expect(
+        await main(
+          ["scans", "rerun", "saved", "--json"],
+          capture().stream,
+          error.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(error.text()).toContain("--validation-prompt-file");
+      expect(selected).toBeUndefined();
+      expect(
+        await main(
+          [
+            "scans",
+            "rerun",
+            "saved",
+            "--validation-prompt-file",
+            "validation.md",
+            "--json",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(selected).toMatchObject({
+        validationPrompt: "Validate with the fixture.\n",
+      });
+      await writeFile(join(root, "validation.md"), " \n");
+      expect(
+        await main(
+          ["scan", ".", "--validation-prompt-file", "validation.md", "--json"],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(2);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
