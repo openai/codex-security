@@ -846,6 +846,11 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-singleton" },
+        { anchor: "candidate-cross-rule" },
+        { anchor: "candidate-authored-instance" },
+        { anchor: "candidate-duplicate-instance" },
       ]);
       const legacyFinding = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]

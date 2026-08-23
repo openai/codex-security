@@ -16,7 +16,7 @@ Use the existing desktop phase labels for work that actually occurs: threat mapp
 
 ## Complete The Same Scan
 
-Record the complete semantic scan draft once with `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`. Supply the actual findings, source-backed coverage, and preserved threat model; let the workbench write the unsealed canonical artifacts and derive authoritative target, scope, coverage metadata, finding identities, and fingerprints.
+Save `complete: false` checkpoints as results arrive and validation decisions are made. Preserve pending candidates with their original evidence in `coverage.deferred`; they are not validated findings. When the audit finishes, record the final semantic scan draft once with `record_codex_security_scan_draft({ scanId, complete: true, handoffClaimToken?, scope?, threatModel?, findings, coverage })`. Supply the actual findings, source-backed coverage, and preserved threat model; let the workbench write the unsealed canonical artifacts and derive authoritative target, scope, coverage metadata, finding identities, and fingerprints.
 
 Honor desktop handoff requirements for any per-finding write-ups before completion. After the semantic draft succeeds and all three canonical JSON files exist, call `complete_codex_security_scan` exactly once with the same authoritative scan ID and handoff token. Return only after completion succeeds and `report.md` exists, linking the generated report and canonical artifacts; retrieve the complete findings only when the user explicitly requests them. Include measured token usage when available and explicitly label partial or unavailable measurement.
 
