@@ -586,6 +586,8 @@ def merge_saved_results(
             and coverage.get("completeness") in {"complete", "unknown"}
         ):
             coverage["completeness"] = "partial"
+        if superseded and not stopped:
+            continue
         if "threatModel" not in manifest["scan"] and isinstance(draft.get("threatModel"), dict):
             manifest["scan"]["threatModel"] = copy.deepcopy(draft["threatModel"])
         for value in draft["findings"]:

@@ -805,6 +805,12 @@ describe("compact diff scan", () => {
           openQuestions,
         },
       });
+      const canonicalDraftIdentities = (
+        JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
+          findings: JsonObject[];
+        }
+      ).findings.map((draftFinding) => draftFinding["identity"]);
+      expect(canonicalDraftIdentities).toHaveLength(9);
       await call("complete_codex_security_scan", {
         scanId,
         handoffClaimToken,
@@ -833,7 +839,8 @@ describe("compact diff scan", () => {
       const completedIdentities = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
       ).map((completedFinding) => completedFinding["identity"]);
-      expect(completedIdentities.slice(0, 8)).toEqual([
+      expect(completedIdentities).toEqual(canonicalDraftIdentities);
+      expect(completedIdentities).toEqual([
         { anchor: "candidate-singleton", instance: "dss-144-a" },
         { anchor: "unsafe-archive-extraction" },
         { anchor: "candidate-cross-rule", instance: "shared-report" },
@@ -845,18 +852,8 @@ describe("compact diff scan", () => {
           instance: "dss-147-b",
         },
         { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
       ]);
-      const recoveredIdentities = completedIdentities.slice(8);
-      expect(recoveredIdentities).toHaveLength(5);
-      expect(recoveredIdentities).toEqual(
-        expect.arrayContaining([
-          { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-          { anchor: "candidate-singleton" },
-          { anchor: "candidate-cross-rule" },
-          { anchor: "candidate-authored-instance" },
-          { anchor: "candidate-duplicate-instance" },
-        ]),
-      );
       const legacyFinding = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
       )[1];
