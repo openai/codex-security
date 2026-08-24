@@ -1092,6 +1092,21 @@ describe("canonical scan contract", () => {
     }
   });
 
+  test("rejects finding locations with reversed line ranges", async () => {
+    const scanDir = await copyExample();
+    const findingsPath = join(scanDir, "findings.json");
+    const findings = await readJson(findingsPath);
+    findings["findings"][0]["locations"][0]["endLine"] = 40;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(
+      "findings.findings[0].locations[0].endLine: must be greater than or equal to startLine.",
+    );
+  });
+
   test.skipIf(process.platform === "win32")(
     "rejects missing or symlinked derived writeup and hardening files",
     async () => {
