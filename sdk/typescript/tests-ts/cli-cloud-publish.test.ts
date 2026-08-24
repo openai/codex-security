@@ -291,6 +291,50 @@ describe("publish scan to Cloud", () => {
     });
   });
 
+  test("preserves a fully confirmed batch when cancellation follows the final response", async () => {
+    const { scans, deps } = await savedScansFixture();
+    const signals = new FakeSignals();
+    deps.addSignalListener = (signal, listener) =>
+      signals.add(signal, listener);
+    deps.removeSignalListener = (signal, listener) =>
+      signals.remove(signal, listener);
+    let uploads = 0;
+    deps.publishScanToCloud = async (_directory, options) => {
+      uploads++;
+      if (uploads === scans.length) signals.emit("SIGINT");
+      return { ...receipt, scanId: options!.expectedScanId! };
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          ...scans.flatMap(({ scanId }) => ["--scan", scanId]),
+          "--to",
+          "cloud",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(uploads).toBe(scans.length);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      results: scans.map(({ scanId }) => ({ scanId })),
+      failed: [],
+      notAttempted: [],
+    });
+    expect(stderr.text()).toBe("");
+    expect(
+      [...signals.listeners.values()].every(
+        (listeners) => listeners.size === 0,
+      ),
+    ).toBe(true);
+  });
+
   test("publishes multiple explicit scans in order and deduplicates resolved paths", async () => {
     for (const dryRun of [false, true]) {
       const deps = dependencies({
@@ -857,6 +901,32 @@ describe("publish scan to Cloud", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe("codex-security: [redacted]\n");
+  });
+
+  test("preserves a confirmed single-scan receipt when cancellation follows the response", async () => {
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.publishScanToCloud = async () => {
+      signals.emit("SIGINT");
+      return receipt;
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", "--to", "cloud", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(receipt);
+    expect(stderr.text()).toBe("");
+    expect(
+      [...signals.listeners.values()].every(
+        (listeners) => listeners.size === 0,
+      ),
+    ).toBe(true);
   });
 
   test("aborts Cloud publication and removes signal listeners", async () => {

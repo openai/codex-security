@@ -1960,6 +1960,21 @@ export async function main(
         presentation?.stop();
         controller.abort(signal);
       };
+      const finishCancellation = (error?: unknown): boolean => {
+        const signal = controller.signal.reason;
+        if (signal !== "SIGINT" && signal !== "SIGTERM") return false;
+        const reason =
+          signal === "SIGINT"
+            ? "Publication canceled by Ctrl-C."
+            : "Publication terminated by SIGTERM.";
+        const recovery =
+          error === undefined || error === signal
+            ? ""
+            : ` ${diagnosticValue(safeErrorMessage(error))}`;
+        errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+        exitCode = signal === "SIGINT" ? 130 : 143;
+        return true;
+      };
       const onInterrupt = (): void => cancel("SIGINT");
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
@@ -2289,7 +2304,10 @@ export async function main(
             // Keep each scan's provenance and acceptance receipt separate. Never
             // retry a failed POST: a lost response may still have been accepted.
             for (const { scanDir: directory, scanId } of selectedScans) {
-              controller.signal.throwIfAborted();
+              if (controller.signal.aborted) {
+                finishCancellation();
+                break;
+              }
               cloudBatch.notAttempted.shift();
               try {
                 const result = await (
@@ -2315,7 +2333,6 @@ export async function main(
                 );
               }
             }
-            controller.signal.throwIfAborted();
             return cloudBatch;
           }
           const result = await (
@@ -2328,7 +2345,6 @@ export async function main(
               ? {}
               : { expectedScanId: selectedScans[0].scanId }),
           });
-          controller.signal.throwIfAborted();
           return { ...result };
         }
 
@@ -2395,19 +2411,7 @@ export async function main(
         }
         return { ...result };
       } catch (error) {
-        const signal = controller.signal.reason;
-        if (signal === "SIGINT" || signal === "SIGTERM") {
-          const reason =
-            signal === "SIGINT"
-              ? "Publication canceled by Ctrl-C."
-              : "Publication terminated by SIGTERM.";
-          const recovery =
-            error === signal
-              ? ""
-              : ` ${diagnosticValue(safeErrorMessage(error))}`;
-          errorOutput.write(`codex-security: ${reason}${recovery}\n`);
-          exitCode = signal === "SIGINT" ? 130 : 143;
-        } else {
+        if (!finishCancellation(error)) {
           errorOutput.write(
             `codex-security: ${options.to === "cloud" ? safeErrorMessage(error) : errorMessage(error)}\n`,
           );

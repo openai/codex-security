@@ -55,6 +55,10 @@ async function fixture() {
   await writeFile(join(home, "auth.json"), JSON.stringify(login), {
     mode: 0o600,
   });
+  await writeFile(
+    join(home, "config.toml"),
+    'cli_auth_credentials_store = "file"\n',
+  );
   return {
     scan,
     home,
@@ -281,6 +285,14 @@ describe("Cloud publication", () => {
       );
       return Response.json(receipt);
     };
+    await expect(
+      publishScanToCloud(scan, { environment, fetch: send }),
+    ).rejects.toThrow('cli_auth_credentials_store = "file"');
+    expect(requests).toBe(0);
+    await writeFile(
+      join(home, "config.toml"),
+      'cli_auth_credentials_store = "file"\n',
+    );
     await publishScanToCloud(scan, { environment, fetch: send });
     await setCodexSecurityCredentialLogout(home, true);
     await expect(
@@ -295,6 +307,10 @@ describe("Cloud publication", () => {
     await writeFile(join(home, ".codex", "auth.json"), JSON.stringify(login), {
       mode: 0o600,
     });
+    await writeFile(
+      join(home, ".codex", "config.toml"),
+      'cli_auth_credentials_store = "file"\n',
+    );
     for (const codexHome of [undefined, "", "  "]) {
       const result = await publishScanToCloud(scan, {
         environment: {
@@ -307,6 +323,26 @@ describe("Cloud publication", () => {
       });
       expect(result.findingIds).toEqual(["finding-1"]);
     }
+  });
+
+  test("requires an explicit file credential setting before reading auth.json", async () => {
+    const { scan, home, environment } = await fixture();
+    let requests = 0;
+    const send = async () => {
+      requests++;
+      return Response.json(receipt);
+    };
+    for (const config of [undefined, "[features]\nplugins = true\n"]) {
+      if (config === undefined) {
+        await rm(join(home, "config.toml"));
+      } else {
+        await writeFile(join(home, "config.toml"), config);
+      }
+      await expect(
+        publishScanToCloud(scan, { environment, fetch: send }),
+      ).rejects.toThrow('cli_auth_credentials_store = "file"');
+    }
+    expect(requests).toBe(0);
   });
 
   test("rejects unsupported, missing, or malformed credentials without leaking their contents", async () => {

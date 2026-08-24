@@ -161,19 +161,20 @@ async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
       throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
     }
   }
+  let credentialStorage: unknown;
   try {
-    const configPath = join(home, "config.toml");
-    if (existsSync(configPath)) {
-      const config = parseToml(await readFile(configPath, "utf8"));
-      // File presence is not proof that it is the active login: automatic or
-      // keyring storage can leave an auth.json from a different account.
-      if (
-        config["cli_auth_credentials_store"] === "keyring" ||
-        config["cli_auth_credentials_store"] === "auto"
-      ) {
-        throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
-      }
-    }
+    credentialStorage = parseToml(
+      await readFile(join(home, "config.toml"), "utf8"),
+    )["cli_auth_credentials_store"];
+  } catch {
+    throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+  }
+  // File presence is not proof that it is the active login: automatic or
+  // keyring storage can leave an auth.json from a different account.
+  if (credentialStorage !== "file") {
+    throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+  }
+  try {
     const credentials = credentialsSchema.safeParse(
       JSON.parse(await readFile(join(home, "auth.json"), "utf8")),
     );
