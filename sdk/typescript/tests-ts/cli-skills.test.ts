@@ -135,6 +135,15 @@ describe("CLI skill commands", () => {
         ["--review-style", "--review-minimality"],
         ["minimality", "local-coding-style"],
       ],
+      [["--assess-patch-risk"], ["patch-risk-assessment"]],
+      [
+        ["--assess-patch-risk", "--review-minimality"],
+        ["minimality", "patch-risk-assessment"],
+      ],
+      [
+        ["--assess-patch-risk", "--review-style", "--review-minimality"],
+        ["minimality", "local-coding-style", "patch-risk-assessment"],
+      ],
     ] as const) {
       const invocations: Array<{
         prompt: string;
@@ -158,6 +167,12 @@ describe("CLI skill commands", () => {
                   ? JSON.stringify({
                       status: "approved",
                       findings: [],
+                      ...(server.prompt.includes("patch-risk-assessment")
+                        ? {
+                            recommendation: "merge",
+                            assessment: "The patch is applicable and low risk.",
+                          }
+                        : {}),
                     })
                   : "Verified synthetic patch.\n",
               );
@@ -187,14 +202,26 @@ describe("CLI skill commands", () => {
           expect(prompt).not.toContain(
             "nearest applicable repository instructions",
           );
-        } else {
+        } else if (prompt.includes("only the local-coding-style review")) {
           expect(prompt).toContain(
             "nearest applicable repository instructions",
           );
           expect(prompt).not.toContain("each changed file, production change");
+        } else {
+          expect(prompt).toContain("$codex-security:assess-patch-risk");
+          expect(prompt).not.toContain("each changed file, production change");
         }
       }
       expect(stdout.text()).toBe("Verified synthetic patch.\n");
+      expect(
+        invocations.some(({ prompt }) =>
+          prompt.includes(
+            JSON.stringify(
+              join("skills", "assess-patch-risk", "SKILL.md"),
+            ).slice(1, -1),
+          ),
+        ),
+      ).toBe(expected.some((stage) => stage === "patch-risk-assessment"));
     }
 
     const help = capture();
@@ -208,6 +235,7 @@ describe("CLI skill commands", () => {
     ).toBe(0);
     expect(help.text()).toContain("--review-minimality");
     expect(help.text()).toContain("--review-style");
+    expect(help.text()).toContain("--assess-patch-risk");
     expect(help.text()).toContain("--max-review-revisions <number>");
   });
 
@@ -566,55 +594,65 @@ describe("CLI skill commands", () => {
     expect(stdout.text()).toBe("Patch 2.");
   });
 
-  test("restarts earlier reviews after an actionable style revision", async () => {
-    const stages: string[] = [];
-    let styleReviews = 0;
-    expect(
-      await main(
-        [
-          "patch",
-          "Synthetic security issue",
-          "--review-minimality",
-          "--review-style",
-          "--max-review-revisions",
-          "5",
-        ],
-        capture().stream,
-        capture().stream,
-        dependencies({
-          onCodex: (_args, output) => {
-            const { prompt, sandbox } = output!.appServer!;
-            if (sandbox !== "read-only") {
-              stages.push(stages.length === 0 ? "author" : "revision");
-              output!.stdout.write("Verified patch.");
+  test("restarts earlier reviews after an actionable later-stage revision", async () => {
+    for (const reviewRisk of [false, true]) {
+      const stages: string[] = [];
+      let laterReviews = 0;
+      expect(
+        await main(
+          [
+            "patch",
+            "Synthetic security issue",
+            "--review-minimality",
+            "--review-style",
+            ...(reviewRisk ? ["--assess-patch-risk"] : []),
+            "--max-review-revisions",
+            "5",
+          ],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              const { prompt, sandbox } = output!.appServer!;
+              if (sandbox !== "read-only") {
+                stages.push(stages.length === 0 ? "author" : "revision");
+                output!.stdout.write("Verified patch.");
+                return 0;
+              }
+              const stage = [
+                "minimality",
+                "local-coding-style",
+                "patch-risk-assessment",
+              ].find((value) => prompt.includes(`only the ${value} review`))!;
+              stages.push(stage);
+              const risk = stage === "patch-risk-assessment";
+              const later = reviewRisk ? risk : stage === "local-coding-style";
+              if (later) laterReviews += 1;
+              const revise = later && laterReviews === 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: revise ? "revise" : "approved",
+                  findings: revise ? ["Add the missing regression test."] : [],
+                  ...(risk
+                    ? {
+                        recommendation: revise ? "revise" : "merge",
+                        assessment: "Synthetic patch risk assessment.",
+                      }
+                    : {}),
+                }),
+              );
               return 0;
-            }
-            const stage = ["minimality", "local-coding-style"].find((value) =>
-              prompt.includes(`only the ${value} review`),
-            )!;
-            stages.push(stage);
-            const style = stage === "local-coding-style";
-            if (style) styleReviews += 1;
-            const revise = style && styleReviews === 1;
-            output!.stdout.write(
-              JSON.stringify({
-                status: revise ? "revise" : "approved",
-                findings: revise ? ["Add the missing regression test."] : [],
-              }),
-            );
-            return 0;
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(stages).toEqual([
-      "author",
-      "minimality",
-      "local-coding-style",
-      "revision",
-      "minimality",
-      "local-coding-style",
-    ]);
+            },
+          }),
+        ),
+      ).toBe(0);
+      const selected = [
+        "minimality",
+        "local-coding-style",
+        ...(reviewRisk ? ["patch-risk-assessment"] : []),
+      ];
+      expect(stages).toEqual(["author", ...selected, "revision", ...selected]);
+    }
   });
 
   test("never retries a blocked review even when revisions remain", async () => {

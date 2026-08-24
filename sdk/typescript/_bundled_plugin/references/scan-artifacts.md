@@ -110,6 +110,7 @@ Standard scans and Deep Standard scan workers include attack-path analysis direc
 ## Fix Finding Paths
 
 - Fix report, when using an existing scan artifact directory: `<artifacts_dir>/fix_report.md`
+- Patch risk assessment, when requested for a remediation patch: `<artifacts_dir>/patch-risk-assessment.json`
 
 ## Placement Rules
 

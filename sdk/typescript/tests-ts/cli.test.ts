@@ -155,6 +155,7 @@ describe("CLI", () => {
           patchSeverity: { enum: ["critical", "high", "medium", "low"] },
           reviewMinimality: { type: "boolean" },
           reviewStyle: { type: "boolean" },
+          assessPatchRisk: { type: "boolean" },
           maxReviewRevisions: { type: "integer", minimum: 0 },
           createPr: { type: "boolean" },
           headless: { type: "boolean" },

@@ -277,6 +277,10 @@ const REVIEW_STYLE_OPTION = z
   .boolean()
   .default(false)
   .describe("Review generated patches against local coding standards.");
+const ASSESS_PATCH_RISK_OPTION = z
+  .boolean()
+  .default(false)
+  .describe("Assess the final patch's applicability, blast radius, and risk.");
 const MAX_REVIEW_REVISIONS_OPTION = z
   .number()
   .int()
@@ -863,10 +867,14 @@ export function resolveCliPath(directory: string, value: string): string {
 interface PatchReviewOptions {
   reviewMinimality?: boolean;
   reviewStyle?: boolean;
+  assessPatchRisk?: boolean;
   maxReviewRevisions?: number;
 }
 
-type PatchReviewStage = "minimality" | "local-coding-style";
+type PatchReviewStage =
+  | "minimality"
+  | "local-coding-style"
+  | "patch-risk-assessment";
 
 type PatchReviewRole = PatchReviewStage | "review-conflict-reconciliation";
 
@@ -987,6 +995,17 @@ type FindingPatch = z.infer<typeof findingPatchSchema>;
 const patchReviewSchema = z.object({
   status: z.enum(["approved", "revise", "blocked"]),
   findings: z.array(z.string().trim().min(1)),
+  recommendation: z
+    .enum([
+      "merge",
+      "merge_with_conditions",
+      "revise",
+      "needs_validation",
+      "no_op",
+      "block",
+    ])
+    .optional(),
+  assessment: z.string().trim().min(1).optional(),
 });
 
 const findingVerificationSchema = z.object({
@@ -2403,6 +2422,7 @@ export async function main(
             .describe("Patch findings at or above LEVEL; requires --patch."),
           reviewMinimality: REVIEW_MINIMALITY_OPTION,
           reviewStyle: REVIEW_STYLE_OPTION,
+          assessPatchRisk: ASSESS_PATCH_RISK_OPTION,
           maxReviewRevisions: MAX_REVIEW_REVISIONS_OPTION,
           createPr: CREATE_PR_OPTION,
           maxCost: z
@@ -2458,6 +2478,7 @@ export async function main(
             options.patch ||
             (!options.reviewMinimality &&
               !options.reviewStyle &&
+              !options.assessPatchRisk &&
               options.maxReviewRevisions === undefined),
           { message: "Patch review options require --patch." },
         )
@@ -2538,6 +2559,7 @@ export async function main(
             patchSeverity: options.patchSeverity,
             reviewMinimality: options.reviewMinimality,
             reviewStyle: options.reviewStyle,
+            assessPatchRisk: options.assessPatchRisk,
             maxReviewRevisions: options.maxReviewRevisions,
             createPr: options.createPr,
             maxCostUsd: options.maxCost,
@@ -3434,6 +3456,7 @@ export async function main(
         linearApiKey: linearApiKeyOption(),
         reviewMinimality: REVIEW_MINIMALITY_OPTION,
         reviewStyle: REVIEW_STYLE_OPTION,
+        assessPatchRisk: ASSESS_PATCH_RISK_OPTION,
         maxReviewRevisions: MAX_REVIEW_REVISIONS_OPTION,
         createPr: CREATE_PR_OPTION,
         resumePr: optionValue("--resume-pr")
@@ -3464,6 +3487,7 @@ export async function main(
               options.linearApiKey !== undefined ||
               options.reviewMinimality ||
               options.reviewStyle ||
+              options.assessPatchRisk ||
               options.maxReviewRevisions !== undefined ||
               options.effort !== undefined ||
               options.codex.length > 0
@@ -3522,6 +3546,7 @@ export async function main(
               {
                 reviewMinimality: options.reviewMinimality,
                 reviewStyle: options.reviewStyle,
+                assessPatchRisk: options.assessPatchRisk,
                 maxReviewRevisions: options.maxReviewRevisions,
               },
             );
@@ -3599,6 +3624,7 @@ export async function main(
               environment,
               reviewMinimality: options.reviewMinimality,
               reviewStyle: options.reviewStyle,
+              assessPatchRisk: options.assessPatchRisk,
               maxReviewRevisions: options.maxReviewRevisions,
             },
           );
@@ -4726,7 +4752,13 @@ function parsePatchReviewVerdict(
   }
   if (
     (verdict.status === "approved" && verdict.findings.length !== 0) ||
-    (verdict.status === "revise" && verdict.findings.length === 0)
+    (verdict.status === "revise" && verdict.findings.length === 0) ||
+    (stage === "patch-risk-assessment" &&
+      (verdict.assessment === undefined ||
+        verdict.recommendation === undefined ||
+        (verdict.status === "approved" &&
+          verdict.recommendation !== "merge" &&
+          verdict.recommendation !== "merge_with_conditions")))
   ) {
     stderr.write(`${stage} review returned an inconsistent verdict.\n`);
     return undefined;
@@ -4776,8 +4808,16 @@ async function runIndependentPatchReview(
     `${stage} ${label}: ${JSON.stringify({
       status: verdict.status,
       findings: verdict.findings.length,
+      ...(verdict.recommendation === undefined
+        ? {}
+        : { recommendation: verdict.recommendation }),
     })}\n`,
   );
+  if (verdict.assessment !== undefined) {
+    context.stderr.write(
+      `${stage} assessment: ${safePatchText(verdict.assessment)}\n`,
+    );
+  }
   return { status: "reviewed", verdict };
 }
 
@@ -4795,12 +4835,13 @@ function patchReviewDecisionsConflict(
 }
 
 function canRevisePatch(
+  stage: PatchReviewStage,
   stageRevisions: number,
   totalRevisions: number,
   options: PatchReviewOptions,
 ): boolean {
   return options.maxReviewRevisions === undefined
-    ? stageRevisions < 1
+    ? stageRevisions < 1 && stage !== "patch-risk-assessment"
     : totalRevisions < options.maxReviewRevisions;
 }
 
@@ -4855,7 +4896,7 @@ async function runPatchReviewWorkflow(
       }
       if (
         verdict.status === "blocked" ||
-        !canRevisePatch(stageRevisions, totalRevisions, context.options)
+        !canRevisePatch(stage, stageRevisions, totalRevisions, context.options)
       ) {
         context.stderr.write(`${stage} review did not approve the patch.\n`);
         return PATCH_REVIEW_EXIT_CODE.failure;
@@ -4908,6 +4949,9 @@ async function runSkill(
       ? [
           ...(options.reviewMinimality ? ["minimality" as const] : []),
           ...(options.reviewStyle ? ["local-coding-style" as const] : []),
+          ...(options.assessPatchRisk
+            ? ["patch-risk-assessment" as const]
+            : []),
         ]
       : [];
   const run = (output: Writable, configuration: SkillRunOptions = options) =>
@@ -5059,8 +5103,10 @@ async function runSkillStage(
             `Independently perform only the ${reviewStage} review of the existing candidate patch. You are a read-only reviewer: do not edit, delegate, expand scope, or rely on the patch author's rationale.`,
             reviewStage === "review-conflict-reconciliation"
               ? "Resolve the conflicting prior review decisions. Make one binding decision selecting the smallest behavior-preserving patch that fully fixes the finding and satisfies mandatory applicable project rules. Approve the current patch if it already meets those requirements; request a revision only for a concrete remaining issue."
-              : PATCH_REVIEW_ASSIGNMENTS[reviewStage],
-            'Return exactly one JSON object: {"status":"approved|revise|blocked","findings":["concrete source-backed issue"]}. Use approved only when findings is empty; use revise only when findings is nonempty.',
+              : reviewStage === "patch-risk-assessment"
+                ? `Use the bundled $codex-security:assess-patch-risk skill at ${JSON.stringify(join(plugin, "skills", "assess-patch-risk", "SKILL.md"))}. Include its concise Markdown assessment in the assessment field and its recommendation in the recommendation field.`
+                : PATCH_REVIEW_ASSIGNMENTS[reviewStage],
+            'Return exactly one JSON object: {"status":"approved|revise|blocked","findings":["concrete source-backed issue"],"recommendation":"merge|merge_with_conditions|revise|needs_validation|no_op|block","assessment":"concise Markdown assessment"}. Omit recommendation and assessment unless assessing patch risk. Use approved only when findings is empty; use revise only when findings is nonempty.',
           ]
         : [
             `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
@@ -6386,6 +6432,7 @@ async function executeScan(
           findingInstructions: patchSelection?.instructions,
           reviewMinimality: arguments_.reviewMinimality,
           reviewStyle: arguments_.reviewStyle,
+          assessPatchRisk: arguments_.assessPatchRisk,
           maxReviewRevisions: arguments_.maxReviewRevisions,
         },
       );

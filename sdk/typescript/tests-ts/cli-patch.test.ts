@@ -162,7 +162,12 @@ describe("scan and patch workflow", () => {
       const result = resultWithFindings(["high"]);
       const stages: string[] = [];
       const outcome = await runWorkflow(
-        [...arguments_, "--review-style", "--review-minimality"],
+        [
+          ...arguments_,
+          "--assess-patch-risk",
+          "--review-style",
+          "--review-minimality",
+        ],
         {
           result,
           onWorkbench: () => savedScan(result),
@@ -170,14 +175,22 @@ describe("scan and patch workflow", () => {
             const { prompt, sandbox } = output!.appServer!;
             if (sandbox === "read-only") {
               expect(prompt).toContain(JSON.stringify(["src/finding-1.ts"]));
-              const stage = ["minimality", "local-coding-style"].find((value) =>
-                prompt.includes(`only the ${value} review`),
-              )!;
+              const stage = [
+                "minimality",
+                "local-coding-style",
+                "patch-risk-assessment",
+              ].find((value) => prompt.includes(`only the ${value} review`))!;
               stages.push(stage);
               output!.stdout.write(
                 JSON.stringify({
                   status: "approved",
                   findings: [],
+                  ...(stage === "patch-risk-assessment"
+                    ? {
+                        recommendation: "merge",
+                        assessment: "The patch is applicable and low risk.",
+                      }
+                    : {}),
                 }),
               );
             } else {
@@ -190,7 +203,13 @@ describe("scan and patch workflow", () => {
       );
 
       expect(outcome.exitCode).toBe(0);
-      expect(stages).toEqual(["author", "minimality", "local-coding-style"]);
+      expect(stages).toEqual([
+        "author",
+        "minimality",
+        "local-coding-style",
+        "patch-risk-assessment",
+      ]);
+      expect(outcome.stderr).toContain('"recommendation":"merge"');
     }
   });
 
@@ -291,46 +310,59 @@ describe("scan and patch workflow", () => {
   });
 
   test("does not create a pull request when an independent review rejects the patch", async () => {
-    const result = resultWithFindings(["high"]);
-    const commands: string[] = [];
-    const outcome = await runWorkflow(
-      [
-        "patch",
-        "--scan",
-        "scan-1",
-        "--create-pr",
-        "--review-minimality",
-        "--json",
-      ],
-      {
-        result,
-        onWorkbench: () => savedScan(result),
-        onRepositoryCommand: (command) => {
-          commands.push(command);
-          return "";
+    for (const reviewRisk of [false, true]) {
+      const result = resultWithFindings(["high"]);
+      const commands: string[] = [];
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--scan",
+          "scan-1",
+          "--create-pr",
+          reviewRisk ? "--assess-patch-risk" : "--review-minimality",
+          "--json",
+        ],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: (command) => {
+            commands.push(command);
+            return "";
+          },
+          onCodex: (args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "blocked",
+                  findings: [
+                    "The patch is outside the production threat model.",
+                  ],
+                  ...(reviewRisk
+                    ? {
+                        recommendation: "no_op",
+                        assessment:
+                          "The affected input is never attacker-controlled.",
+                      }
+                    : {}),
+                }),
+              );
+            } else {
+              completePatches(args, output);
+            }
+            return 0;
+          },
         },
-        onCodex: (args, output) => {
-          if (output!.appServer!.sandbox === "read-only") {
-            output!.stdout.write(
-              JSON.stringify({
-                status: "blocked",
-                findings: ["The patch is outside the production threat model."],
-              }),
-            );
-          } else {
-            completePatches(args, output);
-          }
-          return 0;
-        },
-      },
-    );
+      );
 
-    expect(outcome.exitCode).toBe(2);
-    expect(JSON.parse(outcome.stdout)).toMatchObject({
-      patches: [{ occurrenceId: "occ_1", status: "failed" }],
-    });
-    expect(commands).toEqual([]);
-    expect(outcome.stderr).toContain('"status":"blocked"');
+      expect(outcome.exitCode).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        patches: [{ occurrenceId: "occ_1", status: "failed" }],
+      });
+      expect(commands).toEqual([]);
+      expect(outcome.stderr).toContain(
+        reviewRisk ? '"recommendation":"no_op"' : '"status":"blocked"',
+      );
+    }
   });
 
   test("continues with separate patch tasks when one finding fails", async () => {
@@ -694,6 +726,7 @@ describe("scan and patch workflow", () => {
       ["--create-pr"],
       ["--review-minimality"],
       ["--review-style"],
+      ["--assess-patch-risk"],
       ["--max-review-revisions", "5"],
       ["occ_1"],
     ]) {
@@ -1253,7 +1286,11 @@ describe("scan and patch workflow", () => {
   });
 
   test("rejects optional patch reviews without an explicit patch request", async () => {
-    for (const flag of ["--review-minimality", "--review-style"]) {
+    for (const flag of [
+      "--review-minimality",
+      "--review-style",
+      "--assess-patch-risk",
+    ]) {
       let started = false;
       const outcome = await runWorkflow(["scan", flag], {
         onCodex: () => {
