@@ -2902,6 +2902,7 @@ describe("connected Linear publication", () => {
           ? "SIGINT"
           : new Error("Publication was interrupted.");
       let taskkill: [string, readonly string[]] | undefined;
+      let posixKill: unknown;
       const injected = dependencies(
         publication,
         {},
@@ -2951,13 +2952,10 @@ describe("connected Linear publication", () => {
                   const kill = spyOn(process, "kill");
                   try {
                     forceTerminatePublicationProcesses();
+                    posixKill = kill.mock.calls.at(-1)?.slice();
                   } finally {
                     kill.mockRestore();
                   }
-                  expect(kill).toHaveBeenCalledWith(
-                    -Number(taskkill![1][1]),
-                    "SIGKILL",
-                  );
                 }
               },
             },
@@ -2969,11 +2967,14 @@ describe("connected Linear publication", () => {
 
         const parent = Number(await readFile(parentPath, "utf8"));
         const descendant = Number(await readFile(descendantPath, "utf8"));
-        if (verifyTaskkill)
+        if (verifyTaskkill) {
           expect(taskkill).toEqual([
             "C:\\Synthetic\\System32\\taskkill.exe",
             ["/PID", String(parent), "/T", "/F"],
           ]);
+          if (process.platform !== "win32")
+            expect(posixKill).toEqual([-parent, "SIGKILL"]);
+        }
         expect(await processHasExited(parent)).toBe(true);
         expect(await processHasExited(descendant)).toBe(true);
         const receipt = join(
