@@ -529,7 +529,7 @@ jobs:
                 }
                 writeFileSync(
                   process.argv[1],
-                  (release.body ?? "").replace(/\n+$/u, ""),
+                  (release.body ?? "").replace(/(?:\r?\n)+$/u, ""),
                 );
               ' "$existing_notes_file"
           fi

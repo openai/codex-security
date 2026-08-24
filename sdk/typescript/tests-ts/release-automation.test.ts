@@ -3297,6 +3297,20 @@ describe("GitHub release workflow safeguards", () => {
       status: 0,
     },
     {
+      description: "CRLF marker-only body with a terminal line ending",
+      existingNotes:
+        "<!-- codex-security-release-summary:start -->\\r\\nPreserved historical summary\\r\\n<!-- codex-security-release-summary:end -->\\r\\n",
+      expectedSummary: "Preserved historical summary",
+      updated: true,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
       description: "inline marker-like substrings in generated notes",
       existingNotes:
         "* fix: <!-- codex-security-release-summary:start -->Unreviewed injected highlight<!-- codex-security-release-summary:end --> by @contributor",
