@@ -20,6 +20,8 @@ Judge the result in this order:
 
 Never trade an earlier property for a later one. Minimal means the smallest repository-native change that satisfies all earlier properties, not the fewest lines.
 
+Keep the patch small, concise, focused on the demonstrated vulnerability, and easy to review. Treat remediation suggestions in the finding as hypotheses, not a checklist: implement only what is necessary to close the demonstrated security boundary. Do not redesign working code, protocols, data representations, architecture, or testing infrastructure when a narrower behavior-preserving fix closes the finding. Improving general testability is not the goal; record worthwhile testability improvements, refactoring, and broader hardening in a PR comment, or in the patch summary when no PR exists, instead of implementing them.
+
 ## Patch Contract
 
 Before editing, establish from repository evidence:
@@ -39,6 +41,7 @@ Use this guidance whenever reproducing the finding, running tests, or validating
 
 - Complete the patch contract before broad setup; start with the smallest high-signal check through the real vulnerable boundary.
 - Use repository-supported setup commands. Keep repair effort bounded so it does not displace path analysis, patching, or focused verification.
+- Reuse existing tests and test infrastructure. Do not add extensive testing infrastructure or move, extract, or export production code solely to make it easier to test.
 - Do not stop a progressing command merely because it is slow. Inspect process state, logs, artifacts, or resource use first.
 - If runtime validation remains unavailable, use the strongest targeted static or harness-based artifact that preserves the real integration boundary. Do not substitute a simplified harness that removes the behavior being protected. Record every unrun check as unknown.
 
@@ -64,9 +67,10 @@ The investigation requires repository-relative evidence and a clear separation b
    - If the issue no longer reproduces before any code changes, investigate whether it was already fixed and preserve the validation evidence.
 3. Choose the patch strategy.
    - Determine whether a narrow tactical change can close the boundary while preserving the patch contract.
+   - Treat broad issue descriptions and proposed remediation as leads, not mandatory scope. Do not add downstream controls, sibling fixes, or infrastructure when the narrowest complete change already closes the demonstrated attack path.
    - Consider broader remediation only when the narrow option cannot close the boundary without breaking supported behavior. Remove or disable functionality only when repository or product evidence supports that mitigation.
    - If the only complete fix requires an unresolved decision about product policy, public-API compatibility, or cross-subsystem ownership, return `blocked` with the options, security tradeoff, and likely owner or codeowner when available.
-   - Use nearby variants to test the chosen boundary. Report unrelated sibling findings or longer-term architectural work separately instead of expanding this patch.
+   - Use nearby variants to test the chosen boundary. Report unrelated sibling findings or longer-term architectural work in a PR comment, or in the patch summary when no PR exists, instead of expanding this patch.
 4. Implement the fix and its proof.
    - Make the smallest repository-native change that fully enforces the invariant.
    - Prefer existing helpers and abstractions. Preserve APIs, legitimate inputs, and error semantics unless changing them is required by the security contract.

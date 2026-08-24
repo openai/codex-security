@@ -154,6 +154,185 @@ describe("scan and patch workflow", () => {
     expect(outcome.stderr).toContain("Patching 2 confirmed findings...");
   });
 
+  test("runs independent review stages for scan and saved-finding patching", async () => {
+    for (const arguments_ of [
+      ["scan", "--patch"],
+      ["patch", "--scan", "scan-1"],
+    ]) {
+      const result = resultWithFindings(["high"]);
+      const stages: string[] = [];
+      const outcome = await runWorkflow(
+        [...arguments_, "--review-style", "--review-minimality"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onCodex: (args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            if (sandbox === "read-only") {
+              expect(prompt).toContain(JSON.stringify(["src/finding-1.ts"]));
+              const stage = ["minimality", "local-coding-style"].find((value) =>
+                prompt.includes(`only the ${value} review`),
+              )!;
+              stages.push(stage);
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "approved",
+                  findings: [],
+                }),
+              );
+            } else {
+              stages.push("author");
+              completePatches(args, output);
+            }
+            return 0;
+          },
+        },
+      );
+
+      expect(outcome.exitCode).toBe(0);
+      expect(stages).toEqual(["author", "minimality", "local-coding-style"]);
+    }
+  });
+
+  test("passes the configured revision budget to scan and saved-finding patching", async () => {
+    for (const arguments_ of [
+      ["scan", "--patch"],
+      ["patch", "--scan", "scan-1"],
+    ]) {
+      const result = resultWithFindings(["high"]);
+      let reviews = 0;
+      const outcome = await runWorkflow(
+        [...arguments_, "--review-minimality", "--max-review-revisions", "2"],
+        {
+          result,
+          onWorkbench: () => savedScan(result),
+          onCodex: (args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify(
+                  reviews < 3
+                    ? {
+                        status: "revise",
+                        findings: [`Remove unrelated change ${reviews}.`],
+                      }
+                    : { status: "approved", findings: [] },
+                ),
+              );
+            } else {
+              completePatches(args, output);
+            }
+            return 0;
+          },
+        },
+      );
+
+      expect({
+        arguments_,
+        exitCode: outcome.exitCode,
+        stderr: outcome.stderr,
+      }).toMatchObject({ exitCode: 0 });
+      expect(reviews).toBe(3);
+    }
+  });
+
+  test("updates the independent review scope after an author revision", async () => {
+    const result = resultWithFindings(["high"]);
+    const scopes: string[][] = [];
+    let reviews = 0;
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--review-minimality", "--review-style"],
+      {
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: (args, output) => {
+          const { prompt, sandbox } = output!.appServer!;
+          if (sandbox === "read-only") {
+            const lines = prompt.split("\n");
+            const scope = lines.findIndex((line) =>
+              line.startsWith("Review only the finding-related"),
+            );
+            scopes.push(JSON.parse(lines[scope + 1]!));
+            reviews += 1;
+            output!.stdout.write(
+              JSON.stringify(
+                reviews === 1
+                  ? { status: "revise", findings: ["Use the existing helper."] }
+                  : { status: "approved", findings: [] },
+              ),
+            );
+          } else if (reviews === 0) {
+            completePatches(args, output);
+          } else {
+            output!.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["src/existing-helper.ts"],
+                    verification: "The exploit fails and focused tests pass.",
+                  },
+                ],
+              }),
+            );
+          }
+          return 0;
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(0);
+    expect(scopes).toEqual([
+      ["src/finding-1.ts"],
+      ["src/existing-helper.ts"],
+      ["src/existing-helper.ts"],
+    ]);
+  });
+
+  test("does not create a pull request when an independent review rejects the patch", async () => {
+    const result = resultWithFindings(["high"]);
+    const commands: string[] = [];
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "--scan",
+        "scan-1",
+        "--create-pr",
+        "--review-minimality",
+        "--json",
+      ],
+      {
+        result,
+        onWorkbench: () => savedScan(result),
+        onRepositoryCommand: (command) => {
+          commands.push(command);
+          return "";
+        },
+        onCodex: (args, output) => {
+          if (output!.appServer!.sandbox === "read-only") {
+            output!.stdout.write(
+              JSON.stringify({
+                status: "blocked",
+                findings: ["The patch is outside the production threat model."],
+              }),
+            );
+          } else {
+            completePatches(args, output);
+          }
+          return 0;
+        },
+      },
+    );
+
+    expect(outcome.exitCode).toBe(2);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      patches: [{ occurrenceId: "occ_1", status: "failed" }],
+    });
+    expect(commands).toEqual([]);
+    expect(outcome.stderr).toContain('"status":"blocked"');
+  });
+
   test("continues with separate patch tasks when one finding fails", async () => {
     const result = resultWithFindings(["critical", "high", "medium"]);
     const tasks: string[] = [];
@@ -513,6 +692,9 @@ describe("scan and patch workflow", () => {
       ["--scan", "scan-1"],
       ["--linear-issue", "SEC-123"],
       ["--create-pr"],
+      ["--review-minimality"],
+      ["--review-style"],
+      ["--max-review-revisions", "5"],
       ["occ_1"],
     ]) {
       let commandStarted = false;
@@ -1068,6 +1250,21 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(["scan", "--patch-severity", "high"]);
     expect(outcome.exitCode).toBe(2);
     expect(outcome.stderr).toContain("--patch-severity requires --patch");
+  });
+
+  test("rejects optional patch reviews without an explicit patch request", async () => {
+    for (const flag of ["--review-minimality", "--review-style"]) {
+      let started = false;
+      const outcome = await runWorkflow(["scan", flag], {
+        onCodex: () => {
+          started = true;
+          return 0;
+        },
+      });
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("Patch review options require --patch");
+      expect(started).toBe(false);
+    }
   });
 
   test("requires verified patching before creating a pull request", async () => {

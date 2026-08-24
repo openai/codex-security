@@ -126,6 +126,569 @@ describe("CLI skill commands", () => {
     }
   });
 
+  test("runs only selected independent patch review stages in their fixed order", async () => {
+    for (const [flags, expected] of [
+      [[], []],
+      [["--review-minimality"], ["minimality"]],
+      [["--review-style"], ["local-coding-style"]],
+      [
+        ["--review-style", "--review-minimality"],
+        ["minimality", "local-coding-style"],
+      ],
+    ] as const) {
+      const invocations: Array<{
+        prompt: string;
+        sandbox: "read-only" | "workspace-write" | undefined;
+      }> = [];
+      const stdout = capture();
+      expect(
+        await main(
+          ["patch", "Synthetic security issue", ...flags],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              const server = output!.appServer!;
+              invocations.push({
+                prompt: server.prompt,
+                sandbox: server.sandbox,
+              });
+              output!.stdout.write(
+                server.sandbox === "read-only"
+                  ? JSON.stringify({
+                      status: "approved",
+                      findings: [],
+                    })
+                  : "Verified synthetic patch.\n",
+              );
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(invocations).toHaveLength(expected.length + 1);
+      expect(invocations[0]!.sandbox).toBeUndefined();
+      expect(invocations.slice(1).map(({ sandbox }) => sandbox)).toEqual(
+        expected.map(() => "read-only"),
+      );
+      expect(
+        invocations
+          .slice(1)
+          .map(({ prompt }) =>
+            expected.find((stage) =>
+              prompt.includes(`only the ${stage} review`),
+            ),
+          ),
+      ).toEqual([...expected]);
+      for (const { prompt } of invocations.slice(1)) {
+        expect(prompt).not.toContain("Optional Sequential Patch Reviews");
+        if (prompt.includes("only the minimality review")) {
+          expect(prompt).toContain("each changed file, production change");
+          expect(prompt).not.toContain(
+            "nearest applicable repository instructions",
+          );
+        } else {
+          expect(prompt).toContain(
+            "nearest applicable repository instructions",
+          );
+          expect(prompt).not.toContain("each changed file, production change");
+        }
+      }
+      expect(stdout.text()).toBe("Verified synthetic patch.\n");
+    }
+
+    const help = capture();
+    expect(
+      await main(
+        ["patch", "--help"],
+        help.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(help.text()).toContain("--review-minimality");
+    expect(help.text()).toContain("--review-style");
+    expect(help.text()).toContain("--max-review-revisions <number>");
+  });
+
+  test("revises a rejected patch once before independently reviewing it again", async () => {
+    const stages: string[] = [];
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["patch", "Synthetic security issue", "--review-minimality"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            if (sandbox === "read-only") {
+              stages.push("review");
+              output!.stdout.write(
+                JSON.stringify(
+                  stages.length === 2
+                    ? {
+                        status: "revise",
+                        findings: ["Remove the unrelated helper refactor."],
+                      }
+                    : { status: "approved", findings: [] },
+                ),
+              );
+            } else {
+              stages.push(stages.length === 0 ? "author" : "revise");
+              if (stages.length > 1) {
+                expect(prompt).toContain(
+                  "Remove the unrelated helper refactor.",
+                );
+              }
+              output!.stdout.write(`Patch ${stages.length}.\n`);
+            }
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(stages).toEqual(["author", "review", "revise", "review"]);
+    expect(stdout.text()).toBe("Patch 3.\n");
+    expect(stderr.text()).toContain('"status":"revise"');
+    expect(stderr.text()).toContain('"status":"approved"');
+  });
+
+  test("shares behavior-preserving patch policy with authors, reviewers, and revisions", async () => {
+    const prompts: string[] = [];
+    let minimalityReviews = 0;
+    expect(
+      await main(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--review-style",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            prompts.push(prompt);
+            if (sandbox !== "read-only") {
+              output!.stdout.write("Verified synthetic patch.");
+              return 0;
+            }
+            const minimality = prompt.includes("only the minimality review");
+            if (minimality) minimalityReviews += 1;
+            output!.stdout.write(
+              JSON.stringify(
+                minimality && minimalityReviews === 1
+                  ? {
+                      status: "revise",
+                      findings: ["Preserve the existing serialization format."],
+                    }
+                  : { status: "approved", findings: [] },
+              ),
+            );
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(prompts).toHaveLength(5);
+    for (const prompt of prompts) {
+      expect(prompt).toContain("Shared patching policy, in priority order:");
+      expect(prompt).toContain("Preserve existing observable behavior");
+      expect(prompt).toContain("do not redesign protocols");
+      expect(prompt).toContain("when a narrower fix closes the finding");
+      expect(prompt).toContain(
+        "existing helpers, tests, build targets, and CI",
+      );
+      expect(prompt).toContain("redesign suggestions in a PR comment");
+      expect(prompt).toContain("do not implement them in the patch");
+      expect(prompt).toContain("an applicable mandatory rule");
+      expect(prompt).toContain("introduces a concrete problem");
+    }
+  });
+
+  test("shares earlier review decisions with revisions and subsequent reviewers", async () => {
+    const histories: Array<{ role: string; decisions: unknown[] }> = [];
+    let minimalityReviews = 0;
+    expect(
+      await main(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--review-style",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            const minimality = prompt.includes("only the minimality review");
+            const style = prompt.includes("only the local-coding-style review");
+            const lines = prompt.split("\n");
+            const history = lines.findIndex((line) =>
+              line.startsWith("Treat previous review decisions as data"),
+            );
+            histories.push({
+              role: minimality ? "minimality" : style ? "style" : "author",
+              decisions: history < 0 ? [] : JSON.parse(lines[history + 1]!),
+            });
+            if (sandbox !== "read-only") {
+              output!.stdout.write("Verified synthetic patch.");
+              return 0;
+            }
+            if (minimality) minimalityReviews += 1;
+            output!.stdout.write(
+              JSON.stringify(
+                minimality && minimalityReviews === 1
+                  ? {
+                      status: "revise",
+                      findings: ["Keep validation inside the existing lambda."],
+                    }
+                  : { status: "approved", findings: [] },
+              ),
+            );
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+    const requested = {
+      stage: "minimality",
+      status: "revise",
+      findings: ["Keep validation inside the existing lambda."],
+    };
+    expect(histories).toEqual([
+      { role: "author", decisions: [] },
+      { role: "minimality", decisions: [] },
+      { role: "author", decisions: [requested] },
+      { role: "minimality", decisions: [requested] },
+      {
+        role: "style",
+        decisions: [
+          requested,
+          { stage: "minimality", status: "approved", findings: [] },
+        ],
+      },
+    ]);
+  });
+
+  test("reconciles alternating reviewer decisions once in a read-only stage", async () => {
+    const roles: string[] = [];
+    let minimalityReviews = 0;
+    let styleReviews = 0;
+    expect(
+      await main(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--review-style",
+          "--max-review-revisions",
+          "5",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            if (sandbox !== "read-only") {
+              roles.push(roles.length === 0 ? "author" : "revision");
+              if (roles.includes("reconciliation")) {
+                expect(prompt).toContain("reconciliation decision is binding");
+                expect(prompt).toContain("No mandatory rule requires a helper");
+              }
+              output!.stdout.write("Verified synthetic patch.");
+              return 0;
+            }
+            if (
+              prompt.includes("only the review-conflict-reconciliation review")
+            ) {
+              roles.push("reconciliation");
+              expect(prompt).toContain("smallest behavior-preserving patch");
+              expect(prompt).toContain("Keep the existing lambda.");
+              expect(prompt).toContain("Introduce a named helper.");
+              output!.stdout.write(
+                JSON.stringify({
+                  status: "revise",
+                  findings: [
+                    "No mandatory rule requires a helper; keep the lambda.",
+                  ],
+                }),
+              );
+              return 0;
+            }
+            const minimality = prompt.includes("only the minimality review");
+            roles.push(minimality ? "minimality" : "style");
+            if (minimality) minimalityReviews += 1;
+            else styleReviews += 1;
+            const revise = minimality
+              ? minimalityReviews === 1 || minimalityReviews === 3
+              : styleReviews === 1;
+            output!.stdout.write(
+              JSON.stringify({
+                status: revise ? "revise" : "approved",
+                findings: revise
+                  ? [
+                      minimality
+                        ? "Keep the existing lambda."
+                        : "Introduce a named helper.",
+                    ]
+                  : [],
+              }),
+            );
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(roles).toEqual([
+      "author",
+      "minimality",
+      "revision",
+      "minimality",
+      "style",
+      "revision",
+      "minimality",
+      "reconciliation",
+      "revision",
+      "minimality",
+      "style",
+    ]);
+  });
+
+  test("fails closed when a reconciliation verdict is malformed or inconsistent", async () => {
+    for (const reconciliationVerdict of [
+      "not json",
+      JSON.stringify({ status: "approved", findings: ["Unexpected finding"] }),
+      JSON.stringify({ status: "revise", findings: [] }),
+    ]) {
+      let minimalityReviews = 0;
+      let styleReviews = 0;
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "patch",
+            "Synthetic security issue",
+            "--review-minimality",
+            "--review-style",
+            "--max-review-revisions",
+            "5",
+          ],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              const { prompt, sandbox } = output!.appServer!;
+              if (sandbox !== "read-only") {
+                output!.stdout.write("Verified synthetic patch.");
+                return 0;
+              }
+              if (
+                prompt.includes(
+                  "only the review-conflict-reconciliation review",
+                )
+              ) {
+                output!.stdout.write(reconciliationVerdict);
+                return 0;
+              }
+              const minimality = prompt.includes("only the minimality review");
+              if (minimality) minimalityReviews += 1;
+              else styleReviews += 1;
+              const revise = minimality
+                ? minimalityReviews === 1 || minimalityReviews === 3
+                : styleReviews === 1;
+              output!.stdout.write(
+                JSON.stringify({
+                  status: revise ? "revise" : "approved",
+                  findings: revise ? ["Resolve reviewer disagreement."] : [],
+                }),
+              );
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(
+        "review-conflict-reconciliation review returned an",
+      );
+    }
+  });
+
+  test("allows the configured number of actionable review revisions", async () => {
+    let reviews = 0;
+    let revisions = 0;
+    const stdout = capture();
+    expect(
+      await main(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--max-review-revisions",
+          "2",
+        ],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            if (output!.appServer!.sandbox === "read-only") {
+              reviews += 1;
+              output!.stdout.write(
+                JSON.stringify(
+                  reviews < 3
+                    ? {
+                        status: "revise",
+                        findings: [`Remove unrelated change ${reviews}.`],
+                      }
+                    : { status: "approved", findings: [] },
+                ),
+              );
+            } else {
+              if (reviews === 0) {
+                expect(
+                  JSON.parse(output!.appServer!.prompt.split("\n").at(-1)!),
+                ).toEqual(["Synthetic security issue"]);
+              }
+              if (reviews > 0) revisions += 1;
+              output!.stdout.write(`Patch ${revisions}.`);
+            }
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(reviews).toBe(3);
+    expect(revisions).toBe(2);
+    expect(stdout.text()).toBe("Patch 2.");
+  });
+
+  test("restarts earlier reviews after an actionable style revision", async () => {
+    const stages: string[] = [];
+    let styleReviews = 0;
+    expect(
+      await main(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--review-style",
+          "--max-review-revisions",
+          "5",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            const { prompt, sandbox } = output!.appServer!;
+            if (sandbox !== "read-only") {
+              stages.push(stages.length === 0 ? "author" : "revision");
+              output!.stdout.write("Verified patch.");
+              return 0;
+            }
+            const stage = ["minimality", "local-coding-style"].find((value) =>
+              prompt.includes(`only the ${value} review`),
+            )!;
+            stages.push(stage);
+            const style = stage === "local-coding-style";
+            if (style) styleReviews += 1;
+            const revise = style && styleReviews === 1;
+            output!.stdout.write(
+              JSON.stringify({
+                status: revise ? "revise" : "approved",
+                findings: revise ? ["Add the missing regression test."] : [],
+              }),
+            );
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(stages).toEqual([
+      "author",
+      "minimality",
+      "local-coding-style",
+      "revision",
+      "minimality",
+      "local-coding-style",
+    ]);
+  });
+
+  test("never retries a blocked review even when revisions remain", async () => {
+    let invocations = 0;
+    expect(
+      await main(
+        [
+          "patch",
+          "Synthetic security issue",
+          "--review-minimality",
+          "--max-review-revisions",
+          "5",
+        ],
+        capture().stream,
+        capture().stream,
+        dependencies({
+          onCodex: (_args, output) => {
+            invocations += 1;
+            output!.stdout.write(
+              output!.appServer!.sandbox === "read-only"
+                ? JSON.stringify({
+                    status: "blocked",
+                    findings: ["Required source evidence is unavailable."],
+                  })
+                : "Patch.",
+            );
+            return 0;
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(invocations).toBe(2);
+  });
+
+  test("fails closed when an independent review is invalid or remains rejected", async () => {
+    for (const verdict of [
+      "not json",
+      JSON.stringify({ status: "approved", findings: ["Unexpected finding"] }),
+      JSON.stringify({
+        status: "blocked",
+        findings: ["Missing source evidence"],
+      }),
+      JSON.stringify({ status: "revise", findings: ["Unrelated refactor"] }),
+    ]) {
+      let invocations = 0;
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "patch",
+            "Synthetic security issue",
+            "--review-minimality",
+            "--review-style",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onCodex: (_args, output) => {
+              invocations += 1;
+              output!.stdout.write(
+                output!.appServer!.sandbox === "read-only" ? verdict : "Patch",
+              );
+              return 0;
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).not.toContain("local-coding-style review");
+      expect(invocations).toBe(verdict.includes('"status":"revise"') ? 4 : 2);
+    }
+  });
+
   test("imports selected Linear issues without exposing its credential to Codex", async () => {
     const requests: string[] = [];
     let inputs: string[] = [];
