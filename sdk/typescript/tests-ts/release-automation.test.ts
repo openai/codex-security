@@ -3031,7 +3031,7 @@ describe("GitHub release workflow safeguards", () => {
         "        printf '%s\\n' \"$MOCK_PEELED_COMMIT\"",
         "        ;;",
         '      "repos/test/codex-security/releases/generate-notes")',
-        "        printf '%s\\n' 'Generated release notes'",
+        "        printf '%s\\n' '{\"body\":\"Generated release notes\"}'",
         "        ;;",
         "      *) return 65 ;;",
         "    esac",
@@ -3081,7 +3081,9 @@ describe("GitHub release workflow safeguards", () => {
     expect(githubReleaseWorkflow).toContain(
       '"repos/$GITHUB_REPOSITORY/releases/generate-notes"',
     );
-    expect(githubReleaseWorkflow).toContain("--notes-file -");
+    expect(githubReleaseWorkflow).toContain(
+      '--notes-file "$published_notes_file"',
+    );
     expect(githubReleaseWorkflow).toContain('--latest="$MAKE_LATEST"');
     expect(githubReleaseWorkflow).toContain("release-history");
   });
@@ -3420,6 +3422,46 @@ describe("GitHub release workflow safeguards", () => {
       status: 0,
     },
     {
+      description: "already current with CRLF-equivalent generated notes",
+      existingNotes: "Generated release notes\\r\\n",
+      generatedNotes: "Generated release notes\r\n",
+      updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      description: "already current with NUL-bearing generated notes",
+      existingNotes: "Generated release notes\\u0000",
+      generatedNotesBase64: "R2VuZXJhdGVkIHJlbGVhc2Ugbm90ZXMA",
+      updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      description: "empty generated notes",
+      existingNotes: "Generated release notes",
+      generatedNotes: "",
+      expectedError: "Generated GitHub release notes must not be empty.",
+      updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
       description:
         "already current on a release predating release-note configuration",
       existingNotes: "Generated release notes",
@@ -3536,6 +3578,8 @@ describe("GitHub release workflow safeguards", () => {
     "reconciles $description notes on an existing verified GitHub release",
     ({
       existingNotes,
+      generatedNotes = "Generated release notes\n",
+      generatedNotesBase64,
       updated,
       latestTag,
       makeLatest,
@@ -3602,7 +3646,7 @@ describe("GitHub release workflow safeguards", () => {
         "          printf '%s\\n' 'Could not find a configuration file at .github/release.yml' >&2",
         "          return 1",
         "        fi",
-        "        printf '%s\\n' 'Generated release notes'",
+        "        printf '%s' \"$MOCK_GENERATED_NOTES_RESPONSE\"",
         "        ;;",
         "      *) return 65 ;;",
         "    esac",
@@ -3624,8 +3668,13 @@ describe("GitHub release workflow safeguards", () => {
         "        ;;",
         "      edit)",
         "        shift",
-        "        local edit_latest= notes=0",
+        "        local edit_latest= notes_file= next_is_notes_file=false",
         '        for argument in "$@"; do',
+        '          if [[ "$next_is_notes_file" == true ]]; then',
+        '            notes_file="$argument"',
+        "            next_is_notes_file=false",
+        "            continue",
+        "          fi",
         '          if [[ "$argument" == "--verify-tag" ]]; then',
         "            printf '%s\\n' 'unknown flag: --verify-tag' >&2",
         "            return 67",
@@ -3633,13 +3682,15 @@ describe("GitHub release workflow safeguards", () => {
         '          if [[ "$argument" == --latest=* ]]; then',
         '            edit_latest="${argument#--latest=}"',
         "          fi",
-        '          if [[ "$argument" == "--notes-file" ]]; then notes=1; fi',
+        '          if [[ "$argument" == "--notes-file" ]]; then',
+        "            next_is_notes_file=true",
+        "          fi",
         "        done",
         '        if [[ "$edit_latest" != "$MOCK_MAKE_LATEST" ]]; then return 68; fi',
         "        printf 'updated latest: %s\\n' \"$edit_latest\"",
-        '        if [[ "$notes" == 1 ]]; then',
+        '        if [[ -n "$notes_file" ]]; then',
         "          printf '%s: ' 'updated release notes'",
-        "          cat",
+        '          cat "$notes_file"',
         "        fi",
         "        ;;",
         "      create) return 70 ;;",
@@ -3686,6 +3737,12 @@ describe("GitHub release workflow safeguards", () => {
           ...process.env,
           GITHUB_REPOSITORY: "test/codex-security",
           MAKE_LATEST: String(makeLatest),
+          MOCK_GENERATED_NOTES_RESPONSE: JSON.stringify({
+            body:
+              generatedNotesBase64 === undefined
+                ? generatedNotes
+                : Buffer.from(generatedNotesBase64, "base64").toString("utf8"),
+          }),
           MOCK_EXISTING_NOTES: existingNotes,
           MOCK_LATEST_TAG: latestTag,
           MOCK_MAKE_LATEST: String(makeLatest),
@@ -3794,7 +3851,7 @@ describe("GitHub release workflow safeguards", () => {
         "Publish GitHub Release and generated notes",
       );
       const composeCommand = publishStep.match(
-        /published_notes="\$\(\n(?<command>[\s\S]*?)\n\)"/u,
+        /(?<command>node sdk\/typescript\/scripts\/release-automation\.mjs \\\n\s+compose-release-notes \\\n[\s\S]*?) \\\n\s*> "\$published_notes_file"/u,
       )?.groups?.["command"];
       expect(composeCommand).toBeDefined();
 

@@ -546,14 +546,16 @@ jobs:
           if [[ -n "$PREVIOUS_TAG" ]]; then
             notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
           fi
-          generated_notes="$(gh api "${notes_args[@]}" --jq '.body')"
-          if [[ -z "$generated_notes" ]]; then
-            echo "Generated GitHub release notes must not be empty." >&2
-            exit 1
-          fi
-
           generated_notes_file="$release_workspace/generated-notes.md"
-          printf '%s' "$generated_notes" > "$generated_notes_file"
+          gh api "${notes_args[@]}" |
+            node --input-type=module --eval '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const response = JSON.parse(readFileSync(0, "utf8"));
+              if (typeof response.body !== "string") {
+                throw new Error("Generated GitHub release notes must be a string.");
+              }
+              writeFileSync(process.argv[1], response.body);
+            ' "$generated_notes_file"
           release_note_args=()
 
           tagged_notes_file="$release_workspace/tagged-notes.md"
@@ -570,15 +572,13 @@ jobs:
             )
           fi
 
-          published_notes="$(
-            node sdk/typescript/scripts/release-automation.mjs \
-              compose-release-notes \
-              "$RELEASE_VERSION" \
-              "$generated_notes_file" \
-              ${release_note_args[@]+"${release_note_args[@]}"}
-          )"
           published_notes_file="$release_workspace/published-notes.md"
-          printf '%s' "$published_notes" > "$published_notes_file"
+          node sdk/typescript/scripts/release-automation.mjs \
+            compose-release-notes \
+            "$RELEASE_VERSION" \
+            "$generated_notes_file" \
+            ${release_note_args[@]+"${release_note_args[@]}"} \
+            > "$published_notes_file"
 
           if [[ -n "$existing_release" ]]; then
             latest_response="$(
@@ -618,11 +618,10 @@ jobs:
                   "$currently_latest" != "$MAKE_LATEST" ]]; then
               verify_release_tag
               if [[ "$notes_changed" == true ]]; then
-                printf '%s\n' "$published_notes" |
-                  gh release edit "$RELEASE_TAG" \
-                    --repo "$GITHUB_REPOSITORY" \
-                    --latest="$MAKE_LATEST" \
-                    --notes-file -
+                gh release edit "$RELEASE_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --latest="$MAKE_LATEST" \
+                  --notes-file "$published_notes_file"
                 echo "Updated existing GitHub Release with reviewed and generated notes."
               else
                 gh release edit "$RELEASE_TAG" \
@@ -644,9 +643,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY"
             --title "Codex Security $RELEASE_VERSION"
             --verify-tag
-            --notes-file -
+            --notes-file "$published_notes_file"
             --latest="$MAKE_LATEST"
           )
 
           verify_release_tag
-          printf '%s\n' "$published_notes" | gh release create "${release_args[@]}"
+          gh release create "${release_args[@]}"

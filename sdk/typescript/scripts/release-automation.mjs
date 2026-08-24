@@ -888,6 +888,10 @@ function main() {
   if (command === "compose-release-notes" && process.argv.length >= 5) {
     const version = process.argv[3];
     const generatedNotes = readFileSync(process.argv[4], "utf8");
+    const normalizedGeneratedNotes = generatedNotes.replace(/(?:\r?\n)+$/u, "");
+    if (normalizedGeneratedNotes.length === 0) {
+      throw new Error("Generated GitHub release notes must not be empty.");
+    }
     const files = releaseNoteFileArguments(process.argv.slice(5));
     const taggedNotes =
       files["--tagged-notes-file"] === undefined
@@ -899,7 +903,7 @@ function main() {
         : readFileSync(files["--existing-notes-file"], "utf8");
     const summary = resolveReleaseSummary(version, taggedNotes, existingNotes);
     process.stdout.write(
-      composeReleaseNotes(generatedNotes.replace(/\n+$/u, ""), summary),
+      composeReleaseNotes(normalizedGeneratedNotes, summary),
     );
     return;
   }
