@@ -49,11 +49,13 @@ export async function publishScanToCloud(
     fetch?: (url: string, options: RequestInit) => Promise<Response>;
     signal?: AbortSignal;
     dryRun?: boolean;
+    expectedScanId?: string;
   } = {},
 ): Promise<CloudPublicationResult> {
   const { manifest, findings } = await loadContract(scanDirectory, {
     pluginRoot: await bundledPluginRoot(),
     signal: dependencies.signal,
+    expectedScanId: dependencies.expectedScanId,
   });
   if (findings.findings.length === 0) {
     throw new CodexSecurityError(

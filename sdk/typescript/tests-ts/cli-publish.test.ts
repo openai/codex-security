@@ -74,6 +74,45 @@ function publicationResult(
 }
 
 describe("publish scan", () => {
+  test("resolves a saved scan ID for Linear publication", async () => {
+    const scanDir = await publicationDirectory();
+    const deps = dependencies({
+      onWorkbench: (args) => {
+        expect(args).toEqual(["get-scan", "--scan-id", "scan-123"]);
+        return {
+          scan: {
+            scanId: "scan-123",
+            scanDir,
+            progress: { status: "complete" },
+          },
+        };
+      },
+    });
+    let calls = 0;
+    deps.publishScan = async (directory, options) => {
+      calls++;
+      expect(directory).toBe(scanDir);
+      expect(options.expectedScanId).toBe("scan-123");
+      return publicationResult();
+    };
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--scan",
+          "scan-123",
+          ...DESTINATION_OPTIONS,
+          "--json",
+        ],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(calls).toBe(1);
+  });
+
   test("accepts the Linear project flag and its published alias", async () => {
     for (const flag of ["--linear-project", "--project"]) {
       let projectId: string | undefined;

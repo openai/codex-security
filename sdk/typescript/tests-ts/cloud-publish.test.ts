@@ -65,6 +65,28 @@ async function fixture() {
 }
 
 describe("Cloud publication", () => {
+  test.each([false, true])(
+    "rejects artifacts from another scan before upload or preview (dryRun=%s)",
+    async (dryRun) => {
+      const { scan, environment } = await fixture();
+      let requests = 0;
+      await expect(
+        publishScanToCloud(scan, {
+          environment,
+          dryRun,
+          expectedScanId: "another-scan",
+          fetch: async () => {
+            requests++;
+            throw new Error("unexpected request");
+          },
+        }),
+      ).rejects.toThrow(
+        "Scan artifacts do not match selected scan another-scan.",
+      );
+      expect(requests).toBe(0);
+    },
+  );
+
   test("previews validated findings without credentials or network access", async () => {
     const { scan, home, environment } = await fixture();
     await rm(join(home, "auth.json"));
@@ -79,6 +101,7 @@ describe("Cloud publication", () => {
       await publishScanToCloud(scan, {
         environment,
         dryRun: true,
+        expectedScanId: manifest.scan.id,
         fetch: async () => {
           requests++;
           throw new Error("unexpected request");

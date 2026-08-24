@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import type { JsonObject } from "../src/index.js";
 import {
   capture,
   dependencies,
@@ -16,7 +17,280 @@ const receipt = {
   findingCount: 1,
 };
 
+const temporaryDirectories: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
+
+async function savedScansFixture() {
+  const root = await mkdtemp(join(tmpdir(), "cloud-saved-scans-"));
+  temporaryDirectories.push(root);
+  const scans = await Promise.all(
+    [1, 2, 3].map(async (index) => {
+      const scanDir = join(root, `scan ${index}`);
+      await mkdir(scanDir);
+      return {
+        scanId: `${String(index).repeat(8)}-1111-4111-8111-111111111111`,
+        scanDir,
+        targetSummary: `example/repo-${index}`,
+        progress: { status: "complete" },
+        findingCount: index,
+      };
+    }),
+  );
+  const workbenchCalls: string[][] = [];
+  const deps = dependencies({
+    onWorkbench: (args): JsonObject => {
+      workbenchCalls.push([...args]);
+      if (args[0] === "list-scans") return { scans };
+      expect(args.slice(0, 2)).toEqual(["get-scan", "--scan-id"]);
+      const scan = scans.find(({ scanId }) => scanId.startsWith(args[2]!));
+      if (!scan) throw new Error("Codex Security scan not found.");
+      return { scan };
+    },
+  });
+  return { scans, deps, workbenchCalls };
+}
+
 describe("publish scan to Cloud", () => {
+  test("resolves IDs, prefixes, and latest before publishing and deduplicates aliases", async () => {
+    const { scans, deps, workbenchCalls } = await savedScansFixture();
+    const [first, second] = scans;
+    const calls: string[] = [];
+    deps.publishScanToCloud = async (directory, options) => {
+      expect(workbenchCalls).toHaveLength(4);
+      const scan = scans[calls.length]!;
+      expect(directory).toBe(scan.scanDir);
+      expect(options?.expectedScanId).toBe(scan.scanId);
+      expect(options?.dryRun).toBe(true);
+      calls.push(scan.scanId);
+      return { ...receipt, scanId: scan.scanId, dryRun: true };
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--scan",
+          first!.scanId,
+          `--scan=${second!.scanId.slice(0, 8)}`,
+          "--scan",
+          "latest",
+          "--to",
+          "cloud",
+          "--dry-run",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(workbenchCalls).toContainEqual([
+      "list-scans",
+      "--repository",
+      resolve(deps.currentDirectory()),
+      "--status",
+      "complete",
+    ]);
+    expect(calls).toEqual([first!.scanId, second!.scanId]);
+    expect(JSON.parse(stdout.text()).results).toHaveLength(2);
+    expect(stderr.text()).toBe("");
+  });
+
+  test.each(["missing", "incomplete", "unavailable"])(
+    "rejects a %s saved scan before uploading any selected scan",
+    async (failure) => {
+      const { scans, deps } = await savedScansFixture();
+      const [first, second] = scans;
+      let requestedId = second!.scanId;
+      if (failure === "missing") requestedId = "99999999";
+      if (failure === "incomplete") second!.progress.status = "running";
+      if (failure === "unavailable")
+        await rm(second!.scanDir, { recursive: true });
+      let uploads = 0;
+      deps.publishScanToCloud = async () => {
+        uploads++;
+        return receipt;
+      };
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "--scan",
+            first!.scanId,
+            "--scan",
+            requestedId,
+            "--to",
+            "cloud",
+          ],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(uploads).toBe(0);
+      expect(stderr.text()).toMatch(
+        /not found|not complete|artifacts or run a new scan/,
+      );
+      if (failure !== "missing")
+        expect(stderr.text()).toContain(second!.scanId);
+    },
+  );
+
+  test("rejects mixed ID and directory selectors before reading history", async () => {
+    const deps = dependencies({
+      onWorkbench: () => {
+        throw new Error("unexpected lookup");
+      },
+    });
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--scan",
+          "11111111",
+          "--scan-dir",
+          "external-scan",
+          "--to",
+          "cloud",
+        ],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("Use --scan or scan directory inputs");
+  });
+
+  test("selects several saved scans by ID and stops at Done without selecting the rest", async () => {
+    const { scans, deps } = await savedScansFixture();
+    const picks = [scans[1]!.scanId, scans[0]!.scanId, ""];
+    let selections = 0;
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async (_question, choices, presentation, signal) => {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(presentation?.header).toContain("SCAN ID");
+        expect(choices.some(({ value }) => value === "")).toBe(selections > 0);
+        expect(
+          choices.some(({ label }) => label.includes(scans[0]!.scanDir)),
+        ).toBe(false);
+        const pick = picks[selections++]!;
+        return choices.find(({ value }) => value === pick)!.value;
+      },
+    };
+    const calls: string[] = [];
+    deps.publishScanToCloud = async (_directory, options) => {
+      expect(selections).toBe(3);
+      calls.push(options!.expectedScanId!);
+      return { ...receipt, scanId: options!.expectedScanId! };
+    };
+    const stdout = capture();
+    expect(
+      await main(
+        ["publish", "scan", "--to", "cloud", "--json"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(calls).toEqual(picks.slice(0, 2));
+    expect(
+      JSON.parse(stdout.text()).results.map(
+        (result: { scanId: string }) => result.scanId,
+      ),
+    ).toEqual(calls);
+  });
+
+  test("cancels in the picker without uploading already selected scans", async () => {
+    const { deps } = await savedScansFixture();
+    const signals = new FakeSignals();
+    deps.addSignalListener = (signal, listener) =>
+      signals.add(signal, listener);
+    deps.removeSignalListener = (signal, listener) =>
+      signals.remove(signal, listener);
+    let selections = 0;
+    deps.publishPrompt = {
+      isInteractive: () => true,
+      select: async (_question, choices, _presentation, signal) => {
+        if (selections++ > 0) {
+          signals.emit("SIGINT");
+          signal!.throwIfAborted();
+        }
+        return choices[0]!.value;
+      },
+    };
+    let uploads = 0;
+    deps.publishScanToCloud = async () => {
+      uploads++;
+      return receipt;
+    };
+    expect(
+      await main(
+        ["publish", "scan", "--to", "cloud"],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(130);
+    expect(uploads).toBe(0);
+    expect(
+      [...signals.listeners.values()].every(
+        (listeners) => listeners.size === 0,
+      ),
+    ).toBe(true);
+  });
+
+  test("identifies failed and unattempted saved scans by ID on cancellation", async () => {
+    const { scans, deps } = await savedScansFixture();
+    const signals = new FakeSignals();
+    deps.addSignalListener = (signal, listener) =>
+      signals.add(signal, listener);
+    deps.removeSignalListener = (signal, listener) =>
+      signals.remove(signal, listener);
+    deps.publishScanToCloud = async (_directory, options) => {
+      if (options!.expectedScanId === scans[1]!.scanId) {
+        signals.emit("SIGTERM");
+        throw new Error("Publication was not confirmed.");
+      }
+      return { ...receipt, scanId: options!.expectedScanId! };
+    };
+    const stdout = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          ...scans.flatMap(({ scanId }) => ["--scan", scanId]),
+          "--to",
+          "cloud",
+          "--json",
+        ],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(143);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      results: [{ scanId: scans[0]!.scanId }],
+      failed: [
+        { scanId: scans[1]!.scanId, error: "Publication was not confirmed." },
+      ],
+      notAttempted: [scans[2]!.scanId],
+    });
+  });
+
   test("publishes multiple explicit scans in order and deduplicates resolved paths", async () => {
     for (const dryRun of [false, true]) {
       const deps = dependencies({
@@ -353,6 +627,9 @@ describe("publish scan to Cloud", () => {
 
   test("rejects missing or empty scan flags and extra positionals before publishing", async () => {
     for (const inputs of [
+      ["--scan"],
+      ["--scan="],
+      ["--scan", "--json"],
       ["--scan-dir"],
       ["--scan-dir="],
       ["--scan-dir", "--json"],
@@ -406,12 +683,13 @@ describe("publish scan to Cloud", () => {
         select: async (_question, choices) => {
           selections++;
           const directories: string[] = choices.map(({ value }) => value);
-          expect(directories).toEqual([scanDir]);
+          expect(directories).toEqual(["scan-1"]);
           return choices[0]!.value;
         },
       };
-      deps.publishScanToCloud = async (directory) => {
+      deps.publishScanToCloud = async (directory, options) => {
         expect(directory).toBe(scanDir);
+        expect(options?.expectedScanId).toBe("scan-1");
         return receipt;
       };
       const stdout = capture();
@@ -450,7 +728,7 @@ describe("publish scan to Cloud", () => {
         deps,
       ),
     ).toBe(2);
-    expect(stderr.text()).toContain("/path/to/sealed-scan --to cloud");
+    expect(stderr.text()).toContain("--scan SCAN_ID --to cloud");
     expect(stderr.text()).not.toContain("--linear-team");
   });
 

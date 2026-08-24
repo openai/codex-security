@@ -1849,11 +1849,17 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: z.object({
+      scan: z
+        .array(optionValue("--scan"))
+        .default([])
+        .describe(
+          "Saved scan ID, unique prefix, or latest; repeat for multiple scans (Linear accepts one).",
+        ),
       scanDir: z
         .array(optionValue("--scan-dir"))
         .default([])
         .describe(
-          "Completed scan directory; repeat for multiple scans (Linear accepts one).",
+          "External completed scan directory; repeat for multiple scans (Linear accepts one).",
         ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
@@ -1892,7 +1898,7 @@ export async function main(
       let cloudBatch:
         | {
             results: (CloudPublicationResult & { scanDir: string })[];
-            failed: { scanDir: string; error: string }[];
+            failed: { scanDir: string; scanId?: string; error: string }[];
             notAttempted: string[];
           }
         | undefined;
@@ -1916,6 +1922,16 @@ export async function main(
         if (directories.length > 1 && options.to !== "cloud") {
           throw new CodexSecurityError(
             "Multiple scan directories are only supported with --to cloud.",
+          );
+        }
+        if (options.scan.length > 0 && directories.length > 0) {
+          throw new CodexSecurityError(
+            "Use --scan or scan directory inputs, not both.",
+          );
+        }
+        if (new Set(options.scan).size > 1 && options.to !== "cloud") {
+          throw new CodexSecurityError(
+            "Multiple scans are only supported with --to cloud.",
           );
         }
         if (
@@ -1978,7 +1994,21 @@ export async function main(
           dependencies.environment["CODEX_SECURITY_LINEAR_PROJECT"]?.trim() ||
           undefined;
 
-        let scanDir = directories[0];
+        if (options.to === "cloud") {
+          dependencies.addSignalListener("SIGINT", onInterrupt);
+          dependencies.addSignalListener("SIGTERM", onTerminate);
+          observingSignals = true;
+        }
+        const selectedScans: { scanDir: string; scanId?: string }[] =
+          directories.map((scanDir) => ({ scanDir }));
+        for (const requestedId of new Set(options.scan)) {
+          controller.signal.throwIfAborted();
+          const scan = await resolvePublicationScan(requestedId, dependencies);
+          if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
+            selectedScans.push(scan);
+          }
+        }
+        let scanDir = selectedScans[0]?.scanDir;
         let publicationRepository =
           scanDir === undefined ? "scan" : basename(scanDir);
         if (scanDir === undefined) {
@@ -1991,7 +2021,7 @@ export async function main(
             }).prompt;
           if (!prompt.isInteractive()) {
             throw new CodexSecurityError(
-              `Interactive scan selection requires a terminal. Provide a completed scan directory: codex-security publish scan /path/to/sealed-scan --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
+              `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
             );
           }
           const saved = await dependencies.runWorkbench([
@@ -2029,6 +2059,10 @@ export async function main(
             dependencies.environment["NO_COLOR"] === undefined &&
             dependencies.environment["TERM"] !== "dumb";
           const repositories = new Map<string, string>();
+          const scansById = new Map<
+            string,
+            { scanId: string; scanDir: string }
+          >();
           const rows = scans.flatMap((scan) => {
             if (!isJsonObject(scan)) return [];
             const progress = scan["progress"];
@@ -2078,13 +2112,17 @@ export async function main(
               .replace(/\s+/gu, " ")
               .slice(-6)}`;
             repositories.set(directory, repository);
+            scansById.set(scanId, {
+              scanId,
+              scanDir: resolveCliPath(currentDirectory, directory),
+            });
             return [
               {
                 repository,
                 findings,
                 age: publicationScanAge(timestamp, now),
                 scanId: shortScanId,
-                value: directory,
+                value: options.to === "cloud" ? scanId : directory,
               },
             ];
           });
@@ -2129,28 +2167,55 @@ export async function main(
               value: row.value,
             };
           });
-          scanDir = await prompt.select(
-            "Which completed scan would you like to publish?",
-            choices,
-            { header },
-          );
+          if (options.to === "cloud") {
+            let remaining = choices;
+            while (remaining.length > 0) {
+              controller.signal.throwIfAborted();
+              const selected = await prompt.select(
+                "Which completed scans would you like to publish?",
+                selectedScans.length === 0
+                  ? remaining
+                  : [
+                      {
+                        label: `Done (${selectedScans.length} selected)`,
+                        value: "",
+                      },
+                      ...remaining,
+                    ],
+                { header },
+                controller.signal,
+              );
+              controller.signal.throwIfAborted();
+              if (selected === "") break;
+              selectedScans.push(scansById.get(selected)!);
+              remaining = remaining.filter(({ value }) => value !== selected);
+            }
+            scanDir = selectedScans[0]!.scanDir;
+          } else {
+            scanDir = await prompt.select(
+              "Which completed scan would you like to publish?",
+              choices,
+              { header },
+            );
+            selectedScans.push({ scanDir });
+          }
           publicationRepository =
             repositories.get(scanDir) ?? basename(scanDir);
         }
 
         if (options.to === "cloud") {
-          dependencies.addSignalListener("SIGINT", onInterrupt);
-          dependencies.addSignalListener("SIGTERM", onTerminate);
-          observingSignals = true;
-          if (directories.length > 1) {
+          controller.signal.throwIfAborted();
+          if (selectedScans.length > 1) {
             cloudBatch = {
               results: [],
               failed: [],
-              notAttempted: [...directories],
+              notAttempted: selectedScans.map(
+                ({ scanId, scanDir }) => scanId ?? scanDir,
+              ),
             };
             // Keep each scan's provenance and acceptance receipt separate. Never
             // retry a failed POST: a lost response may still have been accepted.
-            for (const directory of directories) {
+            for (const { scanDir: directory, scanId } of selectedScans) {
               controller.signal.throwIfAborted();
               cloudBatch.notAttempted.shift();
               try {
@@ -2160,15 +2225,20 @@ export async function main(
                   environment: dependencies.environment,
                   dryRun: options.dryRun,
                   signal: controller.signal,
+                  ...(scanId === undefined ? {} : { expectedScanId: scanId }),
                 });
                 cloudBatch.results.push({ scanDir: directory, ...result });
               } catch (error) {
                 const message = safeErrorMessage(error);
-                cloudBatch.failed.push({ scanDir: directory, error: message });
+                cloudBatch.failed.push({
+                  scanDir: directory,
+                  ...(scanId === undefined ? {} : { scanId }),
+                  error: message,
+                });
                 if (controller.signal.aborted) throw error;
                 exitCode = 2;
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(safeErrorMessage(directory))}: ${diagnosticValue(message)}\n`,
+                  `codex-security: ${diagnosticValue(safeErrorMessage(scanId ?? directory))}: ${diagnosticValue(message)}\n`,
                 );
               }
             }
@@ -2181,6 +2251,9 @@ export async function main(
             environment: dependencies.environment,
             dryRun: options.dryRun,
             signal: controller.signal,
+            ...(selectedScans[0]?.scanId === undefined
+              ? {}
+              : { expectedScanId: selectedScans[0].scanId }),
           });
           controller.signal.throwIfAborted();
           return { ...result };
@@ -2204,6 +2277,9 @@ export async function main(
             resolveCliPath(currentDirectory, scanDir),
             {
               destination: "linear",
+              ...(selectedScans[0]?.scanId === undefined
+                ? {}
+                : { expectedScanId: selectedScans[0].scanId }),
               teamId,
               ...(projectId === undefined ? {} : { projectId }),
               dryRun: options.dryRun,
@@ -3954,6 +4030,71 @@ async function* workbenchFindings(
     yield* page.findings;
     offset = typeof page.nextOffset === "number" ? page.nextOffset : undefined;
   } while (offset !== undefined);
+}
+
+async function resolvePublicationScan(
+  requestedId: string,
+  dependencies: CliDependencies,
+): Promise<SavedScan> {
+  let scanId = requestedId;
+  if (scanId === "latest") {
+    const history = await dependencies.runWorkbench([
+      "list-scans",
+      "--repository",
+      resolve(dependencies.currentDirectory()),
+      "--status",
+      "complete",
+    ]);
+    const scans = history["scans"];
+    const latest = Array.isArray(scans) ? scans[0] : undefined;
+    if (
+      latest === undefined ||
+      !isJsonObject(latest) ||
+      typeof latest["scanId"] !== "string"
+    ) {
+      throw new CodexSecurityError(
+        "No completed saved scan was found for this repository.",
+      );
+    }
+    scanId = latest["scanId"];
+  }
+  const context = await dependencies.runWorkbench([
+    "get-scan",
+    "--scan-id",
+    scanId,
+  ]);
+  const scan = context["scan"];
+  if (
+    scan === undefined ||
+    !isJsonObject(scan) ||
+    typeof scan["scanId"] !== "string"
+  ) {
+    throw new CodexSecurityError(`Could not read saved scan ${scanId}.`);
+  }
+  scanId = scan["scanId"];
+  const progress = scan["progress"];
+  if (
+    progress === undefined ||
+    !isJsonObject(progress) ||
+    progress["status"] !== "complete"
+  ) {
+    throw new CodexSecurityError(`Scan ${scanId} is not complete.`);
+  }
+  const storedDirectory = scan["scanDir"];
+  const scanDir =
+    typeof storedDirectory === "string" && storedDirectory.length > 0
+      ? resolveCliPath(dependencies.currentDirectory(), storedDirectory)
+      : undefined;
+  const metadata =
+    scanDir === undefined
+      ? undefined
+      : await lstat(scanDir).catch(() => undefined);
+  if (scanDir === undefined || metadata?.isDirectory() !== true) {
+    throw new CodexSecurityError(
+      `Artifacts for scan ${scanId} are unavailable. Restore the completed scan artifacts or run a new scan.`,
+    );
+  }
+  return { ...scan, scanId, scanDir };
 }
 
 async function selectSavedFindings(
