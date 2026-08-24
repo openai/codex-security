@@ -458,7 +458,9 @@ function evaluateWorkflowCondition(
   condition: string,
   values: Record<string, string>,
 ): boolean {
-  let expression = condition;
+  let expression = condition
+    .replace(/^\$\{\{\s*/u, "")
+    .replace(/\s*\}\}$/u, "");
   for (const [identifier, value] of Object.entries(values).sort(
     ([left], [right]) => right.length - left.length,
   )) {
@@ -3871,6 +3873,287 @@ describe("GitHub release workflow safeguards", () => {
       "needs: [validate-title, windows-test, windows-verify]",
     );
   });
+
+  test("isolates body-only edits from full CI names and concurrency", () => {
+    const metadataOnly =
+      "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null";
+    const metadataPrefix =
+      "${{ " + metadataOnly + " && 'metadata-only / ' || '' }}";
+    const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
+      concurrency: {
+        group: string;
+        "cancel-in-progress": string;
+      };
+      jobs: Record<
+        string,
+        {
+          name: string;
+          if?: string;
+          strategy?: { matrix: Record<string, string[]> };
+          steps: Array<{ if?: string }>;
+        }
+      >;
+    };
+
+    expect(workflow.concurrency.group).toBe(
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ " +
+        metadataOnly +
+        " && 'metadata-only' || 'full' }}",
+    );
+    expect(workflow.concurrency["cancel-in-progress"]).toBe(
+      "${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}",
+    );
+    for (const job of Object.values(workflow.jobs)) {
+      expect(job.name.startsWith(metadataPrefix), job.name).toBe(true);
+    }
+
+    const fullCiCondition =
+      "needs.validate-title.outputs.run-full-ci == 'true'";
+    for (const job of ["test", "windows-test", "windows-verify"]) {
+      expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
+    }
+    const requiredJobCondition = `always() && !(${metadataOnly})`;
+    expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
+    expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
+    expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
+      "needs.validate-title.result != 'success' || needs.test.result != 'success'",
+    );
+    expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
+      "needs.validate-title.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'",
+    );
+
+    const renderName = (
+      template: string,
+      values: Record<string, string>,
+      metadata: boolean,
+    ) => {
+      let name = template.replace(
+        metadataPrefix,
+        metadata ? "metadata-only / " : "",
+      );
+      for (const [key, value] of Object.entries(values)) {
+        name = name.replaceAll("${{ matrix." + key + " }}", value);
+      }
+      return name.replace(
+        "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+        values["node"] === "22.13.0" ? "22" : values["node"] ?? "",
+      );
+    };
+    const unixJob = workflow.jobs["required-test"];
+    const windowsJob = workflow.jobs["windows"];
+    const fullNames = [
+      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
+        renderName(unixJob?.name ?? "", { os }, false),
+      ),
+      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
+        renderName(windowsJob?.name ?? "", { node }, false),
+      ),
+    ];
+    const metadataNames = [
+      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
+        renderName(unixJob?.name ?? "", { os }, true),
+      ),
+      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
+        renderName(windowsJob?.name ?? "", { node }, true),
+      ),
+    ];
+    const requiredContexts = new Set([
+      "ubuntu-latest / node-22",
+      "macos-latest / node-22",
+      "windows-latest / node-22",
+    ]);
+
+    expect(
+      fullNames.filter((name) => requiredContexts.has(name)).sort(),
+    ).toEqual([...requiredContexts].sort());
+    expect(metadataNames.some((name) => requiredContexts.has(name))).toBe(
+      false,
+    );
+    expect(
+      metadataNames.every((name) => name.startsWith("metadata-only / ")),
+    ).toBe(true);
+  });
+
+  test.each([
+    {
+      name: "body-only edit with a valid title",
+      eventName: "pull_request",
+      action: "edited",
+      titleChanged: false,
+      baseChanged: false,
+      title: "docs: clarify release notes",
+      fullCi: false,
+      titleValid: true,
+      upstream: "skipped",
+      gateFailure: false,
+      cancellation: false,
+    },
+    {
+      name: "body-only edit with an invalid title",
+      eventName: "pull_request",
+      action: "edited",
+      titleChanged: false,
+      baseChanged: false,
+      title: "Docs: invalid title ",
+      fullCi: false,
+      titleValid: false,
+      upstream: "skipped",
+      gateFailure: false,
+      cancellation: false,
+    },
+    {
+      name: "title edit",
+      eventName: "pull_request",
+      action: "edited",
+      titleChanged: true,
+      baseChanged: false,
+      title: "ci: update title",
+      fullCi: true,
+      titleValid: true,
+      upstream: "success",
+      gateFailure: false,
+      cancellation: true,
+    },
+    {
+      name: "base edit",
+      eventName: "pull_request",
+      action: "edited",
+      titleChanged: false,
+      baseChanged: true,
+      title: "ci: update base",
+      fullCi: true,
+      titleValid: true,
+      upstream: "success",
+      gateFailure: false,
+      cancellation: true,
+    },
+    {
+      name: "code synchronization",
+      eventName: "pull_request",
+      action: "synchronize",
+      titleChanged: false,
+      baseChanged: false,
+      title: "ci: update code",
+      fullCi: true,
+      titleValid: true,
+      upstream: "success",
+      gateFailure: false,
+      cancellation: true,
+    },
+    {
+      name: "push",
+      eventName: "push",
+      action: "none",
+      titleChanged: false,
+      baseChanged: false,
+      title: "",
+      fullCi: true,
+      titleValid: true,
+      upstream: "success",
+      gateFailure: false,
+      cancellation: false,
+    },
+    {
+      name: "full CI with skipped upstream jobs",
+      eventName: "pull_request",
+      action: "synchronize",
+      titleChanged: false,
+      baseChanged: false,
+      title: "ci: update code",
+      fullCi: true,
+      titleValid: true,
+      upstream: "skipped",
+      gateFailure: true,
+      cancellation: true,
+    },
+  ])(
+    "keeps required contexts truthful for $name",
+    ({
+      eventName,
+      action,
+      titleChanged,
+      baseChanged,
+      title,
+      fullCi,
+      titleValid,
+      upstream,
+      gateFailure,
+      cancellation,
+    }) => {
+      const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
+        concurrency: { "cancel-in-progress": string };
+        jobs: Record<string, { steps: Array<{ if?: string }> }>;
+      };
+      const scopeScript = workflowStepShell(
+        nodeCiWorkflow,
+        "Decide whether full CI is needed",
+      );
+      const titleScript = workflowStepShell(
+        nodeCiWorkflow,
+        "Require a Conventional Commit pull request title",
+      );
+      const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
+      const output = join(workspace, "output");
+      try {
+        const scope = spawnSync(bash, ["-c", scopeScript], {
+          env: {
+            ...process.env,
+            BASE_CHANGED: String(baseChanged),
+            EVENT_ACTION: action === "none" ? "" : action,
+            EVENT_NAME: eventName,
+            GITHUB_OUTPUT: output,
+            TITLE_CHANGED: String(titleChanged),
+          },
+        });
+        expect(scope.status).toBe(0);
+        expect(readFileSync(output, "utf8")).toBe(
+          `run-full-ci=${String(fullCi)}\n`,
+        );
+
+        const validation =
+          eventName === "pull_request"
+            ? spawnSync(bash, ["-c", titleScript], {
+                env: { ...process.env, PR_TITLE: title },
+              }).status === 0
+              ? "success"
+              : "failure"
+            : "success";
+        expect(validation === "success").toBe(titleValid);
+
+        const values = {
+          "needs.test.result": upstream,
+          "needs.validate-title.result": validation,
+          "needs.windows-test.result": upstream,
+          "needs.windows-verify.result": upstream,
+        };
+        const unixGate = workflow.jobs["required-test"]?.steps[0]?.if ?? "";
+        const windowsGate = workflow.jobs["windows"]?.steps[0]?.if ?? "";
+        if (fullCi) {
+          expect(evaluateWorkflowCondition(unixGate, values)).toBe(gateFailure);
+          expect(evaluateWorkflowCondition(windowsGate, values)).toBe(
+            gateFailure,
+          );
+        } else {
+          expect(unixGate).toBeDefined();
+          expect(windowsGate).toBeDefined();
+        }
+
+        expect(
+          evaluateWorkflowCondition(
+            workflow.concurrency["cancel-in-progress"],
+            {
+              "github.event.changes.base": baseChanged ? "changed" : "null",
+              "github.event.changes.title": titleChanged ? "changed" : "null",
+              "github.event.action": action,
+              "github.event_name": eventName,
+            },
+          ),
+        ).toBe(cancellation);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("documents supported title types semantically", () => {
     expect(documentedTitleTypes(releasingGuide)).toEqual(
