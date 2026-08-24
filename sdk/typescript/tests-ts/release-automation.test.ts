@@ -3980,6 +3980,12 @@ describe("GitHub release workflow safeguards", () => {
         "Categorize pull request without checking out its code",
       );
       const mock = [
+        "base64() {",
+        '  if [[ "${1:-}" == "--decode" ]]; then',
+        "    return 64",
+        "  fi",
+        '  command base64 "$@"',
+        "}",
         "gh() {",
         '  if [[ "$1" != "api" ]]; then return 64; fi',
         "  shift",

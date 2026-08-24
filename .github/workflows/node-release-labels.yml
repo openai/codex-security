@@ -61,7 +61,12 @@ jobs:
           current_title="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER" \
               --jq '.title | @base64' |
-              base64 --decode &&
+              node --input-type=module --eval '
+                import { readFileSync } from "node:fs";
+                process.stdout.write(
+                  Buffer.from(readFileSync(0, "utf8"), "base64"),
+                );
+              ' &&
               printf '%s' "$title_sentinel"
           )"
           current_title="${current_title%"$title_sentinel"}"
