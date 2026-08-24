@@ -317,7 +317,7 @@ describe("publish scan", () => {
     expect(stderr.text()).toBe("");
   });
 
-  test("waits for interrupted publication recovery before honoring either terminal signal", async () => {
+  test("waits for direct publication recovery until a later terminal signal", async () => {
     for (const [signal, expectedCode, expectedMessage] of [
       ["SIGINT", 130, "Publication canceled by Ctrl-C."],
       ["SIGTERM", 143, "Publication terminated by SIGTERM."],
@@ -326,6 +326,7 @@ describe("publish scan", () => {
       const stderr = capture();
       const signals = new FakeSignals();
       const events: string[] = [];
+      let now = 0;
       let enteredPublication!: () => void;
       const publicationStarted = new Promise<void>((resolve) => {
         enteredPublication = resolve;
@@ -335,6 +336,8 @@ describe("publish scan", () => {
         finishRecovery = resolve;
       });
       const deps = dependencies({ signals });
+      deps.environment["CODEX_SECURITY_LINEAR_API_KEY"] = "synthetic-key";
+      deps.now = () => now;
       deps.forceExit = (forced) => events.push(`forced ${forced}`);
       deps.publishScan = async (_scanDirectory, options) => {
         expect(options.signal).toBeInstanceOf(AbortSignal);
@@ -351,27 +354,28 @@ describe("publish scan", () => {
         );
       };
 
-      let finished = false;
       const publishing = main(
         ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
         stdout.stream,
         stderr.stream,
         deps,
-      ).then((status) => {
-        finished = true;
-        return status;
-      });
+      );
       await publicationStarted;
-      expect(finished).toBe(false);
       expect(signals.listeners.get("SIGINT")?.size).toBe(1);
       expect(signals.listeners.get("SIGTERM")?.size).toBe(1);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toBe("");
+      signals.emit(signal);
+      expect(events).toEqual([`aborted ${signal}`]);
+      now = 500;
+      signals.emit(signal);
+      expect(events).toEqual([`aborted ${signal}`, `forced ${signal}`]);
+      expect(stderr.text()).toContain("reconcile retained Linear");
       finishRecovery();
 
       expect(await publishing).toBe(expectedCode);
 
-      expect(events).toEqual([`aborted ${signal}`, "recovered created issues"]);
+      expect(events.at(-1)).toBe("recovered created issues");
       expect(stderr.text()).toContain(expectedMessage);
       expect(stderr.text()).toContain("recover it before retrying");
       expect(stdout.text()).toBe("");
@@ -757,6 +761,16 @@ describe("publish scan", () => {
         scanId: result.scanId,
         total: result.created.length,
       });
+      options.onProgress?.({
+        type: "handoff_recorded",
+        findingId: result.created[0]!.findingId,
+        recorded: 1,
+        total: result.created.length,
+      });
+      expect(stderr.text()).toContain(
+        "[1/2] Saved Linear publication evidence.",
+      );
+      expect(stderr.text()).not.toContain("Created");
       for (const [index, issue] of result.created.entries()) {
         options.onProgress?.({
           type: "issue_completed",

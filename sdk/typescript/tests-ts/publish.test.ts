@@ -559,6 +559,8 @@ describe("direct Linear API publication", () => {
         linearApiKey: "synthetic-key",
         onProgress: (event) => {
           updates.push(event);
+          if (event.type === "handoff_recorded" && event.recorded === 1)
+            expect(completed).toBe(20);
           if (
             event.type === "issue_completed" &&
             completedAtFirstIssueProgress === undefined
@@ -595,6 +597,9 @@ describe("direct Linear API publication", () => {
       { findingId: "finding-22", error: "Linear rejected this finding." },
     ]);
     expect(completedAtFirstIssueProgress).toBe(23);
+    expect(
+      updates.filter((event) => event.type === "handoff_recorded"),
+    ).toHaveLength(23);
     expect(
       updates
         .filter((event) => event.type === "issue_completed")

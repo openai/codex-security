@@ -70,6 +70,12 @@ export type PublishScanProgress =
   | { type: "started"; scanId: string; total: number }
   | { type: "codex_event"; event: unknown }
   | {
+      type: "handoff_recorded";
+      findingId: string;
+      recorded: number;
+      total: number;
+    }
+  | {
       type: "issue_completed";
       findingId: string;
       issueIdentifier?: string;
@@ -316,6 +322,7 @@ export async function publishScanInternal(
       handoff.file,
       linearClient,
       assigneeId,
+      progressObserver,
       options.signal,
     );
   } else {
@@ -531,9 +538,11 @@ async function publishLinearApiIssues(
   handoffFile: string,
   client: Pick<LinearClient, "createIssue">,
   assigneeId: string | undefined,
+  observer: PublishScanOptions["onProgress"],
   signal?: AbortSignal,
 ): Promise<void> {
   let handoffWrites = Promise.resolve();
+  let recorded = 0;
   const appendHandoff = async (
     record: Record<string, unknown>,
   ): Promise<void> => {
@@ -589,6 +598,12 @@ async function publishLinearApiIssues(
           occurrenceId: issue.occurrenceId,
           ...outcome,
           arguments: arguments_,
+        });
+        reportPublicationProgress(observer, {
+          type: "handoff_recorded",
+          findingId: issue.findingId,
+          recorded: ++recorded,
+          total: publication.issues.length,
         });
       }),
     );

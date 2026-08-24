@@ -895,7 +895,9 @@ const publication = await publishScan("/path/to/completed-scan", {
   destination: "linear",
   teamId: "TEAM_ID",
   onProgress: (progress) => {
-    if (progress.type === "issue_completed") {
+    if (progress.type === "handoff_recorded") {
+      console.error("Saved mutation result", progress.recorded);
+    } else if (progress.type === "issue_completed") {
       console.error(
         `Processed ${progress.completed} of ${progress.total} findings.`,
       );
