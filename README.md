@@ -52,15 +52,15 @@ Use the included Docker Compose configuration for scans of many repositories. Se
 To use another inference provider, set its API key and select a model:
 
 ```bash
+export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
+export AWS_REGION="us-east-2"
+codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
+
 export OPENROUTER_API_KEY="<your-openrouter-api-key>"
 codex-security scan . --provider openrouter --model anthropic/claude-sonnet-4.5
 
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
-
-export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
-export AWS_REGION="us-east-2"
-codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
 
 ## Documentation
