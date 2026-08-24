@@ -235,6 +235,7 @@ const VALUE_OPTIONS = new Set([
   "--patch-severity",
   "--resume-pr",
   "--scan",
+  "--scan-dir",
   "--severity",
   "--max-cost",
   "--workers",
@@ -1846,14 +1847,14 @@ export async function main(
         .string()
         .optional()
         .describe("Completed scan directory; omit to select a saved scan."),
-      "additionalScanDirs...": z
-        .string()
-        .optional()
-        .describe(
-          "Additional completed scan directories; not supported by Linear.",
-        ),
     }),
     options: z.object({
+      scanDir: z
+        .array(optionValue("--scan-dir"))
+        .default([])
+        .describe(
+          "Completed scan directory; repeat for multiple scans (Linear accepts one).",
+        ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
         .string()
@@ -1903,7 +1904,16 @@ export async function main(
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
       try {
-        if (positionals.length > 1 && options.to !== "cloud") {
+        const currentDirectory = dependencies.currentDirectory();
+        const directories = [
+          ...new Set(
+            [
+              ...(args.scanDir === undefined ? [] : [args.scanDir]),
+              ...options.scanDir,
+            ].map((directory) => resolveCliPath(currentDirectory, directory)),
+          ),
+        ];
+        if (directories.length > 1 && options.to !== "cloud") {
           throw new CodexSecurityError(
             "Multiple scan directories are only supported with --to cloud.",
           );
@@ -1968,7 +1978,7 @@ export async function main(
           dependencies.environment["CODEX_SECURITY_LINEAR_PROJECT"]?.trim() ||
           undefined;
 
-        let scanDir = args.scanDir;
+        let scanDir = directories[0];
         let publicationRepository =
           scanDir === undefined ? "scan" : basename(scanDir);
         if (scanDir === undefined) {
@@ -2004,7 +2014,7 @@ export async function main(
                   return undefined;
                 }
                 const metadata = await lstat(
-                  resolve(dependencies.currentDirectory(), directory),
+                  resolveCliPath(currentDirectory, directory),
                 ).catch(() => undefined);
                 return metadata?.isDirectory() === true &&
                   !metadata.isSymbolicLink()
@@ -2132,14 +2142,7 @@ export async function main(
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
-          if (positionals.length > 1) {
-            const directories = [
-              ...new Set(
-                positionals.map((directory) =>
-                  resolve(dependencies.currentDirectory(), directory),
-                ),
-              ),
-            ];
+          if (directories.length > 1) {
             cloudBatch = {
               results: [],
               failed: [],
@@ -2174,7 +2177,7 @@ export async function main(
           }
           const result = await (
             dependencies.publishScanToCloud ?? publishScanToCloud
-          )(resolve(dependencies.currentDirectory(), scanDir), {
+          )(resolveCliPath(currentDirectory, scanDir), {
             environment: dependencies.environment,
             dryRun: options.dryRun,
             signal: controller.signal,
@@ -2198,7 +2201,7 @@ export async function main(
         let result;
         try {
           result = await (dependencies.publishScan ?? publishScan)(
-            resolve(dependencies.currentDirectory(), scanDir),
+            resolveCliPath(currentDirectory, scanDir),
             {
               destination: "linear",
               teamId,
@@ -3816,7 +3819,6 @@ function validateCliArguments(
     command !== "validate" &&
     command !== "verify-fix" &&
     command !== "patch" &&
-    !(command === "publish" && subcommand === "scan") &&
     positionals.length >
       (command === "logout" || command === "info"
         ? 0

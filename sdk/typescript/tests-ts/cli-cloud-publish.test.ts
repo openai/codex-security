@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
@@ -64,9 +64,11 @@ describe("publish scan to Cloud", () => {
           [
             "publish",
             "scan",
+            "--scan-dir",
             "scan one",
             "--to=cloud",
-            "scan-two",
+            "--scan-dir=scan-two",
+            "--scan-dir",
             "./scan one",
             "--json",
             ...(dryRun ? ["--dry-run"] : []),
@@ -106,7 +108,14 @@ describe("publish scan to Cloud", () => {
     const stderr = capture();
     expect(
       await main(
-        ["publish", "scan", ...directories, "--to", "cloud", "--json"],
+        [
+          "publish",
+          "scan",
+          ...directories.flatMap((directory) => ["--scan-dir", directory]),
+          "--to",
+          "cloud",
+          "--json",
+        ],
         stdout.stream,
         stderr.stream,
         deps,
@@ -154,7 +163,14 @@ describe("publish scan to Cloud", () => {
         const stderr = capture();
         expect(
           await main(
-            ["publish", "scan", ...directories, "--to", "cloud", "--json"],
+            [
+              "publish",
+              "scan",
+              ...directories.flatMap((directory) => ["--scan-dir", directory]),
+              "--to",
+              "cloud",
+              "--json",
+            ],
             stdout.stream,
             stderr.stream,
             deps,
@@ -206,6 +222,7 @@ describe("publish scan to Cloud", () => {
           "publish",
           "scan",
           "scan-one",
+          "--scan-dir",
           "scan-two",
           "--to",
           "linear",
@@ -223,58 +240,143 @@ describe("publish scan to Cloud", () => {
     expect(stderr.text()).toContain("Multiple scan directories");
   });
 
-  test("routes explicit scans to Cloud without initializing Codex or Linear", async () => {
-    for (const destination of [["--to=cloud"], ["--to", "cloud"]]) {
-      for (const dryRun of [false, true]) {
-        const currentDirectory = join(tmpdir(), "cloud-publish-current");
-        const deps = dependencies({
-          currentDirectory,
-          environment: { CODEX_SECURITY_LINEAR_API_KEY: " " },
-          onWorkbench: () => {
-            throw new Error("must not inspect scan history");
-          },
-        });
-        deps.createSecurity = () => {
-          throw new Error("must not initialize Codex");
-        };
-        deps.publishScan = async () => {
-          throw new Error("must not publish to Linear");
-        };
-        let calls = 0;
-        const result = dryRun
-          ? { ...receipt, findingIds: [], dryRun: true as const, findings: [] }
-          : receipt;
-        deps.publishScanToCloud = async (directory, options) => {
-          calls++;
-          expect(directory).toBe(join(currentDirectory, "completed-scan"));
-          expect(options).toEqual({
-            environment: deps.environment,
-            dryRun,
-            signal: expect.any(AbortSignal),
+  test.each(["positional", "flag"])(
+    "routes an explicit %s scan to Cloud without initializing Codex or Linear",
+    async (syntax) => {
+      for (const destination of [["--to=cloud"], ["--to", "cloud"]]) {
+        for (const dryRun of [false, true]) {
+          const currentDirectory = join(tmpdir(), "cloud-publish-current");
+          const deps = dependencies({
+            currentDirectory,
+            environment: { CODEX_SECURITY_LINEAR_API_KEY: " " },
+            onWorkbench: () => {
+              throw new Error("must not inspect scan history");
+            },
           });
-          return result;
-        };
-        const stdout = capture();
-        const stderr = capture();
-        expect(
-          await main(
-            [
-              "publish",
-              "scan",
-              "completed-scan",
-              ...destination,
-              "--json",
-              ...(dryRun ? ["--dry-run"] : []),
-            ],
-            stdout.stream,
-            stderr.stream,
-            deps,
-          ),
-        ).toBe(0);
-        expect(calls).toBe(1);
-        expect(JSON.parse(stdout.text())).toEqual(result);
-        expect(stderr.text()).toBe("");
+          deps.createSecurity = () => {
+            throw new Error("must not initialize Codex");
+          };
+          deps.publishScan = async () => {
+            throw new Error("must not publish to Linear");
+          };
+          let calls = 0;
+          const result = dryRun
+            ? {
+                ...receipt,
+                findingIds: [],
+                dryRun: true as const,
+                findings: [],
+              }
+            : receipt;
+          deps.publishScanToCloud = async (directory, options) => {
+            calls++;
+            expect(directory).toBe(join(currentDirectory, "completed-scan"));
+            expect(options).toEqual({
+              environment: deps.environment,
+              dryRun,
+              signal: expect.any(AbortSignal),
+            });
+            return result;
+          };
+          const stdout = capture();
+          const stderr = capture();
+          expect(
+            await main(
+              [
+                "publish",
+                "scan",
+                ...(syntax === "flag"
+                  ? ["--scan-dir", "completed-scan"]
+                  : ["completed-scan"]),
+                ...destination,
+                "--json",
+                ...(dryRun ? ["--dry-run"] : []),
+              ],
+              stdout.stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(0);
+          expect(calls).toBe(1);
+          expect(JSON.parse(stdout.text())).toEqual(result);
+          expect(stderr.text()).toBe("");
+        }
       }
+    },
+  );
+
+  test("expands home-relative scan inputs and deduplicates mixed positional and flag paths", async () => {
+    const first = join(homedir(), "scan-one");
+    const second = join(homedir(), "scan-two");
+    for (const { inputs, expected } of [
+      { inputs: ["~/scan-one"], expected: [first] },
+      {
+        inputs: ["--scan-dir", "~/scan-one", "--scan-dir", first],
+        expected: [first],
+      },
+      {
+        inputs: ["~/scan-one", "--scan-dir", first, "--scan-dir", "~/scan-two"],
+        expected: [first, second],
+      },
+    ]) {
+      const deps = dependencies({
+        onWorkbench: () => {
+          throw new Error("must not inspect scan history");
+        },
+      });
+      const calls: string[] = [];
+      deps.publishScanToCloud = async (directory) => {
+        calls.push(directory);
+        return receipt;
+      };
+      const stdout = capture();
+      expect(
+        await main(
+          ["publish", "scan", ...inputs, "--to", "cloud", "--json"],
+          stdout.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toEqual(expected);
+      expect(JSON.parse(stdout.text())).toEqual(
+        expected.length === 1
+          ? receipt
+          : {
+              results: expected.map((scanDir) => ({ scanDir, ...receipt })),
+              failed: [],
+              notAttempted: [],
+            },
+      );
+    }
+  });
+
+  test("rejects missing or empty scan flags and extra positionals before publishing", async () => {
+    for (const inputs of [
+      ["--scan-dir"],
+      ["--scan-dir="],
+      ["--scan-dir", "--json"],
+      ["scan-one", "scan-two"],
+    ]) {
+      const deps = dependencies();
+      let calls = 0;
+      deps.publishScanToCloud = async () => {
+        calls++;
+        return receipt;
+      };
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["publish", "scan", ...inputs, "--to", "cloud"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(calls).toBe(0);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).not.toBe("");
     }
   });
 

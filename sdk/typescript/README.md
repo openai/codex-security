@@ -588,17 +588,26 @@ same command to resume.
 
 ### Publish multiple completed scans to Cloud
 
-Pass multiple completed, sealed scan directories to publish them in one command:
+Repeat `--scan-dir` to publish multiple completed, sealed scan directories in
+one command:
 
 ```bash
-npx @openai/codex-security publish scan /path/to/scan-a /path/to/scan-b \
+npx @openai/codex-security publish scan \
+  --scan-dir /path/to/scan-a --scan-dir /path/to/scan-b \
   --to cloud --dry-run --json
 ```
 
 The preview validates every scan without uploading or requiring credentials.
 Remove `--dry-run` to publish using a file-backed ChatGPT login. Scans are sent
 sequentially, with each scan's findings and provenance in its own request.
-Repeated paths are resolved and published only once per invocation.
+Relative and home-relative (`~/...`) paths use the same resolution as other
+CLI commands. Repeated resolved paths are published only once per invocation.
+
+The existing `publish scan /path/to/scan --to cloud` form still works. You can
+combine that single positional directory with `--scan-dir` flags; additional
+bare positional directories are not accepted. With no directory, the existing
+interactive picker selects one saved scan. These inputs name individual scan
+directories, not a bulk-scan results directory or `results.jsonl` file.
 
 Batch output contains `results` (one receipt or dry-run preview per successful
 scan, including its `scanDir`), `failed` (scan directories and errors), and
@@ -609,8 +618,8 @@ SIGTERM stop new requests, preserve completed receipts, and return `130` and
 
 Requests are never retried automatically. An unconfirmed upload may already
 have been accepted: check acceptance before resubmitting, and do not rerun the
-whole batch blindly. Single-scan publication keeps its existing output shape
-and interactive picker. Linear publication still accepts only one scan.
+whole batch blindly. Selecting one unique scan keeps the existing single-scan
+output shape. Linear accepts one scan, supplied positionally or by `--scan-dir`.
 
 ### Publish completed scans to Linear
 
