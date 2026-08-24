@@ -586,6 +586,32 @@ and scans stopped at their configured cost limit do not start another turn.
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
 
+### Publish multiple completed scans to Cloud
+
+Pass multiple completed, sealed scan directories to publish them in one command:
+
+```bash
+npx @openai/codex-security publish scan /path/to/scan-a /path/to/scan-b \
+  --to cloud --dry-run --json
+```
+
+The preview validates every scan without uploading or requiring credentials.
+Remove `--dry-run` to publish using a file-backed ChatGPT login. Scans are sent
+sequentially, with each scan's findings and provenance in its own request.
+Repeated paths are resolved and published only once per invocation.
+
+Batch output contains `results` (one receipt or dry-run preview per successful
+scan, including its `scanDir`), `failed` (scan directories and errors), and
+`notAttempted` (directories left after cancellation). A failed scan does not
+stop the remaining scans; any failure produces exit code `2`. Ctrl-C and
+SIGTERM stop new requests, preserve completed receipts, and return `130` and
+`143`, respectively.
+
+Requests are never retried automatically. An unconfirmed upload may already
+have been accepted: check acceptance before resubmitting, and do not rerun the
+whole batch blindly. Single-scan publication keeps its existing output shape
+and interactive picker. Linear publication still accepts only one scan.
+
 ### Publish completed scans to Linear
 
 Publish every finding from a completed standard, deep, or scoped scan to one

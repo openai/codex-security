@@ -55,7 +55,10 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
-import { publishScanToCloud } from "./cloud-publish.js";
+import {
+  publishScanToCloud,
+  type CloudPublicationResult,
+} from "./cloud-publish.js";
 import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
@@ -1843,6 +1846,12 @@ export async function main(
         .string()
         .optional()
         .describe("Completed scan directory; omit to select a saved scan."),
+      "additionalScanDirs...": z
+        .string()
+        .optional()
+        .describe(
+          "Additional completed scan directories; not supported by Linear.",
+        ),
     }),
     options: z.object({
       // Cloud remains an internal destination, omitted from public discovery.
@@ -1879,6 +1888,13 @@ export async function main(
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
       let presentation: PublicationProgressPresenter | undefined;
+      let cloudBatch:
+        | {
+            results: (CloudPublicationResult & { scanDir: string })[];
+            failed: { scanDir: string; error: string }[];
+            notAttempted: string[];
+          }
+        | undefined;
       const cancel = (signal: SignalName): void => {
         presentation?.stop();
         controller.abort(signal);
@@ -1887,6 +1903,11 @@ export async function main(
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
       try {
+        if (positionals.length > 1 && options.to !== "cloud") {
+          throw new CodexSecurityError(
+            "Multiple scan directories are only supported with --to cloud.",
+          );
+        }
         if (
           options.to === "cloud" &&
           [
@@ -2111,6 +2132,46 @@ export async function main(
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
+          if (positionals.length > 1) {
+            const directories = [
+              ...new Set(
+                positionals.map((directory) =>
+                  resolve(dependencies.currentDirectory(), directory),
+                ),
+              ),
+            ];
+            cloudBatch = {
+              results: [],
+              failed: [],
+              notAttempted: [...directories],
+            };
+            // Keep each scan's provenance and acceptance receipt separate. Never
+            // retry a failed POST: a lost response may still have been accepted.
+            for (const directory of directories) {
+              controller.signal.throwIfAborted();
+              cloudBatch.notAttempted.shift();
+              try {
+                const result = await (
+                  dependencies.publishScanToCloud ?? publishScanToCloud
+                )(directory, {
+                  environment: dependencies.environment,
+                  dryRun: options.dryRun,
+                  signal: controller.signal,
+                });
+                cloudBatch.results.push({ scanDir: directory, ...result });
+              } catch (error) {
+                const message = safeErrorMessage(error);
+                cloudBatch.failed.push({ scanDir: directory, error: message });
+                if (controller.signal.aborted) throw error;
+                exitCode = 2;
+                errorOutput.write(
+                  `codex-security: ${diagnosticValue(safeErrorMessage(directory))}: ${diagnosticValue(message)}\n`,
+                );
+              }
+            }
+            controller.signal.throwIfAborted();
+            return cloudBatch;
+          }
           const result = await (
             dependencies.publishScanToCloud ?? publishScanToCloud
           )(resolve(dependencies.currentDirectory(), scanDir), {
@@ -2200,7 +2261,7 @@ export async function main(
           );
           exitCode = 2;
         }
-        return undefined;
+        return cloudBatch;
       } finally {
         if (observingSignals) {
           dependencies.removeSignalListener("SIGINT", onInterrupt);
@@ -3755,6 +3816,7 @@ function validateCliArguments(
     command !== "validate" &&
     command !== "verify-fix" &&
     command !== "patch" &&
+    !(command === "publish" && subcommand === "scan") &&
     positionals.length >
       (command === "logout" || command === "info"
         ? 0

@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -17,6 +17,212 @@ const receipt = {
 };
 
 describe("publish scan to Cloud", () => {
+  test("publishes multiple explicit scans in order and deduplicates resolved paths", async () => {
+    for (const dryRun of [false, true]) {
+      const deps = dependencies({
+        onWorkbench: () => {
+          throw new Error("must not inspect scan history");
+        },
+      });
+      deps.createSecurity = () => {
+        throw new Error("must not initialize Codex");
+      };
+      deps.publishScan = async () => {
+        throw new Error("must not publish to Linear");
+      };
+      const directories = ["scan one", "scan-two"].map((path) =>
+        resolve(deps.currentDirectory(), path),
+      );
+      const calls: string[] = [];
+      let publishing = false;
+      const results = directories.map((scanDir, index) => ({
+        scanDir,
+        scanId: `scan-${index + 1}`,
+        findingIds: dryRun ? [] : [`finding-${index + 1}`],
+        findingCount: 1,
+        ...(dryRun ? { dryRun: true as const, findings: [] } : {}),
+      }));
+      deps.publishScanToCloud = async (directory, options) => {
+        expect(publishing).toBe(false);
+        publishing = true;
+        expect(directory).toBe(directories[calls.length]!);
+        expect(options).toEqual({
+          environment: deps.environment,
+          dryRun,
+          signal: expect.any(AbortSignal),
+        });
+        const { scanDir: _, ...result } = results[calls.length]!;
+        calls.push(directory);
+        await Promise.resolve();
+        publishing = false;
+        return result;
+      };
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "scan one",
+            "--to=cloud",
+            "scan-two",
+            "./scan one",
+            "--json",
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toEqual(directories);
+      expect(JSON.parse(stdout.text())).toEqual({
+        results,
+        failed: [],
+        notAttempted: [],
+      });
+      expect(stderr.text()).toBe("");
+    }
+  });
+
+  test("keeps receipts and continues after a failed scan without retrying", async () => {
+    const deps = dependencies();
+    const directories = ["scan-one", "scan-two", "scan-three"].map((path) =>
+      resolve(deps.currentDirectory(), path),
+    );
+    const calls: string[] = [];
+    deps.publishScanToCloud = async (directory) => {
+      calls.push(directory);
+      if (directory === directories[1]) {
+        throw new Error(`Cloud failed: ${SYNTHETIC_CREDENTIALS}`);
+      }
+      return {
+        ...receipt,
+        scanId: directory === directories[0] ? "scan-1" : "scan-3",
+      };
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", ...directories, "--to", "cloud", "--json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(calls).toEqual(directories);
+    expect(JSON.parse(stdout.text())).toEqual({
+      results: [
+        { scanDir: directories[0], ...receipt },
+        { scanDir: directories[2], ...receipt, scanId: "scan-3" },
+      ],
+      failed: [{ scanDir: directories[1], error: "[redacted]" }],
+      notAttempted: [],
+    });
+    expect(stderr.text()).toContain("[redacted]");
+    expect(stderr.text()).not.toContain(SYNTHETIC_CREDENTIALS);
+  });
+
+  test.each([false, true])(
+    "preserves batch receipts on cancellation with a confirmed response: %s",
+    async (confirmed) => {
+      for (const [signal, code] of [
+        ["SIGINT", 130],
+        ["SIGTERM", 143],
+      ] as const) {
+        const signals = new FakeSignals();
+        const deps = dependencies({ signals });
+        const directories = ["scan-one", "scan-two", "scan-three"].map((path) =>
+          resolve(deps.currentDirectory(), path),
+        );
+        const calls: string[] = [];
+        deps.publishScanToCloud = async (directory, options) => {
+          calls.push(directory);
+          if (directory === directories[1]) {
+            signals.emit(signal);
+            expect(options?.signal?.aborted).toBe(true);
+            if (confirmed) return { ...receipt, scanId: "scan-2" };
+            throw new Error(
+              "Cloud publication was not confirmed. Check acceptance before resubmitting.",
+            );
+          }
+          return receipt;
+        };
+        const stdout = capture();
+        const stderr = capture();
+        expect(
+          await main(
+            ["publish", "scan", ...directories, "--to", "cloud", "--json"],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(code);
+        expect(calls).toEqual(directories.slice(0, 2));
+        expect(JSON.parse(stdout.text())).toEqual({
+          results: [
+            { scanDir: directories[0], ...receipt },
+            ...(confirmed
+              ? [{ scanDir: directories[1], ...receipt, scanId: "scan-2" }]
+              : []),
+          ],
+          failed: confirmed
+            ? []
+            : [
+                {
+                  scanDir: directories[1],
+                  error:
+                    "Cloud publication was not confirmed. Check acceptance before resubmitting.",
+                },
+              ],
+          notAttempted: [directories[2]],
+        });
+        expect(stderr.text()).toContain(
+          signal === "SIGINT" ? "canceled" : "terminated",
+        );
+        expect(
+          [...signals.listeners.values()].every(
+            (listeners) => listeners.size === 0,
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+
+  test("rejects multiple scans for Linear before publishing any findings", async () => {
+    const deps = dependencies();
+    let calls = 0;
+    deps.publishScan = async () => {
+      calls++;
+      throw new Error("unexpected publication");
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "scan-one",
+          "scan-two",
+          "--to",
+          "linear",
+          "--linear-team",
+          "synthetic-team",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(calls).toBe(0);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain("Multiple scan directories");
+  });
+
   test("routes explicit scans to Cloud without initializing Codex or Linear", async () => {
     for (const destination of [["--to=cloud"], ["--to", "cloud"]]) {
       for (const dryRun of [false, true]) {
