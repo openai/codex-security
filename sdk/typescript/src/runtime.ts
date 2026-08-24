@@ -24,6 +24,7 @@ import {
   rm,
   rmdir,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -75,6 +76,7 @@ const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOCK_DATABASE = ".codex-security-scan.sqlite3";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
+const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
@@ -1149,6 +1151,15 @@ export async function acquireCodexSecurityCredentialHomeLock(
         throw error;
       }
 
+      // Released clients use the directory heartbeat instead of the SQLite lock.
+      const heartbeat = setInterval(async () => {
+        try {
+          const now = new Date();
+          await utimes(lock, now, now);
+        } catch {}
+      }, CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS);
+      heartbeat.unref();
+
       let released = false;
       return async () => {
         if (released) return;
@@ -1169,6 +1180,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
           }
           await rm(lock, { recursive: true, force: true });
         } finally {
+          clearInterval(heartbeat);
           database.close();
         }
       };

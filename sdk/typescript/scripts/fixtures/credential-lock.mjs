@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile, utimes, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { promisify } from "node:util";
 
 const [runtimeUrl, directory, mode] = process.argv.slice(2);
 const {
@@ -20,6 +29,30 @@ if (mode === "hold") {
   // can exit if its parent dies.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20_000);
   await release();
+} else if (mode === "legacy") {
+  const lock = join(directory, ".codex-security-scan.lock");
+  const ownerPath = join(lock, "owner.json");
+  const original = await lstat(lock);
+  assert.ok(Date.now() - original.mtimeMs >= 30_000);
+  process.kill(JSON.parse(await readFile(ownerPath, "utf8")).pid, 0);
+
+  // Released 0.1.18 clients wait one heartbeat before reclaiming an aged
+  // directory, even when its recorded owner is still running.
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  if ((await lstat(lock)).mtimeMs > original.mtimeMs) {
+    process.stdout.write("legacy blocked\n");
+  } else {
+    const quarantine = `${lock}.stale-legacy-fixture`;
+    await rename(lock, quarantine);
+    await rm(quarantine, { recursive: true, force: true });
+    await mkdir(lock, { mode: 0o700 });
+    await writeFile(
+      ownerPath,
+      `${JSON.stringify({ pid: process.pid, token: "legacy-fixture" })}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+    process.stdout.write("legacy acquired\n");
+  }
 } else {
   const home = await prepare({ CODEX_SECURITY_STATE_DIR: directory });
   const lock = join(home, ".codex-security-scan.lock");
@@ -54,10 +87,20 @@ if (mode === "hold") {
   let release;
   try {
     await expectOutput("locked");
+    const activeOwner = await readFile(ownerPath, "utf8");
+    const stale = new Date(Date.now() - 60_000);
+    await utimes(lock, stale, stale);
+    const legacy = await promisify(execFile)(
+      process.execPath,
+      [process.argv[1], runtimeUrl, home, "legacy"],
+      { timeout: 10_000, windowsHide: true },
+    );
+    assert.equal(legacy.stdout.trim(), "legacy blocked");
+    assert.equal(await readFile(ownerPath, "utf8"), activeOwner);
+
     holder.stdin.write("block\n");
     await expectOutput("blocked");
     const owner = JSON.parse(await readFile(ownerPath, "utf8"));
-    const stale = new Date(Date.now() - 60_000);
     await utimes(lock, stale, stale);
 
     const controller = new AbortController();
@@ -89,7 +132,7 @@ if (mode === "hold") {
     await release();
     release = undefined;
     console.log(
-      "Paused owner protected; crashed owner with reused PID recovered.",
+      "Active owner protected from released clients; paused owner protected; crashed owner with reused PID recovered.",
     );
   } finally {
     holder.kill("SIGKILL");

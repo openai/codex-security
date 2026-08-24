@@ -2365,7 +2365,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await release();
   });
 
-  test("protects a stalled credential-lock owner and recovers after a crash with a reused PID", async () => {
+  test("protects active and stalled credential-lock owners and recovers after a crash with a reused PID", async () => {
     const root = await temporaryDirectory();
     await promisify(execFile)(
       process.execPath,
