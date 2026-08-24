@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -26,7 +27,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_validation import optional_text, require_uuid, user_text
+from workbench_validation import optional_text, require_uuid, user_context_argument
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
 DEEP_SCAN_WORKER_STATUSES = ("queued", "running", "succeeded", "failed", "canceled")
@@ -39,6 +40,8 @@ DEEP_SCAN_TERMINAL_REASONS = ("saturated", "capped")
 DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v1"
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
+DEEP_SCAN_MAX_ERROR_LENGTH = 2400
+DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR = "\nOriginal Deep Scan failure:\n"
 
 
 def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) -> None:
@@ -48,7 +51,9 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     begin_target.add_argument("--scan-id")
     begin_target.add_argument("--target-path")
     begin_deep_scan.add_argument("--scope", default=".")
-    begin_deep_scan.add_argument("--user-context")
+    begin_user_context = begin_deep_scan.add_mutually_exclusive_group()
+    begin_user_context.add_argument("--user-context")
+    begin_user_context.add_argument("--user-context-stdin", action="store_true")
     begin_deep_scan.add_argument("--scan-root")
     begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--model")
@@ -118,6 +123,11 @@ def register_subcommands(subparsers: Any, positive_int: Callable[[str], int]) ->
     )
     fail_deep_scan.add_argument("--coordinator-generation", type=positive_int)
 
+    publication_failure = subparsers.add_parser("record-deep-scan-publication-failure")
+    publication_failure.add_argument("--scan-id", required=True)
+    publication_failure.add_argument("--message", required=True)
+    publication_failure.add_argument("--coordinator-generation", type=positive_int)
+
 
 def non_negative_int(value: str) -> int:
     parsed = int(value)
@@ -141,6 +151,7 @@ class DeepScanDependencies:
     safe_segment: Callable[[str], str]
     compact_timestamp: Callable[[], str]
     scan_completion_lock: Callable[[str], Any]
+    preserve_stopped_results: Callable[[sqlite3.Connection, str], None]
 
 
 _dependencies: DeepScanDependencies | None = None
@@ -159,6 +170,34 @@ def dependencies() -> DeepScanDependencies:
 
 def now() -> str:
     return dependencies().now()
+
+
+def _bounded_error_text(message: str, maximum: int) -> str:
+    if len(message) <= maximum:
+        return message
+    digest = hashlib.sha256(message.encode()).hexdigest()
+    suffix = f"\n...[truncated; sha256:{digest}]"
+    if len(suffix) >= maximum:
+        return message[:maximum]
+    return f"{message[: maximum - len(suffix)]}{suffix}"
+
+
+def deep_scan_error(run: sqlite3.Row) -> str | None:
+    original = run["error_message"]
+    publication = run["publication_error_message"]
+    if not isinstance(publication, str):
+        return original if isinstance(original, str) else None
+    if not isinstance(original, str):
+        return publication
+    available = DEEP_SCAN_MAX_ERROR_LENGTH - len(DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR)
+    publication_budget = min(len(publication), available // 2)
+    original_budget = min(len(original), available - publication_budget)
+    publication_budget = min(len(publication), available - original_budget)
+    return (
+        _bounded_error_text(publication, publication_budget)
+        + DEEP_SCAN_PUBLICATION_ERROR_SEPARATOR
+        + _bounded_error_text(original, original_budget)
+    )
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -437,7 +476,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "canonicalArtifacts": canonical_artifacts,
         "manifestPath": run["manifest_path"],
         "terminalReason": run["terminal_reason"],
-        "error": run["error_message"],
+        "error": deep_scan_error(run),
         "createdAt": run["created_at"],
         "updatedAt": run["updated_at"],
         "completedAt": run["completed_at"],
@@ -795,7 +834,7 @@ def begin_deep_scan_for_target(
         if target_root == target or target in target_root.parents:
             raise SystemExit("The scan artifact directory must be outside the selected target.")
         target_root.mkdir(parents=True, exist_ok=True)
-        user_context = user_text(args.user_context)
+        user_context = user_context_argument(args)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
@@ -884,7 +923,7 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
     if thread_id is None:
         raise SystemExit("thread-id is required.")
     if args.scan_id:
-        if args.user_context is not None or args.scope != ".":
+        if args.user_context is not None or args.user_context_stdin or args.scope != ".":
             raise SystemExit("scan-id cannot be combined with target setup fields.")
         return begin_deep_scan_for_scan(connection, args.scan_id, thread_id, args)
     if args.claim_token is not None:
@@ -2020,7 +2059,57 @@ def fail_deep_scan_locked(
         raise
     if promotion is not None:
         finish_staged_file(promotion)
+    dependencies().preserve_stopped_results(connection, scan_id)
     return deep_scan_result(connection, scan_id)
+
+
+def record_deep_scan_publication_failure(
+    connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    scan_id = require_uuid(args.scan_id, "scan-id")
+    message = optional_text(args.message, maximum=2400)
+    if message is None:
+        raise SystemExit("message is required.")
+    with scan_completion_lock(scan_id):
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            run = require_deep_scan_run(connection, scan_id)
+            require_current_coordinator(run, args)
+            scan = require_scan(connection, scan_id)
+            if (
+                run["status"] not in {"failed", "canceled", "interrupted"}
+                or scan["status"] != "failed"
+            ):
+                raise SystemExit(
+                    "Saved result publication failures can only update a stopped Deep Scan."
+                )
+            if scan["seal_manifest_digest"] is not None:
+                connection.commit()
+                return deep_scan_result(connection, scan_id)
+            if run["publication_error_message"] != message:
+                timestamp = now()
+                connection.execute(
+                    """
+                    UPDATE deep_scan_runs
+                    SET publication_error_message = ?, updated_at = ?
+                    WHERE scan_id = ?
+                    """,
+                    (message, timestamp, scan_id),
+                )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+    return deep_scan_result(connection, scan_id)
+
+
+def clear_deep_scan_publication_failure(connection: sqlite3.Connection, scan_id: str) -> None:
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET publication_error_message = NULL, updated_at = ? "
+            "WHERE scan_id = ? AND publication_error_message IS NOT NULL",
+            (now(), scan_id),
+        )
 
 
 def fail_from_parent_scan(

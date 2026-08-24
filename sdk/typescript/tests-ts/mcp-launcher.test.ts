@@ -60,7 +60,9 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
           CODEX_MCP_NODE_PATH: managedNode,
         },
         encoding: "utf8",
-        timeout: 10_000,
+        // Bun 1.3.14 can report an immediate ETIMEDOUT for synchronous
+        // Windows .cmd launches. The enclosing test timeout still bounds it.
+        ...(windows ? {} : { timeout: 10_000 }),
         windowsHide: true,
         windowsVerbatimArguments: windows,
         input:

@@ -1,8 +1,7 @@
-import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { resolvePluginPython } from "../src/runtime.js";
+import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 test("loads each scan's matching findings once across historical batches", async () => {
@@ -33,8 +32,8 @@ test("loads each scan's matching findings once across historical batches", async
     "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': sum('FROM finding_occurrences AS occurrences' in query for query in queries)}))",
   ].join("\n");
 
-  const result = spawnSync(
-    python,
+  const result = await runCodexCommand(
+    { command: python },
     [
       "-I",
       "-B",
@@ -42,10 +41,12 @@ test("loads each scan's matching findings once across historical batches", async
       join(PLUGIN_ROOT, "scripts"),
       join(tmpdir(), "codex-security-matching-fixture"),
     ],
-    { input: probe, encoding: "utf8", timeout: 10_000, windowsHide: true },
+    process.env,
+    probe,
+    AbortSignal.timeout(10_000),
   );
 
-  expect(result.status, result.stderr || result.error?.message).toBe(0);
+  expect(result.exitCode, result.stderr).toBe(0);
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toMatchObject({
     backfilled: ["scan-0", "scan-1", "scan-2"],
@@ -61,4 +62,50 @@ test("loads each scan's matching findings once across historical batches", async
       ],
     },
   });
+});
+
+test("loads oversized comparison matches from stdin", async () => {
+  const python = await resolvePluginPython();
+
+  const probe = [
+    "import argparse, io, json, sqlite3, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "connection = sqlite3.connect(':memory:')",
+    "connection.row_factory = sqlite3.Row",
+    "connection.executescript('''",
+    "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT, created_at TEXT, updated_at TEXT);",
+    "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT);",
+    "''')",
+    "scans = {'before': {'id': 'before', 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'}, 'after': {'id': 'after', 'status': 'complete', 'target_id': 'target', 'target_path': '/repo'}}",
+    "findings = {'before': {'old': {'id': 'old'}}, 'after': {'new': {'id': 'new'}}}",
+    "history._scan_findings = lambda _connection, scan_id: findings[scan_id]",
+    "history.compare_scans = lambda *_args, **_kwargs: {'saved': True}",
+    "payload = sys.stdin.read()",
+    "sys.stdin = io.StringIO(payload)",
+    "result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {})",
+    "print(json.dumps(result))",
+  ].join("\n");
+  const payload = JSON.stringify({
+    matches: [
+      {
+        beforeOccurrenceIds: ["old"],
+        afterOccurrenceIds: ["new"],
+        reason: "x".repeat(64 * 1024),
+      },
+    ],
+    uncertain: [],
+  });
+
+  const result = await runCodexCommand(
+    { command: python },
+    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
+    process.env,
+    payload,
+    AbortSignal.timeout(10_000),
+  );
+
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual({ saved: true });
 });

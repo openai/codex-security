@@ -98,6 +98,8 @@ import {
 } from "./linear.js";
 import type { Finding, SeverityLevel } from "./models.js";
 import { runMultiscan } from "./multiscan.js";
+import { componentPlanSchema, planComponents } from "./component-plan.js";
+import { runComponentScans } from "./component-scan.js";
 import {
   publishScan,
   type PublishScanProgress,
@@ -111,6 +113,7 @@ import {
   codexSecurityStateDirectory,
   expandHome,
   prepareCodexSecurityCredentialHome,
+  pythonUtf8Environment,
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
@@ -130,11 +133,10 @@ import {
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
 import type { PatchSelection } from "./patch-tui.js";
-import type {
-  ScanPhase,
-  ScanProgress,
-  ScanWorkerPhase,
-  ScanWorkerStatus,
+import {
+  scanPhaseLabel as scanPhase,
+  type ScanProgress,
+  type ScanWorkerStatus,
 } from "./worker-progress.js";
 import {
   abortable,
@@ -213,9 +215,13 @@ const EXPORT_DEFAULT_OUTPUTS = {
 } as const;
 const VALUE_OPTIONS = new Set([
   "--auth",
+  "--safety-identifier",
   "--path",
+  "--component",
+  "--components-file",
   "--knowledge-base",
   "--scan-prompt-file",
+  "--validation-prompt-file",
   "--post-scan-prompt-file",
   "--diff",
   "--head",
@@ -758,8 +764,11 @@ async function readPromptFiles(
   scanPromptFile?: string,
   postScanPromptFile?: string,
   repository = directory,
-): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
-  const [scanPrompt, postScanPrompt] = await Promise.all([
+  validationPromptFile?: string,
+): Promise<
+  Pick<ScanOptions, "scanPrompt" | "validationPrompt" | "postScanPrompt">
+> {
+  const [scanPrompt, postScanPrompt, validationPrompt] = await Promise.all([
     scanPromptFile === undefined
       ? undefined
       : readRegularInputFile(
@@ -772,9 +781,19 @@ async function readPromptFiles(
           resolveCliPath(directory, postScanPromptFile),
           repository,
         ),
+    validationPromptFile === undefined
+      ? undefined
+      : readRegularInputFile(
+          resolveCliPath(directory, validationPromptFile),
+          repository,
+        ),
   ]);
+  if (validationPrompt !== undefined && !validationPrompt.trim()) {
+    throw new CodexSecurityError("The validation prompt must not be empty.");
+  }
   return {
     ...(scanPrompt?.trim() ? { scanPrompt } : {}),
+    ...(validationPrompt === undefined ? {} : { validationPrompt }),
     ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
   };
 }
@@ -831,11 +850,13 @@ export function resolveCliPath(directory: string, value: string): string {
 
 interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
+  safetyIdentifier?: string;
   verbose?: boolean;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
   scanPromptFile?: string;
+  validationPromptFile?: string;
   postScanPromptFile?: string;
   diff?: string;
   workingTree: boolean;
@@ -921,6 +942,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
@@ -971,6 +993,7 @@ interface CliDependencies {
     args: readonly string[],
     output?: SkillCommandOutput,
     environment?: NodeJS.ProcessEnv,
+    input?: string,
   ): Promise<number>;
   runRepositoryCommand(
     command: "git" | "gh",
@@ -978,8 +1001,9 @@ interface CliDependencies {
     repository: string,
   ): Promise<string>;
   bulkScan?: BulkScanDiscoveryDependencies;
+  planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
-  runWorkbench(args: readonly string[]): Promise<JsonObject>;
+  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
@@ -1037,12 +1061,13 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     writeSync(stream.fd, value);
   },
   forceExit: (signal) => process.kill(process.pid, signal),
-  runCodex: (args, output, environment) =>
+  runCodex: (args, output, environment, input) =>
     runCodexSkillCommand(
       args,
       output,
       resolveCodexCommand(environment),
       environment,
+      input,
     ),
   runRepositoryCommand: async (command, args, repository) => {
     const executable = await resolveTrustedExecutable(
@@ -1073,6 +1098,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       python,
       [
         "-I",
+        "-X",
+        "utf8",
         join(plugin, "scripts", "finalize_scan_contract.py"),
         "--scan-dir",
         arguments_.scanDir,
@@ -1124,7 +1151,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
-  runWorkbench: async (args) => {
+  runWorkbench: async (args, input) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -1138,6 +1165,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
+      input,
     );
   },
   matchFindings: (input, options) =>
@@ -1149,6 +1177,7 @@ export async function runCodexSkillCommand(
   output?: SkillCommandOutput,
   command: CodexCommand = resolveCodexCommand(),
   processEnvironment: NodeJS.ProcessEnv = process.env,
+  input?: string,
 ): Promise<number> {
   const configuredHome = processEnvironment["CODEX_HOME"];
   const environment = { ...processEnvironment };
@@ -1165,10 +1194,22 @@ export async function runCodexSkillCommand(
     cwd: output?.appServer?.directory ?? parse(process.execPath).root,
     stdio:
       output === undefined
-        ? "inherit"
-        : [output.appServer === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+        ? input === undefined
+          ? "inherit"
+          : ["pipe", "inherit", "inherit"]
+        : [
+            output.appServer !== undefined || input !== undefined
+              ? "pipe"
+              : "ignore",
+            "pipe",
+            "pipe",
+          ],
     windowsHide: true,
   });
+  if (input !== undefined) {
+    invocation.stdin?.on("error", () => {});
+    invocation.stdin?.end(input);
+  }
   let requestedSignal: SignalName | null = null;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
@@ -1332,24 +1373,26 @@ async function writeCliOutput(
 export function exportEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    [
-      "PATH",
-      "Path",
-      "PATHEXT",
-      "SystemRoot",
-      "SYSTEMROOT",
-      "WINDIR",
-      "TMP",
-      "TEMP",
-      "TMPDIR",
-      "PYTHON",
-      "LANG",
-      "LC_ALL",
-      "LC_CTYPE",
-    ]
-      .filter((key) => environment[key] !== undefined)
-      .map((key) => [key, environment[key]]),
+  return pythonUtf8Environment(
+    Object.fromEntries(
+      [
+        "PATH",
+        "Path",
+        "PATHEXT",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TMP",
+        "TEMP",
+        "TMPDIR",
+        "PYTHON",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+      ]
+        .filter((key) => environment[key] !== undefined)
+        .map((key) => [key, environment[key]]),
+    ),
   );
 }
 
@@ -1448,19 +1491,21 @@ export async function main(
       ],
       async ({ matchingCached, matchingInputs, ...comparison }) => {
         if (matchingCached && !force) return comparison;
-        return await dependencies.runWorkbench([
-          "save-scan-comparison",
-          "--before-scan-id",
-          beforeId,
-          "--after-scan-id",
-          afterId,
-          "--matches-json",
+        return await dependencies.runWorkbench(
+          [
+            "save-scan-comparison",
+            "--before-scan-id",
+            beforeId,
+            "--after-scan-id",
+            afterId,
+            "--matches-json-stdin",
+          ],
           JSON.stringify(
             await dependencies.matchFindings(
               matchingInputs as JsonObject & ScanComparisonInput,
             ),
           ),
-        ]);
+        );
       },
     );
   const presentHistory = (
@@ -1713,6 +1758,11 @@ export async function main(
           .describe("Saved scan identifier (default: latest completed scan)."),
       }),
       options: z.object({
+        validationPromptFile: optionValue("--validation-prompt-file")
+          .optional()
+          .describe(
+            "Use FILE for custom validation; required when rerunning a custom-validation scan.",
+          ),
         verbose: z
           .boolean()
           .default(false)
@@ -1729,7 +1779,11 @@ export async function main(
             "--scan-id",
             scanId,
           ]);
-          scanArguments = scanArgumentsFromRecipe(recipe, scanId);
+          scanArguments = scanArgumentsFromRecipe(
+            recipe,
+            scanId,
+            options.validationPromptFile,
+          );
           scanArguments.verbose = options.verbose;
         } catch (error) {
           const message = errorMessage(error);
@@ -2381,6 +2435,11 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Print scan diagnostics to stderr."),
+          safetyIdentifier: optionValue("--safety-identifier")
+            .optional()
+            .describe(
+              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+            ),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -2396,6 +2455,11 @@ export async function main(
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
             .describe("Append scan instructions from FILE."),
+          validationPromptFile: optionValue("--validation-prompt-file")
+            .optional()
+            .describe(
+              "Replace final validation with the workflow in FILE (not Deep).",
+            ),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
             .describe("Run FILE after each scan, including failures."),
@@ -2550,11 +2614,13 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            safetyIdentifier: options.safetyIdentifier,
             verbose: options.verbose,
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
             scanPromptFile: options.scanPromptFile,
+            validationPromptFile: options.validationPromptFile,
             postScanPromptFile: options.postScanPromptFile,
             diff: options.diff,
             workingTree: options.workingTree,
@@ -2679,6 +2745,253 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("scan-components", {
+      description:
+        "Run standard scans for project components and combine the results.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Project directory (default: current directory)."),
+      }),
+      options: z
+        .object({
+          auth: z
+            .enum(SCAN_AUTH_MODES)
+            .default("auto")
+            .describe(
+              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            ),
+          component: z
+            .array(optionValue("--component"))
+            .default([])
+            .describe(
+              "Scan this repository-relative path as a component; repeat for more.",
+            ),
+          componentsFile: optionValue("--components-file")
+            .optional()
+            .describe("Read a component plan from JSON."),
+          auto: z
+            .boolean()
+            .default(false)
+            .describe("Ask Codex to divide the project into components."),
+          planOnly: z
+            .boolean()
+            .default(false)
+            .describe("Save components.json without starting scans."),
+          headless: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Print status lines instead of the interactive dashboard.",
+            ),
+          outputDir: optionValue("--output-dir").describe(
+            "Empty results directory outside the repository.",
+          ),
+          workers: z
+            .number()
+            .int()
+            .positive()
+            .default(4)
+            .describe("Concurrent standard component scans."),
+          knowledgeBase: z
+            .array(optionValue("--knowledge-base"))
+            .default([])
+            .describe("Read shared security docs for every component."),
+          scanPromptFile: optionValue("--scan-prompt-file")
+            .optional()
+            .describe("Append instructions from FILE to every scan."),
+          postScanPromptFile: optionValue("--post-scan-prompt-file")
+            .optional()
+            .describe("Run FILE after each scan, including failures."),
+          model: optionValue("--model")
+            .optional()
+            .describe("Model for planning and component scans."),
+          effort: effortOption(),
+          provider: PROVIDER_OPTION,
+          maxCost: z
+            .number()
+            .positive()
+            .optional()
+            .describe(
+              "Stop each component scan if estimated USD cost exceeds AMOUNT.",
+            ),
+          pluginPath: optionValue("--plugin-path")
+            .optional()
+            .describe(PLUGIN_PATH_DESCRIPTION),
+          python: optionValue("--python")
+            .optional()
+            .describe(PYTHON_PATH_DESCRIPTION),
+          codex: z
+            .array(optionValue("--codex"))
+            .default([])
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
+        })
+        .refine(
+          (options) =>
+            Number(options.component.length > 0) +
+              Number(options.componentsFile !== undefined) +
+              Number(options.auto) ===
+            1,
+          {
+            message:
+              "Choose exactly one of --component, --components-file, or --auto.",
+          },
+        ),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        const controller = new AbortController();
+        let dashboard: ScanDashboard | null = null;
+        const stopDashboard = (): void => {
+          try {
+            dashboard?.stop();
+          } catch {}
+        };
+        const onInterrupt = (): void => controller.abort("SIGINT");
+        const onTerminate = (): void => controller.abort("SIGTERM");
+        const interruptedExitCode = (): number | undefined =>
+          controller.signal.reason === "SIGINT"
+            ? 130
+            : controller.signal.reason === "SIGTERM"
+              ? 143
+              : undefined;
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          const directory = dependencies.currentDirectory();
+          const repository = resolveCliPath(directory, args.repository ?? ".");
+          const config: CodexSecurityConfig = {
+            pluginPath: options.pluginPath,
+            pythonPath: options.python,
+            codexOverrides: parseCodexOverrides(
+              options.codex,
+              options.model,
+              options.effort,
+              options.provider,
+            ),
+          };
+          const components =
+            options.componentsFile === undefined
+              ? options.component.map((path) => ({ name: path, paths: [path] }))
+              : componentPlanSchema.parse(
+                  JSON.parse(
+                    await readRegularInputFile(
+                      resolveCliPath(directory, options.componentsFile),
+                      repository,
+                    ),
+                  ),
+                ).components;
+          if (
+            !options.headless &&
+            !options.planOnly &&
+            errorOutput.isTTY === true &&
+            dependencies.environment["CI"] === undefined &&
+            dependencies.environment["TERM"] !== "dumb"
+          ) {
+            const candidate = new ScanDashboard(errorOutput, {
+              repository,
+              presentation: "components",
+              model: scanModelConfiguration(await mergedCodexConfig(config)),
+              maxCostUsd: options.maxCost,
+              clock: dependencies,
+              color: dependencies.environment["NO_COLOR"] === undefined,
+              sanitize: safeErrorMessage,
+              input: process.stdin,
+              onInterrupt,
+            });
+            candidate.setStage(
+              options.auto ? "Planning components" : "Preparing components",
+            );
+            try {
+              candidate.start();
+              dashboard = candidate;
+            } catch {
+              try {
+                candidate.stop();
+              } catch {}
+            }
+          }
+          const result = await runComponentScans({
+            repository,
+            outputDir: resolveCliPath(directory, options.outputDir),
+            ...(options.auto ? { auto: true } : { components }),
+            planOnly: options.planOnly,
+            workers: options.workers,
+            config,
+            scanOptions: {
+              auth: options.auth,
+              knowledgeBasePaths: options.knowledgeBase.map((path) =>
+                resolveCliPath(directory, path),
+              ),
+              ...(await readPromptFiles(
+                directory,
+                options.scanPromptFile,
+                options.postScanPromptFile,
+                repository,
+              )),
+              ...(options.maxCost === undefined
+                ? {}
+                : { maxCostUsd: options.maxCost }),
+            },
+            createSecurity: dependencies.createSecurity,
+            planComponents: dependencies.planComponents,
+            matchFindings: dependencies.matchFindings,
+            onPlan: (components) => dashboard?.setComponents(components),
+            onScanEvent:
+              dashboard === null
+                ? undefined
+                : (event) => dashboard?.recordComponentEvent(event),
+            onDeduplicationStarted: () => {
+              if (dashboard !== null)
+                dashboard.showComponents("Combining duplicate findings");
+              else
+                errorOutput.write(
+                  "codex-security: Matching component findings by root cause...\n",
+                );
+            },
+            environment: dependencies.environment,
+            signal: controller.signal,
+            onProgress: (component) => {
+              if (dashboard !== null) dashboard.updateComponent(component);
+              else
+                errorOutput.write(
+                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${component.error}`}\n`,
+                );
+            },
+            onComplete: (result) => {
+              dashboard?.finishComponents(result);
+              stopDashboard();
+              errorOutput.write(
+                `Component scans: ${result.completed} complete, ${result.incomplete} incomplete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "incomplete" ? " (matching incomplete)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+              );
+              if (result.retryPlanPath !== undefined)
+                errorOutput.write(
+                  `Retry with --components-file ${JSON.stringify(errorMessage(result.retryPlanPath))} and a new --output-dir.\n`,
+                );
+            },
+          });
+          exitCode =
+            interruptedExitCode() ??
+            (result.failed ||
+            result.incomplete ||
+            result.deduplication?.status === "incomplete"
+              ? 2
+              : 0);
+          return { ...result };
+        } catch (error) {
+          stopDashboard();
+          exitCode = interruptedExitCode() ?? 2;
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+        } finally {
+          stopDashboard();
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("bulk-scan", {
       description:
         "Discover repositories and run resumable bulk security scans.",
@@ -2720,6 +3033,11 @@ export async function main(
         scanPromptFile: optionValue("--scan-prompt-file")
           .optional()
           .describe("Append instructions from FILE to every scan."),
+        validationPromptFile: optionValue("--validation-prompt-file")
+          .optional()
+          .describe(
+            "Replace final validation with FILE for every standard scan.",
+          ),
         postScanPromptFile: optionValue("--post-scan-prompt-file")
           .optional()
           .describe("Run FILE after each scan, including failures."),
@@ -2784,6 +3102,8 @@ export async function main(
             currentDirectory,
             options.scanPromptFile,
             options.postScanPromptFile,
+            currentDirectory,
+            options.validationPromptFile,
           );
           let inputPath: string;
           let outputDir: string;
@@ -3608,10 +3928,19 @@ function defaultListCommand(argv: readonly string[]): readonly string[] {
 function scanArgumentsFromRecipe(
   recipe: JsonValue | undefined,
   parentScanId: string,
+  validationPromptFile?: string,
 ): ScanArguments {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
       "This scan does not have a saved launch recipe.",
+    );
+  }
+  if (
+    recipe["validationMode"] === "custom" &&
+    validationPromptFile === undefined
+  ) {
+    throw new CodexSecurityError(
+      "This scan used custom validation. Supply --validation-prompt-file to rerun it.",
     );
   }
   const repository = recipe["repository"];
@@ -3727,6 +4056,7 @@ function scanArgumentsFromRecipe(
     repository,
     paths,
     knowledgeBasePaths,
+    validationPromptFile,
     diff: kind === "refs" ? reference : undefined,
     workingTree: kind === "working_tree",
     head: kind === "refs" ? head ?? "HEAD" : undefined,
@@ -3759,6 +4089,7 @@ function validateCliArguments(
       "scan",
       "install-hook",
       "bulk-scan",
+      "scan-components",
       "scans",
       "findings",
       "export",
@@ -3960,15 +4291,17 @@ async function matchAllScans(
       return { scanId, matches, uncertain };
     });
     for (const { scanId, matches, uncertain } of comparisons) {
-      await dependencies.runWorkbench([
-        "save-scan-comparison",
-        "--before-scan-id",
-        scanId,
-        "--after-scan-id",
-        afterScanId,
-        "--matches-json",
+      await dependencies.runWorkbench(
+        [
+          "save-scan-comparison",
+          "--before-scan-id",
+          scanId,
+          "--after-scan-id",
+          afterScanId,
+          "--matches-json-stdin",
+        ],
         JSON.stringify({ matches, uncertain }),
-      ]);
+      );
       matchedPairs += 1;
       findingMatches += matches.reduce(
         (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
@@ -4627,6 +4960,12 @@ async function runSkill(
       ...(verify ? ["--config", 'approvals_reviewer="auto_review"'] : []),
       "--config",
       'responses_api_metadata.codex_security_surface="cli"',
+      ...(options.safetyIdentifier === undefined
+        ? []
+        : [
+            "--config",
+            `safety_identifier=${JSON.stringify(options.safetyIdentifier)}`,
+          ]),
       ...(appServer
         ? []
         : [
@@ -4635,7 +4974,7 @@ async function runSkill(
             "--skip-git-repo-check",
             "--cd",
             directory,
-            prompt,
+            "-",
           ]),
     ],
     {
@@ -4656,6 +4995,7 @@ async function runSkill(
         : {}),
     },
     options.environment,
+    appServer ? undefined : prompt,
   );
 }
 
@@ -5259,6 +5599,7 @@ async function executeScan(
       arguments_.scanPromptFile,
       arguments_.postScanPromptFile,
       resolve(directory, repository),
+      arguments_.validationPromptFile,
     );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
@@ -5401,6 +5742,7 @@ async function executeScan(
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
       auth,
+      safetyIdentifier: arguments_.safetyIdentifier,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
@@ -5869,6 +6211,7 @@ async function executeScan(
         dependencies,
         {
           ...providerOptions,
+          safetyIdentifier: arguments_.safetyIdentifier,
           environment,
           findingInstructions: patchSelection?.instructions,
         },
@@ -6019,19 +6362,6 @@ function scanScope(arguments_: ScanArguments): string | null {
   if (arguments_.diff !== undefined) return "committed changes";
   if (arguments_.workingTree) return "working-tree changes";
   return null;
-}
-
-function scanPhase(value: ScanWorkerPhase | ScanPhase): string {
-  return {
-    preflight: "preflight",
-    threat_model: "building threat model",
-    discovery: "reviewing files",
-    ranking: "ranking scan targets",
-    file_review: "reviewing files",
-    validation: "validating findings",
-    attack_path: "analyzing attack paths",
-    reporting: "writing report",
-  }[value];
 }
 
 interface DeepScanStop {

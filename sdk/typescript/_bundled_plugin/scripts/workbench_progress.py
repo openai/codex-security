@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_workbench import require_current_coordinator
 from workbench.handoff import require_current_continuation
 from workbench_constants import PHASES
-from workbench_validation import optional_text, require_uuid, user_text
+from workbench_validation import optional_text, require_uuid, user_context_argument
 
 MAX_PREFLIGHT_ISSUES = 32
 
@@ -83,7 +83,7 @@ def update_context(
     scan_context: Callable[[sqlite3.Connection, str], dict[str, Any]],
 ) -> dict[str, Any]:
     scan_id = require_uuid(args.scan_id, "scan-id")
-    context = user_text(args.user_context)
+    context = user_context_argument(args)
     connection.execute("BEGIN IMMEDIATE")
     try:
         scan = require_scan(connection, scan_id)
@@ -164,7 +164,10 @@ def update_progress(
     scan_id = require_uuid(args.scan_id, "scan-id")
     model = optional_text(args.model, maximum=200)
     reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
-    serialized_preflight_issues = preflight_issues_json(args.preflight_issues_json)
+    preflight_issues = (
+        sys.stdin.read() if args.preflight_issues_json_stdin else args.preflight_issues_json
+    )
+    serialized_preflight_issues = preflight_issues_json(preflight_issues)
     connection.execute("BEGIN IMMEDIATE")
     try:
         timestamp = now()

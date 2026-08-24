@@ -9,7 +9,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runWorkbench } from "../src/runtime.js";
+import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 
 const originalClaimToken = "22222222-2222-4222-8222-222222222222";
 const replacementClaimToken = "33333333-3333-4333-8333-333333333333";
@@ -186,7 +187,150 @@ test("recovers an interrupted copied Deep Scan publication", async () => {
   });
 });
 
+test.each([
+  ["supplied", "  Review café authentication.\r\n\t"],
+  ["absent", undefined],
+  ["large", "  --café\r\n".repeat(30_000)],
+] as const)(
+  "preserves %s scan instructions from registration through the Deep worker prompt",
+  async (_label, scanPrompt) => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-context-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(join(repository, "source.py"), "# synthetic source\n");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const command = (args: string[], input?: string) =>
+      runWorkbench(
+        {
+          python: python!,
+          pluginRoot: PLUGIN_ROOT,
+          environment: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            CODEX_HOME: join(root, "codex-home"),
+          },
+        },
+        args,
+        input,
+      );
+    const registration = await command(
+      [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--registration-json-stdin",
+      ],
+      JSON.stringify({
+        recipe: {
+          config: {
+            developer_instructions: "Synthetic context. ".repeat(4_000),
+          },
+          mode: "deep",
+          repository,
+          target: { kind: "repository", paths: [] },
+        },
+        userContext: scanPrompt,
+      }),
+    );
+    const scanId = registration["scanId"] as string;
+    const context = await command(["get-scan", "--scan-id", scanId]);
+    expect(context["scan"]).toMatchObject({ userContext: scanPrompt ?? null });
+
+    const begun = await command([
+      "begin-deep-scan",
+      "--scan-id",
+      scanId,
+      "--thread-id",
+      "synthetic-thread",
+      "--scan-root",
+      join(root, "scans"),
+      "--available-parallelism",
+      "4",
+      "--workflow-version",
+      "deep-scan-mcp/v1",
+    ]);
+    const deepScan = begun["deepScan"] as Record<string, unknown>;
+
+    const templates =
+      /\/\/ templates\/deep-scan\/discovery\.md\n([\s\S]*?)\/\/ src\/deep-scan\/worker-runner\.ts/u.exec(
+        await loadBundledRuntime(),
+      )?.[1];
+    expect(templates).toBeDefined();
+    const renderDiscoveryPrompt = new Function(
+      `${templates}\nreturn renderDiscoveryPrompt;`,
+    )() as (input: Record<string, unknown>) => string;
+    const prompt = renderDiscoveryPrompt({
+      ...deepScan,
+      pluginRoot: PLUGIN_ROOT,
+      workerLabel: "synthetic-worker",
+      subagents: 0,
+    });
+    const workerContext = JSON.parse(
+      /```json\n([\s\S]*?)\n```/u.exec(prompt)![1]!,
+    );
+    expect(workerContext).toMatchObject({
+      scanId,
+      userContext: scanPrompt ?? null,
+    });
+  },
+);
+
 describe("deep scan workbench ownership", () => {
+  test("starts a Deep Scan with oversized stdin user context", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-deep-context-stdin-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const stateDir = join(root, "state");
+    await mkdir(repository);
+    await writeFile(join(repository, "source.py"), "# source fixture\n");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const userContext = "deep security focus".repeat(4_000);
+
+    const result = Bun.spawnSync(
+      [
+        python!,
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+        "begin-deep-scan",
+        "--thread-id",
+        "deep-context-stdin-owner",
+        "--target-path",
+        repository,
+        "--scope",
+        ".",
+        "--user-context-stdin",
+        "--scan-root",
+        join(root, "scans"),
+        "--available-parallelism",
+        "4",
+      ],
+      {
+        env: { ...process.env, CODEX_SECURITY_STATE_DIR: stateDir },
+        stdin: Buffer.from(userContext),
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    const started = JSON.parse(
+      new TextDecoder().decode(result.stdout),
+    ) as Record<string, Record<string, unknown>>;
+    expect(started["deepScan"]?.["userContext"]).toBe(userContext);
+  }, 30_000);
+
   test("rejects completion before an SDK-created Deep Scan finishes", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-deep-completion-guard-")),
@@ -248,7 +392,7 @@ describe("deep scan workbench ownership", () => {
     [0.5, 0.5],
     [96, 96],
   ] as const)(
-    "resolves the configured discovery deadline %s as %s hours",
+    "resolves the configured discovery deadline %p as %p hours",
     async (configuredHours, expectedHours) => {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "codex-security-deep-deadline-config-")),
@@ -365,7 +509,7 @@ describe("deep scan workbench ownership", () => {
   });
 
   test.each([false, true] as const)(
-    "backfills and repairs discovery deadline migration when already recorded: %s",
+    "backfills and repairs discovery deadline migration when already recorded: %p",
     (migrationRecorded) => {
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
@@ -421,7 +565,7 @@ describe("deep scan workbench ownership", () => {
     ["scoped_path", false],
     ["repository", true],
   ] as const)(
-    "returns an honest partial %s report with existing deferred work %s when saturated discovery exceeds its cost limit",
+    "returns an honest partial %s report with existing deferred work %p when saturated discovery exceeds its cost limit",
     async (inventoryStrategy, existingDeferred) => {
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "codex-security-deep-budget-recovery-")),

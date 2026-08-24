@@ -54,6 +54,11 @@ Use `security.preflight()` to validate local inputs, `onWorkerStatus` and
 `onReconnect` to observe long-running scans, and an `AbortSignal` to cancel a
 scan.
 
+For separate standard scans under one project, the SDK also exports
+`runComponentScans({ repository, outputDir, components })`. Each component has
+a `name` and `paths` array. Use `auto: true` instead of `components` for
+model-assisted planning, and `planOnly: true` to save the plan without scanning.
+
 Successful results include open repository findings in `repositoryFindings`,
 when available; `findings` remains the current scan. Matching earlier findings
 can make one additional model call, including with a scan cost limit.
@@ -61,6 +66,44 @@ can make one additional model call, including with a scan cost limit.
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
+
+### Validate an existing finding
+
+Use `security.validate()` to assess one finding without running a repository
+scan or invoking the Codex Security CLI:
+
+```ts
+const security = new CodexSecurity();
+try {
+  const result = await security.validate({
+    repositoryPath: "/path/to/repository",
+    finding: {
+      title: "Possible SQL injection",
+      location: "src/query.ts:42",
+    },
+    outputDir: "/path/outside/repository/validation",
+  });
+  console.log(result.disposition);
+  console.log(result.report);
+} finally {
+  await security.close();
+}
+```
+
+`finding` accepts literal text or a JSON-serializable object, never a file
+path. Read files explicitly. Validation uses the CLI's validation skill and
+the client's settings and authentication. It leaves repository files unchanged
+and does not add a scan to scan history.
+
+The result contains `disposition` (`reportable`, `suppressed`, `not_applicable`,
+or `deferred`), a Markdown `report`, `threadId`, and `outputDir` for evidence.
+The report explains root cause, exploitability, evidence, and proof gaps.
+`reportable` can rely on static analysis; `deferred` means insufficient evidence.
+
+`outputDir` must be empty and outside the enclosing Git worktree. It defaults
+to the Codex Security state directory's `validations/` folder. Pass `auth` to
+select authentication or `signal` to cancel. Failed, incomplete, or malformed
+responses reject the promise.
 
 ### SDK configuration and scan options
 
@@ -75,20 +118,21 @@ Pass runtime configuration to the `CodexSecurity` constructor:
 Pass scan configuration to `security.run(repository, options)` or
 `security.preflight(repository, options)`:
 
-| Option                  | Description                                                                           |
-| ----------------------- | ------------------------------------------------------------------------------------- |
-| `auth`                  | Select `"auto"`, `"chatgpt"`, or `"api-key"`.                                         |
-| `target`                | Select a repository, repository-relative paths, committed diff, or working-tree diff. |
-| `mode`                  | Select `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
-| `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.         |
-| `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
-| `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
-| `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
-| `maxTimeHours`          | Limit deep-scan discovery to a positive number of hours, up to 96.                    |
-| `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                            |
-| `parentScanId`          | Link a rerun to an existing parent scan.                                              |
-| `expectedPluginVersion` | Require the original plugin version when replaying a scan.                            |
-| `signal`                | Cancel a scan with an `AbortSignal`.                                                  |
+| Option                  | Description                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------ |
+| `auth`                  | Select `"auto"`, `"chatgpt"`, or `"api-key"`.                                              |
+| `safetyIdentifier`      | Stable hashed end-user ID for this scan's model requests; requires API-key authentication. |
+| `target`                | Select a repository, repository-relative paths, committed diff, or working-tree diff.      |
+| `mode`                  | Select `"standard"` or `"deep"`; deep mode supports repositories and paths.                |
+| `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.              |
+| `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                           |
+| `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                             |
+| `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                         |
+| `maxTimeHours`          | Limit deep-scan discovery to a positive number of hours, up to 96.                         |
+| `failureSeverity`       | Record a finding-severity policy in the saved scan recipe.                                 |
+| `parentScanId`          | Link a rerun to an existing parent scan.                                                   |
+| `expectedPluginVersion` | Require the original plugin version when replaying a scan.                                 |
+| `signal`                | Cancel a scan with an `AbortSignal`.                                                       |
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
 `onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
@@ -211,6 +255,8 @@ npx @openai/codex-security scan /path/to/repository --patch --patch-severity hig
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
+npx @openai/codex-security scan-components /path/to/repository --component apps/api --component apps/web --output-dir /path/outside/repository/results
+npx @openai/codex-security scan-components /path/to/repository --auto --output-dir /path/outside/repository/results
 npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security scan /path/to/repository --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
@@ -289,6 +335,104 @@ the parent repository.
 Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
 shares them with every repository. Directories are searched recursively for
 Markdown, text, PDF, and Word (`.docx`) files.
+
+### Attribute scans to end users
+
+For an application that serves multiple users, pass the originating user's
+stable hashed ID on each scan:
+
+```ts
+await security.run("/path/to/repository", {
+  auth: "api-key",
+  safetyIdentifier: hashedUserId,
+});
+```
+
+```bash
+codex-security scan /path/to/repository --auth api-key --safety-identifier hashed-user-id
+```
+
+The ID must contain 1–64 characters and cannot be blank or contain NUL.
+Do not use an email address or other personal data. The ID is passed to Codex
+for the scan, nested workers, retries, and follow-up work. It is not saved in
+shared configuration or the scan recipe. Supply it again for a later rerun.
+Concurrent SDK clients can use different IDs without changing `process.env`.
+
+This requires a Codex runtime with native `--safety-identifier` support and a
+plugin that forwards it to workers. The current bundled runtime does not yet
+support this option. Use `CODEX_CLI_PATH` to select a compatible build.
+The SDK does not check runtime or plugin compatibility; older versions may
+omit the identifier. Omitting the option leaves ordinary scans unchanged.
+Preflight checks the ID's format; authentication is checked when the scan starts.
+
+### Scan project components
+
+`scan --path` runs one scan across the selected paths. Use `scan-components`
+to run a separate standard scan for each component of one local project:
+
+```bash
+npx @openai/codex-security scan-components /path/to/project \
+  --component apps/api --component apps/web --component packages/shared \
+  --workers 4 --output-dir /path/outside/project/results
+```
+
+Use `--auth chatgpt` or `--auth api-key` to select credentials for planning,
+component scans, and matching. The default is `--auth auto`, as with `scan`.
+The SDK accepts the same choice through `scanOptions.auth`.
+
+Use `--auto` instead of `--component` to let Codex propose the split. To review
+or edit it first, save a plan, then run that plan into a new output directory:
+
+```bash
+npx @openai/codex-security scan-components /path/to/project \
+  --auto --plan-only --output-dir /path/outside/project/plan
+npx @openai/codex-security scan-components /path/to/project \
+  --components-file /path/outside/project/plan/components.json \
+  --output-dir /path/outside/project/results
+```
+
+A component can contain several repository-relative paths:
+
+```json
+{
+  "components": [
+    { "name": "API", "paths": ["apps/api", "packages/auth"] },
+    { "name": "Web", "paths": ["apps/web"] }
+  ]
+}
+```
+
+Automatic planning uses a local file inventory. In Git repositories it follows
+Git's ignore rules. Each automatic path must cover at least one inventoried file.
+Explicit `--component` and `--components-file` selections keep their existing behavior.
+Inventoried files omitted by the model are added to an
+`Other files` component. No source files are changed during planning.
+
+In an interactive terminal, one dashboard shows all components and their scan
+progress. Use the arrow keys to select a component, Enter to view its activity,
+and Esc to return. Other scans continue while you inspect one. Finding counts
+are preliminary until cross-component matching finishes. Use `--headless` for
+plain status lines; CI and redirected output use those automatically.
+Failed or incomplete components are also saved in `retry-components.json`.
+Pass that file to `--components-file` with a new output directory to retry them.
+
+Each component keeps its normal scan artifacts under `component-N/`.
+The combined `findings.json` uses the same root-cause matcher as `scans match`.
+It merges high-confidence matches even when their titles, locations, or
+fingerprints differ. Each group keeps its highest-severity finding and all
+original scan and occurrence IDs. Match reasons and uncertain pairs are saved;
+uncertain findings stay separate. `summary.json` records scan coverage and
+whether matching finished. `report.md` links to the component reports.
+These combined files are a project summary, not a new sealed scan. Use the
+individual scan folders with `export` and `publish`.
+
+The output directory must be empty and outside the project. Failed components
+do not stop the others. The command saves the available results and exits with
+code `2` if a component fails, coverage is incomplete, or cross-component
+matching fails. `--max-cost` applies to each component scan, not planning,
+cross-component matching, or the whole project. `--model` and `--effort` also
+apply to matching. `--knowledge-base`,
+`--scan-prompt-file`, and `--post-scan-prompt-file` work as they do for bulk scans.
 
 ### Configure deep scans
 
@@ -643,6 +787,72 @@ scan history.
 The CLI never retries an upload automatically. An upload with a missing or
 invalid receipt may already have been accepted. Check whether Cloud accepted
 that scan before retrying it. Do not resend scans with confirmed receipts.
+
+### Custom validation
+
+Use a prompt file to replace the final validation step in a standard or diff
+scan. The ordinary source review still runs. The supplied text goes directly
+into a separate validation turn and is not sent to discovery workers.
+The SDK adapts the bundled discovery workflow without changing the plugin.
+An incompatible plugin workflow stops the scan instead of using default validation.
+
+```bash
+npx @openai/codex-security scan . --validation-prompt-file validation.md
+```
+
+The SDK accepts the same text as `validationPrompt`:
+
+```ts
+const result = await security.run(repository, {
+  validationPrompt:
+    "Run scripts/validate.sh, test each candidate through the local API, and stop the test environment when finished.",
+});
+```
+
+Describe setup, allowed test targets, expected evidence, and cleanup in the
+prompt. Refer to credentials through environment variables; do not put secrets
+in the prompt or validation output. There are no separate setup or teardown
+hooks. Deep scans reject this option. Empty candidate sets skip the custom turn.
+
+The SDK supplies the candidate IDs and requires a `CustomValidationResult`:
+
+```json
+{
+  "status": "complete",
+  "reason": null,
+  "validations": [
+    {
+      "candidateId": "candidate-1",
+      "validation": {
+        "disposition": "reportable",
+        "method": "integration test",
+        "confidence": "high",
+        "confidence_rationale": "The test reproduced the reported behavior.",
+        "rubric": "Check the protected operation.",
+        "evidence": ["The unauthorized request succeeded."],
+        "counterevidence_or_proof_gap": "",
+        "remaining_uncertainty": "",
+        "artifact_paths": []
+      },
+      "severity": null,
+      "impact": null
+    }
+  ]
+}
+```
+
+Each candidate needs exactly one result. The disposition is `reportable`,
+`suppressed`, `not_applicable`, or `deferred`. Optional assessment changes use
+`{ "level": "medium", "rationale": "..." }` in `severity` or `impact`; use
+`null` to retain the original assessment. Finding identity and source locations
+do not change. Deferred candidates make coverage partial. Suppressed and
+deferred candidates remain in the saved validation artifacts.
+
+The scan directory contains `artifacts/custom-validation/candidates.json` and
+`results.json`. Setup failure, incomplete output, or invalid output leaves the
+scan incomplete. There is no automatic fallback to default validation. When
+rerunning a saved custom-validation scan, supply
+`scans rerun SCAN_ID --validation-prompt-file validation.md` again.
 
 ### Publish completed scans to Linear
 

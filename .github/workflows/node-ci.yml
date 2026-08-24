@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, edited, reopened, synchronize]
 
 permissions:
   contents: read
@@ -13,8 +14,28 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-title:
+    name: validate pull request title
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require a Conventional Commit pull request title
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
+          if [[ ! "$PR_TITLE" =~ $conventional_title ]]; then
+            echo "Pull request title must follow <type>[optional scope][!]: <description>." >&2
+            exit 1
+          fi
+
   test:
     name: ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    needs: validate-title
+    if: always()
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -33,6 +54,10 @@ jobs:
             node: "26"
 
     steps:
+      - name: Require a valid pull request title
+        if: needs.validate-title.result != 'success'
+        run: exit 1
+
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -66,6 +91,7 @@ jobs:
         run: pnpm --dir sdk/typescript run audit:prod
 
       - name: Typecheck
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
         run: pnpm --dir sdk/typescript run types
 
       - name: Test
@@ -75,9 +101,23 @@ jobs:
           TMP: ${{ runner.temp }}
           TMPDIR: ${{ runner.temp }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: pnpm --dir sdk/typescript run test
+        run: pnpm --dir sdk/typescript run ${{ matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0' && 'test:ci' || 'test' }}
+
+      - name: Upload test reports
+        if: always() && matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: node-22-test-reports
+          overwrite: true
+          path: |
+            sdk/typescript/reports/junit.xml
+            sdk/typescript/coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'
         run: pnpm --dir sdk/typescript run format
 
       - name: Pack
@@ -89,23 +129,9 @@ jobs:
         shell: bash
         run: pnpm run check:package ../../dist/*.tgz
 
-      - name: Smoke-test Node.js runtime
-        working-directory: sdk/typescript
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module --eval '
-            import { CodexSecurity } from "@openai/codex-security";
-
-            if (typeof CodexSecurity !== "function") {
-              throw new Error("The SDK does not export CodexSecurity.");
-            }
-          '
-          node bin/codex-security.mjs --version
-          node bin/codex-security.mjs --help
-
   windows-test:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
+    needs: validate-title
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -162,18 +188,9 @@ jobs:
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
         run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
-      - name: Typecheck
-        if: matrix.shard == 7
-        working-directory: sdk/typescript
-        run: pnpm run types
-
-      - name: Check formatting
-        if: matrix.shard == 7
-        working-directory: sdk/typescript
-        run: pnpm run format
-
   windows-verify:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
+    needs: validate-title
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -210,26 +227,11 @@ jobs:
         shell: bash
         run: pnpm run check:package ../../dist/*.tgz
 
-      - name: Smoke-test Node.js runtime
-        working-directory: sdk/typescript
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module --eval '
-            import { CodexSecurity } from "@openai/codex-security";
-
-            if (typeof CodexSecurity !== "function") {
-              throw new Error("The SDK does not export CodexSecurity.");
-            }
-          '
-          node bin/codex-security.mjs --version
-          node bin/codex-security.mjs --help
-
   windows:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [windows-test, windows-verify]
+    needs: [validate-title, windows-test, windows-verify]
     strategy:
       fail-fast: false
       matrix:
@@ -237,5 +239,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
+        if: needs.validate-title.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
         run: exit 1

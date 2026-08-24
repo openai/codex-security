@@ -175,7 +175,7 @@ describe("scan cost", () => {
     [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
     [{ cache_write_input_tokens: 0, cache_write_tokens: 80 }, 0],
   ] as const)(
-    "keeps workbench cache-write normalization aligned with SDK usage",
+    "keeps workbench cache-write normalization aligned with SDK usage for %j as %p tokens",
     async (cacheWrites, expectedCacheWrites) => {
       const { PLUGIN_ROOT } = await import("./plugin-root.js");
       const python = Bun.which("python3") ?? Bun.which("python");
