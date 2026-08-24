@@ -74,6 +74,10 @@ describe("Linear issue intake", () => {
               title: "Recheck a completed issue",
               description: null,
               url: "https://linear.app/example/issue/SEC-123",
+              comments: async () => ({
+                nodes: [],
+                pageInfo: { hasNextPage: false },
+              }),
             },
           ],
           (value) => (filter = value),
@@ -108,6 +112,10 @@ describe("Linear issue intake", () => {
                 title: "Synthetic finding",
                 description: "Synthetic evidence",
                 url,
+                comments: async () => ({
+                  nodes: [],
+                  pageInfo: { hasNextPage: false },
+                }),
               };
             },
           }) as unknown as LinearImportClient,
@@ -165,9 +173,15 @@ describe("Linear issue intake", () => {
           },
           linearClient: () =>
             ({
-              issue: async () => {
-                throw error;
-              },
+              issue: async () => ({
+                comments: async () => ({
+                  nodes: [],
+                  pageInfo: { hasNextPage: true },
+                  fetchNext: async () => {
+                    throw error;
+                  },
+                }),
+              }),
             }) as unknown as LinearImportClient,
         }),
       ).rejects.toThrow(message);

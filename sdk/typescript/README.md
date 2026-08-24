@@ -995,8 +995,9 @@ for a personal API key, or `LINEAR_ACCESS_TOKEN` for an OAuth access token.
 `LINEAR_API_KEY` is also accepted. `--linear-api-key KEY` overrides these
 environment settings; prefer the environment variable to keep keys out of shell
 history. Imported content is always literal, and issue URLs must match the
-selected workspace. Linear access is read-only, and its credentials are not
-passed to the patch subprocess.
+selected workspace. Each imported issue includes its title, description, and
+all comments with their source links. Linear access is read-only, and its
+credentials are not passed to the patch subprocess.
 
 Use `verify-fix` to check whether an existing security fix actually closes its
 original vulnerability without modifying the repository. Pass a finding

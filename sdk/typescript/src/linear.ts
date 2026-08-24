@@ -112,12 +112,21 @@ export async function importLinearIssues(options: {
       }
     }
 
-    return issues.map(({ identifier, title, url, description }) => ({
-      source: "linear",
-      id: identifier,
-      url,
-      text: `Title: ${title}\n\n${description ?? ""}`,
-    }));
+    const imports: ImportedIssue[] = [];
+    for (const issue of issues) {
+      const comments = await issue.comments({ first: 50 });
+      while (comments.pageInfo.hasNextPage) await comments.fetchNext();
+      imports.push({
+        source: "linear",
+        id: issue.identifier,
+        url: issue.url,
+        text: [
+          `Title: ${issue.title}\n\n${issue.description ?? ""}`,
+          ...comments.nodes.map(({ url, body }) => `Comment: ${url}\n${body}`),
+        ].join("\n\n"),
+      });
+    }
+    return imports;
   } catch (error) {
     if (error instanceof CodexSecurityError) throw error;
     if (
