@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -64,7 +64,7 @@ describe("publish scan to Cloud", () => {
     deps.publishScanToCloud = async (directory, options) => {
       expect(workbenchCalls).toHaveLength(4);
       const scan = scans[calls.length]!;
-      expect(directory).toBe(scan.scanDir);
+      expect(directory).toBe(await realpath(scan.scanDir));
       expect(options?.expectedScanId).toBe(scan.scanId);
       expect(options?.dryRun).toBe(true);
       calls.push(scan.scanId);
@@ -625,6 +625,52 @@ describe("publish scan to Cloud", () => {
     }
   });
 
+  test("publishes a scan once through canonical and directory-linked paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cloud-publish-links-"));
+    temporaryDirectories.push(root);
+    const scans = join(root, "scans");
+    const scanDir = join(scans, "completed-scan");
+    const linkedScans = join(root, "linked-scans");
+    await mkdir(scanDir, { recursive: true });
+    await symlink(
+      scans,
+      linkedScans,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const canonicalScan = await realpath(scanDir);
+    const calls: string[] = [];
+    const deps = dependencies({
+      onWorkbench: () => {
+        throw new Error("must not inspect scan history");
+      },
+    });
+    deps.publishScanToCloud = async (directory) => {
+      calls.push(directory);
+      return receipt;
+    };
+    const stdout = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--scan-dir",
+          scanDir,
+          "--scan-dir",
+          join(linkedScans, "completed-scan"),
+          "--to",
+          "cloud",
+          "--json",
+        ],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([canonicalScan]);
+    expect(JSON.parse(stdout.text())).toEqual(receipt);
+  });
+
   test("rejects missing or empty scan flags and extra positionals before publishing", async () => {
     for (const inputs of [
       ["--scan"],
@@ -683,12 +729,17 @@ describe("publish scan to Cloud", () => {
         select: async (_question, choices) => {
           selections++;
           const directories: string[] = choices.map(({ value }) => value);
-          expect(directories).toEqual(["scan-1"]);
+          if (selections === 1) {
+            expect(directories).toEqual(["scan-1"]);
+            return choices[0]!.value;
+          }
+          expect(directories).toEqual([""]);
+          expect(choices[0]!.label).toBe("Done (1 selected)");
           return choices[0]!.value;
         },
       };
       deps.publishScanToCloud = async (directory, options) => {
-        expect(directory).toBe(scanDir);
+        expect(directory).toBe(await realpath(scanDir));
         expect(options?.expectedScanId).toBe("scan-1");
         return receipt;
       };
@@ -701,7 +752,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(0);
-      expect(selections).toBe(1);
+      expect(selections).toBe(2);
       expect(JSON.parse(stdout.text())).toEqual(receipt);
     } finally {
       await rm(root, { recursive: true, force: true });

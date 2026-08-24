@@ -17,7 +17,7 @@ import {
 const CLOUD_PUBLISH_URL =
   "https://chatgpt.com/backend-api/aardvark/cli/findings";
 const CHATGPT_LOGIN_REQUIRED =
-  "Cloud publication requires a file-backed ChatGPT login. Sign in with ChatGPT using Codex file credential storage, then retry.";
+  'Cloud publication requires ChatGPT credentials stored with cli_auth_credentials_store = "file". Automatic and keyring storage are not read because a stale auth.json may belong to another account. Configure file storage, sign in with ChatGPT again, then retry.';
 
 const credentialsSchema = z.object({
   auth_mode: z.literal("chatgpt").optional(),
@@ -123,11 +123,15 @@ export async function publishScanToCloud(
   const receipt = receiptSchema.safeParse(
     await response.json().catch(() => undefined),
   );
+  // Cloud assigns opaque IDs in request order, so they cannot be compared to
+  // local finding IDs. The authenticated response must still preserve the
+  // submitted count and return one distinct observation for each finding.
   if (
     (response.status !== 200 && response.status !== 201) ||
     !receipt.success ||
     receipt.data.finding_count !== findings.findings.length ||
-    receipt.data.finding_ids.length !== findings.findings.length
+    receipt.data.finding_ids.length !== findings.findings.length ||
+    new Set(receipt.data.finding_ids).size !== receipt.data.finding_ids.length
   ) {
     throw new CodexSecurityError(
       "Cloud publication returned an invalid acceptance receipt. Check whether the request was accepted before submitting again.",
@@ -161,6 +165,8 @@ async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
     const configPath = join(home, "config.toml");
     if (existsSync(configPath)) {
       const config = parseToml(await readFile(configPath, "utf8"));
+      // File presence is not proof that it is the active login: automatic or
+      // keyring storage can leave an auth.json from a different account.
       if (
         config["cli_auth_credentials_store"] === "keyring" ||
         config["cli_auth_credentials_store"] === "auto"

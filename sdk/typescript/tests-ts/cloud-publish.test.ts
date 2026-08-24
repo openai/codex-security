@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -62,6 +63,56 @@ async function fixture() {
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     },
   };
+}
+
+async function addSecondFinding(scan: string): Promise<void> {
+  const findingsPath = join(scan, "findings.json");
+  const manifestPath = join(scan, "scan-manifest.json");
+  const findings = JSON.parse(await readFile(findingsPath, "utf8")) as {
+    findings: Array<{
+      findingId: string;
+      occurrenceId: string;
+      ruleId: string;
+      identity: { anchor: string; instance?: string };
+      fingerprints: { primary: string };
+      title: string;
+    }>;
+  };
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    scan: {
+      id: string;
+      target: { targetId: string };
+      artifacts: Array<{ path: string; sha256: string }>;
+    };
+  };
+  const second = structuredClone(findings.findings[0]!);
+  second.identity.instance = "second-instance";
+  second.title = "A second synthetic finding";
+  const sha256 = (value: string): string =>
+    createHash("sha256").update(value).digest("hex");
+  const fingerprint = `codex-security/v1:sha256:${sha256(
+    [
+      "codex-security/v1",
+      manifest.scan.target.targetId,
+      second.ruleId,
+      second.identity.anchor,
+      second.identity.instance,
+    ].join("\0"),
+  )}`;
+  second.findingId = `csf_${sha256(fingerprint).slice(0, 24)}`;
+  second.occurrenceId = `occ_${sha256(
+    [manifest.scan.id, fingerprint].join("\0"),
+  ).slice(0, 24)}`;
+  second.fingerprints.primary = fingerprint;
+  findings.findings.push(second);
+  await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
+  const artifact = manifest.scan.artifacts.find(
+    ({ path }) => path === "findings.json",
+  )!;
+  artifact.sha256 = createHash("sha256")
+    .update(await readFile(findingsPath))
+    .digest("hex");
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 describe("Cloud publication", () => {
@@ -166,6 +217,32 @@ describe("Cloud publication", () => {
     expect(requests).toBe(1);
   });
 
+  test("accepts opaque Cloud finding IDs that differ from local finding IDs", async () => {
+    const { scan, environment } = await fixture();
+    const localFindings = JSON.parse(
+      await readFile(join(scan, "findings.json"), "utf8"),
+    ) as { findings: Array<{ findingId: string }> };
+    const opaqueId = "cloud-observation-synthetic";
+    expect(
+      localFindings.findings.map(({ findingId }) => findingId),
+    ).not.toContain(opaqueId);
+    expect(
+      await publishScanToCloud(scan, {
+        environment,
+        fetch: async () =>
+          Response.json({
+            status: "accepted",
+            finding_ids: [opaqueId],
+            finding_count: 1,
+          }),
+      }),
+    ).toEqual({
+      scanId: "scan_example_001",
+      findingIds: [opaqueId],
+      findingCount: 1,
+    });
+  });
+
   test("honors a Cloud publication URL override", async () => {
     const { scan, environment } = await fixture();
     const publishUrl =
@@ -208,7 +285,7 @@ describe("Cloud publication", () => {
     await setCodexSecurityCredentialLogout(home, true);
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
-    ).rejects.toThrow("file-backed ChatGPT login");
+    ).rejects.toThrow('cli_auth_credentials_store = "file"');
     expect(requests).toBe(1);
   });
 
@@ -250,16 +327,16 @@ describe("Cloud publication", () => {
       });
       await expect(
         publishScanToCloud(scan, { environment, fetch: send }),
-      ).rejects.toThrow("file-backed ChatGPT login");
+      ).rejects.toThrow('cli_auth_credentials_store = "file"');
     }
     await writeFile(join(home, "auth.json"), "malformed-synthetic-secret");
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
-    ).rejects.toThrow("file-backed ChatGPT login");
+    ).rejects.toThrow('cli_auth_credentials_store = "file"');
     await rm(join(home, "auth.json"));
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
-    ).rejects.toThrow("file-backed ChatGPT login");
+    ).rejects.toThrow('cli_auth_credentials_store = "file"');
     expect(requests).toBe(0);
   });
 
@@ -271,17 +348,35 @@ describe("Cloud publication", () => {
         join(home, "config.toml"),
         `cli_auth_credentials_store = "${mode}"\n`,
       );
-      await expect(
-        publishScanToCloud(scan, {
-          environment,
-          fetch: async () => {
-            requests++;
-            return Response.json(receipt);
-          },
-        }),
-      ).rejects.toThrow("file-backed ChatGPT login");
+      const error = await publishScanToCloud(scan, {
+        environment,
+        fetch: async () => {
+          requests++;
+          return Response.json(receipt);
+        },
+      }).then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+      expect(String(error)).toContain('cli_auth_credentials_store = "file"');
+      expect(String(error)).toContain(
+        "a stale auth.json may belong to another account",
+      );
     }
     expect(requests).toBe(0);
+
+    await writeFile(
+      join(home, "config.toml"),
+      'cli_auth_credentials_store = "file"\n',
+    );
+    await publishScanToCloud(scan, {
+      environment,
+      fetch: async () => {
+        requests++;
+        return Response.json(receipt);
+      },
+    });
+    expect(requests).toBe(1);
   });
 
   test("rejects tampered scan artifacts before reading credentials or uploading", async () => {
@@ -355,6 +450,25 @@ describe("Cloud publication", () => {
       publishScanToCloud(scan, {
         environment,
         fetch: async () => Response.json(receipt, { status: 202 }),
+      }),
+    ).rejects.toThrow("invalid acceptance receipt");
+  });
+
+  test("rejects duplicate opaque IDs in an otherwise complete receipt", async () => {
+    const { scan, environment } = await fixture();
+    await addSecondFinding(scan);
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        fetch: async () =>
+          Response.json({
+            status: "accepted",
+            finding_ids: [
+              "cloud-observation-duplicate",
+              "cloud-observation-duplicate",
+            ],
+            finding_count: 2,
+          }),
       }),
     ).rejects.toThrow("invalid acceptance receipt");
   });

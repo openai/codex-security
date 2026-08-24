@@ -2223,7 +2223,7 @@ export async function main(
           });
           if (options.to === "cloud") {
             let remaining = choices;
-            while (remaining.length > 0) {
+            while (true) {
               controller.signal.throwIfAborted();
               const selected = await prompt.select(
                 "Which completed scans would you like to publish?",
@@ -2258,6 +2258,25 @@ export async function main(
         }
 
         if (options.to === "cloud") {
+          const seenDirectories = new Set<string>();
+          for (let index = 0; index < selectedScans.length; ) {
+            const selected = selectedScans[index]!;
+            const canonical = await realpath(selected.scanDir).catch(
+              () => selected.scanDir,
+            );
+            const identity =
+              process.platform === "win32"
+                ? canonical.toLowerCase()
+                : canonical;
+            if (seenDirectories.has(identity)) {
+              selectedScans.splice(index, 1);
+              continue;
+            }
+            seenDirectories.add(identity);
+            selected.scanDir = canonical;
+            index++;
+          }
+          scanDir = selectedScans[0]!.scanDir;
           controller.signal.throwIfAborted();
           if (selectedScans.length > 1) {
             cloudBatch = {

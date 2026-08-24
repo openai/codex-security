@@ -756,9 +756,18 @@ processes each selected scan once, and checks that its sealed artifacts match
 the selected ID. The artifacts must still be available locally.
 
 `--dry-run` validates the scans and prints their findings without uploading or
-requiring a login. Remove `--dry-run` to upload. Uploads require ChatGPT
-credentials stored in a file. The CLI sends one scan at a time, with each
-scan's findings and metadata in a separate request.
+requiring a login. Remove `--dry-run` to upload. Live uploads require ChatGPT
+credentials explicitly stored in a file. Set this in your Codex `config.toml`,
+then sign in with ChatGPT again:
+
+```toml
+cli_auth_credentials_store = "file"
+```
+
+Automatic and keyring credential storage are not accepted for Cloud
+publication, even when an `auth.json` file exists, because that file may be
+stale and belong to a different account. The CLI sends one scan at a time,
+with each scan's findings and metadata in a separate request.
 
 For artifacts outside local history, use repeated `--scan-dir PATH` instead.
 A single positional directory is still accepted and can be combined with
@@ -783,6 +792,11 @@ fails. Ctrl-C or SIGTERM stops new requests and returns the results collected
 so far. The exit code is `130` for Ctrl-C and `143` for SIGTERM. Cloud
 publication receipts appear in command output; the CLI does not save them to
 scan history.
+
+A successful receipt contains one opaque Cloud finding ID for each submitted
+finding, in request order. These are not local finding IDs. The CLI verifies
+the authenticated response status, count, and ID uniqueness, but cannot map
+opaque server IDs back to individual local findings independently.
 
 The CLI never retries an upload automatically. An upload with a missing or
 invalid receipt may already have been accepted. Check whether Cloud accepted
