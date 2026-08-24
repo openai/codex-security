@@ -789,9 +789,11 @@ without the batch fields above.
 
 The CLI continues after a failed scan and exits with code `2` if any scan
 fails. Ctrl-C or SIGTERM stops new requests and returns the results collected
-so far. The exit code is `130` for Ctrl-C and `143` for SIGTERM. Cloud
-publication receipts appear in command output; the CLI does not save them to
-scan history.
+so far. When cancellation stops work before every requested publication is
+confirmed, the exit code is `130` for Ctrl-C and `143` for SIGTERM. If the
+single response or final batch response has already confirmed the complete
+publication, the command exits with code `0`. Cloud publication receipts
+appear in command output; the CLI does not save them to scan history.
 
 A successful receipt contains one opaque Cloud finding ID for each submitted
 finding, in request order. These are not local finding IDs. The CLI verifies
