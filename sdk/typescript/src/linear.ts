@@ -121,8 +121,11 @@ export async function importLinearIssues(options: {
         id: issue.identifier,
         url: issue.url,
         text: [
-          `Title: ${issue.title}\n\n${issue.description ?? ""}`,
-          ...comments.nodes.map(({ url, body }) => `Comment: ${url}\n${body}`),
+          `Title: ${issue.title}`,
+          `<description>\n${issue.description ?? ""}\n</description>`,
+          ...comments.nodes.map(
+            ({ url, body }) => `<comment>\nURL: ${url}\n\n${body}\n</comment>`,
+          ),
         ].join("\n\n"),
       });
     }

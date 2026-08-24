@@ -91,7 +91,7 @@ describe("Linear issue intake", () => {
         source: "linear",
         id: "SEC-123",
         url: "https://linear.app/example/issue/SEC-123",
-        text: "Title: Recheck a completed issue\n\n",
+        text: "Title: Recheck a completed issue\n\n<description>\n\n</description>",
       },
     ]);
   });
@@ -126,7 +126,7 @@ describe("Linear issue intake", () => {
             source: "linear",
             id: "SEC-123",
             url,
-            text: "Title: Synthetic finding\n\nSynthetic evidence",
+            text: "Title: Synthetic finding\n\n<description>\nSynthetic evidence\n</description>",
           },
         ]);
       } else {
