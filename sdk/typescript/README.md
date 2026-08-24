@@ -208,26 +208,6 @@ when the dedicated home does not already contain stored credentials. Logging
 out prevents later scans from automatically reimporting that ambient sign-in
 until you explicitly log in again.
 
-If Windows startup reports `Windows credential-home ancestor allows another
-identity to replace the directory`, an older sandboxed run may have left a write
-grant on the state directory. The default scan profile no longer grants write
-access to the entire state directory; it does not automatically rewrite existing
-ancestor ACLs.
-
-Preserve the old state directory and its reports. Choose a **new**, private
-directory outside both the repository and the old state directory, then check
-your sign-in:
-
-```powershell
-$env:CODEX_SECURITY_STATE_DIR = Join-Path $env:USERPROFILE '.codex-security-state-new'
-npx @openai/codex-security login status
-```
-
-Run `npx @openai/codex-security login` if sign-in is needed, and use the same state
-setting for subsequent commands. The new directory starts separate scan history;
-existing reports remain in the old directory. Do not copy the old directory's
-permissions to the new one.
-
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
 interactive scan asks which credential to use. JSON output, dry runs, CI, and
@@ -961,6 +941,12 @@ select a private, writable directory outside the scanned repository:
 ```bash
 export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
 ```
+
+On Windows, an older sandboxed run can leave an invalid credential-home ancestor
+ACL. Preserve that state and its reports, and select a **new**, private
+`CODEX_SECURITY_STATE_DIR` outside both the old state and the repository.
+Sign in again if needed and keep using the new setting; it starts separate scan
+history. Existing ancestor ACLs are not rewritten.
 
 `findings` or `findings list` lists open findings for the current repository.
 Use `findings false-positive OCCURRENCE_ID --reason TEXT` to mark a finding as a
