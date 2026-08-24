@@ -208,6 +208,26 @@ when the dedicated home does not already contain stored credentials. Logging
 out prevents later scans from automatically reimporting that ambient sign-in
 until you explicitly log in again.
 
+If Windows startup reports `Windows credential-home ancestor allows another
+identity to replace the directory`, an older sandboxed run may have left a write
+grant on the state directory. The default scan profile no longer grants write
+access to the entire state directory; it does not automatically rewrite existing
+ancestor ACLs.
+
+Preserve the old state directory and its reports. Choose a **new**, private
+directory outside both the repository and the old state directory, then check
+your sign-in:
+
+```powershell
+$env:CODEX_SECURITY_STATE_DIR = Join-Path $env:USERPROFILE '.codex-security-state-new'
+npx @openai/codex-security login status
+```
+
+Run `npx @openai/codex-security login` if sign-in is needed, and use the same state
+setting for subsequent commands. The new directory starts separate scan history;
+existing reports remain in the old directory. Do not copy the old directory's
+permissions to the new one.
+
 An environment API key takes precedence over a stored sign-in by default.
 When both a stored ChatGPT sign-in and an environment API key are available, an
 interactive scan asks which credential to use. JSON output, dry runs, CI, and
@@ -933,9 +953,10 @@ defaults to `~/.codex`. Scan credentials are never stored in the scan
 configuration. Recorded failure summaries and bulk-scan receipts omit messages
 that contain recognizable credentials.
 
-The scan sandbox permits writes to the selected state directory so SQLite can
-maintain its database and journal files. If the host itself cannot write to the
-default directory, select a writable directory outside the scanned repository:
+The CLI and workbench maintain the state database and its journal files as the
+current user. The default scan profile grants workspace writes, not write access
+to the entire state directory. If the host cannot write to the default directory,
+select a private, writable directory outside the scanned repository:
 
 ```bash
 export CODEX_SECURITY_STATE_DIR=/path/to/writable/codex-security-state
@@ -1117,8 +1138,8 @@ same account are not separate security principals.
 
 Every scan uses the `codex_security_scan` filesystem profile and
 automatically reviewed execution approvals. Its baseline profile allows reads
-of the local filesystem and writes to workspace roots and the selected scan
-state directory. Approval requests are reviewed without an interactive prompt;
+of the local filesystem and writes to workspace roots. Approval requests are
+reviewed without an interactive prompt;
 approved requests can grant additional permissions for a specific operation.
 Use `--codex 'approval_policy="never"'` or a selected profile with that policy
 to deny all requests instead. Other `approval_policy`, `approvals_reviewer`,
