@@ -517,19 +517,21 @@ jobs:
                 "$downloaded_archive"
           fi
 
-          existing_notes=""
+          existing_notes_file="$release_workspace/existing-notes.md"
+          : > "$existing_notes_file"
           if [[ -n "$existing_release" ]]; then
-            existing_notes="$(
-              printf '%s\n' "$existing_release" |
-                node --input-type=module --eval '
-                  import { readFileSync } from "node:fs";
-                  const release = JSON.parse(readFileSync(0, "utf8"));
-                  if (release.body != null && typeof release.body !== "string") {
-                    throw new Error("Existing release notes must be a string.");
-                  }
-                  process.stdout.write(release.body ?? "");
-                '
-            )"
+            printf '%s\n' "$existing_release" |
+              node --input-type=module --eval '
+                import { readFileSync, writeFileSync } from "node:fs";
+                const release = JSON.parse(readFileSync(0, "utf8"));
+                if (release.body != null && typeof release.body !== "string") {
+                  throw new Error("Existing release notes must be a string.");
+                }
+                writeFileSync(
+                  process.argv[1],
+                  (release.body ?? "").replace(/\n+$/u, ""),
+                );
+              ' "$existing_notes_file"
           fi
 
           notes_args=(
@@ -562,9 +564,7 @@ jobs:
             )
           fi
 
-          if [[ -n "$existing_notes" ]]; then
-            existing_notes_file="$release_workspace/existing-notes.md"
-            printf '%s' "$existing_notes" > "$existing_notes_file"
+          if [[ -s "$existing_notes_file" ]]; then
             release_note_args+=(
               --existing-notes-file "$existing_notes_file"
             )
@@ -577,6 +577,8 @@ jobs:
               "$generated_notes_file" \
               ${release_note_args[@]+"${release_note_args[@]}"}
           )"
+          published_notes_file="$release_workspace/published-notes.md"
+          printf '%s' "$published_notes" > "$published_notes_file"
 
           if [[ -n "$existing_release" ]]; then
             latest_response="$(
@@ -608,10 +610,14 @@ jobs:
               currently_latest=true
             fi
 
-            if [[ "$existing_notes" != "$published_notes" ||
+            notes_changed=false
+            if ! cmp -s "$existing_notes_file" "$published_notes_file"; then
+              notes_changed=true
+            fi
+            if [[ "$notes_changed" == true ||
                   "$currently_latest" != "$MAKE_LATEST" ]]; then
               verify_release_tag
-              if [[ "$existing_notes" != "$published_notes" ]]; then
+              if [[ "$notes_changed" == true ]]; then
                 printf '%s\n' "$published_notes" |
                   gh release edit "$RELEASE_TAG" \
                     --repo "$GITHUB_REPOSITORY" \

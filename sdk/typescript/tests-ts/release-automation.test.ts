@@ -3337,6 +3337,20 @@ describe("GitHub release workflow safeguards", () => {
       status: 1,
     },
     {
+      description: "NUL-bearing historical summary",
+      existingNotes:
+        "<!-- codex-security-release-summary:start -->\\nReviewed\\u0000summary\\n<!-- codex-security-release-summary:end -->",
+      expectedError: "Existing release summary is empty.",
+      updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 1,
+    },
+    {
       description: "generated notes without its tagged reviewed summary",
       existingNotes: "Generated release notes",
       releaseSummary:
@@ -3368,6 +3382,18 @@ describe("GitHub release workflow safeguards", () => {
     {
       description: "already current",
       existingNotes: "Generated release notes",
+      updated: false,
+      latestTag: "npm-v0.1.3",
+      makeLatest: false,
+      latestUpdated: false,
+      tagType: "commit",
+      tagObject: releaseCommit,
+      peeledCommit: "",
+      status: 0,
+    },
+    {
+      description: "already current with trailing line feeds",
+      existingNotes: "Generated release notes\\n\\n",
       updated: false,
       latestTag: "npm-v0.1.3",
       makeLatest: false,
