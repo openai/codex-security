@@ -232,21 +232,6 @@ const releasingGuide = readFileSync(
   new URL("../../../RELEASING.md", import.meta.url),
   "utf8",
 );
-const supportedTitleTypes = [
-  "build",
-  "chore",
-  "ci",
-  "docs",
-  "feat",
-  "fix",
-  "perf",
-  "refactor",
-  "release",
-  "revert",
-  "style",
-  "test",
-] as const;
-
 function publishedMetadata(): ReleaseMetadata {
   return {
     name: "@openai/codex-security",
@@ -478,33 +463,6 @@ function evaluateWorkflowCondition(
     throw new Error(`Could not evaluate workflow condition: ${condition}`);
   }
   return result.status === 0;
-}
-
-function documentedTitleTypes(guide: string): Set<string> {
-  const fencedBlocks = [
-    ...guide.matchAll(/^```[^\r\n]*\r?\n[\s\S]*?^```[ \t]*$/gmu),
-  ];
-  const syntaxBlockIndex = fencedBlocks.findIndex(
-    ([block]) => block.includes("<type>") && block.includes("<description>"),
-  );
-  const syntaxBlock = fencedBlocks[syntaxBlockIndex];
-  const examplesBlock = fencedBlocks[syntaxBlockIndex + 1];
-  if (
-    !syntaxBlock ||
-    !examplesBlock ||
-    syntaxBlock.index === undefined ||
-    examplesBlock.index === undefined
-  ) {
-    throw new Error("Expected title syntax and examples blocks.");
-  }
-  const guidance = guide.slice(
-    syntaxBlock.index + syntaxBlock[0].length,
-    examplesBlock.index,
-  );
-
-  return new Set(
-    [...guidance.matchAll(/`([a-z][a-z0-9-]*)`/gu)].map((match) => match[1]!),
-  );
 }
 
 describe("reviewed release note helpers", () => {
@@ -3932,10 +3890,6 @@ describe("GitHub release workflow safeguards", () => {
     expect(releasePattern).toBeDefined();
     expect(ciPattern).toBe(releasePattern);
     expect(titlePattern).toBe(releasePattern);
-    const typeGroup = /^\^\(([^)]+)\)/u.exec(releasePattern ?? "")?.[1];
-    expect(new Set(typeGroup?.split("|") ?? [])).toEqual(
-      new Set(supportedTitleTypes),
-    );
     expect(nodeCiWorkflow).toContain(
       "types: [opened, edited, reopened, synchronize]",
     );
@@ -4226,12 +4180,6 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("documents supported title types semantically", () => {
-    expect(documentedTitleTypes(releasingGuide)).toEqual(
-      new Set(supportedTitleTypes),
-    );
-  });
-
   test("documents a canonical historical-summary prefix block", () => {
     const start = "<!-- codex-security-release-summary:start -->";
     const end = "<!-- codex-security-release-summary:end -->";
@@ -4253,7 +4201,6 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test.each([
-    "banana: use an unsupported type",
     "fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
@@ -4271,6 +4218,23 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test.each([
+    "security: preserve an existing title type",
+    "deps(api)!: upgrade a dependency",
+    "dependency-update2: refresh release tooling",
+  ])("active title gates accept previously valid title %s", (title) => {
+    for (const [workflow, step] of [
+      [nodeCiWorkflow, "Require a Conventional Commit pull request title"],
+      [titleWorkflow, "Check conventional title"],
+    ] as const) {
+      expect(
+        spawnSync(bash, ["-c", workflowStepShell(workflow, step)], {
+          env: { ...process.env, PR_TITLE: title },
+        }).status,
+      ).toBe(0);
+    }
+  });
+
+  test.each([
     "[codex] Add a scan feature",
     "Feat: use an uppercase type",
     "feat(): use an empty scope",
@@ -4279,7 +4243,6 @@ describe("GitHub release workflow safeguards", () => {
     "feat:  use two separator spaces",
     "feat: leave trailing whitespace ",
     "feat:",
-    "banana: use an unsupported type",
     "fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
@@ -4470,6 +4433,8 @@ describe("GitHub release workflow safeguards", () => {
     { title: "fix: publish a customer fix", label: "bug" },
     { title: "docs: publish customer documentation", label: "documentation" },
     { title: "chore: stop excluding an internal change", label: null },
+    { title: "security: publish a security fix", label: null },
+    { title: "deps: upgrade a dependency", label: null },
   ])(
     "reconciles an automatic skip label after retitling to $title",
     ({ title, label }) => {
@@ -4544,6 +4509,10 @@ describe("GitHub release workflow safeguards", () => {
     { title: "docs!: breaking documentation", label: "breaking-change" },
     {
       title: "docs(api)!: breaking documentation",
+      label: "breaking-change",
+    },
+    {
+      title: "security(api)!: breaking security change",
       label: "breaking-change",
     },
   ])("categorizes breaking-change title $title", ({ title, label }) => {

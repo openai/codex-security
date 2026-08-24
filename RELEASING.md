@@ -15,10 +15,9 @@ Pull request titles must follow this form:
 <type>[optional scope][!]: <description>
 ```
 
-Supported types are `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
-`refactor`, `release`, `revert`, `style`, `test`. Use a lowercase scope when
-present. Start the description with a non-whitespace character and do not leave
-trailing whitespace. Examples:
+Use a lowercase type beginning with a letter and containing only letters,
+digits, and hyphens. Use a lowercase scope when present. Start the description
+with a non-whitespace character and do not leave trailing whitespace. Examples:
 
 ```text
 feat(cli): add component scan planning
@@ -29,14 +28,14 @@ feat(sdk)!: remove the legacy result field
 
 The title controls the generated release category:
 
-| Title                       | Release category |
-| --------------------------- | ---------------- |
-| Any supported type with `!` | Breaking changes |
-| `feat`                      | Features         |
-| `fix`                       | Fixes            |
-| `docs`                      | Documentation    |
-| `release`, `test`           | Excluded         |
-| Any other supported type    | Other changes    |
+| Title             | Release category |
+| ----------------- | ---------------- |
+| Any type with `!` | Breaking changes |
+| `feat`            | Features         |
+| `fix`             | Fixes            |
+| `docs`            | Documentation    |
+| `release`, `test` | Excluded         |
+| Any other type    | Other changes    |
 
 Use `release` and `test` only for changes that do not affect package users. A
 maintainer can apply `skip-release-notes` to exclude another internal change.
