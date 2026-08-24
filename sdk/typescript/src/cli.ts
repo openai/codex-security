@@ -97,6 +97,7 @@ import { runMultiscan } from "./multiscan.js";
 import { componentPlanSchema, planComponents } from "./component-plan.js";
 import { runComponentScans } from "./component-scan.js";
 import {
+  forceTerminatePublicationProcesses as terminatePublishers,
   publishScan,
   type PublishScanProgress,
   type PublishScanResult,
@@ -985,6 +986,7 @@ interface CliDependencies {
   addSignalListener(signal: SignalName, listener: () => void): void;
   removeSignalListener(signal: SignalName, listener: () => void): void;
   writeSynchronously(stream: Writable, value: string): void;
+  terminatePublishers?(): void;
   forceExit(signal: SignalName): void;
   exportFindings(
     arguments_: ExportArguments,
@@ -1932,16 +1934,14 @@ export async function main(
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
       let presentation: PublicationProgressPresenter | undefined;
-      let directApiPublication = false;
       let firstSignalAt = 0;
       let observingSignals = false;
       const cancel = (signal: SignalName): void => {
         presentation?.stop();
         if (controller.signal.aborted) {
           if (
-            !directApiPublication ||
-            (controller.signal.reason === signal &&
-              dependencies.now() - firstSignalAt < 500)
+            controller.signal.reason === signal &&
+            dependencies.now() - firstSignalAt < 500
           ) {
             return;
           }
@@ -1951,6 +1951,7 @@ export async function main(
               "codex-security: Publication force-stopped; reconcile retained Linear publication evidence before retrying.\n",
             );
           } catch {}
+          (dependencies.terminatePublishers ?? terminatePublishers)();
           removeSignalListeners();
           dependencies.forceExit(signal);
           return;
@@ -1971,7 +1972,6 @@ export async function main(
           dependencies.environment,
           options.linearApiKey,
         );
-        directApiPublication = linearApiKey !== undefined;
         const assigneeId = options.linearAssignee?.trim();
         if (options.linearAssignee !== undefined && !assigneeId) {
           throw new CodexSecurityError("--linear-assignee must not be empty.");

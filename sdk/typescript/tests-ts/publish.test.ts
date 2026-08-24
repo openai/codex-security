@@ -16,8 +16,9 @@ import {
   NetworkLinearError,
   UnknownLinearError,
 } from "@linear/sdk";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
+  forceTerminatePublicationProcesses,
   publishScanInternal,
   type PublicationCodexResult,
   type PublishScanDependencies,
@@ -323,6 +324,24 @@ async function processHasExited(pid: number): Promise<boolean> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   return false;
+}
+
+async function cleanupPublicationProcesses(...paths: string[]): Promise<void> {
+  const pids = await Promise.all(
+    paths.map(async (path) =>
+      Number(await readFile(path, "utf8").catch(() => "0")),
+    ),
+  );
+  for (const pid of process.platform === "win32"
+    ? pids
+    : [-pids[0]!, ...pids]) {
+    if (!Number.isSafeInteger(pid) || Math.abs(pid) < 2) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
 }
 
 describe("direct Linear API publication", () => {
@@ -2835,12 +2854,12 @@ describe("connected Linear publication", () => {
   });
 
   test.each([
-    ["a promptly exiting parent", false, "SIGTERM"],
-    ["a parent that ignores termination", true, "SIGTERM"],
-    ["a Ctrl-C-interrupted parent", false, "SIGINT"],
+    ["a promptly exiting parent", false, "SIGTERM", true],
+    ["a parent that ignores termination", true, "SIGTERM", false],
+    ["a Ctrl-C-interrupted parent", false, "SIGINT", false],
   ] as const)(
     "cancellation stops %s and its signal-resistant Codex descendants",
-    async (_description, ignoreTermination, terminationSignal) => {
+    async (_name, ignoresSignal, signal, verifyTaskkill) => {
       const directory = await mkdtemp(
         join(tmpdir(), "codex-security-publication-cancel-"),
       );
@@ -2856,8 +2875,6 @@ describe("connected Linear publication", () => {
           'const { spawn } = require("node:child_process");',
           'fs.readFileSync(0, "utf8");',
           "fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));",
-          "const environment = { ...process.env };",
-          "delete environment.NODE_OPTIONS;",
           "const descendant = [",
           '  "const fs = require(\\"node:fs\\");",',
           '  "process.on(\\"SIGTERM\\", () => {});",',
@@ -2865,7 +2882,7 @@ describe("connected Linear publication", () => {
           '  "fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));",',
           '  "setInterval(() => {}, 1000);",',
           '].join("");',
-          'spawn(process.execPath, ["-e", descendant], { env: environment, stdio: "ignore" });',
+          'spawn(process.execPath, ["-e", descendant], { env: { CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });',
           "const waiter = new Int32Array(new SharedArrayBuffer(4));",
           "for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) {",
           "  if (attempts === 1000) process.exit(3);",
@@ -2881,20 +2898,23 @@ describe("connected Linear publication", () => {
       );
       const controller = new AbortController();
       const reason =
-        terminationSignal === "SIGINT"
+        signal === "SIGINT"
           ? "SIGINT"
           : new Error("Publication was interrupted.");
+      let taskkill: [string, readonly string[]] | undefined;
       const injected = dependencies(
         publication,
         {},
         {
           environment: {
-            ...process.env,
+            ...(process.platform === "win32"
+              ? { SystemRoot: process.env["SystemRoot"] }
+              : {}),
             CODEX_SECURITY_STATE_DIR: join(directory, "state"),
             NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
             CODEX_PUBLICATION_PARENT_PID: parentPath,
             CODEX_PUBLICATION_DESCENDANT_PID: descendantPath,
-            CODEX_PUBLICATION_IGNORE_TERMINATION: ignoreTermination ? "1" : "0",
+            CODEX_PUBLICATION_IGNORE_TERMINATION: ignoresSignal ? "1" : "0",
             CODEX_PUBLICATION_EVENT: issueEvent(publication.issues[0]!),
           },
           resolveCodex: () => ({
@@ -2907,41 +2927,77 @@ describe("connected Linear publication", () => {
       delete injected.runCodex;
       delete injected.writeReceipt;
 
-      await expect(
-        publishScanInternal(
-          publication.scanDirectory,
-          {
-            ...OPTIONS,
-            signal: controller.signal,
-            onProgress: (event) => {
-              if (event.type === "codex_event") controller.abort(reason);
+      try {
+        await expect(
+          publishScanInternal(
+            publication.scanDirectory,
+            {
+              ...OPTIONS,
+              signal: controller.signal,
+              onProgress: (event) => {
+                if (event.type !== "codex_event") return;
+                if (verifyTaskkill) {
+                  forceTerminatePublicationProcesses({
+                    platform: "win32",
+                    systemRoot: "C:\\Synthetic",
+                    runTaskkill: (command, args) => {
+                      taskkill = [command, [...args]];
+                      return { status: 0 };
+                    },
+                  });
+                }
+                controller.abort(reason);
+                if (verifyTaskkill && process.platform !== "win32") {
+                  const kill = spyOn(process, "kill");
+                  try {
+                    forceTerminatePublicationProcesses();
+                  } finally {
+                    kill.mockRestore();
+                  }
+                  expect(kill).toHaveBeenCalledWith(
+                    -Number(taskkill![1][1]),
+                    "SIGKILL",
+                  );
+                }
+              },
             },
-          },
-          injected,
-        ),
-      ).rejects.toThrow(
-        /Linear publication was interrupted\. The publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
-      );
+            injected,
+          ),
+        ).rejects.toThrow(
+          /Linear publication was interrupted\. The publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
+        );
 
-      const parent = Number(await readFile(parentPath, "utf8"));
-      const descendant = Number(await readFile(descendantPath, "utf8"));
-      expect(await processHasExited(parent)).toBe(true);
-      expect(await processHasExited(descendant)).toBe(true);
-      const receipt = join(
-        directory,
-        "state",
-        "publications",
-        "linear",
-        `${createHash("sha256").update(publication.scanId).digest("hex")}.json`,
-      );
-      const persisted = JSON.parse(await readFile(receipt, "utf8")) as {
-        created: Array<{ issueIdentifier: string }>;
-        counts: { findings: number; created: number; failed: number };
-      };
-      expect(persisted.created.map((issue) => issue.issueIdentifier)).toEqual([
-        "SEC-1",
-      ]);
-      expect(persisted.counts).toEqual({ findings: 2, created: 1, failed: 1 });
+        const parent = Number(await readFile(parentPath, "utf8"));
+        const descendant = Number(await readFile(descendantPath, "utf8"));
+        if (verifyTaskkill)
+          expect(taskkill).toEqual([
+            "C:\\Synthetic\\System32\\taskkill.exe",
+            ["/PID", String(parent), "/T", "/F"],
+          ]);
+        expect(await processHasExited(parent)).toBe(true);
+        expect(await processHasExited(descendant)).toBe(true);
+        const receipt = join(
+          directory,
+          "state",
+          "publications",
+          "linear",
+          `${createHash("sha256").update(publication.scanId).digest("hex")}.json`,
+        );
+        const persisted = JSON.parse(await readFile(receipt, "utf8")) as {
+          created: Array<{ issueIdentifier: string }>;
+          counts: { findings: number; created: number; failed: number };
+        };
+        expect(persisted.created.map((issue) => issue.issueIdentifier)).toEqual(
+          ["SEC-1"],
+        );
+        expect(persisted.counts).toEqual({
+          findings: 2,
+          created: 1,
+          failed: 1,
+        });
+      } finally {
+        await cleanupPublicationProcesses(parentPath, descendantPath);
+      }
     },
     30_000,
   );
