@@ -225,6 +225,29 @@ describe("scan and patch workflow", () => {
       join(STATE_DIRECTORY, "codex-home"),
     );
 
+    const attributed = await runWorkflow(
+      [
+        "scan",
+        "--patch",
+        "--auth",
+        "api-key",
+        "--safety-identifier",
+        "synthetic-user",
+        "--json",
+      ],
+      {
+        result,
+        environment: { OPENAI_API_KEY: "synthetic-key" },
+        onCodex: (args, output) => {
+          invocation = args;
+          completePatches(args, output);
+          return 0;
+        },
+      },
+    );
+    expect(attributed.exitCode).toBe(0);
+    expect(invocation).toContain('safety_identifier="synthetic-user"');
+
     const provider = await runWorkflow(
       [
         "scan",

@@ -865,6 +865,7 @@ def build_report_markdown(
             "",
             "| Field | Value |",
             "| --- | --- |",
+            f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
             f"| Coverage | {coverage['completeness']} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
@@ -973,20 +974,30 @@ def build_report_markdown(
                 for item in deferred
             )
         )
+        stopped = manifest.get("scan", {}).get("status") in {
+            "failed",
+            "canceled",
+            "interrupted",
+        }
         lines.extend(
             [
                 "### No findings",
                 "",
                 (
-                    "No source review completed before the configured time limit. "
-                    "No vulnerability conclusion can be drawn."
-                    if no_source_review
+                    "No findings were retained before the scan stopped. "
+                    "The scan did not complete. No vulnerability conclusion can be drawn."
+                    if stopped
                     else (
-                        "No findings were validated before the scan reached its cost limit. "
-                        "Review the deferred candidates in Open Questions And Follow Up."
-                        if budget_exhausted
-                        else "No reportable findings survived the canonical discovery, validation, "
-                        "and reportability gates."
+                        "No source review completed before the configured time limit. "
+                        "No vulnerability conclusion can be drawn."
+                        if no_source_review
+                        else (
+                            "No findings were validated before the scan reached its cost limit. "
+                            "Review the deferred candidates in Open Questions And Follow Up."
+                            if budget_exhausted
+                            else "No reportable findings survived the canonical discovery, validation, "
+                            "and reportability gates."
+                        )
                     )
                 ),
             ]

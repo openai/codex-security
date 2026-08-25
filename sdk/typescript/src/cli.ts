@@ -56,6 +56,10 @@ import {
 } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {
+  publishScanToCloud,
+  type CloudPublicationResult,
+} from "./cloud-publish.js";
+import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
@@ -94,6 +98,8 @@ import {
 } from "./linear.js";
 import type { Finding, SeverityLevel } from "./models.js";
 import { runMultiscan } from "./multiscan.js";
+import { componentPlanSchema, planComponents } from "./component-plan.js";
+import { runComponentScans } from "./component-scan.js";
 import {
   checkScanPublication,
   publishScan,
@@ -129,11 +135,10 @@ import {
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
 import type { PatchSelection } from "./patch-tui.js";
-import type {
-  ScanPhase,
-  ScanProgress,
-  ScanWorkerPhase,
-  ScanWorkerStatus,
+import {
+  scanPhaseLabel as scanPhase,
+  type ScanProgress,
+  type ScanWorkerStatus,
 } from "./worker-progress.js";
 import {
   abortable,
@@ -212,7 +217,10 @@ const EXPORT_DEFAULT_OUTPUTS = {
 } as const;
 const VALUE_OPTIONS = new Set([
   "--auth",
+  "--safety-identifier",
   "--path",
+  "--component",
+  "--components-file",
   "--knowledge-base",
   "--scan-prompt-file",
   "--validation-prompt-file",
@@ -235,6 +243,7 @@ const VALUE_OPTIONS = new Set([
   "--patch-severity",
   "--resume-pr",
   "--scan",
+  "--scan-dir",
   "--severity",
   "--max-cost",
   "--workers",
@@ -922,6 +931,7 @@ export function resolveCliPath(directory: string, value: string): string {
 
 interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
+  safetyIdentifier?: string;
   verbose?: boolean;
   repository?: string;
   paths: string[];
@@ -1013,6 +1023,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  safetyIdentifier?: string;
   directory?: string;
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
@@ -1042,6 +1053,7 @@ interface CliDependencies {
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
+  publishScanToCloud?: typeof publishScanToCloud;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -1071,6 +1083,7 @@ interface CliDependencies {
     repository: string,
   ): Promise<string>;
   bulkScan?: BulkScanDiscoveryDependencies;
+  planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
   runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
@@ -1987,6 +2000,25 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: PUBLICATION_DESTINATION_OPTIONS.extend({
+      scan: z
+        .array(optionValue("--scan"))
+        .default([])
+        .describe(
+          "Saved scan ID, unique prefix, or latest; repeat for multiple scans (Linear accepts one).",
+        ),
+      scanDir: z
+        .array(optionValue("--scan-dir"))
+        .default([])
+        .describe(
+          "External completed scan directory; repeat for multiple scans (Linear accepts one).",
+        ),
+      // Cloud remains an internal destination, omitted from public discovery.
+      to: z
+        .string()
+        .refine((value) => value === "linear" || value === "cloud", {
+          message: "Unsupported publication destination. Use --to linear.",
+        })
+        .describe("Publication destination (linear)."),
       dryRun: z
         .boolean()
         .default(false)
@@ -2002,20 +2034,98 @@ export async function main(
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
       let presentation: PublicationProgressPresenter | undefined;
+      let cloudBatch:
+        | {
+            results: (CloudPublicationResult & { scanDir: string })[];
+            failed: { scanDir: string; scanId?: string; error: string }[];
+            notAttempted: string[];
+          }
+        | undefined;
       const cancel = (signal: SignalName): void => {
         presentation?.stop();
         controller.abort(signal);
+      };
+      const finishCancellation = (error?: unknown): boolean => {
+        const signal = controller.signal.reason;
+        if (signal !== "SIGINT" && signal !== "SIGTERM") return false;
+        const reason =
+          signal === "SIGINT"
+            ? "Publication canceled by Ctrl-C."
+            : "Publication terminated by SIGTERM.";
+        const recovery =
+          error === undefined || error === signal
+            ? ""
+            : ` ${diagnosticValue(safeErrorMessage(error))}`;
+        errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+        exitCode = signal === "SIGINT" ? 130 : 143;
+        return true;
       };
       const onInterrupt = (): void => cancel("SIGINT");
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
       try {
-        const destination = publicationDestination(
-          options,
-          dependencies.environment,
-        );
+        const currentDirectory = dependencies.currentDirectory();
+        const directories = [
+          ...new Set(
+            [
+              ...(args.scanDir === undefined ? [] : [args.scanDir]),
+              ...options.scanDir,
+            ].map((directory) => resolveCliPath(currentDirectory, directory)),
+          ),
+        ];
+        if (directories.length > 1 && options.to !== "cloud") {
+          throw new CodexSecurityError(
+            "Multiple scan directories are only supported with --to cloud.",
+          );
+        }
+        if (options.scan.length > 0 && directories.length > 0) {
+          throw new CodexSecurityError(
+            "Use --scan or scan directory inputs, not both.",
+          );
+        }
+        if (new Set(options.scan).size > 1 && options.to !== "cloud") {
+          throw new CodexSecurityError(
+            "Multiple scans are only supported with --to cloud.",
+          );
+        }
+        if (
+          options.to === "cloud" &&
+          (options.skipExisting ||
+            [
+              options.linearTeam,
+              options.linearApiKey,
+              options.linearProject,
+              options.project,
+              options.linearAssignee,
+            ].some((value) => value !== undefined))
+        ) {
+          throw new CodexSecurityError(
+            "Cloud publication cannot be combined with Linear options.",
+          );
+        }
+        const destination =
+          options.to === "linear"
+            ? publicationDestination(
+                { ...options, to: "linear" },
+                dependencies.environment,
+              )
+            : undefined;
 
-        let scanDir = args.scanDir;
+        if (options.to === "cloud") {
+          dependencies.addSignalListener("SIGINT", onInterrupt);
+          dependencies.addSignalListener("SIGTERM", onTerminate);
+          observingSignals = true;
+        }
+        const selectedScans: { scanDir: string; scanId?: string }[] =
+          directories.map((scanDir) => ({ scanDir }));
+        for (const requestedId of new Set(options.scan)) {
+          controller.signal.throwIfAborted();
+          const scan = await resolvePublicationScan(requestedId, dependencies);
+          if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
+            selectedScans.push(scan);
+          }
+        }
+        let scanDir = selectedScans[0]?.scanDir;
         let publicationRepository =
           scanDir === undefined ? "scan" : basename(scanDir);
         if (scanDir === undefined) {
@@ -2028,7 +2138,7 @@ export async function main(
             }).prompt;
           if (!prompt.isInteractive()) {
             throw new CodexSecurityError(
-              "Interactive scan selection requires a terminal. Provide a completed scan directory: codex-security publish scan /path/to/sealed-scan --to linear --linear-team TEAM_ID.",
+              `Interactive scan selection requires a terminal. Select a saved scan: codex-security publish scan --scan SCAN_ID --to ${options.to}${options.to === "linear" ? " --linear-team TEAM_ID" : ""}.`,
             );
           }
           const saved = await dependencies.runWorkbench([
@@ -2051,7 +2161,7 @@ export async function main(
                   return undefined;
                 }
                 const metadata = await lstat(
-                  resolve(dependencies.currentDirectory(), directory),
+                  resolveCliPath(currentDirectory, directory),
                 ).catch(() => undefined);
                 return metadata?.isDirectory() === true &&
                   !metadata.isSymbolicLink()
@@ -2066,6 +2176,10 @@ export async function main(
             dependencies.environment["NO_COLOR"] === undefined &&
             dependencies.environment["TERM"] !== "dumb";
           const repositories = new Map<string, string>();
+          const scansById = new Map<
+            string,
+            { scanId: string; scanDir: string }
+          >();
           const rows = scans.flatMap((scan) => {
             if (!isJsonObject(scan)) return [];
             const progress = scan["progress"];
@@ -2115,13 +2229,17 @@ export async function main(
               .replace(/\s+/gu, " ")
               .slice(-6)}`;
             repositories.set(directory, repository);
+            scansById.set(scanId, {
+              scanId,
+              scanDir: resolveCliPath(currentDirectory, directory),
+            });
             return [
               {
                 repository,
                 findings,
                 age: publicationScanAge(timestamp, now),
                 scanId: shortScanId,
-                value: directory,
+                value: options.to === "cloud" ? scanId : directory,
               },
             ];
           });
@@ -2166,13 +2284,116 @@ export async function main(
               value: row.value,
             };
           });
-          scanDir = await prompt.select(
-            "Which completed scan would you like to publish?",
-            choices,
-            { header },
-          );
+          if (options.to === "cloud") {
+            let remaining = choices;
+            while (true) {
+              controller.signal.throwIfAborted();
+              const selected = await prompt.select(
+                "Which completed scans would you like to publish?",
+                selectedScans.length === 0
+                  ? remaining
+                  : [
+                      {
+                        label: `Done (${selectedScans.length} selected)`,
+                        value: "",
+                      },
+                      ...remaining,
+                    ],
+                { header },
+                controller.signal,
+              );
+              controller.signal.throwIfAborted();
+              if (selected === "") break;
+              selectedScans.push(scansById.get(selected)!);
+              remaining = remaining.filter(({ value }) => value !== selected);
+            }
+            scanDir = selectedScans[0]!.scanDir;
+          } else {
+            scanDir = await prompt.select(
+              "Which completed scan would you like to publish?",
+              choices,
+              { header },
+            );
+            selectedScans.push({ scanDir });
+          }
           publicationRepository =
             repositories.get(scanDir) ?? basename(scanDir);
+        }
+
+        if (options.to === "cloud") {
+          const seenDirectories = new Set<string>();
+          for (let index = 0; index < selectedScans.length; ) {
+            const selected = selectedScans[index]!;
+            const canonical = await realpath(selected.scanDir).catch(
+              () => selected.scanDir,
+            );
+            const identity =
+              process.platform === "win32"
+                ? canonical.toLowerCase()
+                : canonical;
+            if (seenDirectories.has(identity)) {
+              selectedScans.splice(index, 1);
+              continue;
+            }
+            seenDirectories.add(identity);
+            selected.scanDir = canonical;
+            index++;
+          }
+          scanDir = selectedScans[0]!.scanDir;
+          controller.signal.throwIfAborted();
+          if (selectedScans.length > 1) {
+            cloudBatch = {
+              results: [],
+              failed: [],
+              notAttempted: selectedScans.map(
+                ({ scanId, scanDir }) => scanId ?? scanDir,
+              ),
+            };
+            // Keep each scan's provenance and acceptance receipt separate. Never
+            // retry a failed POST: a lost response may still have been accepted.
+            for (const { scanDir: directory, scanId } of selectedScans) {
+              if (controller.signal.aborted) {
+                finishCancellation();
+                break;
+              }
+              cloudBatch.notAttempted.shift();
+              try {
+                const result = await (
+                  dependencies.publishScanToCloud ?? publishScanToCloud
+                )(directory, {
+                  environment: dependencies.environment,
+                  dryRun: options.dryRun,
+                  signal: controller.signal,
+                  ...(scanId === undefined ? {} : { expectedScanId: scanId }),
+                });
+                cloudBatch.results.push({ scanDir: directory, ...result });
+              } catch (error) {
+                const message = safeErrorMessage(error);
+                cloudBatch.failed.push({
+                  scanDir: directory,
+                  ...(scanId === undefined ? {} : { scanId }),
+                  error: message,
+                });
+                if (controller.signal.aborted) throw error;
+                exitCode = 2;
+                errorOutput.write(
+                  `codex-security: ${diagnosticValue(safeErrorMessage(scanId ?? directory))}: ${diagnosticValue(message)}\n`,
+                );
+              }
+            }
+            return cloudBatch;
+          }
+          const result = await (
+            dependencies.publishScanToCloud ?? publishScanToCloud
+          )(resolveCliPath(currentDirectory, scanDir), {
+            environment: dependencies.environment,
+            dryRun: options.dryRun,
+            signal: controller.signal,
+            ...(selectedScans[0]?.scanId === undefined
+              ? {}
+              : { expectedScanId: selectedScans[0].scanId }),
+          });
+          return { ...result };
         }
 
         const progress = new PublicationProgressPresenter(
@@ -2190,9 +2411,12 @@ export async function main(
         let result;
         try {
           result = await (dependencies.publishScan ?? publishScan)(
-            resolve(dependencies.currentDirectory(), scanDir),
+            resolveCliPath(currentDirectory, scanDir),
             {
-              ...destination,
+              ...destination!,
+              ...(selectedScans[0]?.scanId === undefined
+                ? {}
+                : { expectedScanId: selectedScans[0].scanId }),
               dryRun: options.dryRun,
               signal: controller.signal,
               ...(options.skipExisting ? { skipExisting: true } : {}),
@@ -2232,8 +2456,13 @@ export async function main(
         }
         return { ...result };
       } catch (error) {
-        reportPublicationError(error, controller.signal.reason);
-        return undefined;
+        if (!finishCancellation(error)) {
+          errorOutput.write(
+            `codex-security: ${options.to === "cloud" ? safeErrorMessage(error) : errorMessage(error)}\n`,
+          );
+          exitCode = 2;
+        }
+        return cloudBatch;
       } finally {
         if (observingSignals) {
           dependencies.removeSignalListener("SIGINT", onInterrupt);
@@ -2307,6 +2536,11 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Print scan diagnostics to stderr."),
+          safetyIdentifier: optionValue("--safety-identifier")
+            .optional()
+            .describe(
+              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+            ),
           path: z
             .array(optionValue("--path"))
             .default([])
@@ -2481,6 +2715,7 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            safetyIdentifier: options.safetyIdentifier,
             verbose: options.verbose,
             repository: args.repository,
             paths: options.path,
@@ -2611,6 +2846,253 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("scan-components", {
+      description:
+        "Run standard scans for project components and combine the results.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Project directory (default: current directory)."),
+      }),
+      options: z
+        .object({
+          auth: z
+            .enum(SCAN_AUTH_MODES)
+            .default("auto")
+            .describe(
+              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            ),
+          component: z
+            .array(optionValue("--component"))
+            .default([])
+            .describe(
+              "Scan this repository-relative path as a component; repeat for more.",
+            ),
+          componentsFile: optionValue("--components-file")
+            .optional()
+            .describe("Read a component plan from JSON."),
+          auto: z
+            .boolean()
+            .default(false)
+            .describe("Ask Codex to divide the project into components."),
+          planOnly: z
+            .boolean()
+            .default(false)
+            .describe("Save components.json without starting scans."),
+          headless: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Print status lines instead of the interactive dashboard.",
+            ),
+          outputDir: optionValue("--output-dir").describe(
+            "Empty results directory outside the repository.",
+          ),
+          workers: z
+            .number()
+            .int()
+            .positive()
+            .default(4)
+            .describe("Concurrent standard component scans."),
+          knowledgeBase: z
+            .array(optionValue("--knowledge-base"))
+            .default([])
+            .describe("Read shared security docs for every component."),
+          scanPromptFile: optionValue("--scan-prompt-file")
+            .optional()
+            .describe("Append instructions from FILE to every scan."),
+          postScanPromptFile: optionValue("--post-scan-prompt-file")
+            .optional()
+            .describe("Run FILE after each scan, including failures."),
+          model: optionValue("--model")
+            .optional()
+            .describe("Model for planning and component scans."),
+          effort: effortOption(),
+          provider: PROVIDER_OPTION,
+          maxCost: z
+            .number()
+            .positive()
+            .optional()
+            .describe(
+              "Stop each component scan if estimated USD cost exceeds AMOUNT.",
+            ),
+          pluginPath: optionValue("--plugin-path")
+            .optional()
+            .describe(PLUGIN_PATH_DESCRIPTION),
+          python: optionValue("--python")
+            .optional()
+            .describe(PYTHON_PATH_DESCRIPTION),
+          codex: z
+            .array(optionValue("--codex"))
+            .default([])
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
+        })
+        .refine(
+          (options) =>
+            Number(options.component.length > 0) +
+              Number(options.componentsFile !== undefined) +
+              Number(options.auto) ===
+            1,
+          {
+            message:
+              "Choose exactly one of --component, --components-file, or --auto.",
+          },
+        ),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options }) {
+        const controller = new AbortController();
+        let dashboard: ScanDashboard | null = null;
+        const stopDashboard = (): void => {
+          try {
+            dashboard?.stop();
+          } catch {}
+        };
+        const onInterrupt = (): void => controller.abort("SIGINT");
+        const onTerminate = (): void => controller.abort("SIGTERM");
+        const interruptedExitCode = (): number | undefined =>
+          controller.signal.reason === "SIGINT"
+            ? 130
+            : controller.signal.reason === "SIGTERM"
+              ? 143
+              : undefined;
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          const directory = dependencies.currentDirectory();
+          const repository = resolveCliPath(directory, args.repository ?? ".");
+          const config: CodexSecurityConfig = {
+            pluginPath: options.pluginPath,
+            pythonPath: options.python,
+            codexOverrides: parseCodexOverrides(
+              options.codex,
+              options.model,
+              options.effort,
+              options.provider,
+            ),
+          };
+          const components =
+            options.componentsFile === undefined
+              ? options.component.map((path) => ({ name: path, paths: [path] }))
+              : componentPlanSchema.parse(
+                  JSON.parse(
+                    await readRegularInputFile(
+                      resolveCliPath(directory, options.componentsFile),
+                      repository,
+                    ),
+                  ),
+                ).components;
+          if (
+            !options.headless &&
+            !options.planOnly &&
+            errorOutput.isTTY === true &&
+            dependencies.environment["CI"] === undefined &&
+            dependencies.environment["TERM"] !== "dumb"
+          ) {
+            const candidate = new ScanDashboard(errorOutput, {
+              repository,
+              presentation: "components",
+              model: scanModelConfiguration(await mergedCodexConfig(config)),
+              maxCostUsd: options.maxCost,
+              clock: dependencies,
+              color: dependencies.environment["NO_COLOR"] === undefined,
+              sanitize: safeErrorMessage,
+              input: process.stdin,
+              onInterrupt,
+            });
+            candidate.setStage(
+              options.auto ? "Planning components" : "Preparing components",
+            );
+            try {
+              candidate.start();
+              dashboard = candidate;
+            } catch {
+              try {
+                candidate.stop();
+              } catch {}
+            }
+          }
+          const result = await runComponentScans({
+            repository,
+            outputDir: resolveCliPath(directory, options.outputDir),
+            ...(options.auto ? { auto: true } : { components }),
+            planOnly: options.planOnly,
+            workers: options.workers,
+            config,
+            scanOptions: {
+              auth: options.auth,
+              knowledgeBasePaths: options.knowledgeBase.map((path) =>
+                resolveCliPath(directory, path),
+              ),
+              ...(await readPromptFiles(
+                directory,
+                options.scanPromptFile,
+                options.postScanPromptFile,
+                repository,
+              )),
+              ...(options.maxCost === undefined
+                ? {}
+                : { maxCostUsd: options.maxCost }),
+            },
+            createSecurity: dependencies.createSecurity,
+            planComponents: dependencies.planComponents,
+            matchFindings: dependencies.matchFindings,
+            onPlan: (components) => dashboard?.setComponents(components),
+            onScanEvent:
+              dashboard === null
+                ? undefined
+                : (event) => dashboard?.recordComponentEvent(event),
+            onDeduplicationStarted: () => {
+              if (dashboard !== null)
+                dashboard.showComponents("Combining duplicate findings");
+              else
+                errorOutput.write(
+                  "codex-security: Matching component findings by root cause...\n",
+                );
+            },
+            environment: dependencies.environment,
+            signal: controller.signal,
+            onProgress: (component) => {
+              if (dashboard !== null) dashboard.updateComponent(component);
+              else
+                errorOutput.write(
+                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${component.error}`}\n`,
+                );
+            },
+            onComplete: (result) => {
+              dashboard?.finishComponents(result);
+              stopDashboard();
+              errorOutput.write(
+                `Component scans: ${result.completed} complete, ${result.incomplete} incomplete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "incomplete" ? " (matching incomplete)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+              );
+              if (result.retryPlanPath !== undefined)
+                errorOutput.write(
+                  `Retry with --components-file ${JSON.stringify(errorMessage(result.retryPlanPath))} and a new --output-dir.\n`,
+                );
+            },
+          });
+          exitCode =
+            interruptedExitCode() ??
+            (result.failed ||
+            result.incomplete ||
+            result.deduplication?.status === "incomplete"
+              ? 2
+              : 0);
+          return { ...result };
+        } catch (error) {
+          stopDashboard();
+          exitCode = interruptedExitCode() ?? 2;
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+        } finally {
+          stopDashboard();
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command("bulk-scan", {
       description:
         "Discover repositories and run resumable bulk security scans.",
@@ -3708,6 +4190,7 @@ function validateCliArguments(
       "scan",
       "install-hook",
       "bulk-scan",
+      "scan-components",
       "scans",
       "findings",
       "export",
@@ -3981,6 +4464,71 @@ async function* workbenchFindings(
     yield* page.findings;
     offset = typeof page.nextOffset === "number" ? page.nextOffset : undefined;
   } while (offset !== undefined);
+}
+
+async function resolvePublicationScan(
+  requestedId: string,
+  dependencies: CliDependencies,
+): Promise<SavedScan> {
+  let scanId = requestedId;
+  if (scanId === "latest") {
+    const history = await dependencies.runWorkbench([
+      "list-scans",
+      "--repository",
+      resolve(dependencies.currentDirectory()),
+      "--status",
+      "complete",
+    ]);
+    const scans = history["scans"];
+    const latest = Array.isArray(scans) ? scans[0] : undefined;
+    if (
+      latest === undefined ||
+      !isJsonObject(latest) ||
+      typeof latest["scanId"] !== "string"
+    ) {
+      throw new CodexSecurityError(
+        "No completed saved scan was found for this repository.",
+      );
+    }
+    scanId = latest["scanId"];
+  }
+  const context = await dependencies.runWorkbench([
+    "get-scan",
+    "--scan-id",
+    scanId,
+  ]);
+  const scan = context["scan"];
+  if (
+    scan === undefined ||
+    !isJsonObject(scan) ||
+    typeof scan["scanId"] !== "string"
+  ) {
+    throw new CodexSecurityError(`Could not read saved scan ${scanId}.`);
+  }
+  scanId = scan["scanId"];
+  const progress = scan["progress"];
+  if (
+    progress === undefined ||
+    !isJsonObject(progress) ||
+    progress["status"] !== "complete"
+  ) {
+    throw new CodexSecurityError(`Scan ${scanId} is not complete.`);
+  }
+  const storedDirectory = scan["scanDir"];
+  const scanDir =
+    typeof storedDirectory === "string" && storedDirectory.length > 0
+      ? resolveCliPath(dependencies.currentDirectory(), storedDirectory)
+      : undefined;
+  const metadata =
+    scanDir === undefined
+      ? undefined
+      : await lstat(scanDir).catch(() => undefined);
+  if (scanDir === undefined || metadata?.isDirectory() !== true) {
+    throw new CodexSecurityError(
+      `Artifacts for scan ${scanId} are unavailable. Restore the completed scan artifacts or run a new scan.`,
+    );
+  }
+  return { ...scan, scanId, scanDir };
 }
 
 async function selectSavedFindings(
@@ -4513,6 +5061,12 @@ async function runSkill(
       ...(verify ? ["--config", 'approvals_reviewer="auto_review"'] : []),
       "--config",
       'responses_api_metadata.codex_security_surface="cli"',
+      ...(options.safetyIdentifier === undefined
+        ? []
+        : [
+            "--config",
+            `safety_identifier=${JSON.stringify(options.safetyIdentifier)}`,
+          ]),
       ...(appServer
         ? []
         : [
@@ -5289,6 +5843,7 @@ async function executeScan(
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
       auth,
+      safetyIdentifier: arguments_.safetyIdentifier,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
       ...prompts,
@@ -5757,6 +6312,7 @@ async function executeScan(
         dependencies,
         {
           ...providerOptions,
+          safetyIdentifier: arguments_.safetyIdentifier,
           environment,
           findingInstructions: patchSelection?.instructions,
         },
@@ -5907,19 +6463,6 @@ function scanScope(arguments_: ScanArguments): string | null {
   if (arguments_.diff !== undefined) return "committed changes";
   if (arguments_.workingTree) return "working-tree changes";
   return null;
-}
-
-function scanPhase(value: ScanWorkerPhase | ScanPhase): string {
-  return {
-    preflight: "preflight",
-    threat_model: "building threat model",
-    discovery: "reviewing files",
-    ranking: "ranking scan targets",
-    file_review: "reviewing files",
-    validation: "validating findings",
-    attack_path: "analyzing attack paths",
-    reporting: "writing report",
-  }[value];
 }
 
 interface DeepScanStop {

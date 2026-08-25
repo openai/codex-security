@@ -24,6 +24,7 @@ import {
   rm,
   rmdir,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -74,6 +75,7 @@ const MAX_ZIP_EXPANDED_SIZE = 512 * 1024 * 1024;
 const MODEL_UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
+const CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS = 5_000;
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
@@ -1065,7 +1067,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
       throw error;
     });
     if (existingLock !== null) {
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, signal)) continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1078,7 +1080,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
       await mkdir(lock, { mode: 0o700 });
     } catch (error) {
       if (nodeErrorCode(error) !== "EEXIST") throw error;
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, signal)) continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1094,9 +1096,18 @@ export async function acquireCodexSecurityCredentialHomeLock(
       throw error;
     }
 
+    const heartbeat = setInterval(async () => {
+      try {
+        const now = new Date();
+        await utimes(lock, now, now);
+      } catch {}
+    }, CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS);
+    heartbeat.unref();
+
     let released = false;
     return async () => {
       if (released) return;
+      clearInterval(heartbeat);
       await requireSecureCredentialHome(codexHome, {
         ...securityOptions,
         expectedDevice,
@@ -1116,7 +1127,10 @@ export async function acquireCodexSecurityCredentialHomeLock(
   }
 }
 
-async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
+async function recoverStaleCredentialHomeLock(
+  lock: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const metadata = await lstat(lock).catch((error: unknown) => {
     if (nodeErrorCode(error) === "ENOENT") return null;
     throw error;
@@ -1135,17 +1149,13 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
     if (nodeErrorCode(error) !== "ENOENT" && !(error instanceof SyntaxError)) {
       throw error;
     }
-    if (
-      Date.now() - metadata.mtimeMs <
-      INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS
-    ) {
-      return false;
-    }
   }
 
   // Only positive signed-32-bit PIDs identify an owner. Other values can name
   // process groups or fail argument validation, so use the stale-age check.
   const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
+  let ownerExited = false;
+  let ownerIsAlive = false;
   if (
     typeof ownerPid === "number" &&
     Number.isInteger(ownerPid) &&
@@ -1154,18 +1164,36 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   ) {
     try {
       process.kill(ownerPid, 0);
-      return false;
+      ownerIsAlive = true;
     } catch (error) {
-      if (nodeErrorCode(error) !== "ESRCH") {
-        if (nodeErrorCode(error) === "EPERM") return false;
-        throw error;
-      }
+      if (nodeErrorCode(error) === "ESRCH") ownerExited = true;
+      else if (nodeErrorCode(error) === "EPERM") ownerIsAlive = true;
+      else throw error;
     }
-  } else if (
-    Date.now() - metadata.mtimeMs <
-    INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS
+  }
+  if (
+    !ownerExited &&
+    Date.now() - metadata.mtimeMs < INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS
   ) {
     return false;
+  }
+
+  if (ownerIsAlive) {
+    await delay(CREDENTIAL_LOCK_HEARTBEAT_MILLISECONDS, undefined, { signal });
+    const refreshedMetadata = await lstat(lock).catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (refreshedMetadata === null) return true;
+    if (
+      !refreshedMetadata.isDirectory() ||
+      refreshedMetadata.isSymbolicLink()
+    ) {
+      throw new OutputDirectoryError(
+        `Codex Security credential-home lock is not a directory: ${lock}`,
+      );
+    }
+    if (refreshedMetadata.mtimeMs > metadata.mtimeMs) return false;
   }
 
   const quarantine = `${lock}.stale-${randomUUID()}`;
@@ -1350,7 +1378,7 @@ export function requireOutputOutsideRepositories(
 
 export async function preparePersistentOutputRoot(
   stateDirectory: string,
-  category: "scans" | "policies",
+  category: "scans" | "policies" | "validations",
   repositoryName: string,
 ): Promise<string> {
   requireModelSafeOutputDir(stateDirectory);
@@ -1361,7 +1389,7 @@ export async function preparePersistentOutputRoot(
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (!(await lstat(root)).isDirectory()) {
       throw new OutputDirectoryError(
-        `Persistent ${category === "scans" ? "scan" : "policy"} output must use real directories: ${root}`,
+        `Persistent ${category === "scans" ? "scan" : category === "policies" ? "policy" : "validation"} output must use real directories: ${root}`,
       );
     }
   }
