@@ -929,16 +929,27 @@ describe("publish scan to Cloud", () => {
     ).toBe(true);
   });
 
-  test("aborts Cloud publication and removes signal listeners", async () => {
+  test("aborts Cloud publication without activating Linear recovery signal handling", async () => {
     for (const [signal, code] of [
       ["SIGINT", 130],
       ["SIGTERM", 143],
     ] as const) {
       const signals = new FakeSignals();
-      const deps = dependencies({ signals });
+      const deps = dependencies({
+        signals,
+        environment: { CODEX_SECURITY_LINEAR_API_KEY: "synthetic-linear-key" },
+      });
+      let now = 0;
+      let forced = false;
+      deps.now = () => now;
+      deps.forceExit = () => {
+        forced = true;
+      };
       deps.publishScanToCloud = async (_directory, options) => {
         signals.emit(signal);
         expect(options?.signal?.aborted).toBe(true);
+        now = 500;
+        signals.emit(signal);
         options?.signal?.throwIfAborted();
         return receipt;
       };
@@ -952,10 +963,12 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(code);
+      expect(forced).toBe(false);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
         signal === "SIGINT" ? "canceled" : "terminated",
       );
+      expect(stderr.text()).not.toContain("reconcile retained Linear");
       expect(
         [...signals.listeners.values()].every(
           (listeners) => listeners.size === 0,

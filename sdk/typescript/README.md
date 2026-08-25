@@ -973,6 +973,21 @@ Issue descriptions contain source code and vulnerability details. Select a
 Linear destination authorized to receive that information. Publication receipts
 are stored separately from the sealed scan artifacts.
 
+Before recording a connected-app publication, Codex Security verifies the exact
+mutation arguments and reconciles every recognized issue identifier and
+non-empty URL in the connector result with its durable handoff. If those claims
+conflict, or a completed mutation cannot be verified, publication exits with an
+indeterminate recovery error. The private handoff, connector-event evidence,
+and partial receipts remain in local state; independently verified sibling
+issues may already be recorded in scan history.
+
+Do not immediately rerun an indeterminate publication. Inspect the retained
+evidence and the selected Linear destination, reconcile every issue that may
+already have been created, and retry only after confirming that no unrecorded
+issue would be duplicated. Publication does not perform a fresh remote readback
+or recover unrecorded remote creations. The opt-in `--skip-existing` behavior
+only skips issues already recorded in local history.
+
 You can also publish a scan from TypeScript:
 
 ```ts
@@ -982,7 +997,9 @@ const publication = await publishScan("/path/to/completed-scan", {
   destination: "linear",
   teamId: "TEAM_ID",
   onProgress: (progress) => {
-    if (progress.type === "issue_completed") {
+    if (progress.type === "handoff_recorded") {
+      console.error("Saved mutation result", progress.recorded);
+    } else if (progress.type === "issue_completed") {
       console.error(
         `Processed ${progress.completed} of ${progress.total} findings.`,
       );

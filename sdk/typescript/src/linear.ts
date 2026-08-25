@@ -166,16 +166,22 @@ function linearIssueFilter(input: string | undefined): JsonObject {
   );
 }
 
-function linearIssueReference(input: string): {
+export function isLinearIssueIdentifier(input: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9_-]*-\d+$/u.test(input);
+}
+
+export function linearIssueReference(input: string): {
   id: string;
   workspace?: string;
 } {
   if (!/^https?:\/\//iu.test(input)) return { id: input };
   const url = new URL(input);
-  const match = /^\/([^/]+)\/issue\/([A-Z][A-Z0-9]*-\d+)(?:\/|$)/iu.exec(
-    url.pathname,
-  );
-  if (url.hostname !== "linear.app" || match === null) {
+  const match = /^\/([^/]+)\/issue\/([^/]+)(?:\/|$)/iu.exec(url.pathname);
+  if (
+    url.hostname !== "linear.app" ||
+    match === null ||
+    !isLinearIssueIdentifier(match[2]!)
+  ) {
     throw new CodexSecurityError("Linear issue URL is invalid.");
   }
   return { id: match[2]!, workspace: match[1]!.toLowerCase() };

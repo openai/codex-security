@@ -598,6 +598,13 @@ class PublicationProgressPresenter {
       return;
     }
 
+    if (event.type === "handoff_recorded") {
+      const message = `[${event.recorded}/${event.total}] Saved Linear publication evidence.`;
+      if (this.#dashboard === null) this.#write(message, true);
+      else this.#dashboard.setStage(message);
+      return;
+    }
+
     if (event.type === "issue_completed") {
       const detail =
         event.error === undefined
@@ -2034,6 +2041,9 @@ export async function main(
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
       let presentation: PublicationProgressPresenter | undefined;
+      let directApiPublication = false;
+      let firstSignalAt = 0;
+      let observingSignals = false;
       let cloudBatch:
         | {
             results: (CloudPublicationResult & { scanDir: string })[];
@@ -2043,6 +2053,25 @@ export async function main(
         | undefined;
       const cancel = (signal: SignalName): void => {
         presentation?.stop();
+        if (controller.signal.aborted) {
+          if (
+            !directApiPublication ||
+            (controller.signal.reason === signal &&
+              dependencies.now() - firstSignalAt < 500)
+          ) {
+            return;
+          }
+          try {
+            dependencies.writeSynchronously(
+              errorOutput,
+              "codex-security: Publication force-stopped; reconcile retained Linear publication evidence before retrying.\n",
+            );
+          } catch {}
+          removeSignalListeners();
+          dependencies.forceExit(signal);
+          return;
+        }
+        firstSignalAt = dependencies.now();
         controller.abort(signal);
       };
       const finishCancellation = (error?: unknown): boolean => {
@@ -2062,7 +2091,12 @@ export async function main(
       };
       const onInterrupt = (): void => cancel("SIGINT");
       const onTerminate = (): void => cancel("SIGTERM");
-      let observingSignals = false;
+      const removeSignalListeners = (): void => {
+        if (!observingSignals) return;
+        dependencies.removeSignalListener("SIGINT", onInterrupt);
+        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        observingSignals = false;
+      };
       try {
         const currentDirectory = dependencies.currentDirectory();
         const directories = [
@@ -2110,6 +2144,8 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
+        directApiPublication =
+          !options.dryRun && destination?.linearApiKey !== undefined;
 
         if (options.to === "cloud") {
           dependencies.addSignalListener("SIGINT", onInterrupt);
@@ -2464,10 +2500,7 @@ export async function main(
         }
         return cloudBatch;
       } finally {
-        if (observingSignals) {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
-        }
+        removeSignalListeners();
       }
     },
   });

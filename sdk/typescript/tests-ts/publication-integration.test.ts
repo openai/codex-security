@@ -16,6 +16,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { prepareScanPublication } from "../src/publication.js";
+import { recordPublishedIssues } from "../src/publication-store.js";
 import type {
   CoverageDocument,
   Finding,
@@ -28,6 +30,7 @@ import {
   type PublishScanDependencies,
   type PublishScanProgress,
   type PublishScanResult,
+  type PublishedScanIssue,
 } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
@@ -862,6 +865,136 @@ describe("database-backed Linear publication integration", () => {
     ).toBe(null);
     expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
   });
+
+  test.each([false, true])(
+    "keeps conflicting connector identities out of CLI history and retains recovery evidence with skipExisting=%s",
+    async (skipExisting) => {
+      const completed = await fixture(1 + Number(skipExisting));
+      const sealed = await artifactDigests(completed.scanDirectory);
+      const recorded: PublishedScanIssue[] = [];
+      if (skipExisting) {
+        const prepared = await prepareScanPublication(
+          completed.scanDirectory,
+          OPTIONS,
+        );
+        recorded.push({
+          findingId: prepared.issues[0]!.findingId,
+          occurrenceId: prepared.issues[0]!.occurrenceId,
+          issueIdentifier: "SEC-500",
+        });
+        await recordPublishedIssues(prepared, recorded, completed.environment);
+      }
+      const storedBefore = storedPublications(completed);
+      const pending = completed.findings[Number(skipExisting)]!;
+      const stdout = capture();
+      const stderr = capture();
+      const cli = dependencies({ environment: completed.environment });
+      let handoffFile = "";
+      let handoffLine = "";
+      let completedEvent = "";
+
+      cli.publishScan = async (directory, options) =>
+        publishScanInternal(directory, options, {
+          environment: completed.environment,
+          resolveCodex: () => ({ command: "synthetic-codex" }),
+          runCodex: async (_command, _args, prompt) => {
+            const payload = await publicationPayload(prompt);
+            expect(
+              payload.batches.flat().map((finding) => finding.findingId),
+            ).toEqual([pending.findingId]);
+            const finding = payload.batches[0]![0]!;
+            handoffFile = payload.handoffFile;
+            handoffLine = JSON.stringify({
+              scanId: payload.scanId,
+              findingId: finding.findingId,
+              occurrenceId: finding.occurrenceId,
+              issueIdentifier: "SYNTH-A",
+              arguments: finding.arguments,
+            });
+            await appendFile(handoffFile, `${handoffLine}\n`, "utf8");
+            completedEvent = JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "tool-conflicting-publication",
+                type: "mcp_tool_call",
+                server: "codex_apps",
+                tool: "linear.save_issue",
+                arguments: finding.arguments,
+                status: "completed",
+                result: {
+                  structured_content: { identifier: "SYNTH-A" },
+                  content: [
+                    {
+                      type: "text",
+                      text: JSON.stringify({ identifier: "SYNTH-B" }),
+                    },
+                  ],
+                },
+              },
+            });
+            return { exitCode: 0, stdout: completedEvent, stderr: "" };
+          },
+        });
+
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            completed.scanDirectory,
+            "--to",
+            "linear",
+            "--linear-team",
+            OPTIONS.teamId,
+            "--project",
+            OPTIONS.projectId,
+            ...(skipExisting ? ["--skip-existing"] : []),
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          cli,
+        ),
+      ).toBe(2);
+
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "could not verify every completed mutation",
+      );
+      expect(stderr.text()).toContain(handoffFile);
+      expect(storedPublications(completed)).toEqual(storedBefore);
+      const receipt = JSON.parse(
+        await readFile(receiptPath(completed), "utf8"),
+      ) as PublishScanResult;
+      expect(receipt.skipped).toEqual(skipExisting ? recorded : undefined);
+      expect(receipt).toMatchObject({
+        indeterminate: true,
+        created: [],
+        failed: [
+          {
+            findingId: pending.findingId,
+            error:
+              "The connected Linear app returned conflicting created issue identifiers or URLs.",
+          },
+        ],
+        counts: {
+          findings: completed.findings.length,
+          created: 0,
+          failed: 1,
+          ...(skipExisting ? { skipped: 1 } : {}),
+        },
+      });
+      expect(await readFile(handoffFile, "utf8")).toBe(`${handoffLine}\n`);
+      const eventFiles = (await readdir(dirname(handoffFile))).filter(
+        (name) => name.startsWith("events-") && name.endsWith(".jsonl"),
+      );
+      expect(eventFiles).toHaveLength(1);
+      expect(
+        await readFile(join(dirname(handoffFile), eventFiles[0]!), "utf8"),
+      ).toBe(`${completedEvent}\n`);
+      expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
+    },
+  );
 
   test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
     const completed = await fixture(3);
