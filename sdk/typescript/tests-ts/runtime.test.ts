@@ -58,8 +58,10 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  CodexConfigInspectionError,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
+  inspectCodexConfig,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
@@ -5478,4 +5480,108 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     ).toBe(false);
   });
+
+  testPosix(
+    "inspects Codex config with cwd-sensitive paginated permission profiles",
+    async () => {
+      const root = await temporaryDirectory();
+      const executable = join(root, "fake-codex.mjs");
+      const requestsPath = join(root, "requests.jsonl");
+      await writeFile(
+        executable,
+        [
+          "#!/usr/bin/env node",
+          'import { appendFileSync } from "node:fs";',
+          'import { createInterface } from "node:readline";',
+          `const requestsPath = ${JSON.stringify(requestsPath)};`,
+          "const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });",
+          "const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');",
+          "for await (const line of lines) {",
+          "  const request = JSON.parse(line);",
+          "  appendFileSync(requestsPath, JSON.stringify(request) + '\\n');",
+          "  if (request.id === 1) send({ id: 1, result: {} });",
+          "  if (request.id === 2) send({ id: 2, result: { config: { default_permissions: 'codex_security_scan', permissions: { codex_security_scan: { filesystem: { ':root': 'read' } } } } } });",
+          "  if (request.id === 3) send({ id: 3, result: { requirements: null } });",
+          "  if (request.id === 4 && request.params?.cursor === undefined) send({ id: 4, result: { data: [{ id: 'first', allowed: false }], nextCursor: 'page-2' } });",
+          "  if (request.id === 4 && request.params?.cursor === 'page-2') send({ id: 4, result: { data: [{ id: 'codex_security_scan', allowed: true }], nextCursor: null } });",
+          "}",
+          "",
+        ].join("\n"),
+        { mode: 0o700 },
+      );
+      await chmod(executable, 0o700);
+
+      const inspection = await inspectCodexConfig(
+        { command: executable },
+        { PATH: process.env["PATH"] },
+        join(root, "repository"),
+        ['default_permissions="codex_security_scan"'],
+      );
+
+      expect(inspection.permissionProfiles).toEqual([
+        { id: "first", allowed: false },
+        { id: "codex_security_scan", allowed: true },
+      ]);
+      const requests = (await readFile(requestsPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(requests[0]).toMatchObject({
+        method: "initialize",
+        params: { capabilities: null },
+      });
+      expect(requests[1]).toEqual({ method: "initialized" });
+      expect(requests[2]).toMatchObject({
+        method: "config/read",
+        params: { cwd: join(root, "repository") },
+      });
+      expect(requests[3]).toEqual({
+        id: 3,
+        method: "configRequirements/read",
+      });
+      expect(requests[4]).toMatchObject({
+        method: "permissionProfile/list",
+        params: { cwd: join(root, "repository") },
+      });
+      expect(requests[5]).toMatchObject({
+        method: "permissionProfile/list",
+        params: { cwd: join(root, "repository"), cursor: "page-2" },
+      });
+    },
+  );
+
+  testPosix(
+    "does not misclassify unrelated unknown-variant RPC errors as an old Codex version",
+    async () => {
+      const root = await temporaryDirectory();
+      const executable = join(root, "fake-codex.mjs");
+      await writeFile(
+        executable,
+        [
+          "#!/usr/bin/env node",
+          'import { createInterface } from "node:readline";',
+          "const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });",
+          "const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');",
+          "for await (const line of lines) {",
+          "  const request = JSON.parse(line);",
+          "  if (request.id === 1) send({ id: 1, result: {} });",
+          "  if (request.id === 2) send({ id: 2, error: { code: -32600, message: 'unknown variant bad-mode' } });",
+          "}",
+          "",
+        ].join("\n"),
+        { mode: 0o700 },
+      );
+      await chmod(executable, 0o700);
+
+      const failure = await inspectCodexConfig(
+        { command: executable },
+        { PATH: process.env["PATH"] },
+        join(root, "repository"),
+        [],
+      ).catch((error) => error);
+
+      expect(failure).toBeInstanceOf(CodexConfigInspectionError);
+      expect((failure as CodexConfigInspectionError).kind).toBe("protocol");
+    },
+  );
 });

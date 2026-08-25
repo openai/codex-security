@@ -1,5 +1,6 @@
 import { CodexSecurity } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
+import { parse as parseToml } from "smol-toml";
 
 type ClientArguments = ConstructorParameters<typeof CodexSecurity>;
 
@@ -68,6 +69,33 @@ export class TestClient extends CodexSecurity {
           throw new Error("Unexpected Codex invocation in test");
         },
         environment: {},
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {} as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          const prefix = "permissions.codex_security_scan.filesystem=";
+          const override = overrides.find((value) => value.startsWith(prefix));
+          if (override === undefined) {
+            throw new Error("missing scan filesystem override");
+          }
+          const filesystem = parseToml(
+            "filesystem = " + override.slice(prefix.length),
+          )["filesystem"] as JsonObject;
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                codex_security_scan: { filesystem },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [{ id: "codex_security_scan", allowed: true }],
+          };
+        },
         runWorkbench: async (_options, args, input) =>
           mockWorkbench(args, input),
         ...dependencies,

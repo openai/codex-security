@@ -24,7 +24,7 @@ import {
   type ThreadOptions,
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
   CodexSecurity,
@@ -49,7 +49,12 @@ import {
   type JsonObject,
 } from "../src/config.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
-import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
+import {
+  type CodexConfigInspection,
+  CodexConfigInspectionError,
+  resolveCodexCommand,
+  runWorkbench,
+} from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -152,6 +157,19 @@ function nodeCodex(script: string): {
   };
 }
 
+function scanFilesystemFromOverrides(
+  overrides: readonly string[] | undefined,
+): JsonObject {
+  const prefix = "permissions.codex_security_scan.filesystem=";
+  const override = overrides?.find((value) => value.startsWith(prefix));
+  if (override === undefined) {
+    throw new Error("missing scan filesystem override");
+  }
+  return parseToml("filesystem = " + override.slice(prefix.length))[
+    "filesystem"
+  ] as JsonObject;
+}
+
 async function writeUsageSession(
   codexHome: string,
   threadId: string,
@@ -216,6 +234,7 @@ describe("CodexSecurity finding validation", () => {
   async function validationClient(
     events: (signal: AbortSignal) => AsyncGenerator<ThreadEvent> = () =>
       validationEvents(),
+    dependencies: Partial<ConstructorParameters<typeof TestClient>[1]> = {},
   ) {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -263,6 +282,7 @@ describe("CodexSecurity finding validation", () => {
             },
           };
         },
+        ...dependencies,
       },
     );
     const options = {
@@ -331,6 +351,77 @@ describe("CodexSecurity finding validation", () => {
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
         options.repositoryPath,
       );
+    },
+  );
+
+  test.each([true, false])(
+    "starts validation only when inherited file denials are preserved: %j",
+    async (preserveDenials) => {
+      let deniedPath = "";
+      const inspectedDirectories: string[] = [];
+      const {
+        client: security,
+        options,
+        captured,
+        workbench,
+      } = await validationClient(undefined, {
+        inspectCodexConfig: async (
+          _command,
+          _environment,
+          cwd,
+          overrides,
+        ): Promise<CodexConfigInspection> => {
+          inspectedDirectories.push(cwd);
+          if (overrides.length === 0) {
+            deniedPath = join(cwd, "private.env");
+            return {
+              config: {
+                default_permissions: "selected",
+                permissions: {
+                  selected: { filesystem: { [deniedPath]: "deny" } },
+                },
+              },
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          const filesystem = scanFilesystemFromOverrides(overrides);
+          expect(filesystem[deniedPath]).toBe("deny");
+          if (!preserveDenials) delete filesystem[deniedPath];
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: { codex_security_scan: { filesystem } },
+            },
+            requirements: null,
+            permissionProfiles: [{ id: "codex_security_scan", allowed: true }],
+          };
+        },
+      });
+      await using client = security;
+      if (preserveDenials) {
+        expect(await client.validate(options)).toMatchObject(assessment);
+        expect(
+          scanFilesystemFromOverrides(captured.codex?.configOverrides),
+        ).toMatchObject({
+          [deniedPath]: "deny",
+          [options.outputDir]: { ".": "write" },
+          ":workspace_roots": "read",
+        });
+        expect(captured.codex?.config?.["features"]).toMatchObject({
+          plugins: false,
+        });
+      } else {
+        await expect(client.validate(options)).rejects.toThrow(
+          "expected permission rules",
+        );
+        expect(captured.codex).toBeUndefined();
+      }
+      expect(inspectedDirectories).toEqual([
+        options.repositoryPath,
+        options.outputDir,
+      ]);
+      expect(workbench).not.toHaveBeenCalled();
     },
   );
 
@@ -4659,6 +4750,956 @@ describe("CodexSecurity orchestration", () => {
       client.run(repository, { expectedPluginVersion: "0.0.1" }),
     ).rejects.toThrow("original scan used plugin version 0.0.1");
     await client.close();
+  });
+
+  test("passes active ambient filesystem denials as a process-local scan profile", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const ambientHome = join(root, "ambient-codex-home");
+    const codexHome = join(root, "generated-codex-home");
+    const stateDirectory = join(root, "state");
+    const scanDir = join(root, "scan[1]");
+    const otherWorkspace = join(root, "additional-workspace");
+    const homeWorkspace = join(root, "home-workspace");
+    const relativeWorkspace = join(root, "relative-workspace");
+    const posixBackslashWorkspace = join(repository, "~\\literal-workspace");
+    const explicitWorkspace = join(root, "explicit-workspace[1]");
+    const inheritedSecret = join(root, "inherited-secret.env");
+    const inheritedThenAllowed = join(root, "allowed-by-child.env");
+    const projectLayerSecret = join(root, "project-layer-secret.env");
+    const explicitSecret = join(root, "explicit-secret.env");
+    const directSecret = join(root, "direct-secret.env");
+    const delSecret = join(root, "del\u007f.env");
+    const ignoredWrite = join(root, "not-writable");
+    let codexOptions: CodexOptions | undefined;
+    let recipe: JsonObject | undefined;
+    let ambientInspectedCwd: string | undefined;
+    await Promise.all(
+      [
+        repository,
+        ambientHome,
+        codexHome,
+        scanDir,
+        otherWorkspace,
+        explicitWorkspace,
+      ].map((path) => mkdir(path, { mode: 0o700 })),
+    );
+    await writeFile(
+      join(ambientHome, "config.toml"),
+      stringifyToml({
+        default_permissions: "selected",
+        permissions: {
+          base: {
+            workspace_roots: {
+              [otherWorkspace]: true,
+              [process.platform === "win32"
+                ? "~\\home-workspace"
+                : "~/home-workspace"]: true,
+              "../relative-workspace": true,
+              ...(process.platform === "win32"
+                ? {}
+                : { "~\\literal-workspace": true }),
+            },
+            filesystem: {
+              glob_scan_max_depth: 4,
+              ":root": "read",
+              ":workspace_roots": {
+                "**/*.env": "deny",
+                "legacy.secret": "none",
+                "allowed.txt": "read",
+              },
+              ":project_roots": {
+                "legacy-project.secret": "deny",
+              },
+              "~/.ssh": "none",
+              [inheritedSecret]: "deny",
+              [inheritedThenAllowed]: "deny",
+              [explicitWorkspace]: "deny",
+            },
+          },
+          selected: {
+            extends: "base",
+            filesystem: { [inheritedThenAllowed]: "read" },
+          },
+          codex_security_scan: {
+            filesystem: { ":workspace_roots": "deny" },
+          },
+        },
+      }),
+    );
+    const client = new TestClient(
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          default_permissions: "explicit",
+          permissions: {
+            explicit: {
+              workspace_roots: {
+                [explicitWorkspace]: true,
+              },
+              filesystem: {
+                [explicitSecret]: "deny",
+                [inheritedSecret]: "read",
+                ":root": "write",
+                ":workspace_roots": {
+                  "explicit.secret": "deny",
+                },
+              },
+            },
+            codex_security_scan: {
+              filesystem: {
+                [directSecret]: "deny",
+                [delSecret]: "deny",
+                [ignoredWrite]: "write",
+              },
+            },
+          },
+        },
+      },
+      {
+        environment: {
+          CODEX_HOME: ambientHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          HOME: root,
+          OPENAI_API_KEY: "synthetic-transient-key",
+        },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, cwd, overrides) => {
+          if (overrides.length === 0) {
+            ambientInspectedCwd = cwd;
+            const config = parseToml(
+              await readFile(join(ambientHome, "config.toml"), "utf8"),
+            ) as JsonObject;
+            const permissions = config["permissions"] as JsonObject;
+            (permissions["base"] as JsonObject)["extends"] = null;
+            const selected = permissions["selected"] as JsonObject;
+            selected["workspace_roots"] = null;
+            (selected["filesystem"] as JsonObject)[projectLayerSecret] = "deny";
+            return {
+              config,
+              requirements: {
+                defaultPermissions: "selected",
+                allowedPermissionProfiles: { codex_security_scan: true },
+              },
+              permissionProfiles: [],
+            };
+          }
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                codex_security_scan: {
+                  filesystem: scanFilesystemFromOverrides(overrides),
+                },
+              },
+            },
+            requirements: {
+              defaultPermissions: "selected",
+              allowedPermissionProfiles: { codex_security_scan: true },
+            },
+            permissionProfiles: [{ id: "codex_security_scan", allowed: true }],
+          };
+        },
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ) => {
+          if (args[0] === "register-cli-scan") {
+            recipe = JSON.parse(input!).recipe as JsonObject;
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: (options: CodexOptions) => {
+          codexOptions = options;
+          throw new Error("ambient denials captured");
+        },
+      },
+    );
+
+    try {
+      await expect(client.run(repository)).rejects.toThrow(
+        "ambient denials captured",
+      );
+      expect(codexOptions?.configOverrides).toContain(
+        'default_permissions="codex_security_scan"',
+      );
+      expect(ambientInspectedCwd).toBe(repository);
+      const filesystem = scanFilesystemFromOverrides(
+        codexOptions?.configOverrides,
+      );
+      expect(
+        codexOptions?.configOverrides?.some((override) =>
+          override.startsWith(
+            "permissions.codex_security_scan.workspace_roots=",
+          ),
+        ),
+      ).toBe(false);
+      expect(filesystem).toMatchObject({
+        glob_scan_max_depth: 4,
+        ":root": "read",
+        ":workspace_roots": "read",
+        [scanDir]: { ".": "write" },
+        [stateDirectory]: { ".": "write" },
+        [codexHome]: { ".": "read" },
+        [repository]: {
+          ".": "deny",
+          "**/*.env": "deny",
+          "legacy.secret": "deny",
+          "legacy-project.secret": "deny",
+          "explicit.secret": "deny",
+        },
+        [otherWorkspace]: {
+          "**/*.env": "deny",
+          "legacy.secret": "deny",
+          "legacy-project.secret": "deny",
+        },
+        [homeWorkspace]: {
+          "**/*.env": "deny",
+          "legacy.secret": "deny",
+          "legacy-project.secret": "deny",
+        },
+        [relativeWorkspace]: {
+          "**/*.env": "deny",
+          "legacy.secret": "deny",
+          "legacy-project.secret": "deny",
+        },
+        ...(process.platform === "win32"
+          ? {}
+          : {
+              [posixBackslashWorkspace]: {
+                "**/*.env": "deny",
+                "legacy.secret": "deny",
+                "legacy-project.secret": "deny",
+              },
+            }),
+        [explicitWorkspace]: {
+          "explicit.secret": "deny",
+        },
+        [root]: {
+          "explicit-workspace[1]": "deny",
+        },
+        "~/.ssh": "deny",
+        [inheritedSecret]: "deny",
+        [projectLayerSecret]: "deny",
+        [explicitSecret]: "deny",
+        [directSecret]: "deny",
+        [delSecret]: "deny",
+      });
+      expect(filesystem).not.toHaveProperty(inheritedThenAllowed);
+      expect(filesystem).not.toHaveProperty(ignoredWrite);
+      expect(filesystem).not.toHaveProperty(":project_roots");
+      expect(filesystem).not.toHaveProperty(process.cwd());
+      expect(recipe).toMatchObject({
+        config: {
+          default_permissions: "codex_security_scan",
+          permissions: {
+            codex_security_scan: {
+              filesystem: {
+                [repository]: {
+                  "explicit.secret": "deny",
+                },
+                [explicitWorkspace]: {
+                  "explicit.secret": "deny",
+                },
+                [explicitSecret]: "deny",
+                [directSecret]: "deny",
+                [delSecret]: "deny",
+              },
+            },
+          },
+        },
+      });
+      const recipePermissions = recipe?.["config"] as JsonObject;
+      const savedPermissions = recipePermissions["permissions"] as JsonObject;
+      const savedProfile = savedPermissions[
+        "codex_security_scan"
+      ] as JsonObject;
+      expect(savedProfile["filesystem"]).not.toHaveProperty(inheritedSecret);
+      expect(savedProfile).not.toHaveProperty("workspace_roots");
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed when a workspace-scoped glob cannot keep a literal root exact", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const metacharWorkspace = join(root, "workspace[1]");
+    await Promise.all([mkdir(repository), mkdir(metacharWorkspace)]);
+    let runtimeStarted = false;
+    let codexStarted = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime must not start");
+        },
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length !== 0) {
+            throw new Error("scan profile inspection must not start");
+          }
+          return {
+            config: {
+              default_permissions: "selected",
+              permissions: {
+                selected: {
+                  workspace_roots: { [metacharWorkspace]: true },
+                  filesystem: {
+                    ":workspace_roots": { "**/*.env": "deny" },
+                  },
+                },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        "cannot safely preserve a workspace-scoped glob deny",
+      );
+      expect((failure as Error).message).toContain(
+        JSON.stringify(metacharWorkspace),
+      );
+      expect((failure as Error).message).toContain(
+        "Use literal denied subpaths",
+      );
+      expect(runtimeStarted).toBe(false);
+      expect(codexStarted).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed when glob deny depths cannot be represented exactly", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    let runtimeStarted = false;
+    let codexStarted = false;
+    const client = new TestClient(
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          default_permissions: "explicit",
+          permissions: {
+            explicit: {
+              filesystem: {
+                glob_scan_max_depth: 8,
+                "**/*.pem": "deny",
+              },
+            },
+          },
+        },
+      },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => {
+          runtimeStarted = true;
+          throw new Error("runtime must not start");
+        },
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length !== 0) {
+            throw new Error("scan profile inspection must not start");
+          }
+          return {
+            config: {
+              default_permissions: "ambient",
+              permissions: {
+                ambient: {
+                  filesystem: {
+                    glob_scan_max_depth: 2,
+                    "**/*.env": "deny",
+                  },
+                },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        "different glob_scan_max_depth values",
+      );
+      expect((failure as Error).message).toContain(
+        "Use the same glob_scan_max_depth",
+      );
+      expect(runtimeStarted).toBe(false);
+      expect(codexStarted).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed with profile guidance when organization policy rejects the scan profile", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    let codexStarted = false;
+    let inspectedCwd: string | undefined;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {} as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          inspectedCwd = cwd;
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                codex_security_scan: {
+                  filesystem: scanFilesystemFromOverrides(overrides),
+                },
+              },
+            },
+            requirements: {
+              defaultPermissions: "opaque-managed-default",
+              allowedPermissionProfiles: { codex_security_scan: false },
+            },
+            permissionProfiles: [{ id: "codex_security_scan", allowed: false }],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        "define and allow this profile",
+      );
+      expect((failure as Error).message).toContain("codex_security_scan");
+      expect((failure as Error).message).toContain(
+        "[allowed_permission_profiles]",
+      );
+      expect(codexStarted).toBe(false);
+      expect(inspectedCwd).toBe(scanDir);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed before scanning when a permitted scan profile would drop an opaque managed default", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    let codexStarted = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length !== 0) {
+            throw new Error("scan profile inspection must not start");
+          }
+          return {
+            config: {} as JsonObject,
+            requirements: {
+              defaultPermissions: "opaque-managed-default",
+              allowedPermissionProfiles: { codex_security_scan: true },
+            },
+            permissionProfiles: [],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe(
+        [
+          'Codex Security cannot preserve the file restrictions in your organization\'s "opaque-managed-default" profile.',
+          "Ask your Codex administrator to set up a codex_security_scan profile using this guide:",
+          "https://github.com/openai/codex-security/blob/main/sdk/typescript/README.md#managed-permission-profiles",
+          "No scan was started.",
+        ].join("\n"),
+      );
+      expect(codexStarted).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("uses generic guidance when catalog rejection is not an ID allowlist rejection", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {} as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                codex_security_scan: {
+                  filesystem: scanFilesystemFromOverrides(overrides),
+                },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [{ id: "codex_security_scan", allowed: false }],
+          };
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        "other managed permission constraints",
+      );
+      expect((failure as Error).message).not.toContain(
+        "[allowed_permission_profiles]",
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("allows visible deny-only scan inheritance without dropping its denies", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state[1]");
+    const codexHome = join(stateDirectory, "codex-home");
+    const scanDir = join(root, "scan[1]");
+    const inheritedSecret = join(root, "inherited-secret.env");
+    const extraWorkspace = join(root, "extra-workspace");
+    const redundantWrite = join(scanDir, "subdir");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome, { recursive: true }),
+      mkdir(scanDir),
+    ]);
+    let codexStarted = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          OPENAI_API_KEY: "synthetic-transient-key",
+        },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {} as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                parent: {
+                  extends: ":read-only",
+                  workspace_roots: { [extraWorkspace]: true },
+                  filesystem: {
+                    [inheritedSecret]: "deny",
+                    [redundantWrite]: { ".": "write" },
+                  },
+                  network: { enabled: true },
+                },
+                codex_security_scan: {
+                  extends: "parent",
+                  filesystem: scanFilesystemFromOverrides(overrides),
+                },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [{ id: "codex_security_scan", allowed: true }],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("deny-only inheritance preserved");
+        },
+      },
+    );
+
+    try {
+      await expect(client.run(repository)).rejects.toThrow(
+        "deny-only inheritance preserved",
+      );
+      expect(codexStarted).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed when an inherited write crosses the credential-home boundary", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state[1]");
+    const codexHome = join(stateDirectory, "codex-home");
+    const scanDir = join(root, "scan[1]");
+    const credentialChild = join(codexHome, "child");
+    await Promise.all([
+      mkdir(repository),
+      mkdir(codexHome, { recursive: true }),
+      mkdir(scanDir),
+    ]);
+    let codexStarted = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          OPENAI_API_KEY: "synthetic-transient-key",
+        },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {} as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                parent: {
+                  filesystem: { [credentialChild]: { ".": "write" } },
+                },
+                codex_security_scan: {
+                  extends: "parent",
+                  filesystem: scanFilesystemFromOverrides(overrides),
+                },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [{ id: "codex_security_scan", allowed: true }],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain("expected permission rules");
+      expect(codexStarted).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("allows an ancestor deny already overridden by the reserved child", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    const overriddenPath = join(root, "overridden.env");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    let codexStarted = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {
+                permissions: {
+                  parent: { filesystem: { [overriddenPath]: "deny" } },
+                  codex_security_scan: {
+                    extends: "parent",
+                    filesystem: { [overriddenPath]: "read" },
+                  },
+                },
+              } as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                parent: { filesystem: { [overriddenPath]: "deny" } },
+                codex_security_scan: {
+                  extends: "parent",
+                  filesystem: {
+                    ...scanFilesystemFromOverrides(overrides),
+                    [overriddenPath]: "read",
+                  },
+                },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [{ id: "codex_security_scan", allowed: true }],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("overridden ancestor deny preserved");
+        },
+      },
+    );
+
+    try {
+      await expect(client.run(repository)).rejects.toThrow(
+        "overridden ancestor deny preserved",
+      );
+      expect(codexStarted).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("fails closed when a valid inherited profile widens scan writes", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    let codexStarted = false;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {} as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          return {
+            config: {
+              default_permissions: "codex_security_scan",
+              permissions: {
+                codex_security_scan: {
+                  extends: ":workspace-write",
+                  filesystem: scanFilesystemFromOverrides(overrides),
+                },
+              },
+            },
+            requirements: null,
+            permissionProfiles: [{ id: "codex_security_scan", allowed: true }],
+          };
+        },
+        createCodex: () => {
+          codexStarted = true;
+          throw new Error("Codex must not start");
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain("expected permission rules");
+      expect(codexStarted).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("does not misreport an inspection exit as an unsupported Codex version", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment: { OPENAI_API_KEY: "synthetic-transient-key" },
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        inspectCodexConfig: async (_command, _environment, _cwd, overrides) => {
+          if (overrides.length === 0) {
+            return {
+              config: {} as JsonObject,
+              requirements: null,
+              permissionProfiles: [],
+            };
+          }
+          throw new CodexConfigInspectionError("exit");
+        },
+      },
+    );
+
+    try {
+      const failure = await client.run(repository).catch((error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        "exited before returning configuration",
+      );
+      expect((failure as Error).message).not.toContain(
+        "Update the pinned Codex SDK and CLI version",
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("keeps concurrent scan filesystem denials process-local", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    await Promise.all([mkdir(repository), mkdir(codexHome)]);
+    const captured: JsonObject[] = [];
+    let scansStarted = 0;
+    let releaseScans!: () => void;
+    const concurrentScans = new Promise<void>((resolve) => {
+      releaseScans = resolve;
+    });
+    const denied = [join(root, "private-0.env"), join(root, "private-1.env")];
+    const clients = await Promise.all(
+      denied.map(async (path, index) => {
+        const scanDir = join(root, "scan-" + index);
+        await mkdir(scanDir);
+        return new TestClient(
+          {
+            pluginPath: PLUGIN_ROOT,
+            codexOverrides: {
+              permissions: {
+                codex_security_scan: { filesystem: { [path]: "deny" } },
+              },
+            },
+          },
+          {
+            environment: { OPENAI_API_KEY: "synthetic-key-" + index },
+            prepareRuntime: async () => preparedRuntime(codexHome),
+            resolvePluginPython: async () => "/managed/python",
+            prepareOutputDir: async () => scanDir,
+            repositoryRevision: async () => "deadbeef",
+            createCodex: (options: CodexOptions) => {
+              captured[index] = scanFilesystemFromOverrides(
+                options.configOverrides,
+              );
+              return {
+                startThread: () => ({
+                  id: null,
+                  async runStreamed() {
+                    if (++scansStarted === 2) releaseScans();
+                    await concurrentScans;
+                    throw new Error("parallel permission scan reached");
+                  },
+                }),
+              };
+            },
+          },
+        );
+      }),
+    );
+
+    try {
+      const results = await Promise.allSettled(
+        clients.map((client) => client.run(repository).finally(releaseScans)),
+      );
+      for (const result of results) {
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            message: "parallel permission scan reached",
+          }),
+        });
+      }
+      expect(captured[0]).toMatchObject({ [denied[0]!]: "deny" });
+      expect(captured[0]?.[":workspace_roots"]).toBe("read");
+      expect(captured[0]).not.toHaveProperty(denied[1]!);
+      expect(captured[1]).toMatchObject({ [denied[1]!]: "deny" });
+      expect(captured[1]?.[":workspace_roots"]).toBe("read");
+      expect(captured[1]).not.toHaveProperty(denied[0]!);
+    } finally {
+      releaseScans();
+      for (const client of clients) await client.close();
+    }
   });
 
   test.each([

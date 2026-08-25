@@ -12,7 +12,15 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -110,9 +118,11 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  CodexConfigInspectionError,
   createIsolatedHome,
   expandHome,
   importAmbientAuth,
+  inspectCodexConfig,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
@@ -191,6 +201,9 @@ interface PreparedSession {
   authentication: ScanAuthentication;
   approvalPolicy: "never" | "on-request";
   python: string;
+  permissionDenials: JsonObject;
+  explicitPermissionDenials: JsonObject;
+  inheritedVisibleRequiredPermissionProfile: string | null;
   releaseCredentialHome: (() => Promise<void>) | null;
 }
 
@@ -369,6 +382,7 @@ interface ClientDependencies {
   prepareOutputDir?: typeof prepareOutputDir;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  inspectCodexConfig?: typeof inspectCodexConfig;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindings;
 }
@@ -491,6 +505,11 @@ export class CodexSecurity {
         (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
       );
       throwIfAborted(signal, outputDir);
+      const permissionProfileOverrides = await this.#preparePermissionProfile(
+        session,
+        outputDir,
+        signal,
+      );
       // Like CLI validation, load the skill directly without scan tools.
       session.sessionConfig["features"] = {
         ...(session.sessionConfig["features"] as JsonObject),
@@ -503,6 +522,7 @@ export class CodexSecurity {
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
           CODEX_SECURITY_SURFACE: this.#surface,
         },
+        permissionProfileOverrides,
         options.auth,
       );
       const thread = codex.startThread({
@@ -679,7 +699,7 @@ export class CodexSecurity {
       checkOpen();
 
       const session = await this.#prepareSession(
-        { protectedRoot, stateDirectory },
+        { protectedRoot, stateDirectory, repository: repo },
         options,
         signal,
         temporaryRoot,
@@ -694,6 +714,7 @@ export class CodexSecurity {
         authentication,
         approvalPolicy,
         python,
+        explicitPermissionDenials,
       } = session;
       releaseCredentialHome = session.releaseCredentialHome;
       const deepScanConfigPath =
@@ -751,6 +772,11 @@ export class CodexSecurity {
         scanDir,
       );
       checkOpen();
+      const permissionProfileOverrides = await this.#preparePermissionProfile(
+        session,
+        scanDir,
+        signal,
+      );
 
       const shellPluginRoot = runtime.plugin.pluginRoot;
       const canonicalShellPluginRoot = await realpath(shellPluginRoot);
@@ -902,7 +928,10 @@ export class CodexSecurity {
         mode,
         expectation.repositoryRevision,
         runtime.plugin.version,
-        { ...preflightConfig, approval_policy: approvalPolicy },
+        scanRecipeConfig(
+          { ...preflightConfig, approval_policy: approvalPolicy },
+          explicitPermissionDenials,
+        ),
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
@@ -1123,6 +1152,7 @@ export class CodexSecurity {
       const { codex, environment } = this.#createSessionCodex(
         session,
         runtimePaths,
+        permissionProfileOverrides,
         options.auth,
       );
       const thread = codex.startThread({
@@ -1816,9 +1846,46 @@ export class CodexSecurity {
     }
   }
 
+  async #preparePermissionProfile(
+    session: PreparedSession,
+    outputDirectory: string,
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    const expectedPermissionFilesystem = scanPermissionFilesystem(
+      session.sessionConfig,
+      session.permissionDenials,
+      outputDirectory,
+    );
+    const permissionProfileOverrides = scanPermissionProfileOverrides(
+      session.sessionConfig,
+      session.permissionDenials,
+      outputDirectory,
+    );
+    const inspectConfiguration = this.#dependencies.inspectCodexConfig;
+    if (
+      inspectConfiguration !== undefined ||
+      this.#dependencies.prepareRuntime === undefined
+    ) {
+      await requireScanPermissionProfile(
+        inspectConfiguration === undefined
+          ? this.#codexCommand()
+          : { command: "" },
+        session.runtime.environment,
+        outputDirectory,
+        permissionProfileOverrides,
+        expectedPermissionFilesystem,
+        session.inheritedVisibleRequiredPermissionProfile,
+        signal,
+        inspectConfiguration,
+      );
+    }
+    return permissionProfileOverrides;
+  }
+
   #createSessionCodex(
     session: PreparedSession,
     runtimePaths: Record<string, string>,
+    permissionProfileOverrides: readonly string[],
     auth: ScanAuthMode = "auto",
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
     const {
@@ -1867,6 +1934,7 @@ export class CodexSecurity {
     const codex = this.#dependencies.createCodex({
       ...(codexPathOverride === undefined ? {} : { codexPathOverride }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      configOverrides: [...permissionProfileOverrides],
       env: definedEnvironment(selectedScanEnvironment(environment, "chatgpt")),
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
@@ -1883,7 +1951,8 @@ export class CodexSecurity {
     {
       protectedRoot,
       stateDirectory,
-    }: { protectedRoot: string; stateDirectory: string },
+      repository,
+    }: { protectedRoot: string; stateDirectory: string; repository: string },
     options: Pick<
       ScanOptions,
       | "auth"
@@ -1904,6 +1973,26 @@ export class CodexSecurity {
     };
     try {
       const requestedConfig = await mergedCodexConfig(this.config);
+      const inspectConfiguration = this.#dependencies.inspectCodexConfig;
+      const ambientConfiguration =
+        inspectConfiguration !== undefined ||
+        this.#dependencies.prepareRuntime === undefined
+          ? await inspectAmbientPermissionConfiguration(
+              inspectConfiguration === undefined
+                ? this.#codexCommand()
+                : { command: "" },
+              this.#dependencies.environment,
+              repository,
+              signal,
+              inspectConfiguration,
+            )
+          : { config: {}, requirements: null };
+      const inheritedFilesystem = inheritAmbientFilesystemDenials(
+        requestedConfig,
+        ambientConfiguration,
+        this.#dependencies.environment,
+        repository,
+      );
       const modelProvider = scanModelProvider(requestedConfig);
       const externalProvider = isExternalModelProvider(modelProvider)
         ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
@@ -2074,6 +2163,10 @@ export class CodexSecurity {
         authentication,
         approvalPolicy,
         python,
+        permissionDenials: inheritedFilesystem.denials,
+        explicitPermissionDenials: inheritedFilesystem.explicitDenials,
+        inheritedVisibleRequiredPermissionProfile:
+          inheritedFilesystem.visibleRequiredPermissionProfile,
         releaseCredentialHome,
       };
     } catch (error) {
@@ -3320,6 +3413,1158 @@ export function classifyConnectionFailure(
   }
   if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
   return "unknown";
+}
+
+interface PermissionFilesystem {
+  entries: JsonObject;
+  workspaceRoots: string[];
+}
+
+interface InheritedFilesystemDenials {
+  denials: JsonObject;
+  explicitDenials: JsonObject;
+  visibleRequiredPermissionProfile: string | null;
+}
+
+interface AmbientPermissionConfiguration {
+  config: JsonObject;
+  requirements: JsonObject | null;
+}
+
+function inheritAmbientFilesystemDenials(
+  config: JsonObject,
+  ambientConfiguration: AmbientPermissionConfiguration,
+  environment: ProcessEnvironment,
+  repository: string,
+): InheritedFilesystemDenials {
+  const source = "effective ambient Codex configuration";
+  requireNoOpaqueRequiredPermissionProfile(
+    ambientConfiguration.config,
+    ambientConfiguration.requirements,
+  );
+  const configuredSelection = selectedPermissionConfiguration(
+    ambientConfiguration.config,
+  );
+  const requiredDefaultPermissions =
+    ambientConfiguration.requirements === null
+      ? undefined
+      : ambientConfiguration.requirements["defaultPermissions"];
+  const visibleRequiredDefault =
+    typeof requiredDefaultPermissions === "string" &&
+    (requiredDefaultPermissions.startsWith(":") ||
+      Object.hasOwn(configuredSelection.profiles, requiredDefaultPermissions))
+      ? requiredDefaultPermissions
+      : undefined;
+  const ambientSelection = selectedPermissionConfiguration(
+    ambientConfiguration.config,
+    visibleRequiredDefault,
+  );
+  const requestedSelection = selectedPermissionConfiguration(config);
+  const combinedProfiles = mergePermissionProfiles(
+    ambientSelection.profiles,
+    requestedSelection.profiles,
+  );
+  const inherited =
+    typeof ambientSelection.selected === "string"
+      ? resolvedPermissionFilesystem(
+          ambientSelection.profiles,
+          ambientSelection.selected,
+          source,
+          environment,
+          repository,
+        )
+      : { entries: {}, workspaceRoots: [] };
+  const explicit: PermissionFilesystem[] = [];
+  if (typeof requestedSelection.selected === "string") {
+    explicit.push(
+      resolvedPermissionFilesystem(
+        combinedProfiles,
+        requestedSelection.selected,
+        "explicit Codex configuration",
+        environment,
+        repository,
+      ),
+    );
+  }
+  if (
+    Object.hasOwn(requestedSelection.profiles, SCAN_PERMISSION_PROFILE) &&
+    requestedSelection.selected !== SCAN_PERMISSION_PROFILE
+  ) {
+    explicit.push(
+      resolvedPermissionFilesystem(
+        combinedProfiles,
+        SCAN_PERMISSION_PROFILE,
+        "explicit Codex configuration",
+        environment,
+        repository,
+      ),
+    );
+  }
+
+  let inheritedDenials = filesystemDenials(inherited, repository);
+  if (
+    Object.hasOwn(ambientSelection.profiles, SCAN_PERMISSION_PROFILE) &&
+    ambientSelection.selected !== SCAN_PERMISSION_PROFILE
+  ) {
+    inheritedDenials = mergeFilesystemDenials(
+      inheritedDenials,
+      filesystemDenials(
+        resolvedPermissionFilesystem(
+          ambientSelection.profiles,
+          SCAN_PERMISSION_PROFILE,
+          source,
+          environment,
+          repository,
+        ),
+        repository,
+      ),
+    );
+  }
+  let explicitDenials: JsonObject = {};
+  for (const profile of explicit) {
+    explicitDenials = mergeFilesystemDenials(
+      explicitDenials,
+      filesystemDenials(profile, repository),
+    );
+  }
+  return {
+    denials: mergeFilesystemDenials(inheritedDenials, explicitDenials),
+    explicitDenials,
+    visibleRequiredPermissionProfile:
+      typeof visibleRequiredDefault === "string" &&
+      !visibleRequiredDefault.startsWith(":") &&
+      visibleRequiredDefault !== SCAN_PERMISSION_PROFILE
+        ? visibleRequiredDefault
+        : null,
+  };
+}
+
+function selectedPermissionConfiguration(
+  config: JsonObject,
+  requiredDefaultPermissions?: string,
+): {
+  selected: unknown;
+  profiles: JsonObject;
+} {
+  const rootProfiles = isRecord(config["permissions"])
+    ? (config["permissions"] as JsonObject)
+    : {};
+  const selectedName = config["profile"];
+  const configurationProfiles = config["profiles"];
+  const selectedProfile =
+    typeof selectedName === "string" &&
+    isRecord(configurationProfiles) &&
+    Object.hasOwn(configurationProfiles, selectedName) &&
+    isRecord(configurationProfiles[selectedName])
+      ? configurationProfiles[selectedName]
+      : undefined;
+  const selectedProfiles =
+    selectedProfile !== undefined && isRecord(selectedProfile["permissions"])
+      ? (selectedProfile["permissions"] as JsonObject)
+      : {};
+  return {
+    selected:
+      requiredDefaultPermissions ??
+      (selectedProfile !== undefined &&
+      typeof selectedProfile["default_permissions"] === "string"
+        ? selectedProfile["default_permissions"]
+        : config["default_permissions"]),
+    profiles: mergePermissionProfiles(rootProfiles, selectedProfiles),
+  };
+}
+
+function emptyJsonObject(): JsonObject {
+  return Object.create(null) as JsonObject;
+}
+
+function setJsonObjectEntry(
+  object: JsonObject,
+  key: string,
+  value: unknown,
+): void {
+  Object.defineProperty(object, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+}
+
+function mergePermissionProfiles(
+  lower: JsonObject,
+  higher: JsonObject,
+): JsonObject {
+  const merged = emptyJsonObject();
+  for (const [name, value] of Object.entries(lower)) {
+    setJsonObjectEntry(merged, name, structuredClone(value));
+  }
+  for (const [name, value] of Object.entries(higher)) {
+    const previous = merged[name];
+    if (!isRecord(previous) || !isRecord(value)) {
+      setJsonObjectEntry(merged, name, structuredClone(value));
+      continue;
+    }
+    const profile = emptyJsonObject();
+    for (const [key, child] of [
+      ...Object.entries(previous),
+      ...Object.entries(value),
+    ]) {
+      setJsonObjectEntry(profile, key, structuredClone(child));
+    }
+    for (const key of ["filesystem", "workspace_roots"]) {
+      if (isRecord(previous[key]) && isRecord(value[key])) {
+        setJsonObjectEntry(
+          profile,
+          key,
+          mergePermissionEntries(
+            previous[key] as JsonObject,
+            value[key] as JsonObject,
+          ),
+        );
+      } else if (value[key] === null) {
+        if (previous[key] === undefined) {
+          delete profile[key];
+        } else {
+          setJsonObjectEntry(profile, key, structuredClone(previous[key]!));
+        }
+      }
+    }
+    setJsonObjectEntry(merged, name, profile);
+  }
+  return merged;
+}
+
+function mergePermissionEntries(
+  lower: JsonObject,
+  higher: JsonObject,
+): JsonObject {
+  const merged = emptyJsonObject();
+  for (const [path, value] of Object.entries(lower)) {
+    setJsonObjectEntry(merged, path, structuredClone(value));
+  }
+  for (const [path, value] of Object.entries(higher)) {
+    const previous = merged[path];
+    if (isRecord(previous) && isRecord(value)) {
+      const scoped = emptyJsonObject();
+      for (const [key, child] of [
+        ...Object.entries(previous),
+        ...Object.entries(value),
+      ]) {
+        setJsonObjectEntry(scoped, key, structuredClone(child));
+      }
+      setJsonObjectEntry(merged, path, scoped);
+    } else {
+      setJsonObjectEntry(merged, path, structuredClone(value));
+    }
+  }
+  return merged;
+}
+
+function resolvedPermissionFilesystem(
+  profiles: JsonObject,
+  selected: string,
+  source: string,
+  environment: ProcessEnvironment,
+  policyCwd: string,
+): PermissionFilesystem {
+  const inherited: JsonObject[] = [];
+  const visited = new Set<string>();
+  let current: string | undefined = selected;
+  while (current !== undefined && !current.startsWith(":")) {
+    const profile: unknown = profiles[current];
+    if (visited.has(current) || !isRecord(profile)) {
+      throw new CodexSecurityError(
+        "Cannot resolve Codex filesystem permissions from " + source + ".",
+      );
+    }
+    visited.add(current);
+    inherited.push(profile as JsonObject);
+    const parent: unknown = profile["extends"];
+    if (parent !== undefined && parent !== null && typeof parent !== "string") {
+      throw new CodexSecurityError(
+        "Cannot resolve Codex filesystem permissions from " + source + ".",
+      );
+    }
+    current = typeof parent === "string" ? parent : undefined;
+  }
+
+  let entries: JsonObject = {};
+  let workspaceRoots: JsonObject = {};
+  for (const profile of inherited.reverse()) {
+    const filesystem = profile["filesystem"];
+    const roots = profile["workspace_roots"];
+    if (
+      (filesystem !== undefined &&
+        filesystem !== null &&
+        !isRecord(filesystem)) ||
+      (roots !== undefined && roots !== null && !isRecord(roots))
+    ) {
+      throw new CodexSecurityError(
+        "Cannot resolve Codex filesystem permissions from " + source + ".",
+      );
+    }
+    if (isRecord(filesystem)) {
+      entries = mergePermissionEntries(entries, filesystem as JsonObject);
+    }
+    if (isRecord(roots)) {
+      workspaceRoots = mergePermissionEntries(
+        workspaceRoots,
+        roots as JsonObject,
+      );
+    }
+  }
+  return {
+    entries,
+    workspaceRoots: Object.entries(workspaceRoots)
+      .filter(([, enabled]) => enabled === true)
+      .map(([path]) =>
+        resolvePermissionWorkspaceRoot(path, environment, policyCwd),
+      ),
+  };
+}
+
+function resolvePermissionWorkspaceRoot(
+  path: string,
+  environment: ProcessEnvironment,
+  policyCwd: string,
+): string {
+  // Codex treats the backslash home shorthand as Windows-only. The general
+  // CLI path helper accepts it cross-platform for user-facing arguments, but
+  // permission profiles must mirror Codex's own root resolution exactly.
+  const expanded =
+    process.platform !== "win32" && path.startsWith("~\\")
+      ? path
+      : expandHome(path, environment);
+  return resolve(policyCwd, expanded);
+}
+
+function filesystemDenials(
+  profile: PermissionFilesystem,
+  repository: string,
+): JsonObject {
+  const denied = emptyJsonObject();
+  for (const [path, access] of Object.entries(profile.entries)) {
+    if (path === "glob_scan_max_depth") {
+      if (typeof access === "number") {
+        setJsonObjectEntry(denied, path, structuredClone(access));
+      }
+    } else if (access === "deny" || access === "none") {
+      setJsonObjectEntry(denied, path, "deny");
+    } else if (isRecord(access)) {
+      const scoped = emptyJsonObject();
+      for (const [subpath, value] of Object.entries(access)) {
+        if (value === "deny" || value === "none") {
+          setJsonObjectEntry(scoped, subpath, "deny");
+        }
+      }
+      if (Object.keys(scoped).length > 0) {
+        setJsonObjectEntry(denied, path, scoped);
+      }
+    }
+  }
+  relocateTopLevelFilesystemGlobDenials(denied);
+
+  let workspaceDenials: unknown;
+  for (const selector of [":workspace_roots", ":project_roots"]) {
+    const selectedDenials = denied[selector];
+    if (selectedDenials === "deny") {
+      workspaceDenials = "deny";
+      break;
+    }
+    if (isRecord(selectedDenials)) {
+      workspaceDenials = isRecord(workspaceDenials)
+        ? mergePermissionEntries(
+            workspaceDenials as JsonObject,
+            selectedDenials as JsonObject,
+          )
+        : mergePermissionEntries(
+            emptyJsonObject(),
+            selectedDenials as JsonObject,
+          );
+    }
+  }
+  delete denied[":workspace_roots"];
+  delete denied[":project_roots"];
+  if (workspaceDenials !== "deny" && !isRecord(workspaceDenials)) {
+    return denied;
+  }
+  const roots = [...new Set([repository, ...profile.workspaceRoots])];
+  for (const root of roots) {
+    const scoped = exactWorkspaceRootDenials(root, workspaceDenials);
+    const existing = denied[root];
+    if (existing === "deny") {
+      if (containsFilesystemGlobChars(root)) {
+        const relocated = scopedAbsoluteFilesystemGlob(root);
+        if (relocated === null) {
+          throw new CodexSecurityError(
+            "Codex Security cannot safely preserve filesystem denies that combine a top-level glob path with a workspace-scoped deny for the literal workspace root " +
+              inlineTomlString(root) +
+              ". Use one exact scoped deny for that root, or move the workspace to a path without *, ?, [, or ]. No scan was started.",
+          );
+        }
+        const relocatedExisting = denied[relocated.base];
+        if (relocatedExisting === "deny") {
+          delete denied[root];
+          continue;
+        }
+        const relocatedScoped = isRecord(relocatedExisting)
+          ? (relocatedExisting as JsonObject)
+          : emptyJsonObject();
+        setJsonObjectEntry(relocatedScoped, relocated.suffix, "deny");
+        setJsonObjectEntry(denied, relocated.base, relocatedScoped);
+        delete denied[root];
+      } else {
+        continue;
+      }
+    }
+    setJsonObjectEntry(
+      denied,
+      root,
+      isRecord(existing)
+        ? mergePermissionEntries(existing as JsonObject, scoped)
+        : scoped,
+    );
+  }
+  return denied;
+}
+
+function exactWorkspaceRootDenials(
+  root: string,
+  workspaceDenials: "deny" | Record<string, unknown>,
+): JsonObject {
+  if (workspaceDenials === "deny") {
+    const denied = emptyJsonObject();
+    setJsonObjectEntry(denied, ".", "deny");
+    return denied;
+  }
+  const scoped = workspaceDenials as JsonObject;
+  if (
+    containsFilesystemGlobChars(root) &&
+    Object.keys(scoped).some((path) => containsFilesystemGlobChars(path))
+  ) {
+    throw new CodexSecurityError(
+      "Codex Security cannot safely preserve a workspace-scoped glob deny for the literal workspace root " +
+        inlineTomlString(root) +
+        ". Use literal denied subpaths for that root, or move the workspace to a path without *, ?, [, or ]. No scan was started.",
+    );
+  }
+  return mergePermissionEntries(emptyJsonObject(), scoped);
+}
+
+function scopedAbsoluteFilesystemGlob(
+  path: string,
+): { base: string; suffix: string } | null {
+  const normalized =
+    process.platform === "win32" ? normalizeWindowsGlobPath(path) : path;
+  if (!isAbsolute(normalized)) return null;
+  let base = dirname(normalized);
+  while (containsFilesystemGlobChars(base)) {
+    const parent = dirname(base);
+    if (parent === base) return null;
+    base = parent;
+  }
+  const suffix = relative(base, normalized);
+  if (
+    suffix.length === 0 ||
+    suffix === ".." ||
+    suffix.startsWith(".." + sep) ||
+    isAbsolute(suffix)
+  ) {
+    return null;
+  }
+  return { base, suffix };
+}
+
+function relocateTopLevelFilesystemGlobDenials(denied: JsonObject): void {
+  for (const [path, access] of Object.entries(denied)) {
+    if (access !== "deny" || !containsFilesystemGlobChars(path)) continue;
+    const relocated = scopedAbsoluteFilesystemGlob(path);
+    if (relocated === null) continue;
+    const existing = denied[relocated.base];
+    if (existing === "deny") {
+      delete denied[path];
+      continue;
+    }
+    const scoped = isRecord(existing)
+      ? (existing as JsonObject)
+      : emptyJsonObject();
+    setJsonObjectEntry(scoped, relocated.suffix, "deny");
+    setJsonObjectEntry(denied, relocated.base, scoped);
+    delete denied[path];
+  }
+}
+
+function containsFilesystemGlobChars(path: string): boolean {
+  return /[*?[\]]/u.test(
+    process.platform === "win32" ? normalizeWindowsGlobPath(path) : path,
+  );
+}
+
+function normalizeWindowsGlobPath(path: string): string {
+  const deviceMatch = /^\\\\[?.]\\(.*)$/u.exec(path);
+  if (deviceMatch === null) return path;
+  const remainder = deviceMatch[1]!;
+  if (/^UNC\\[^\\]+\\[^\\]+(?:\\|$)/iu.test(remainder)) {
+    return "\\\\" + remainder.slice(4);
+  }
+  return /^[A-Za-z]:\\/u.test(remainder) ? remainder : path;
+}
+
+function hasDeniedFilesystemGlob(entries: JsonObject): boolean {
+  return Object.entries(entries).some(
+    ([path, access]) =>
+      (access === "deny" && containsFilesystemGlobChars(path)) ||
+      (isRecord(access) &&
+        Object.entries(access).some(
+          ([subpath, scopedAccess]) =>
+            scopedAccess === "deny" && containsFilesystemGlobChars(subpath),
+        )),
+  );
+}
+
+interface ConcreteFilesystemRule {
+  path: string;
+  access: "read" | "write" | "deny";
+}
+
+function filesystemWritesCoveredBy(
+  actual: JsonObject,
+  expected: JsonObject,
+): boolean {
+  const expectedRules = concreteFilesystemRules(expected);
+  for (const [path, access] of Object.entries(actual)) {
+    if (path === "glob_scan_max_depth") continue;
+    if (access === "write") {
+      if (!filesystemWriteCoveredBy(path, undefined, expected, expectedRules)) {
+        return false;
+      }
+      continue;
+    }
+    if (!isRecord(access)) continue;
+    for (const [subpath, scopedAccess] of Object.entries(access)) {
+      if (
+        scopedAccess === "write" &&
+        !filesystemWriteCoveredBy(path, subpath, expected, expectedRules)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function filesystemWriteCoveredBy(
+  path: string,
+  subpath: string | undefined,
+  expected: JsonObject,
+  expectedRules: readonly ConcreteFilesystemRule[],
+): boolean {
+  const expectedAccess = expected[path];
+  if (
+    (subpath === undefined && expectedAccess === "write") ||
+    (subpath !== undefined &&
+      isRecord(expectedAccess) &&
+      expectedAccess[subpath] === "write")
+  ) {
+    return true;
+  }
+  const concrete = concreteFilesystemPath(path, subpath);
+  if (concrete === null) return false;
+  let selected: ConcreteFilesystemRule | undefined;
+  for (const rule of expectedRules) {
+    if (
+      pathContains(rule.path, concrete) &&
+      (selected === undefined || rule.path.length > selected.path.length)
+    ) {
+      selected = rule;
+    }
+  }
+  return selected?.access === "write";
+}
+
+function concreteFilesystemRules(
+  entries: JsonObject,
+): ConcreteFilesystemRule[] {
+  const rules: ConcreteFilesystemRule[] = [];
+  for (const [path, access] of Object.entries(entries)) {
+    if (path === "glob_scan_max_depth") continue;
+    const directAccess = normalizedFilesystemAccess(access);
+    if (directAccess !== null) {
+      const concrete = concreteFilesystemPath(path);
+      if (concrete !== null)
+        rules.push({ path: concrete, access: directAccess });
+      continue;
+    }
+    if (!isRecord(access)) continue;
+    for (const [subpath, scopedAccess] of Object.entries(access)) {
+      const normalized = normalizedFilesystemAccess(scopedAccess);
+      if (normalized === null) continue;
+      const concrete = concreteFilesystemPath(path, subpath);
+      if (concrete !== null) rules.push({ path: concrete, access: normalized });
+    }
+  }
+  return rules;
+}
+
+function normalizedFilesystemAccess(
+  access: unknown,
+): "read" | "write" | "deny" | null {
+  if (access === "read" || access === "write") return access;
+  return access === "deny" || access === "none" ? "deny" : null;
+}
+
+function concreteFilesystemPath(path: string, subpath?: string): string | null {
+  if (path.startsWith(":") || !isAbsolute(path)) {
+    return null;
+  }
+  if (subpath === undefined) {
+    return containsFilesystemGlobChars(path) ? null : resolve(path);
+  }
+  // A scoped rule's base is a literal path. Only its subpath decides whether
+  // Codex compiles it as a glob, so a base such as scan[1] is still concrete.
+  if (isAbsolute(subpath) || containsFilesystemGlobChars(subpath)) {
+    return null;
+  }
+  return resolve(path, subpath);
+}
+
+function pathContains(root: string, candidate: string): boolean {
+  const difference = relative(root, candidate);
+  return (
+    difference === "" ||
+    (difference !== ".." &&
+      !difference.startsWith(".." + sep) &&
+      !isAbsolute(difference))
+  );
+}
+
+function filesystemDenialsContain(
+  actual: JsonObject,
+  required: JsonObject,
+): boolean {
+  if (
+    hasDeniedFilesystemGlob(required) &&
+    actual["glob_scan_max_depth"] !== required["glob_scan_max_depth"]
+  ) {
+    return false;
+  }
+  return filesystemDenyEntriesContain(actual, required);
+}
+
+function filesystemDenyEntriesContain(
+  actual: JsonObject,
+  required: JsonObject,
+): boolean {
+  for (const [path, access] of Object.entries(required)) {
+    if (path === "glob_scan_max_depth") continue;
+    const actualAccess = actual[path];
+    if (access === "deny") {
+      if (actualAccess !== "deny") return false;
+      continue;
+    }
+    if (!isRecord(access)) continue;
+    if (actualAccess === "deny") {
+      if (containsFilesystemGlobChars(path)) return false;
+      continue;
+    }
+    if (
+      !isRecord(actualAccess) ||
+      !filesystemDenyEntriesContain(
+        actualAccess as JsonObject,
+        access as JsonObject,
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+interface VisiblePermissionProfileChain {
+  ancestors: string[];
+  builtin: ":read-only" | ":workspace-write" | null;
+}
+
+function visiblePermissionProfileChain(
+  profiles: JsonObject,
+  selected: string,
+): VisiblePermissionProfileChain | null {
+  const ancestors: string[] = [];
+  const visited = new Set<string>();
+  let current = selected;
+  while (!current.startsWith(":")) {
+    if (visited.has(current)) return null;
+    visited.add(current);
+    const profile = profiles[current];
+    if (!isRecord(profile)) return null;
+    const parent = profile["extends"];
+    if (parent === undefined || parent === null) {
+      return { ancestors, builtin: null };
+    }
+    if (typeof parent !== "string") return null;
+    if (parent.startsWith(":")) {
+      if (parent === ":read-only" || parent === ":workspace-write") {
+        return { ancestors, builtin: parent };
+      }
+      return null;
+    }
+    ancestors.push(parent);
+    current = parent;
+  }
+  return null;
+}
+
+function resolvedPermissionFilesystemForGuard(
+  profiles: JsonObject,
+  selected: string,
+  environment: ProcessEnvironment,
+  policyCwd: string,
+): PermissionFilesystem | null {
+  const chain = visiblePermissionProfileChain(profiles, selected);
+  if (chain === null) return null;
+  try {
+    const resolved = resolvedPermissionFilesystem(
+      profiles,
+      selected,
+      "effective scan permission profile",
+      environment,
+      policyCwd,
+    );
+    const builtinEntries =
+      chain.builtin === ":read-only"
+        ? { ":root": "read" }
+        : chain.builtin === ":workspace-write"
+          ? {
+              ":root": "read",
+              ":workspace_roots": {
+                ".": "write",
+                ".git": "read",
+                ".agents": "read",
+                ".codex": "read",
+              },
+              ":slash_tmp": "write",
+              ":tmpdir": "write",
+            }
+          : {};
+    return {
+      entries: mergePermissionEntries(
+        builtinEntries as JsonObject,
+        resolved.entries,
+      ),
+      workspaceRoots: resolved.workspaceRoots,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mergeFilesystemDenials(
+  lower: JsonObject,
+  higher: JsonObject,
+): JsonObject {
+  const merged = mergePermissionEntries(lower, higher);
+  for (const [path, access] of Object.entries(lower)) {
+    if (
+      containsFilesystemGlobChars(path) &&
+      ((access === "deny" && isRecord(higher[path])) ||
+        (higher[path] === "deny" && isRecord(access)))
+    ) {
+      throw new CodexSecurityError(
+        "Codex Security cannot safely preserve filesystem denies that combine a top-level glob path with a workspace-scoped deny for the literal workspace root " +
+          inlineTomlString(path) +
+          ". Use one exact scoped deny for that root, or move the workspace to a path without *, ?, [, or ]. No scan was started.",
+      );
+    }
+    if (access === "deny" || higher[path] === "deny") {
+      setJsonObjectEntry(merged, path, "deny");
+    }
+  }
+  const inheritedDepth = lower["glob_scan_max_depth"];
+  const additionalDepth = higher["glob_scan_max_depth"];
+  const inheritedHasGlob = hasDeniedFilesystemGlob(lower);
+  const additionalHasGlob = hasDeniedFilesystemGlob(higher);
+  if (inheritedHasGlob && additionalHasGlob) {
+    if (inheritedDepth !== additionalDepth) {
+      throw new CodexSecurityError(
+        "Codex Security cannot safely preserve filesystem glob denies with different glob_scan_max_depth values. Use the same glob_scan_max_depth for all active filesystem glob deny rules. No scan was started.",
+      );
+    }
+    if (typeof inheritedDepth === "number") {
+      setJsonObjectEntry(merged, "glob_scan_max_depth", inheritedDepth);
+    } else {
+      delete merged["glob_scan_max_depth"];
+    }
+  } else if (inheritedHasGlob) {
+    if (inheritedDepth === undefined) {
+      delete merged["glob_scan_max_depth"];
+    } else {
+      setJsonObjectEntry(merged, "glob_scan_max_depth", inheritedDepth);
+    }
+  } else if (additionalHasGlob) {
+    if (additionalDepth === undefined) {
+      delete merged["glob_scan_max_depth"];
+    } else {
+      setJsonObjectEntry(merged, "glob_scan_max_depth", additionalDepth);
+    }
+  }
+  return merged;
+}
+
+function scanPermissionFilesystem(
+  sessionConfig: JsonObject,
+  denials: JsonObject,
+  scanDirectory: string,
+): JsonObject {
+  const permissions = isRecord(sessionConfig["permissions"])
+    ? sessionConfig["permissions"]
+    : {};
+  const profile = permissions[SCAN_PERMISSION_PROFILE];
+  const configuredFilesystem =
+    isRecord(profile) && isRecord(profile["filesystem"])
+      ? (profile["filesystem"] as JsonObject)
+      : {};
+  const filesystem = mergePermissionEntries(
+    emptyJsonObject(),
+    configuredFilesystem,
+  );
+  // The generated home keeps the established workspace-write bootstrap
+  // profile, but the worker's raw profile must not grant every inherited
+  // workspace root write access.
+  delete filesystem[":workspace_roots"];
+  for (const [path, access] of Object.entries(filesystem)) {
+    if (
+      path !== "glob_scan_max_depth" &&
+      !path.startsWith(":") &&
+      (access === "read" || access === "write")
+    ) {
+      // A scoped "." entry keeps literal metacharacters in absolute runtime
+      // paths from being reinterpreted as top-level glob patterns.
+      const scoped = emptyJsonObject();
+      setJsonObjectEntry(scoped, ".", access);
+      setJsonObjectEntry(filesystem, path, scoped);
+    }
+  }
+  const scanDirectoryAccess = emptyJsonObject();
+  setJsonObjectEntry(scanDirectoryAccess, ".", "write");
+  setJsonObjectEntry(filesystem, scanDirectory, scanDirectoryAccess);
+  for (const [path, access] of Object.entries(denials)) {
+    if (path === "glob_scan_max_depth") {
+      setJsonObjectEntry(filesystem, path, structuredClone(access));
+    } else if (access === "deny") {
+      setJsonObjectEntry(filesystem, path, "deny");
+    } else if (isRecord(access)) {
+      const existing = filesystem[path];
+      if (existing === "deny") continue;
+      const scoped = isRecord(existing)
+        ? (existing as JsonObject)
+        : emptyJsonObject();
+      if (typeof existing === "string") {
+        setJsonObjectEntry(scoped, ".", existing);
+      }
+      setJsonObjectEntry(
+        filesystem,
+        path,
+        mergePermissionEntries(scoped, access as JsonObject),
+      );
+    }
+  }
+  // Raw -c tables merge with the generated home, so always overwrite the
+  // bootstrap profile's broad workspace write even when there is no scoped
+  // deny table to carry forward.
+  if (!Object.hasOwn(filesystem, ":workspace_roots")) {
+    setJsonObjectEntry(filesystem, ":workspace_roots", "read");
+  }
+  return filesystem;
+}
+
+function scanPermissionProfileOverrides(
+  sessionConfig: JsonObject,
+  denials: JsonObject,
+  scanDirectory: string,
+): string[] {
+  return [
+    'default_permissions="codex_security_scan"',
+    "permissions." +
+      SCAN_PERMISSION_PROFILE +
+      ".filesystem=" +
+      inlineTomlValue(
+        scanPermissionFilesystem(sessionConfig, denials, scanDirectory),
+      ),
+  ];
+}
+
+function inlineTomlValue(value: unknown): string {
+  if (typeof value === "string") return inlineTomlString(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new CodexSecurityError("Invalid Codex filesystem permissions.");
+    }
+    return String(value);
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (Array.isArray(value)) {
+    return "[" + value.map((item) => inlineTomlValue(item)).join(",") + "]";
+  }
+  if (isRecord(value)) {
+    return (
+      "{" +
+      Object.entries(value)
+        .map(
+          ([key, child]) => inlineTomlKey(key) + "=" + inlineTomlValue(child),
+        )
+        .join(",") +
+      "}"
+    );
+  }
+  throw new CodexSecurityError("Invalid Codex filesystem permissions.");
+}
+
+function inlineTomlKey(key: string): string {
+  return /^[A-Za-z0-9_-]+$/u.test(key) ? key : inlineTomlString(key);
+}
+
+function inlineTomlString(value: string): string {
+  return JSON.stringify(value).replaceAll("\u007f", "\\u007f");
+}
+
+async function inspectAmbientPermissionConfiguration(
+  command: CodexCommand,
+  environment: ProcessEnvironment,
+  cwd: string,
+  signal: AbortSignal,
+  inspectConfiguration: typeof inspectCodexConfig = inspectCodexConfig,
+): Promise<AmbientPermissionConfiguration> {
+  try {
+    const inspection = await inspectConfiguration(
+      command,
+      environment,
+      cwd,
+      [],
+      signal,
+    );
+    return {
+      config: inspection.config,
+      requirements: inspection.requirements,
+    };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new CodexSecurityError(
+      permissionInspectionFailureMessage(
+        command,
+        error,
+        "read the effective ambient permission configuration",
+      ),
+      { cause: error },
+    );
+  }
+}
+
+async function requireScanPermissionProfile(
+  command: CodexCommand,
+  environment: ProcessEnvironment,
+  cwd: string,
+  configOverrides: readonly string[],
+  expectedFilesystem: JsonObject,
+  inheritedVisibleRequiredPermissionProfile: string | null,
+  signal: AbortSignal,
+  inspectConfiguration: typeof inspectCodexConfig = inspectCodexConfig,
+): Promise<void> {
+  let inspection;
+  try {
+    inspection = await inspectConfiguration(
+      command,
+      environment,
+      cwd,
+      configOverrides,
+      signal,
+    );
+  } catch (error) {
+    if (signal.aborted) throw error;
+    throw new CodexSecurityError(
+      permissionInspectionFailureMessage(
+        command,
+        error,
+        "verify the required codex_security_scan permission profile",
+      ),
+      { cause: error },
+    );
+  }
+  requireNoOpaqueRequiredPermissionProfile(
+    inspection.config,
+    inspection.requirements,
+    inheritedVisibleRequiredPermissionProfile,
+  );
+  const permissions = isRecord(inspection.config["permissions"])
+    ? inspection.config["permissions"]
+    : {};
+  const effectiveProfile = resolvedPermissionFilesystemForGuard(
+    permissions,
+    SCAN_PERMISSION_PROFILE,
+    environment,
+    cwd,
+  );
+  const effectiveDenials =
+    effectiveProfile === null ? null : filesystemDenials(effectiveProfile, cwd);
+  const expectedDenials = filesystemDenials(
+    { entries: expectedFilesystem, workspaceRoots: [] },
+    cwd,
+  );
+  const catalogProfile = inspection.permissionProfiles.find(
+    (entry) => entry.id === SCAN_PERMISSION_PROFILE,
+  );
+  if (
+    inspection.config["default_permissions"] === SCAN_PERMISSION_PROFILE &&
+    catalogProfile?.allowed === true &&
+    effectiveProfile !== null &&
+    effectiveDenials !== null &&
+    filesystemWritesCoveredBy(effectiveProfile.entries, expectedFilesystem) &&
+    filesystemDenialsContain(effectiveDenials, expectedDenials)
+  ) {
+    return;
+  }
+  const allowedProfiles =
+    inspection.requirements !== null &&
+    isRecord(inspection.requirements["allowedPermissionProfiles"])
+      ? inspection.requirements["allowedPermissionProfiles"]
+      : undefined;
+  if (
+    isRecord(allowedProfiles) &&
+    allowedProfiles[SCAN_PERMISSION_PROFILE] !== true
+  ) {
+    throw new CodexSecurityError(
+      "Codex Security cannot safely start because organization policy does not allow the required codex_security_scan permission profile. Ask your Codex administrator to define and allow this profile; for example, after defining it, set codex_security_scan = true under [allowed_permission_profiles] in requirements.toml. No scan was started.",
+    );
+  }
+  throw new CodexSecurityError(
+    "Codex Security cannot safely start because Codex did not select the required codex_security_scan permission profile with the expected permission rules. Ask your Codex administrator to allow this profile and resolve any other managed permission constraints. No scan was started.",
+  );
+}
+
+function requireNoOpaqueRequiredPermissionProfile(
+  config: JsonObject,
+  requirements: JsonObject | null,
+  inheritedVisibleRequiredPermissionProfile: string | null = null,
+): void {
+  const profile = opaqueRequiredPermissionProfile(config, requirements);
+  if (
+    profile === null ||
+    profile === inheritedVisibleRequiredPermissionProfile
+  ) {
+    return;
+  }
+  throw new CodexSecurityError(
+    "Codex Security cannot preserve the file restrictions in your organization's " +
+      inlineTomlString(profile) +
+      " profile.\n" +
+      "Ask your Codex administrator to set up a codex_security_scan profile using this guide:\n" +
+      "https://github.com/openai/codex-security/blob/main/sdk/typescript/README.md#managed-permission-profiles\n" +
+      "No scan was started.",
+  );
+}
+
+function opaqueRequiredPermissionProfile(
+  config: JsonObject,
+  requirements: JsonObject | null,
+): string | null {
+  if (requirements === null) return null;
+  const required = requirements["defaultPermissions"];
+  if (
+    typeof required !== "string" ||
+    required.startsWith(":") ||
+    required === SCAN_PERMISSION_PROFILE
+  ) {
+    return null;
+  }
+  const allowed = requirements["allowedPermissionProfiles"];
+  if (!isRecord(allowed) || allowed[SCAN_PERMISSION_PROFILE] !== true) {
+    return null;
+  }
+  return Object.hasOwn(
+    selectedPermissionConfiguration(config).profiles,
+    required,
+  )
+    ? null
+    : required;
+}
+
+function permissionInspectionFailureMessage(
+  command: CodexCommand,
+  error: unknown,
+  operation: string,
+): string {
+  const selectedExecutable = safeSelectedCodexExecutable(command);
+  if (error instanceof CodexConfigInspectionError) {
+    if (error.kind === "unsupported") {
+      return (
+        "Codex Security cannot safely start because " +
+        selectedExecutable +
+        " does not support permission-profile inspection. Update the pinned Codex SDK and CLI version. No scan was started."
+      );
+    }
+    if (error.kind === "launch") {
+      return (
+        "Codex Security could not " +
+        operation +
+        " because " +
+        selectedExecutable +
+        " could not be started. No scan was started."
+      );
+    }
+    if (error.kind === "exit") {
+      return (
+        "Codex Security could not " +
+        operation +
+        " because " +
+        selectedExecutable +
+        " exited before returning configuration. No scan was started."
+      );
+    }
+    return (
+      "Codex Security could not " +
+      operation +
+      " because " +
+      selectedExecutable +
+      " returned an invalid configuration-inspection response. No scan was started."
+    );
+  }
+  return (
+    "Codex Security could not " +
+    operation +
+    " with " +
+    selectedExecutable +
+    ". No scan was started."
+  );
+}
+
+function safeSelectedCodexExecutable(command: CodexCommand): string {
+  const name = command.command
+    .replace(/\\/gu, "/")
+    .split("/")
+    .at(-1)
+    ?.replace(/[^A-Za-z0-9._-]/gu, "_");
+  return name === undefined || name.length === 0
+    ? "the selected Codex executable"
+    : "the selected Codex executable (" + name + ")";
+}
+
+function scanRecipeConfig(
+  config: JsonObject,
+  explicitDenials: JsonObject,
+): JsonObject {
+  if (
+    !Object.keys(explicitDenials).some((path) => path !== "glob_scan_max_depth")
+  ) {
+    return config;
+  }
+  return {
+    ...config,
+    default_permissions: SCAN_PERMISSION_PROFILE,
+    permissions: {
+      [SCAN_PERMISSION_PROFILE]: {
+        filesystem: structuredClone(explicitDenials),
+      },
+    },
+  };
 }
 
 export function scanRuntimeCodexConfig(

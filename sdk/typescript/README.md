@@ -578,6 +578,110 @@ filesystem profile. Use `--codex 'approval_policy="never"'` to deny approval
 requests instead of reviewing them automatically. See
 [Local security model](#local-security-model).
 
+### Managed permission profiles
+
+Codex Security uses the `codex_security_scan` permission profile. If your
+organization restricts which profiles are allowed, ask your Codex administrator
+to complete the setup below. If the error also says that Codex Security cannot
+preserve an existing managed profile's file restrictions, complete the
+[additional steps](#preserve-file-restrictions-from-a-managed-default) before
+retrying.
+
+These examples are additions to an existing policy, not replacement
+configuration files. Keep the organization's other settings, allowed profiles,
+and file restrictions.
+
+#### Allow the scan profile
+
+1. **Deploy this definition in normal Codex configuration first.** The user
+   config is `$CODEX_HOME/config.toml`, usually `~/.codex/config.toml` on macOS
+   and Linux or `%USERPROFILE%\.codex\config.toml` on Windows. An administrator
+   can instead distribute it through normal system configuration:
+   `/etc/codex/config.toml` on macOS and Linux,
+   `%ProgramData%\OpenAI\Codex\config.toml` on Windows, or the macOS MDM
+   `com.openai.codex` preference `config_toml_base64`. Do not edit Codex
+   Security's generated private runtime config.
+
+   ```toml
+   [permissions.codex_security_scan]
+   description = "Reserved for Codex Security scans."
+   ```
+
+   This makes the reserved name known to ordinary Codex. Codex Security supplies
+   the actual scan permissions when it starts a scan. Keep your existing
+   organization-approved default; do not select this placeholder as the default.
+
+2. **Allow the name in the active managed requirements.** Add the following
+   entry to the existing `[allowed_permission_profiles]` table:
+
+   ```toml
+   [allowed_permission_profiles]
+   codex_security_scan = true
+   # Keep the existing allowed profiles, including the approved default.
+   ```
+
+   The system file is `/etc/codex/requirements.toml` on macOS and Linux, or
+   `%ProgramData%\OpenAI\Codex\requirements.toml` on Windows. If requirements
+   come from cloud management or macOS MDM, update that policy source instead.
+   For macOS MDM, the preference is `com.openai.codex` /
+   `requirements_toml_base64`. Do not add a duplicate TOML table or replace the
+   existing allowlist. The profile selected by `default_permissions` must also
+   be allowed.
+
+3. **Restart Codex and retry the scan** after both changes reach the affected
+   machine.
+
+Do not define `[permissions.codex_security_scan]` in `requirements.toml`. A
+managed definition with that name conflicts with the profile Codex Security
+creates for the scan. For details about configuration locations and policy
+precedence, see [Codex config basics](https://learn.chatgpt.com/docs/config-file/config-basic)
+and [managed requirements](https://learn.chatgpt.com/docs/enterprise/managed-configuration#admin-enforced-requirements-requirementstoml).
+
+#### Preserve file restrictions from a managed default
+
+If Codex Security reports that it cannot read the rules for the organization's
+current managed permission profile, allowing `codex_security_scan` is not
+enough. An administrator must make sure those restrictions still apply when
+the scan uses its own profile:
+
+1. Add the organization's required blocked paths and globs to
+   `[permissions.filesystem].deny_read` in the active managed requirements.
+   Preserve the existing entries. These read restrictions apply across
+   permission profiles.
+2. Choose a built-in profile or a profile defined in normal Codex configuration
+   as `default_permissions`, and include it in `[allowed_permission_profiles]`.
+   Change the default only if the replacement preserves the organization's
+   other filesystem and network restrictions.
+3. Apply the [scan-profile setup](#allow-the-scan-profile) above, then restart
+   Codex and retry.
+
+For example, **only if `:read-only` is an approved replacement**, merge the
+following settings into the existing requirements. Replace the synthetic paths
+with the organization's actual deny list, and retain its other policy entries:
+
+```toml
+# Top-level setting, before any [table] header.
+default_permissions = ":read-only"
+
+[allowed_permission_profiles]
+":read-only" = true
+codex_security_scan = true
+# Keep the organization's other allowed profiles.
+
+[permissions.filesystem]
+deny_read = [
+  "/absolute/repository/**/*.env",
+  "~/.ssh",
+  # Keep the organization's other required deny paths and globs.
+]
+```
+
+An allowlist entry alone does not preserve rules from a different profile. If
+the administrator cannot keep all required restrictions with this setup, leave
+the existing managed default in place rather than weakening the policy.
+Codex's [platform-specific enforcement limits](https://learn.chatgpt.com/docs/enterprise/managed-configuration#enforce-deny-read-requirements)
+still apply.
+
 ### Deep-scan engine configuration
 
 Deep scans read `$CODEX_HOME/codex-security/config.toml`, defaulting to
