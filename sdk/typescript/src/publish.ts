@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -9,7 +13,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import {
   InternalLinearError,
   NetworkLinearError,
@@ -1494,6 +1498,25 @@ function codexFailureMessage(stderr: string, exitCode: number): string {
     : `Codex exited with status ${exitCode}; sign in to Codex and connect the Linear app before publishing.`;
 }
 
+const activePublicationProcesses = new Set<ChildProcessWithoutNullStreams>();
+
+interface ForceTerminationDependencies {
+  platform?: NodeJS.Platform;
+  systemRoot?: string;
+  runTaskkill?: (
+    command: string,
+    args: readonly string[],
+  ) => { error?: Error; status: number | null };
+}
+
+export function forceTerminatePublicationProcesses(
+  dependencies: ForceTerminationDependencies = {},
+): void {
+  for (const child of activePublicationProcesses) {
+    forceTerminatePublicationProcess(child, dependencies);
+  }
+}
+
 async function runPublicationCodex(
   command: CodexCommand,
   args: readonly string[],
@@ -1508,8 +1531,9 @@ async function runPublicationCodex(
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
-      detached: process.platform !== "win32",
+      detached: process.platform !== "win32" && signal !== undefined,
     });
+    if (signal !== undefined) activePublicationProcesses.add(child);
     let stdout = "";
     let stderr = "";
     let partialLine = "";
@@ -1527,7 +1551,11 @@ async function runPublicationCodex(
     };
     const cleanup = (): void => {
       signal?.removeEventListener("abort", onAbort);
-      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+      activePublicationProcesses.delete(child);
+      if (forcedTermination !== undefined) {
+        clearTimeout(forcedTermination);
+        forcedTermination = undefined;
+      }
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted === true) onAbort();
@@ -1598,7 +1626,7 @@ function terminatePublicationProcess(
   }
 
   return new Promise((resolve) => {
-    const command = join(
+    const command = win32.join(
       process.env["SystemRoot"] ?? "C:\\Windows",
       "System32",
       "taskkill.exe",
@@ -1616,6 +1644,26 @@ function terminatePublicationProcess(
       resolve();
     });
   });
+}
+
+function forceTerminatePublicationProcess(
+  child: ChildProcessWithoutNullStreams,
+  dependencies: ForceTerminationDependencies,
+): void {
+  if (child.pid === undefined) return;
+  if ((dependencies.platform ?? process.platform) === "win32") {
+    const command = win32.join(
+      dependencies.systemRoot ?? process.env["SystemRoot"] ?? "C:\\Windows",
+      "System32",
+      "taskkill.exe",
+    );
+    const args = ["/PID", String(child.pid), "/T", "/F"];
+    const taskkill =
+      dependencies.runTaskkill?.(command, args) ??
+      spawnSync(command, args, { stdio: "ignore", windowsHide: true });
+    if (taskkill.error === undefined && taskkill.status === 0) return;
+  }
+  terminatePublicationProcessGroup(child, "SIGKILL");
 }
 
 function terminatePublicationProcessGroup(

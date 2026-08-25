@@ -10,15 +10,36 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only' || 'full' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}
 
 jobs:
   validate-title:
-    name: validate pull request title
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}validate pull request title
     runs-on: ubuntu-latest
+    outputs:
+      run-full-ci: ${{ steps.scope.outputs.run-full-ci }}
 
     steps:
+      - name: Decide whether full CI is needed
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          TITLE_CHANGED: ${{ github.event.changes.title != null }}
+          BASE_CHANGED: ${{ github.event.changes.base != null }}
+        run: |
+          set -euo pipefail
+          run_full_ci=true
+          if [[ "$EVENT_NAME" == "pull_request" &&
+                "$EVENT_ACTION" == "edited" &&
+                "$TITLE_CHANGED" != "true" &&
+                "$BASE_CHANGED" != "true" ]]; then
+            run_full_ci=false
+          fi
+          printf 'run-full-ci=%s\n' "$run_full_ci" >> "$GITHUB_OUTPUT"
+
       - name: Require a Conventional Commit pull request title
         if: github.event_name == 'pull_request'
         shell: bash
@@ -27,15 +48,16 @@ jobs:
         run: |
           set -euo pipefail
           conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
-          if [[ ! "$PR_TITLE" =~ $conventional_title ]]; then
+          if [[ "$PR_TITLE" == *$'\n'* || "$PR_TITLE" == *$'\r'* ||
+                ! "$PR_TITLE" =~ $conventional_title ]]; then
             echo "Pull request title must follow <type>[optional scope][!]: <description>." >&2
             exit 1
           fi
 
   test:
-    name: ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     needs: validate-title
-    if: always()
+    if: needs.validate-title.outputs.run-full-ci == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -54,10 +76,6 @@ jobs:
             node: "26"
 
     steps:
-      - name: Require a valid pull request title
-        if: needs.validate-title.result != 'success'
-        run: exit 1
-
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -129,9 +147,25 @@ jobs:
         shell: bash
         run: pnpm run check:package ../../dist/*.tgz
 
+  required-test:
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}${{ matrix.os }} / node-22
+    needs: [validate-title, test]
+    if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Require every Unix coverage job
+        if: needs.validate-title.result != 'success' || needs.test.result != 'success'
+        run: exit 1
+
   windows-test:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
     needs: validate-title
+    if: needs.validate-title.outputs.run-full-ci == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -189,8 +223,9 @@ jobs:
         run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
     needs: validate-title
+    if: needs.validate-title.outputs.run-full-ci == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -228,9 +263,9 @@ jobs:
         run: pnpm run check:package ../../dist/*.tgz
 
   windows:
-    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
     needs: [validate-title, windows-test, windows-verify]
     strategy:
       fail-fast: false

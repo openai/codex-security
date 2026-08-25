@@ -17,7 +17,8 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
-          if [[ ! "$PR_TITLE" =~ $conventional_title ]]; then
+          if [[ "$PR_TITLE" == *$'\n'* || "$PR_TITLE" == *$'\r'* ||
+                ! "$PR_TITLE" =~ $conventional_title ]]; then
             echo '::error::Pull request title must follow <type>[optional scope][!]: <description>.'
             exit 1
           fi

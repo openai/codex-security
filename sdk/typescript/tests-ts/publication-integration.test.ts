@@ -26,6 +26,7 @@ import type {
 } from "../src/models.js";
 import {
   checkScanPublicationInternal,
+  forceTerminatePublicationProcesses,
   publishScanInternal,
   type PublishScanDependencies,
   type PublishScanProgress,
@@ -43,6 +44,10 @@ const OPTIONS = {
   teamId: "team-example",
   projectId: "project-example",
 } as const;
+
+const NODE_EXECUTABLE = execFileSync("node", ["-p", "process.execPath"], {
+  encoding: "utf8",
+}).trim();
 const temporaryDirectories: string[] = [];
 
 interface PublicationFixture {
@@ -249,6 +254,42 @@ async function artifactDigests(
       ]),
     ),
   );
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid < 1) {
+    throw new Error(`Invalid test process ID: ${pid}`);
+  }
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    if (process.platform === "linux") {
+      const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(
+        () => undefined,
+      );
+      if (state === undefined || /\) Z /u.test(state)) return;
+    }
+    await Bun.sleep(20);
+  }
+  throw new Error(`Test process ${pid} did not exit.`);
+}
+
+async function readProcessId(path: string): Promise<number> {
+  return Number(await readFile(path, "utf8").catch(() => "0"));
+}
+
+function killTestProcess(pid: number): void {
+  if (!Number.isSafeInteger(pid) || Math.abs(pid) < 2) return;
+  if (process.platform === "win32" && pid < 0) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
 }
 
 function storedPublications(fixture: PublicationFixture): StoredPublication[] {
@@ -995,6 +1036,188 @@ describe("database-backed Linear publication integration", () => {
       expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
     },
   );
+
+  test.skipIf(process.platform === "win32")(
+    "keeps no-signal SDK publication in the host process group",
+    async () => {
+      const completed = await fixture(1);
+      const root = dirname(completed.scanDirectory);
+      const preload = join(root, "sdk-publication-child.cjs");
+      const publisherPidFile = join(root, "sdk-publication-child.pid");
+      await writeFile(
+        preload,
+        'const fs = require("node:fs");fs.readFileSync(0, "utf8");fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));const waiter = new Int32Array(new SharedArrayBuffer(4));for (;;) Atomics.wait(waiter, 0, 0, 1000);',
+        { mode: 0o600 },
+      );
+      const publishing = publishScanInternal(completed.scanDirectory, OPTIONS, {
+        environment: {
+          PATH: completed.environment["PATH"],
+          PYTHON: completed.python,
+          CODEX_SECURITY_STATE_DIR: completed.stateDirectory,
+          NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+          CODEX_PUBLICATION_PARENT_PID: publisherPidFile,
+        },
+        resolveCodex: () => ({ command: NODE_EXECUTABLE }),
+      });
+
+      try {
+        let publisherPid = await readProcessId(publisherPidFile);
+        for (let attempt = 0; publisherPid < 2 && attempt < 250; attempt += 1) {
+          await Bun.sleep(20);
+          publisherPid = await readProcessId(publisherPidFile);
+        }
+        expect(publisherPid).toBeGreaterThan(1);
+        const groups = execFileSync(
+          "ps",
+          ["-o", "pgid=", "-p", `${process.pid},${publisherPid}`],
+          { encoding: "utf8" },
+        )
+          .trim()
+          .split(/\s+/u);
+        expect(groups).toHaveLength(2);
+        expect(new Set(groups).size).toBe(1);
+        forceTerminatePublicationProcesses({
+          platform: "win32",
+          runTaskkill: () => {
+            throw new Error("No-signal publication entered force registry.");
+          },
+        });
+      } finally {
+        const publisherPid = await readProcessId(publisherPidFile);
+        killTestProcess(publisherPid);
+        await publishing.catch(() => undefined);
+      }
+    },
+    30_000,
+  );
+
+  test("applies connected-publication signal escalation without delivery duplicates", async () => {
+    for (const [secondSignal, elapsed, expectedForced] of [
+      ["SIGINT", 0, []],
+      ["SIGTERM", 0, ["1:terminated", "0:SIGTERM"]],
+      ["SIGINT", 500, ["1:terminated", "0:SIGINT"]],
+    ] as const) {
+      const signals = new FakeSignals();
+      const forced: string[] = [];
+      let now = 0;
+      const cli = dependencies({ signals });
+      cli.environment["CODEX_SECURITY_LINEAR_TEAM"] = OPTIONS.teamId;
+      cli.now = () => now;
+      const record = (value: string): number =>
+        forced.push(`${signals.listeners.get("SIGINT")?.size}:${value}`);
+      cli.terminatePublishers = () => record("terminated");
+      cli.forceExit = record;
+      cli.publishScan = async () => {
+        signals.emit("SIGINT");
+        now = elapsed;
+        signals.emit(secondSignal);
+        throw new Error("Synthetic interrupted connected publication.");
+      };
+
+      expect(
+        await main(
+          ["publish", "scan", "completed-scan", "--to", "linear"],
+          capture().stream,
+          capture().stream,
+          cli,
+        ),
+      ).toBe(130);
+      expect(forced).toEqual([...expectedForced]);
+    }
+  });
+
+  test("kills connected publication descendants before a later signal forces exit", async () => {
+    const completed = await fixture(1);
+    const root = dirname(completed.scanDirectory);
+    const preload = join(root, "publisher.cjs");
+    const publisherPidFile = join(root, "publisher.pid");
+    const descendantPidFile = join(root, "descendant.pid");
+    const descendant =
+      'const fs = require("node:fs");process.on("SIGINT", () => {});process.on("SIGTERM", () => {});fs.writeFileSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID, String(process.pid));setInterval(() => {}, 1000);';
+    await writeFile(
+      preload,
+      `const fs = require("node:fs"); const { spawn } = require("node:child_process");
+const prompt = fs.readFileSync(0, "utf8"); const payload = JSON.parse(prompt.split("BEGIN UNTRUSTED PUBLICATION DATA\\n")[1].split("\\nEND UNTRUSTED PUBLICATION DATA")[0]); const finding = JSON.parse(fs.readFileSync(payload.publicationFile, "utf8")).batches[0][0];
+fs.appendFileSync(payload.handoffFile, JSON.stringify({ scanId: payload.scanId, findingId: finding.findingId, occurrenceId: finding.occurrenceId, error: "Synthetic connected publication may have completed.", possibleMutation: true, arguments: finding.arguments }) + "\\n"); fs.writeFileSync(process.env.CODEX_PUBLICATION_PARENT_PID, String(process.pid));
+spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { env: { ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}), CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });
+const waiter = new Int32Array(new SharedArrayBuffer(4)); for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) { if (attempts === 500) process.exit(3); Atomics.wait(waiter, 0, 0, 10); }
+process.on("SIGINT", () => {}); process.on("SIGTERM", () => {}); fs.writeSync(1, '{"type":"synthetic.publisher_ready"}\\n');
+for (;;) Atomics.wait(waiter, 0, 0, 1000);`,
+      { mode: 0o600 },
+    );
+    const environment = {
+      ...(process.platform === "win32"
+        ? { SystemRoot: process.env["SystemRoot"] }
+        : {}),
+      PATH: completed.environment["PATH"],
+      PYTHON: completed.python,
+      CODEX_SECURITY_STATE_DIR: completed.stateDirectory,
+      CODEX_SECURITY_LINEAR_TEAM: OPTIONS.teamId,
+      NODE_OPTIONS: `--require=${JSON.stringify(preload)}`,
+      CODEX_PUBLICATION_PARENT_PID: publisherPidFile,
+      CODEX_PUBLICATION_DESCENDANT_PID: descendantPidFile,
+    };
+    const signals = new FakeSignals();
+    const cli = dependencies({
+      currentDirectory: completed.scanDirectory,
+      environment,
+      signals,
+    });
+    cli.forceExit = () => undefined;
+    cli.publishScan = async (directory, options) =>
+      await publishScanInternal(
+        directory,
+        {
+          ...options,
+          onProgress: (event) => {
+            options.onProgress?.(event);
+            if (event.type !== "codex_event") return;
+            signals.emit("SIGINT");
+            signals.emit("SIGTERM");
+          },
+        },
+        {
+          environment,
+          resolveCodex: () => ({ command: NODE_EXECUTABLE }),
+        },
+      );
+
+    try {
+      expect(
+        await Promise.race([
+          main(
+            ["publish", "scan", completed.scanDirectory, "--to", "linear"],
+            capture().stream,
+            capture().stream,
+            cli,
+          ),
+          Bun.sleep(20_000).then(() => -1),
+        ]),
+      ).toBe(130);
+      const publisherPid = await readProcessId(publisherPidFile);
+      const descendantPid = await readProcessId(descendantPidFile);
+      await Promise.all([
+        waitForProcessExit(publisherPid),
+        waitForProcessExit(descendantPid),
+      ]);
+      const handoffRoot = join(root, "state/publications/linear/handoffs");
+      const handoffs = await readdir(handoffRoot);
+      expect(handoffs).toHaveLength(1);
+      const handoff = join(handoffRoot, handoffs[0]!);
+      expect(await readFile(join(handoff, "issues.jsonl"), "utf8")).toContain(
+        '"possibleMutation":true',
+      );
+      expect(
+        await readFile(join(handoff, "publication.json"), "utf8"),
+      ).toContain(completed.findings[0]!.findingId);
+    } finally {
+      const publisherPid = await readProcessId(publisherPidFile);
+      const descendantPid = await readProcessId(descendantPidFile);
+      killTestProcess(-publisherPid);
+      killTestProcess(publisherPid);
+      killTestProcess(descendantPid);
+    }
+  }, 30_000);
 
   test("recovers verified SQLite publications before an interrupted CLI exits", async () => {
     const completed = await fixture(3);
