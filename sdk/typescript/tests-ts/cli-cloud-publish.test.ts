@@ -173,26 +173,40 @@ describe("publish scan to Cloud", () => {
     expect(stderr.text()).toContain("Use --scan or scan directory inputs");
   });
 
-  test("selects several saved scans by ID and stops at Done without selecting the rest", async () => {
+  test("selects several saved scans in one multi-select prompt", async () => {
     const { scans, deps } = await savedScansFixture();
-    const picks = [scans[1]!.scanId, scans[0]!.scanId, ""];
+    const picks = [scans[1]!.scanId, scans[0]!.scanId];
     let selections = 0;
     deps.publishPrompt = {
       isInteractive: () => true,
-      select: async (_question, choices, presentation, signal) => {
+      select: async () => {
+        throw new Error("unexpected single-select prompt");
+      },
+      checkbox: async <Value extends string>(
+        _question: string,
+        choices: readonly { label: string; value: Value }[],
+        presentation?: { header?: string; required?: boolean },
+        signal?: AbortSignal,
+      ): Promise<Value[]> => {
+        selections++;
         expect(signal).toBeInstanceOf(AbortSignal);
         expect(presentation?.header).toContain("SCAN ID");
-        expect(choices.some(({ value }) => value === "")).toBe(selections > 0);
+        expect(presentation?.required).toBe(true);
+        expect(choices.some(({ value }) => value === "")).toBe(false);
         expect(
           choices.some(({ label }) => label.includes(scans[0]!.scanDir)),
         ).toBe(false);
-        const pick = picks[selections++]!;
-        return choices.find(({ value }) => value === pick)!.value;
+        expect(choices.map(({ value }) => String(value))).toEqual(
+          scans.map(({ scanId }) => scanId),
+        );
+        return picks.map(
+          (pick) => choices.find(({ value }) => value === pick)!.value,
+        );
       },
     };
     const calls: string[] = [];
     deps.publishScanToCloud = async (_directory, options) => {
-      expect(selections).toBe(3);
+      expect(selections).toBe(1);
       calls.push(options!.expectedScanId!);
       return { ...receipt, scanId: options!.expectedScanId! };
     };
@@ -205,7 +219,7 @@ describe("publish scan to Cloud", () => {
         deps,
       ),
     ).toBe(0);
-    expect(calls).toEqual(picks.slice(0, 2));
+    expect(calls).toEqual(picks);
     expect(
       JSON.parse(stdout.text()).results.map(
         (result: { scanId: string }) => result.scanId,
@@ -220,15 +234,15 @@ describe("publish scan to Cloud", () => {
       signals.add(signal, listener);
     deps.removeSignalListener = (signal, listener) =>
       signals.remove(signal, listener);
-    let selections = 0;
     deps.publishPrompt = {
       isInteractive: () => true,
-      select: async (_question, choices, _presentation, signal) => {
-        if (selections++ > 0) {
-          signals.emit("SIGINT");
-          signal!.throwIfAborted();
-        }
-        return choices[0]!.value;
+      select: async () => {
+        throw new Error("unexpected single-select prompt");
+      },
+      checkbox: async (_question, _choices, _presentation, signal) => {
+        signals.emit("SIGINT");
+        signal!.throwIfAborted();
+        return [];
       },
     };
     let uploads = 0;
@@ -770,16 +784,15 @@ describe("publish scan to Cloud", () => {
       let selections = 0;
       deps.publishPrompt = {
         isInteractive: () => true,
-        select: async (_question, choices) => {
+        select: async () => {
+          throw new Error("unexpected single-select prompt");
+        },
+        checkbox: async (_question, choices, presentation) => {
           selections++;
           const directories: string[] = choices.map(({ value }) => value);
-          if (selections === 1) {
-            expect(directories).toEqual(["scan-1"]);
-            return choices[0]!.value;
-          }
-          expect(directories).toEqual([""]);
-          expect(choices[0]!.label).toBe("Done (1 selected)");
-          return choices[0]!.value;
+          expect(directories).toEqual(["scan-1"]);
+          expect(presentation?.required).toBe(true);
+          return [choices[0]!.value];
         },
       };
       deps.publishScanToCloud = async (directory, options) => {
@@ -796,7 +809,7 @@ describe("publish scan to Cloud", () => {
           deps,
         ),
       ).toBe(0);
-      expect(selections).toBe(2);
+      expect(selections).toBe(1);
       expect(JSON.parse(stdout.text())).toEqual(receipt);
     } finally {
       await rm(root, { recursive: true, force: true });

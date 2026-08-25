@@ -1057,7 +1057,8 @@ interface CliDependencies {
   ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
-  publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
+  publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
+    Partial<Pick<BulkScanPrompt, "checkbox">>;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   publishScanToCloud?: typeof publishScanToCloud;
@@ -2321,28 +2322,22 @@ export async function main(
             };
           });
           if (options.to === "cloud") {
-            let remaining = choices;
-            while (true) {
-              controller.signal.throwIfAborted();
-              const selected = await prompt.select(
-                "Which completed scans would you like to publish?",
-                selectedScans.length === 0
-                  ? remaining
-                  : [
-                      {
-                        label: `Done (${selectedScans.length} selected)`,
-                        value: "",
-                      },
-                      ...remaining,
-                    ],
-                { header },
-                controller.signal,
+            if (prompt.checkbox === undefined) {
+              throw new CodexSecurityError(
+                "Interactive scan selection is unavailable.",
               );
-              controller.signal.throwIfAborted();
-              if (selected === "") break;
-              selectedScans.push(scansById.get(selected)!);
-              remaining = remaining.filter(({ value }) => value !== selected);
             }
+            controller.signal.throwIfAborted();
+            const selected = await prompt.checkbox(
+              "Which completed scans would you like to publish?",
+              choices,
+              { header, required: true },
+              controller.signal,
+            );
+            controller.signal.throwIfAborted();
+            selectedScans.push(
+              ...selected.map((scanId) => scansById.get(scanId)!),
+            );
             scanDir = selectedScans[0]!.scanDir;
           } else {
             scanDir = await prompt.select(
