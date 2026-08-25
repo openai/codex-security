@@ -53,59 +53,96 @@ interface CloudPublicationDependencies {
   dryRun?: boolean;
 }
 
-interface CsvFindingRow {
-  occurrenceId: string;
-  findingId: string;
-  candidateId?: string;
-  title: string;
-  summary: string;
-  severity: Finding["severity"]["level"];
-  confidence: Finding["confidence"]["level"];
-  status: "open" | "closed";
-  closeReason?: "already_fixed" | "wont_fix" | "false_positive";
-  note?: string;
-  remediation: string;
-  path: string;
-  startLine: number;
-  endLine?: number;
-}
-
-const REQUIRED_CSV_COLUMNS = [
-  "occurrence_id",
-  "finding_id",
-  "title",
-  "summary",
-  "severity",
-  "confidence",
-  "status",
-  "close_reason",
-  "note",
-  "remediation",
-  "path",
-  "start_line",
-  "end_line",
-] as const;
-const OPTIONAL_CSV_COLUMNS = ["candidate_id"] as const;
 const EXPORTED_CSV_ESCAPE = /^'(?:[\t\r\n]|\s*[=+\-@＝＋－＠])/u;
-const FINDING_ID = /^csf_[a-f0-9]{24}$/u;
-const OCCURRENCE_ID = /^occ_[a-f0-9]{24}$/u;
-const SEVERITIES = new Set<Finding["severity"]["level"]>([
-  "critical",
-  "high",
-  "medium",
-  "low",
-  "informational",
-]);
-const CONFIDENCES = new Set<Finding["confidence"]["level"]>([
-  "high",
-  "medium",
-  "low",
-]);
-const CLOSE_REASONS = new Set<NonNullable<CsvFindingRow["closeReason"]>>([
-  "already_fixed",
-  "wont_fix",
-  "false_positive",
-]);
+const csvFindingRowSchema = z
+  .object({
+    occurrence_id: z.string().regex(/^occ_[a-f0-9]{24}$/u, {
+      error: "has an invalid occurrence_id",
+    }),
+    finding_id: z.string().regex(/^csf_[a-f0-9]{24}$/u, {
+      error: "has an invalid finding_id",
+    }),
+    candidate_id: z
+      .string()
+      .optional()
+      .transform((value) =>
+        value === undefined || value.trim() === "" ? undefined : value,
+      ),
+    title: requiredCsvText("title"),
+    summary: requiredCsvText("summary"),
+    severity: z.enum(["critical", "high", "medium", "low", "informational"], {
+      error: "has an invalid severity",
+    }),
+    confidence: z.enum(["high", "medium", "low"], {
+      error: "has an invalid confidence",
+    }),
+    status: z.enum(["open", "closed"], {
+      error: "has an invalid status",
+    }),
+    close_reason: z
+      .union(
+        [
+          z.literal(""),
+          z.enum(["already_fixed", "wont_fix", "false_positive"]),
+        ],
+        { error: "has an invalid close_reason" },
+      )
+      .transform((value) => (value === "" ? undefined : value)),
+    note: z
+      .string()
+      .transform((value) => (value.trim() === "" ? undefined : value)),
+    remediation: requiredCsvText("remediation"),
+    path: z.string().refine(safeFindingPath, {
+      error: "has an invalid path",
+    }),
+    start_line: z
+      .string()
+      .refine(validCsvLine, { error: "has an invalid start_line" })
+      .transform(Number),
+    end_line: z
+      .string()
+      .refine((value) => value === "" || validCsvLine(value), {
+        error: "has an invalid end_line",
+      })
+      .transform((value) => (value === "" ? undefined : Number(value))),
+  })
+  .superRefine((row, context) => {
+    if (
+      (row.status === "open" && row.close_reason !== undefined) ||
+      (row.status === "closed" && row.close_reason === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["close_reason"],
+        message: "has an invalid close_reason",
+      });
+    }
+    if (
+      row.status === "closed" &&
+      (row.close_reason === "false_positive" ||
+        row.close_reason === "wont_fix") &&
+      row.note === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["note"],
+        message: "requires a note for its close_reason",
+      });
+    }
+    if (row.end_line !== undefined && row.end_line < row.start_line) {
+      context.addIssue({
+        code: "custom",
+        path: ["end_line"],
+        message: "has end_line before start_line",
+      });
+    }
+  });
+type CsvFindingRow = z.infer<typeof csvFindingRowSchema>;
+type CsvColumn = keyof typeof csvFindingRowSchema.shape;
+const CSV_COLUMNS = Object.keys(csvFindingRowSchema.shape) as CsvColumn[];
+const REQUIRED_CSV_COLUMNS = CSV_COLUMNS.filter(
+  (column) => !csvFindingRowSchema.shape[column].isOptional(),
+);
 
 export async function publishScanToCloud(
   scanDirectory: string,
@@ -211,20 +248,29 @@ export async function publishFindingsCsvToCloud(
 }
 
 function parseFindingsCsv(source: string): CsvFindingRow[] {
-  const { data: rows, errors } = Papa.parse<string[]>(source, {
+  const {
+    data: rows,
+    errors,
+    meta,
+  } = Papa.parse<Record<string, string>>(source, {
+    header: true,
     delimiter: ",",
     skipEmptyLines: "greedy",
+    transform: decodeExportedCsvCell,
   });
+  const fieldMismatch = errors.find(
+    (error) => error.code === "TooFewFields" || error.code === "TooManyFields",
+  );
+  if (fieldMismatch?.row !== undefined) {
+    throw csvRowError(fieldMismatch.row + 2, "must match the header columns");
+  }
   if (errors.length > 0) {
     throw new CodexSecurityError(
       `Findings CSV could not be parsed: ${errors[0]!.message}`,
     );
   }
-  const headers = rows.shift();
-  const allowed = new Set<string>([
-    ...REQUIRED_CSV_COLUMNS,
-    ...OPTIONAL_CSV_COLUMNS,
-  ]);
+  const headers = meta.fields;
+  const allowed = new Set<string>(CSV_COLUMNS);
   if (
     headers === undefined ||
     !REQUIRED_CSV_COLUMNS.every((name) => headers.includes(name)) ||
@@ -243,103 +289,22 @@ function parseFindingsCsv(source: string): CsvFindingRow[] {
 
   const findingIds = new Set<string>();
   const occurrenceIds = new Set<string>();
-  return rows.map((fields, index) => {
+  return rows.map((record, index) => {
     const rowNumber = index + 2;
-    if (fields.length !== headers.length) {
-      throw csvRowError(rowNumber, "must match the header columns");
+    const parsed = csvFindingRowSchema.safeParse(record);
+    if (!parsed.success) {
+      throw csvRowError(rowNumber, parsed.error.issues[0]!.message);
     }
-    const get = (name: string): string =>
-      decodeExportedCsvCell(fields[headers.indexOf(name)] ?? "");
-    const findingId = get("finding_id");
-    const occurrenceId = get("occurrence_id");
-    if (!FINDING_ID.test(findingId)) {
-      throw csvRowError(rowNumber, "has an invalid finding_id");
-    }
-    if (!OCCURRENCE_ID.test(occurrenceId)) {
-      throw csvRowError(rowNumber, "has an invalid occurrence_id");
-    }
-    if (findingIds.has(findingId)) {
+    const row = parsed.data;
+    if (findingIds.has(row.finding_id)) {
       throw csvRowError(rowNumber, "has a duplicate finding_id");
     }
-    if (occurrenceIds.has(occurrenceId)) {
+    if (occurrenceIds.has(row.occurrence_id)) {
       throw csvRowError(rowNumber, "has a duplicate occurrence_id");
     }
-    findingIds.add(findingId);
-    occurrenceIds.add(occurrenceId);
-
-    const title = requiredCsvText(get("title"), rowNumber, "title");
-    const summary = requiredCsvText(get("summary"), rowNumber, "summary");
-    const remediation = requiredCsvText(
-      get("remediation"),
-      rowNumber,
-      "remediation",
-    );
-    const severity = get("severity") as Finding["severity"]["level"];
-    if (!SEVERITIES.has(severity)) {
-      throw csvRowError(rowNumber, "has an invalid severity");
-    }
-    const confidence = get("confidence") as Finding["confidence"]["level"];
-    if (!CONFIDENCES.has(confidence)) {
-      throw csvRowError(rowNumber, "has an invalid confidence");
-    }
-    const status = get("status");
-    if (status !== "open" && status !== "closed") {
-      throw csvRowError(rowNumber, "has an invalid status");
-    }
-    const closeReason = get("close_reason");
-    if (
-      (status === "open" && closeReason !== "") ||
-      (status === "closed" &&
-        !CLOSE_REASONS.has(
-          closeReason as NonNullable<CsvFindingRow["closeReason"]>,
-        ))
-    ) {
-      throw csvRowError(rowNumber, "has an invalid close_reason");
-    }
-    const note = get("note");
-    if (
-      status === "closed" &&
-      (closeReason === "false_positive" || closeReason === "wont_fix") &&
-      note.trim().length === 0
-    ) {
-      throw csvRowError(rowNumber, "requires a note for its close_reason");
-    }
-    const path = get("path");
-    if (!safeFindingPath(path)) {
-      throw csvRowError(rowNumber, "has an invalid path");
-    }
-    const startLine = csvLine(get("start_line"), rowNumber, "start_line");
-    const endLineText = get("end_line");
-    const endLine =
-      endLineText === ""
-        ? undefined
-        : csvLine(endLineText, rowNumber, "end_line");
-    if (endLine !== undefined && endLine < startLine) {
-      throw csvRowError(rowNumber, "has end_line before start_line");
-    }
-    const candidateId = get("candidate_id");
-    return {
-      occurrenceId,
-      findingId,
-      ...(candidateId.trim() === "" ? {} : { candidateId }),
-      title,
-      summary,
-      severity,
-      confidence,
-      status,
-      ...(closeReason === ""
-        ? {}
-        : {
-            closeReason: closeReason as NonNullable<
-              CsvFindingRow["closeReason"]
-            >,
-          }),
-      ...(note.trim() === "" ? {} : { note }),
-      remediation,
-      path,
-      startLine,
-      ...(endLine === undefined ? {} : { endLine }),
-    };
+    findingIds.add(row.finding_id);
+    occurrenceIds.add(row.occurrence_id);
+    return row;
   });
 }
 
@@ -349,7 +314,7 @@ function decodeExportedCsvCell(value: string): string {
 
 function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
   const ruleId = "import.csv";
-  const anchor = row.findingId;
+  const anchor = row.finding_id;
   const fingerprint = `codex-security/v1:sha256:${sha256(
     ["codex-security/v1", CSV_TARGET_ID, ruleId, anchor, ""].join("\0"),
   )}`;
@@ -378,49 +343,43 @@ function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
     locations: [
       {
         path: row.path,
-        startLine: row.startLine,
-        ...(row.endLine === undefined ? {} : { endLine: row.endLine }),
+        startLine: row.start_line,
+        ...(row.end_line === undefined ? {} : { endLine: row.end_line }),
       },
     ],
     remediation: row.remediation,
-    provenance: {
-      source: "csv_import",
-      sourceFindingId: row.findingId,
-      sourceOccurrenceId: row.occurrenceId,
-      csvStatus: row.status,
-      ...(row.closeReason === undefined
-        ? {}
-        : { csvCloseReason: row.closeReason }),
-      ...(row.note === undefined ? {} : { csvNote: row.note }),
+    validation: {
+      method: "Source-reported CSV import metadata",
+      status: row.status,
+      summary: [
+        `Source finding ID: ${row.finding_id}`,
+        `Source occurrence ID: ${row.occurrence_id}`,
+        `Source status: ${row.status}`,
+        ...(row.close_reason === undefined
+          ? []
+          : [`Source close reason: ${row.close_reason}`]),
+        ...(row.note === undefined ? [] : [`Source note: ${row.note}`]),
+      ].join("\n"),
     },
+    provenance: { source: "csv_import" },
     extensions: {
-      ...(row.candidateId === undefined
+      ...(row.candidate_id === undefined
         ? {}
-        : { candidateId: row.candidateId }),
+        : { candidateId: row.candidate_id }),
     },
   };
 }
 
-function requiredCsvText(
-  value: string,
-  rowNumber: number,
-  column: string,
-): string {
-  if (value.trim().length === 0) {
-    throw csvRowError(rowNumber, `requires ${column}`);
-  }
-  return value;
+function requiredCsvText(column: string) {
+  return z.string().refine((value) => value.trim().length > 0, {
+    error: `requires ${column}`,
+  });
 }
 
-function csvLine(value: string, rowNumber: number, column: string): number {
-  if (!/^[1-9]\d*$/u.test(value)) {
-    throw csvRowError(rowNumber, `has an invalid ${column}`);
-  }
+function validCsvLine(value: string): boolean {
+  if (!/^[1-9]\d*$/u.test(value)) return false;
   const line = Number(value);
-  if (!Number.isSafeInteger(line)) {
-    throw csvRowError(rowNumber, `has an invalid ${column}`);
-  }
-  return line;
+  return Number.isSafeInteger(line);
 }
 
 function safeFindingPath(value: string): boolean {

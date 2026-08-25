@@ -184,12 +184,13 @@ describe("Cloud publication", () => {
           severity: { level: "high" },
           confidence: { level: "high" },
           locations: [{ path: "src/extract.py", startLine: 41, endLine: 44 }],
-          provenance: {
-            source: "csv_import",
-            sourceFindingId: "csf_852f90d6e1177502ff113d4a",
-            sourceOccurrenceId: "occ_e79cb19591e696572a1c22be",
-            csvStatus: "open",
+          validation: {
+            method: "Source-reported CSV import metadata",
+            status: "open",
+            summary:
+              "Source finding ID: csf_852f90d6e1177502ff113d4a\nSource occurrence ID: occ_e79cb19591e696572a1c22be\nSource status: open",
           },
+          provenance: { source: "csv_import" },
         },
       ],
     });
@@ -228,10 +229,7 @@ describe("Cloud publication", () => {
       findings: [
         {
           remediation: "Normalize and validate destinations.",
-          provenance: {
-            sourceFindingId: "csf_852f90d6e1177502ff113d4a",
-            sourceOccurrenceId: "occ_e79cb19591e696572a1c22be",
-          },
+          provenance: { source: "csv_import" },
         },
       ],
     });
@@ -253,15 +251,19 @@ describe("Cloud publication", () => {
     });
   });
 
-  test("preserves valid CSV triage fields in finding provenance", async () => {
+  test("preserves source IDs and triage fields in finding validation", async () => {
     const path = await csvFixture(
       `${csvHeader}\n${csvRow.replace(",open,,,", ',closed,wont_fix,"Accepted risk.",')}\n`,
     );
     const result = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(result.findings?.[0]?.provenance).toMatchObject({
-      csvStatus: "closed",
-      csvCloseReason: "wont_fix",
-      csvNote: "Accepted risk.",
+    expect(result.findings?.[0]?.validation).toEqual({
+      method: "Source-reported CSV import metadata",
+      status: "closed",
+      summary:
+        "Source finding ID: csf_852f90d6e1177502ff113d4a\nSource occurrence ID: occ_e79cb19591e696572a1c22be\nSource status: closed\nSource close reason: wont_fix\nSource note: Accepted risk.",
+    });
+    expect(result.findings?.[0]?.provenance).toEqual({
+      source: "csv_import",
     });
   });
 
