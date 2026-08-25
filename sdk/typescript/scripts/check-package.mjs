@@ -195,6 +195,7 @@ const distFiles = new Set(
     "scan-logs",
     "scan-sessions",
     "targets",
+    "thread-source",
     "trusted-executable",
     "version",
     "windows-path",
