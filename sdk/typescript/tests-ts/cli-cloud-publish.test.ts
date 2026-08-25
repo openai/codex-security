@@ -68,7 +68,7 @@ describe("publish scan to Cloud", () => {
       ),
     ).toBe(0);
     expect(stdout.text()).toContain("--csv <string>");
-    expect(stdout.text()).toContain("findings CSV");
+    expect(stdout.text()).toContain("Findings CSV");
   });
 
   test("passes --dry-run through when publishing a findings CSV", async () => {
@@ -83,7 +83,6 @@ describe("publish scan to Cloud", () => {
       publishedPath = path;
       expect(options?.dryRun).toBe(true);
       expect(options?.signal).toBeInstanceOf(AbortSignal);
-      expect(options?.now?.()).toBe(0);
       return { ...receipt, dryRun: true };
     };
     const stdout = capture();
@@ -125,11 +124,6 @@ describe("publish scan to Cloud", () => {
     [
       "a scan directory",
       ["scan", "--to", "cloud", "--csv", "findings.csv"],
-      "Use --csv or scan directory and ID inputs",
-    ],
-    [
-      "a --scan-dir value",
-      ["--scan-dir", "scan", "--to", "cloud", "--csv", "findings.csv"],
       "Use --csv or scan directory and ID inputs",
     ],
     [

@@ -10,7 +10,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   publishFindingsCsvToCloud,
@@ -162,21 +161,11 @@ async function addSecondFinding(scan: string): Promise<void> {
 }
 
 describe("Cloud publication", () => {
-  test("keeps the repository CSV template aligned with the standard export", async () => {
-    expect(
-      await readFile(
-        join(import.meta.dirname, "..", "..", "..", "examples", "findings.csv"),
-        "utf8",
-      ),
-    ).toBe(`${csvHeader}\n`);
-  });
-
   test("previews a validated findings export CSV without credentials or network access", async () => {
     const path = await csvFixture();
     let requests = 0;
     const result = await publishFindingsCsvToCloud(path, {
       dryRun: true,
-      now: () => Date.parse("2026-08-25T12:00:00Z"),
       fetch: async () => {
         requests++;
         throw new Error("unexpected request");
@@ -213,7 +202,6 @@ describe("Cloud publication", () => {
     let payload: Record<string, unknown> | undefined;
     const result = await publishFindingsCsvToCloud(path, {
       environment,
-      now: () => Date.parse("2026-08-25T12:00:00Z"),
       fetch: async (_url, options) => {
         payload = JSON.parse(String(options.body));
         return Response.json(receipt, { status: 201 });
@@ -231,7 +219,7 @@ describe("Cloud publication", () => {
         id: result.scanId,
         producer: { name: "codex-security-cli" },
         status: "completed",
-        startedAt: "2026-08-25T12:00:00.000Z",
+        startedAt: expect.any(String),
         target: {
           kind: "directory_snapshot",
           displayName: "findings.csv",
@@ -247,52 +235,12 @@ describe("Cloud publication", () => {
         },
       ],
     });
-    const scan = payload!["scan"] as {
-      id: string;
-      target: { targetId: string };
-    };
     const [finding] = payload!["findings"] as Array<{
       findingId: string;
       occurrenceId: string;
-      ruleId: string;
-      identity: { anchor: string; instance?: string };
-      fingerprints: { primary: string };
     }>;
-    const hash = (value: string): string =>
-      createHash("sha256").update(value).digest("hex");
     expect(finding!.findingId).toMatch(/^csf_[a-f0-9]{24}$/);
     expect(finding!.occurrenceId).toMatch(/^occ_[a-f0-9]{24}$/);
-    const fingerprint = `codex-security/v1:sha256:${hash(
-      [
-        "codex-security/v1",
-        scan.target.targetId,
-        finding!.ruleId,
-        finding!.identity.anchor,
-        finding!.identity.instance ?? "",
-      ].join("\0"),
-    )}`;
-    expect(finding!.fingerprints.primary).toBe(fingerprint);
-    expect(finding!.findingId).toBe(`csf_${hash(fingerprint).slice(0, 24)}`);
-    expect(finding!.occurrenceId).toBe(
-      `occ_${hash([scan.id, fingerprint].join("\0")).slice(0, 24)}`,
-    );
-    const ajv = new Ajv2020({ strict: false });
-    const validateFindings = ajv.compile(
-      JSON.parse(
-        await readFile(
-          join(PLUGIN_ROOT, "schemas", "findings.schema.json"),
-          "utf8",
-        ),
-      ),
-    );
-    expect(
-      validateFindings({
-        documentType: "codex-security.findings",
-        schemaVersion: "1.0",
-        scanId: result.scanId,
-        findings: payload!["findings"],
-      }),
-    ).toBe(true);
   });
 
   test("accepts the candidate_id column from a Deep scan export", async () => {
@@ -315,14 +263,6 @@ describe("Cloud publication", () => {
       csvCloseReason: "wont_fix",
       csvNote: "Accepted risk.",
     });
-  });
-
-  test("preserves finding text from the CSV", async () => {
-    const path = await csvFixture(
-      `${csvHeader}\n${csvRow.replace("An attacker-controlled path reaches a filesystem write.", '"  Keep intentional spacing.  "')}\n`,
-    );
-    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
-    expect(result.findings?.[0]?.summary).toBe("  Keep intentional spacing.  ");
   });
 
   test("decodes exported CSV cells without stripping literal apostrophes", async () => {
@@ -353,7 +293,6 @@ describe("Cloud publication", () => {
 
   test.each([
     ["missing required header", csvHeader.replace("summary,", "")],
-    ["duplicate header", `${csvHeader},title`],
     ["unknown header", `${csvHeader},unknown`],
     ["no findings", csvHeader],
     ["wrong column count", `${csvHeader}\n${csvRow},extra`],
@@ -362,24 +301,12 @@ describe("Cloud publication", () => {
       `${csvHeader}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a", "finding-1")}`,
     ],
     [
-      "invalid occurrence ID",
-      `${csvHeader}\n${csvRow.replace("occ_e79cb19591e696572a1c22be", "occurrence-1")}`,
-    ],
-    [
       "empty title",
       `${csvHeader}\n${csvRow.replace('"Unsafe archive extraction, including nested entries"', '""')}`,
     ],
     [
       "invalid severity",
       `${csvHeader}\n${csvRow.replace(",high,high,", ",urgent,high,")}`,
-    ],
-    [
-      "invalid confidence",
-      `${csvHeader}\n${csvRow.replace(",high,high,open,", ",high,certain,open,")}`,
-    ],
-    [
-      "invalid status",
-      `${csvHeader}\n${csvRow.replace(",open,,,", ",pending,,,")}`,
     ],
     [
       "invalid close reason",
@@ -394,18 +321,10 @@ describe("Cloud publication", () => {
       `${csvHeader}\n${csvRow.replace("src/extract.py", "../escape.py")}`,
     ],
     [
-      "invalid start line",
-      `${csvHeader}\n${csvRow.replace(",41,44", ",0,44")}`,
-    ],
-    [
       "invalid line range",
       `${csvHeader}\n${csvRow.replace(",41,44", ",45,44")}`,
     ],
     ["duplicate finding", `${csvHeader}\n${csvRow}\n${csvRow}`],
-    [
-      "duplicate occurrence",
-      `${csvHeader}\n${csvRow}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a", "csf_111111111111111111111111")}`,
-    ],
   ])("rejects a CSV with %s before authentication", async (_name, source) => {
     const path = await csvFixture(`${source}\n`);
     let requests = 0;

@@ -2036,9 +2036,7 @@ export async function main(
         .describe("Preview the findings without publishing them."),
       csv: optionValue("--csv")
         .optional()
-        .describe(
-          "Codex Security findings CSV to publish instead of a completed scan.",
-        ),
+        .describe("Findings CSV to publish instead of a completed scan."),
       skipExisting: z
         .boolean()
         .default(false)
@@ -2187,7 +2185,6 @@ export async function main(
             environment: dependencies.environment,
             dryRun: options.dryRun,
             signal: controller.signal,
-            now: dependencies.now,
           });
           return { ...result };
         }

@@ -788,14 +788,8 @@ that you can copy and fill in before publishing.
 The CSV must have the export columns `occurrence_id`, `finding_id`, `title`,
 `summary`, `severity`, `confidence`, `status`, `close_reason`, `note`,
 `remediation`, `path`, `start_line`, and `end_line`. Deep-scan exports may also
-include `candidate_id`. The CLI validates headers, finding and occurrence IDs,
-severity, confidence, triage state, location paths and line ranges, and rejects
-duplicate findings before authentication or upload. Imported rows preserve
-their source IDs in provenance while the upload uses derived canonical IDs.
-Finding IDs use `csf_` plus 24 lowercase hexadecimal characters; occurrence
-IDs use the same format with an `occ_` prefix. Use `--dry-run --json` to
-validate the CSV and inspect the normalized findings locally without a login
-or network request.
+include `candidate_id`. Use `--dry-run --json` to validate the CSV and inspect
+the normalized findings locally without a login or network request.
 
 `--csv` is only supported with `--to cloud` and cannot be combined with a scan
 directory, `--scan-dir`, or `--scan`.
