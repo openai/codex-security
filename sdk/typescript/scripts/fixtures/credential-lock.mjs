@@ -36,10 +36,15 @@ if (mode === "hold") {
   assert.ok(Date.now() - original.mtimeMs >= 30_000);
   process.kill(JSON.parse(await readFile(ownerPath, "utf8")).pid, 0);
 
-  // Released 0.1.18 clients wait one heartbeat before reclaiming an aged
-  // directory, even when its recorded owner is still running.
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
-  if ((await lstat(lock)).mtimeMs > original.mtimeMs) {
+  // Released 0.1.18 clients check for a heartbeat before reclaiming an aged
+  // directory. Observe it directly instead of racing separate process timers.
+  const deadline = Date.now() + 8_000;
+  let refreshed = original;
+  while (refreshed.mtimeMs <= original.mtimeMs && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    refreshed = await lstat(lock);
+  }
+  if (refreshed.mtimeMs > original.mtimeMs) {
     process.stdout.write("legacy blocked\n");
   } else {
     const quarantine = `${lock}.stale-legacy-fixture`;
