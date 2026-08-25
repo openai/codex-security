@@ -17,7 +17,7 @@ import {
 const CLOUD_PUBLISH_URL =
   "https://chatgpt.com/backend-api/aardvark/cli/findings";
 const CHATGPT_LOGIN_REQUIRED =
-  'Cloud publication requires ChatGPT credentials stored with cli_auth_credentials_store = "file". Automatic and keyring storage are not read because a stale auth.json may belong to another account. Configure file storage, sign in with ChatGPT again, then retry.';
+  "Cloud publication requires a ChatGPT login already available to Codex Security. Run a scan or sign in with ChatGPT using Codex file credential storage, then retry.";
 
 const credentialsSchema = z.object({
   auth_mode: z.literal("chatgpt").optional(),
@@ -149,6 +149,7 @@ async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
     environment["CODEX_HOME"]?.trim() || "~/.codex",
     environment,
   );
+  let requireFileStorage = true;
   const dedicatedHome = codexSecurityCredentialHome(environment);
   if (existsSync(dedicatedHome)) {
     if (!(await codexSecurityCredentialAllowsAmbientImport(dedicatedHome))) {
@@ -156,23 +157,26 @@ async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
     }
     if (await codexSecurityHasStoredFileCredentials(dedicatedHome)) {
       home = dedicatedHome;
+      requireFileStorage = false;
     } else if (existsSync(join(dedicatedHome, "config.toml"))) {
       // Do not silently switch accounts when the dedicated login may be in a keyring.
       throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
     }
   }
-  let credentialStorage: unknown;
-  try {
-    credentialStorage = parseToml(
-      await readFile(join(home, "config.toml"), "utf8"),
-    )["cli_auth_credentials_store"];
-  } catch {
-    throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
-  }
-  // File presence is not proof that it is the active login: automatic or
-  // keyring storage can leave an auth.json from a different account.
-  if (credentialStorage !== "file") {
-    throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+  if (requireFileStorage) {
+    let credentialStorage: unknown;
+    try {
+      credentialStorage = parseToml(
+        await readFile(join(home, "config.toml"), "utf8"),
+      )["cli_auth_credentials_store"];
+    } catch {
+      throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+    }
+    // File presence is not proof that it is the active ambient login:
+    // automatic or keyring storage can leave auth.json for another account.
+    if (credentialStorage !== "file") {
+      throw new AuthenticationRequiredError(CHATGPT_LOGIN_REQUIRED);
+    }
   }
   try {
     const credentials = credentialsSchema.safeParse(

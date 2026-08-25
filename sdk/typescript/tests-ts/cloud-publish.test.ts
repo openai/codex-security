@@ -265,7 +265,7 @@ describe("Cloud publication", () => {
     expect(requestedUrl).toBe(publishUrl);
   });
 
-  test("prefers the dedicated file login and honors an explicit logout", async () => {
+  test("reuses the dedicated Codex Security login and honors an explicit logout", async () => {
     const { scan, environment } = await fixture();
     const home = codexSecurityCredentialHome(environment);
     await mkdir(home, { recursive: true, mode: 0o700 });
@@ -277,6 +277,10 @@ describe("Cloud publication", () => {
       }),
       { mode: 0o600 },
     );
+    await writeFile(
+      join(home, "config.toml"),
+      'cli_auth_credentials_store = "auto"\n',
+    );
     let requests = 0;
     const send = async (_url: string, options: RequestInit) => {
       requests++;
@@ -285,19 +289,11 @@ describe("Cloud publication", () => {
       );
       return Response.json(receipt);
     };
-    await expect(
-      publishScanToCloud(scan, { environment, fetch: send }),
-    ).rejects.toThrow('cli_auth_credentials_store = "file"');
-    expect(requests).toBe(0);
-    await writeFile(
-      join(home, "config.toml"),
-      'cli_auth_credentials_store = "file"\n',
-    );
     await publishScanToCloud(scan, { environment, fetch: send });
     await setCodexSecurityCredentialLogout(home, true);
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
-    ).rejects.toThrow('cli_auth_credentials_store = "file"');
+    ).rejects.toThrow("ChatGPT login already available to Codex Security");
     expect(requests).toBe(1);
   });
 
@@ -340,7 +336,7 @@ describe("Cloud publication", () => {
       }
       await expect(
         publishScanToCloud(scan, { environment, fetch: send }),
-      ).rejects.toThrow('cli_auth_credentials_store = "file"');
+      ).rejects.toThrow("ChatGPT login already available to Codex Security");
     }
     expect(requests).toBe(0);
   });
@@ -363,16 +359,16 @@ describe("Cloud publication", () => {
       });
       await expect(
         publishScanToCloud(scan, { environment, fetch: send }),
-      ).rejects.toThrow('cli_auth_credentials_store = "file"');
+      ).rejects.toThrow("ChatGPT login already available to Codex Security");
     }
     await writeFile(join(home, "auth.json"), "malformed-synthetic-secret");
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
-    ).rejects.toThrow('cli_auth_credentials_store = "file"');
+    ).rejects.toThrow("ChatGPT login already available to Codex Security");
     await rm(join(home, "auth.json"));
     await expect(
       publishScanToCloud(scan, { environment, fetch: send }),
-    ).rejects.toThrow('cli_auth_credentials_store = "file"');
+    ).rejects.toThrow("ChatGPT login already available to Codex Security");
     expect(requests).toBe(0);
   });
 
@@ -394,9 +390,8 @@ describe("Cloud publication", () => {
         () => undefined,
         (failure: unknown) => failure,
       );
-      expect(String(error)).toContain('cli_auth_credentials_store = "file"');
       expect(String(error)).toContain(
-        "a stale auth.json may belong to another account",
+        "ChatGPT login already available to Codex Security",
       );
     }
     expect(requests).toBe(0);
