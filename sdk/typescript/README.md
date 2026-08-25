@@ -295,6 +295,7 @@ npx @openai/codex-security export /path/outside/repository/results --export-form
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
 npx @openai/codex-security publish scan /path/outside/repository/results --to linear --linear-team TEAM_ID
 npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
+npx @openai/codex-security publish scan --to cloud --csv /path/outside/repository/findings.csv
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security verify-fix --linear-issue SEC-123 --json
@@ -733,7 +734,7 @@ and scans stopped at their configured cost limit do not start another turn.
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
 
-### Publish multiple completed scans to Cloud
+### Publish findings to Cloud
 
 Choose completed scans from your local history:
 
@@ -774,6 +775,27 @@ Automatic and keyring credential storage are not accepted for Cloud
 publication, even when an `auth.json` file exists, because that file may be
 stale and belong to a different account. The CLI sends one scan at a time,
 with each scan's findings and metadata in a separate request.
+
+To publish findings from a CSV instead of a completed scan, pass the CSV
+created by `codex-security export --export-format csv`:
+
+```bash
+npx @openai/codex-security publish scan --to cloud \
+  --csv /path/outside/repository/findings.csv
+```
+
+The repository includes a header-only
+[findings CSV template](https://github.com/openai/codex-security/blob/main/examples/findings.csv)
+that you can copy and fill in before publishing.
+
+The CSV must have the export columns `occurrence_id`, `finding_id`, `title`,
+`summary`, `severity`, `confidence`, `status`, `close_reason`, `note`,
+`remediation`, `path`, `start_line`, and `end_line`. Deep-scan exports may also
+include `candidate_id`. Use `--dry-run --json` to validate the CSV and inspect
+the normalized findings locally without a login or network request.
+
+`--csv` is only supported with `--to cloud` and cannot be combined with a scan
+directory, `--scan-dir`, or `--scan`.
 
 For artifacts outside local history, use repeated `--scan-dir PATH` instead.
 A single positional directory is still accepted and can be combined with

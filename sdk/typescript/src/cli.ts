@@ -56,6 +56,7 @@ import {
 } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {
+  publishFindingsCsvToCloud,
   publishScanToCloud,
   type CloudPublicationResult,
 } from "./cloud-publish.js";
@@ -258,6 +259,7 @@ const VALUE_OPTIONS = new Set([
   "--max-time-hours",
   "--max-attempts",
   "--export-format",
+  "--csv",
   "--output",
   "--source-root",
   "--format",
@@ -1073,6 +1075,7 @@ interface CliDependencies {
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
+  publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
@@ -2010,9 +2013,9 @@ export async function main(
     }
   };
   const publication = Cli.create("publish", {
-    description: "Publish completed Codex Security scan findings.",
+    description: "Publish Codex Security findings.",
   }).command("scan", {
-    description: "Publish every finding from a completed scan to Linear.",
+    description: "Publish findings from a completed scan or CSV.",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -2044,7 +2047,10 @@ export async function main(
       dryRun: z
         .boolean()
         .default(false)
-        .describe("Preview the findings without creating Linear issues."),
+        .describe("Preview the findings without publishing them."),
+      csv: optionValue("--csv")
+        .optional()
+        .describe("Findings CSV to publish instead of a completed scan."),
       skipExisting: z
         .boolean()
         .default(false)
@@ -2115,6 +2121,10 @@ export async function main(
       };
       try {
         const currentDirectory = dependencies.currentDirectory();
+        const csvPath =
+          options.csv === undefined
+            ? undefined
+            : resolveCliPath(currentDirectory, options.csv);
         const directories = [
           ...new Set(
             [
@@ -2131,6 +2141,21 @@ export async function main(
         if (options.scan.length > 0 && directories.length > 0) {
           throw new CodexSecurityError(
             "Use --scan or scan directory inputs, not both.",
+          );
+        }
+        if (
+          csvPath !== undefined &&
+          (args.scanDir !== undefined ||
+            options.scan.length > 0 ||
+            options.scanDir.length > 0)
+        ) {
+          throw new CodexSecurityError(
+            "Use --csv or scan directory and ID inputs, not both.",
+          );
+        }
+        if (csvPath !== undefined && options.to !== "cloud") {
+          throw new CodexSecurityError(
+            "--csv is only supported with --to cloud.",
           );
         }
         if (new Set(options.scan).size > 1 && options.to !== "cloud") {
@@ -2164,6 +2189,16 @@ export async function main(
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
+        }
+        if (csvPath !== undefined) {
+          const result = await (
+            dependencies.publishFindingsCsvToCloud ?? publishFindingsCsvToCloud
+          )(csvPath, {
+            environment: dependencies.environment,
+            dryRun: options.dryRun,
+            signal: controller.signal,
+          });
+          return { ...result };
         }
         const selectedScans: { scanDir: string; scanId?: string }[] =
           directories.map((scanDir) => ({ scanDir }));

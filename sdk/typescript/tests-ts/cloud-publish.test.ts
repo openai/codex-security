@@ -11,7 +11,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { publishScanToCloud } from "../src/cloud-publish.js";
+import {
+  publishFindingsCsvToCloud,
+  publishScanToCloud,
+} from "../src/cloud-publish.js";
 import {
   codexSecurityCredentialHome,
   setCodexSecurityCredentialLogout,
@@ -33,6 +36,44 @@ const receipt = {
   finding_ids: ["finding-1"],
   finding_count: 1,
 };
+const csvHeader = [
+  "occurrence_id",
+  "finding_id",
+  "title",
+  "summary",
+  "severity",
+  "confidence",
+  "status",
+  "close_reason",
+  "note",
+  "remediation",
+  "path",
+  "start_line",
+  "end_line",
+].join(",");
+const csvRow = [
+  "occ_e79cb19591e696572a1c22be",
+  "csf_852f90d6e1177502ff113d4a",
+  '"Unsafe archive extraction, including nested entries"',
+  "An attacker-controlled path reaches a filesystem write.",
+  "high",
+  "high",
+  "open",
+  "",
+  "",
+  "Normalize and validate destinations.",
+  "src/extract.py",
+  "41",
+  "44",
+].join(",");
+
+async function csvFixture(contents = `${csvHeader}\n${csvRow}\n`) {
+  const root = await mkdtemp(join(tmpdir(), "codex-security-cloud-csv-"));
+  directories.push(root);
+  const path = join(root, "findings.csv");
+  await writeFile(path, contents);
+  return path;
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -120,6 +161,187 @@ async function addSecondFinding(scan: string): Promise<void> {
 }
 
 describe("Cloud publication", () => {
+  test("previews a validated findings export CSV without credentials or network access", async () => {
+    const path = await csvFixture();
+    let requests = 0;
+    const result = await publishFindingsCsvToCloud(path, {
+      dryRun: true,
+      fetch: async () => {
+        requests++;
+        throw new Error("unexpected request");
+      },
+    });
+    expect(result).toMatchObject({
+      scanId: expect.stringMatching(/^scan_csv_[a-f0-9]{24}$/),
+      findingIds: [],
+      findingCount: 1,
+      dryRun: true,
+      findings: [
+        {
+          findingId: expect.stringMatching(/^csf_[a-f0-9]{24}$/),
+          occurrenceId: expect.stringMatching(/^occ_[a-f0-9]{24}$/),
+          title: "Unsafe archive extraction, including nested entries",
+          severity: { level: "high" },
+          confidence: { level: "high" },
+          locations: [{ path: "src/extract.py", startLine: 41, endLine: 44 }],
+          validation: {
+            method: "Source-reported CSV import metadata",
+            status: "open",
+            summary:
+              "Source finding ID: csf_852f90d6e1177502ff113d4a\nSource occurrence ID: occ_e79cb19591e696572a1c22be\nSource status: open",
+          },
+          provenance: { source: "csv_import" },
+        },
+      ],
+    });
+    expect(requests).toBe(0);
+  });
+
+  test("posts CSV findings with generated scan provenance", async () => {
+    const path = await csvFixture();
+    const { environment } = await fixture();
+    let payload: Record<string, unknown> | undefined;
+    const result = await publishFindingsCsvToCloud(path, {
+      environment,
+      fetch: async (_url, options) => {
+        payload = JSON.parse(String(options.body));
+        return Response.json(receipt, { status: 201 });
+      },
+    });
+    expect(result).toEqual({
+      scanId: result.scanId,
+      findingIds: ["finding-1"],
+      findingCount: 1,
+    });
+    expect(result.scanId).toMatch(/^scan_csv_[a-f0-9]{24}$/);
+    expect(payload).toMatchObject({
+      schemaVersion: "1.0",
+      scan: {
+        id: result.scanId,
+        producer: { name: "codex-security-cli" },
+        status: "completed",
+        startedAt: "1970-01-01T00:00:00.000Z",
+        target: {
+          kind: "directory_snapshot",
+          displayName: "findings.csv",
+        },
+      },
+      findings: [
+        {
+          remediation: "Normalize and validate destinations.",
+          provenance: { source: "csv_import" },
+        },
+      ],
+    });
+    const [finding] = payload!["findings"] as Array<{
+      findingId: string;
+      occurrenceId: string;
+    }>;
+    expect(finding!.findingId).toMatch(/^csf_[a-f0-9]{24}$/);
+    expect(finding!.occurrenceId).toMatch(/^occ_[a-f0-9]{24}$/);
+  });
+
+  test("accepts the candidate_id column from a Deep scan export", async () => {
+    const path = await csvFixture(
+      `${csvHeader.replace("finding_id,", "finding_id,candidate_id,")}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a,", "csf_852f90d6e1177502ff113d4a,candidate-001,")}\n`,
+    );
+    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
+    expect(result.findings?.[0]?.extensions).toEqual({
+      candidateId: "candidate-001",
+    });
+  });
+
+  test("preserves source IDs and triage fields in finding validation", async () => {
+    const path = await csvFixture(
+      `${csvHeader}\n${csvRow.replace(",open,,,", ',closed,wont_fix,"Accepted risk.",')}\n`,
+    );
+    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
+    expect(result.findings?.[0]?.validation).toEqual({
+      method: "Source-reported CSV import metadata",
+      status: "closed",
+      summary:
+        "Source finding ID: csf_852f90d6e1177502ff113d4a\nSource occurrence ID: occ_e79cb19591e696572a1c22be\nSource status: closed\nSource close reason: wont_fix\nSource note: Accepted risk.",
+    });
+    expect(result.findings?.[0]?.provenance).toEqual({
+      source: "csv_import",
+    });
+  });
+
+  test("decodes exported CSV cells without stripping literal apostrophes", async () => {
+    const path = await csvFixture(
+      `${csvHeader}\n${csvRow
+        .replace(
+          '"Unsafe archive extraction, including nested entries"',
+          '"\'\tTabbed title"',
+        )
+        .replace(
+          "An attacker-controlled path reaches a filesystem write.",
+          "'Literal apostrophe.",
+        )
+        .replace(
+          "Normalize and validate destinations.",
+          "'  @owner should remediate.",
+        )
+        .replace("src/extract.py", "'-generated/extract.py")}\n`,
+    );
+    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
+    expect(result.findings?.[0]).toMatchObject({
+      title: "\tTabbed title",
+      summary: "'Literal apostrophe.",
+      remediation: "  @owner should remediate.",
+      locations: [{ path: "-generated/extract.py" }],
+    });
+  });
+
+  test.each([
+    ["missing required header", csvHeader.replace("summary,", "")],
+    ["unknown header", `${csvHeader},unknown`],
+    ["no findings", csvHeader],
+    ["wrong column count", `${csvHeader}\n${csvRow},extra`],
+    [
+      "invalid finding ID",
+      `${csvHeader}\n${csvRow.replace("csf_852f90d6e1177502ff113d4a", "finding-1")}`,
+    ],
+    [
+      "empty title",
+      `${csvHeader}\n${csvRow.replace('"Unsafe archive extraction, including nested entries"', '""')}`,
+    ],
+    [
+      "invalid severity",
+      `${csvHeader}\n${csvRow.replace(",high,high,", ",urgent,high,")}`,
+    ],
+    [
+      "invalid close reason",
+      `${csvHeader}\n${csvRow.replace(",open,,,", ",closed,deferred,,")}`,
+    ],
+    [
+      "missing required close note",
+      `${csvHeader}\n${csvRow.replace(",open,,,", ",closed,false_positive,,")}`,
+    ],
+    [
+      "unsafe path",
+      `${csvHeader}\n${csvRow.replace("src/extract.py", "../escape.py")}`,
+    ],
+    [
+      "invalid line range",
+      `${csvHeader}\n${csvRow.replace(",41,44", ",45,44")}`,
+    ],
+    ["duplicate finding", `${csvHeader}\n${csvRow}\n${csvRow}`],
+  ])("rejects a CSV with %s before authentication", async (_name, source) => {
+    const path = await csvFixture(`${source}\n`);
+    let requests = 0;
+    await expect(
+      publishFindingsCsvToCloud(path, {
+        environment: {},
+        fetch: async () => {
+          requests++;
+          throw new Error("unexpected request");
+        },
+      }),
+    ).rejects.toThrow(/Findings CSV/);
+    expect(requests).toBe(0);
+  });
+
   test.each([false, true])(
     "rejects artifacts from another scan before upload or preview (dryRun=%s)",
     async (dryRun) => {
