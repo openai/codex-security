@@ -325,6 +325,32 @@ describe("Cloud publication", () => {
     expect(result.findings?.[0]?.summary).toBe("  Keep intentional spacing.  ");
   });
 
+  test("decodes exported CSV cells without stripping literal apostrophes", async () => {
+    const path = await csvFixture(
+      `${csvHeader}\n${csvRow
+        .replace(
+          '"Unsafe archive extraction, including nested entries"',
+          '"\'\tTabbed title"',
+        )
+        .replace(
+          "An attacker-controlled path reaches a filesystem write.",
+          "'Literal apostrophe.",
+        )
+        .replace(
+          "Normalize and validate destinations.",
+          "'  @owner should remediate.",
+        )
+        .replace("src/extract.py", "'-generated/extract.py")}\n`,
+    );
+    const result = await publishFindingsCsvToCloud(path, { dryRun: true });
+    expect(result.findings?.[0]).toMatchObject({
+      title: "\tTabbed title",
+      summary: "'Literal apostrophe.",
+      remediation: "  @owner should remediate.",
+      locations: [{ path: "-generated/extract.py" }],
+    });
+  });
+
   test.each([
     ["missing required header", csvHeader.replace("summary,", "")],
     ["duplicate header", `${csvHeader},title`],

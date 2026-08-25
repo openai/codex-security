@@ -86,6 +86,10 @@ const REQUIRED_CSV_COLUMNS = [
   "end_line",
 ] as const;
 const OPTIONAL_CSV_COLUMNS = ["candidate_id"] as const;
+const CSV_FORMULA_PREFIX = /^[=+\-@＝＋－＠]/u;
+// Match Python str.lstrip(), which the bundled CSV exporter uses here.
+const PYTHON_LEADING_WHITESPACE =
+  /^[\u0009-\u000D\u001C-\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]*/u;
 const FINDING_ID = /^csf_[a-f0-9]{24}$/u;
 const OCCURRENCE_ID = /^occ_[a-f0-9]{24}$/u;
 const SEVERITIES = new Set<Finding["severity"]["level"]>([
@@ -249,7 +253,8 @@ function parseFindingsCsv(source: string): CsvFindingRow[] {
     if (fields.length !== headers.length) {
       throw csvRowError(rowNumber, "must match the header columns");
     }
-    const get = (name: string): string => fields[headers.indexOf(name)] ?? "";
+    const get = (name: string): string =>
+      decodeExportedCsvCell(fields[headers.indexOf(name)] ?? "");
     const findingId = get("finding_id");
     const occurrenceId = get("occurrence_id");
     if (!FINDING_ID.test(findingId)) {
@@ -341,6 +346,18 @@ function parseFindingsCsv(source: string): CsvFindingRow[] {
       ...(endLine === undefined ? {} : { endLine }),
     };
   });
+}
+
+function decodeExportedCsvCell(value: string): string {
+  if (!value.startsWith("'")) return value;
+  const decoded = value.slice(1);
+  const stripped = decoded.replace(PYTHON_LEADING_WHITESPACE, "");
+  return decoded.startsWith("\t") ||
+    decoded.startsWith("\r") ||
+    decoded.startsWith("\n") ||
+    CSV_FORMULA_PREFIX.test(stripped)
+    ? decoded
+    : value;
 }
 
 function csvRowFinding(row: CsvFindingRow, scanId: string): Finding {
