@@ -3895,7 +3895,7 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(nodeCiWorkflow).toContain("needs: validate-title");
     expect(nodeCiWorkflow).toContain(
-      "needs: [validate-title, windows-test, windows-verify]",
+      "needs: [validate-title, readme-checks, windows-test, windows-verify]",
     );
   });
 
@@ -3915,7 +3915,12 @@ describe("GitHub release workflow safeguards", () => {
           name: string;
           if?: string;
           strategy?: { matrix: Record<string, string[]> };
-          steps: Array<{ if?: string }>;
+          steps: Array<{
+            if?: string;
+            name?: string;
+            run?: string;
+            "working-directory"?: string;
+          }>;
         }
       >;
     };
@@ -3931,20 +3936,56 @@ describe("GitHub release workflow safeguards", () => {
     for (const job of Object.values(workflow.jobs)) {
       expect(job.name.startsWith(metadataPrefix), job.name).toBe(true);
     }
+    for (const stepName of [
+      "Checkout pull request for change classification",
+      "Detect README-only changes",
+    ]) {
+      expect(
+        workflow.jobs["validate-title"]?.steps.find(
+          ({ name }) => name === stepName,
+        )?.if,
+      ).toContain("github.event.changes.base == null");
+    }
 
     const fullCiCondition =
       "needs.validate-title.outputs.run-full-ci == 'true'";
     for (const job of ["test", "windows-test", "windows-verify"]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
     }
+    expect(workflow.jobs["readme-checks"]?.if).toBe(
+      "needs.validate-title.outputs.readme-only == 'true'",
+    );
+    const readmeSteps = workflow.jobs["readme-checks"]?.steps ?? [];
+    expect(
+      readmeSteps.find(({ name }) => name === "Check README formatting")?.run,
+    ).toBe("pnpm --dir sdk/typescript run format");
+    const consistencyCommand =
+      readmeSteps.find(({ name }) => name === "Check README consistency")
+        ?.run ?? "";
+    expect(consistencyCommand).toContain("--test-name-pattern");
+    expect(consistencyCommand).toContain(
+      "documents user-facing environment and deep-scan configuration",
+    );
+    expect(consistencyCommand).toContain(
+      "keeps documented runtime and deep-scan defaults accurate",
+    );
+    expect(consistencyCommand).toContain("./tests-ts/cli.test.ts");
+    for (const [name, run] of [
+      ["Pack", "pnpm pack --pack-destination ../../dist"],
+      ["Inspect package", "pnpm run check:package ../../dist/*.tgz"],
+    ]) {
+      const step = readmeSteps.find((candidate) => candidate.name === name);
+      expect(step?.["working-directory"]).toBe("sdk/typescript");
+      expect(step?.run).toBe(run);
+    }
     const requiredJobCondition = `always() && !(${metadataOnly})`;
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || needs.test.result != 'success'",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.run-full-ci == 'true' && needs.test.result != 'success') || (needs.validate-title.outputs.readme-only == 'true' && needs.readme-checks.result != 'success') || (needs.validate-title.outputs.run-full-ci != 'true' && needs.validate-title.outputs.readme-only != 'true')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.run-full-ci == 'true' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.readme-only == 'true' && needs.readme-checks.result != 'success') || (needs.validate-title.outputs.run-full-ci != 'true' && needs.validate-title.outputs.readme-only != 'true')",
     );
 
     const renderName = (
@@ -4001,14 +4042,85 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     {
+      name: "a root README",
+      paths: ["README.md"],
+      readmeOnly: true,
+    },
+    {
+      name: "nested READMEs",
+      paths: ["examples/README.md", "sdk/typescript/README.md"],
+      readmeOnly: true,
+    },
+    {
+      name: "another Markdown file",
+      paths: ["docs/guide.md"],
+      readmeOnly: false,
+    },
+    {
+      name: "a README and source code",
+      paths: ["README.md", "sdk/typescript/src/index.ts"],
+      readmeOnly: false,
+    },
+    {
+      name: "a source file renamed to README",
+      paths: ["sdk/typescript/src/index.ts", "README.md"],
+      readmeOnly: false,
+    },
+    {
+      name: "a differently cased readme",
+      paths: ["readme.md"],
+      readmeOnly: false,
+    },
+    {
+      name: "an empty diff",
+      paths: [],
+      readmeOnly: false,
+    },
+  ])("classifies $name without weakening full CI", ({ paths, readmeOnly }) => {
+    const script = workflowStepShell(
+      nodeCiWorkflow,
+      "Detect README-only changes",
+    );
+    const workspace = mkdtempSync(join(tmpdir(), "release-ci-readme-"));
+    const output = join(workspace, "output");
+    const mock = [
+      "git() {",
+      '  if [[ "$*" != "diff --no-renames --name-only -z HEAD^1 HEAD" ]]; then return 64; fi',
+      "  while IFS= read -r path; do",
+      '    if [[ -n "$path" ]]; then printf \'%s\\0\' "$path"; fi',
+      '  done <<< "$MOCK_CHANGED_FILES"',
+      "}",
+    ].join("\n");
+    try {
+      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: output,
+          MOCK_CHANGED_FILES: paths.join("\n"),
+        },
+      });
+      expect(result.status).toBe(0);
+      expect(readFileSync(output, "utf8")).toBe(
+        `readme-only=${String(readmeOnly)}\n`,
+      );
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    {
       name: "body-only edit with a valid title",
       eventName: "pull_request",
       action: "edited",
       titleChanged: false,
       baseChanged: false,
       title: "docs: clarify release notes",
+      detectedReadmeOnly: false,
+      readmeOnly: false,
       fullCi: false,
       titleValid: true,
+      readmeChecks: "skipped",
       upstream: "skipped",
       gateFailure: false,
       cancellation: false,
@@ -4020,8 +4132,11 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: false,
       baseChanged: false,
       title: "Docs: invalid title ",
+      detectedReadmeOnly: false,
+      readmeOnly: false,
       fullCi: false,
       titleValid: false,
+      readmeChecks: "skipped",
       upstream: "skipped",
       gateFailure: false,
       cancellation: false,
@@ -4033,21 +4148,27 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: true,
       baseChanged: false,
       title: "ci: update title",
+      detectedReadmeOnly: false,
+      readmeOnly: false,
       fullCi: true,
       titleValid: true,
+      readmeChecks: "skipped",
       upstream: "success",
       gateFailure: false,
       cancellation: true,
     },
     {
-      name: "base edit",
+      name: "README-only base edit",
       eventName: "pull_request",
       action: "edited",
       titleChanged: false,
       baseChanged: true,
-      title: "ci: update base",
+      title: "docs: retarget README update",
+      detectedReadmeOnly: true,
+      readmeOnly: false,
       fullCi: true,
       titleValid: true,
+      readmeChecks: "skipped",
       upstream: "success",
       gateFailure: false,
       cancellation: true,
@@ -4059,10 +4180,45 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: false,
       baseChanged: false,
       title: "ci: update code",
+      detectedReadmeOnly: false,
+      readmeOnly: false,
       fullCi: true,
       titleValid: true,
+      readmeChecks: "skipped",
       upstream: "success",
       gateFailure: false,
+      cancellation: true,
+    },
+    {
+      name: "README-only synchronization",
+      eventName: "pull_request",
+      action: "synchronize",
+      titleChanged: false,
+      baseChanged: false,
+      title: "docs: clarify examples",
+      detectedReadmeOnly: true,
+      readmeOnly: true,
+      fullCi: false,
+      titleValid: true,
+      readmeChecks: "success",
+      upstream: "skipped",
+      gateFailure: false,
+      cancellation: true,
+    },
+    {
+      name: "README-only synchronization with failed formatting",
+      eventName: "pull_request",
+      action: "synchronize",
+      titleChanged: false,
+      baseChanged: false,
+      title: "docs: misformat examples",
+      detectedReadmeOnly: true,
+      readmeOnly: true,
+      fullCi: false,
+      titleValid: true,
+      readmeChecks: "failure",
+      upstream: "skipped",
+      gateFailure: true,
       cancellation: true,
     },
     {
@@ -4072,8 +4228,11 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: false,
       baseChanged: false,
       title: "",
+      detectedReadmeOnly: false,
+      readmeOnly: false,
       fullCi: true,
       titleValid: true,
+      readmeChecks: "skipped",
       upstream: "success",
       gateFailure: false,
       cancellation: false,
@@ -4085,8 +4244,11 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: false,
       baseChanged: false,
       title: "ci: update code",
+      detectedReadmeOnly: false,
+      readmeOnly: false,
       fullCi: true,
       titleValid: true,
+      readmeChecks: "skipped",
       upstream: "skipped",
       gateFailure: true,
       cancellation: true,
@@ -4099,8 +4261,11 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged,
       baseChanged,
       title,
+      detectedReadmeOnly,
+      readmeOnly,
       fullCi,
       titleValid,
+      readmeChecks,
       upstream,
       gateFailure,
       cancellation,
@@ -4127,12 +4292,13 @@ describe("GitHub release workflow safeguards", () => {
             EVENT_ACTION: action === "none" ? "" : action,
             EVENT_NAME: eventName,
             GITHUB_OUTPUT: output,
+            README_ONLY: String(detectedReadmeOnly),
             TITLE_CHANGED: String(titleChanged),
           },
         });
         expect(scope.status).toBe(0);
         expect(readFileSync(output, "utf8")).toBe(
-          `run-full-ci=${String(fullCi)}\n`,
+          `readme-only=${String(readmeOnly)}\nrun-full-ci=${String(fullCi)}\n`,
         );
 
         const validation =
@@ -4146,14 +4312,17 @@ describe("GitHub release workflow safeguards", () => {
         expect(validation === "success").toBe(titleValid);
 
         const values = {
+          "needs.readme-checks.result": readmeChecks,
           "needs.test.result": upstream,
+          "needs.validate-title.outputs.readme-only": String(readmeOnly),
+          "needs.validate-title.outputs.run-full-ci": String(fullCi),
           "needs.validate-title.result": validation,
           "needs.windows-test.result": upstream,
           "needs.windows-verify.result": upstream,
         };
         const unixGate = workflow.jobs["required-test"]?.steps[0]?.if ?? "";
         const windowsGate = workflow.jobs["windows"]?.steps[0]?.if ?? "";
-        if (fullCi) {
+        if (fullCi || readmeOnly) {
           expect(evaluateWorkflowCondition(unixGate, values)).toBe(gateFailure);
           expect(evaluateWorkflowCondition(windowsGate, values)).toBe(
             gateFailure,
