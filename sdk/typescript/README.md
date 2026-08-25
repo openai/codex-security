@@ -730,6 +730,83 @@ and scans stopped at their configured cost limit do not start another turn.
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
 
+### Publish multiple completed scans to Cloud
+
+Choose completed scans from your local history:
+
+```bash
+npx @openai/codex-security publish scan --to cloud --dry-run --json
+```
+
+The picker shows each scan's repository, finding count, age, and scan ID.
+Press <kbd>Space</kbd> to select or deselect scans, then press
+<kbd>Enter</kbd> to submit. At least one scan is required, and no scans are
+selected automatically.
+
+For scripts, repeat `--scan` with saved scan IDs or unique ID prefixes (at
+least eight characters):
+
+```bash
+npx @openai/codex-security publish scan \
+  --scan SCAN_ID_A --scan SCAN_ID_B \
+  --to cloud --dry-run --json
+```
+
+Use `scans list --json` to find IDs for the current repository. `--scan latest`
+selects its latest completed scan. The CLI resolves IDs through saved history,
+processes each selected scan once, and checks that its sealed artifacts match
+the selected ID. Picker selections use the order shown; repeated `--scan`
+selections use argument order. The artifacts must still be available locally.
+
+`--dry-run` validates the scans and prints their findings without uploading or
+requiring a login. Remove `--dry-run` to upload. Live uploads require ChatGPT
+credentials explicitly stored in a file. Set this in your Codex `config.toml`,
+then sign in with ChatGPT again:
+
+```toml
+cli_auth_credentials_store = "file"
+```
+
+Automatic and keyring credential storage are not accepted for Cloud
+publication, even when an `auth.json` file exists, because that file may be
+stale and belong to a different account. The CLI sends one scan at a time,
+with each scan's findings and metadata in a separate request.
+
+For artifacts outside local history, use repeated `--scan-dir PATH` instead.
+A single positional directory is still accepted and can be combined with
+`--scan-dir`. Do not combine directory inputs with `--scan`. Each directory
+must contain one completed, sealed scan; bulk-run directories and
+`results.jsonl` files are not accepted. Relative paths start at the current
+directory, and `~/...` starts at your home directory. Each resolved directory
+is processed once.
+
+For multiple distinct scans, output contains:
+
+- `results`: receipts or dry-run previews, each with its `scanId` and `scanDir`.
+- `failed`: errors with `scanDir` and, for saved selections, `scanId`.
+- `notAttempted`: saved scan IDs, or paths for directory inputs, that the command
+  did not reach before cancellation.
+
+For one distinct scan, the CLI returns the scan result directly,
+without the batch fields above.
+
+The CLI continues after a failed scan and exits with code `2` if any scan
+fails. Ctrl-C or SIGTERM stops new requests and returns the results collected
+so far. When cancellation stops work before every requested publication is
+confirmed, the exit code is `130` for Ctrl-C and `143` for SIGTERM. If the
+single response or final batch response has already confirmed the complete
+publication, the command exits with code `0`. Cloud publication receipts
+appear in command output; the CLI does not save them to scan history.
+
+A successful receipt contains one opaque Cloud finding ID for each submitted
+finding, in request order. These are not local finding IDs. The CLI verifies
+the authenticated response status, count, and ID uniqueness, but cannot map
+opaque server IDs back to individual local findings independently.
+
+The CLI never retries an upload automatically. An upload with a missing or
+invalid receipt may already have been accepted. Check whether Cloud accepted
+that scan before retrying it. Do not resend scans with confirmed receipts.
+
 ### Custom validation
 
 Use a prompt file to replace the final validation step in a standard or diff
@@ -802,17 +879,21 @@ Publish every finding from a completed standard, deep, or scoped scan to one
 Linear team:
 
 ```bash
-npx @openai/codex-security publish scan /path/to/completed-scan \
+npx @openai/codex-security publish scan --scan SCAN_ID \
   --to linear \
   --linear-team TEAM_ID
 ```
+
+Linear accepts one scan. Use a saved scan ID, a unique ID prefix, or `latest`.
+For external artifacts, a positional directory or `--scan-dir PATH` is also
+accepted.
 
 Add `--linear-project PROJECT_ID` to place the issues in a Linear project.
 The existing `--project` flag remains an alias. Without a project, issues are
 created directly in the selected team.
 
 To choose from all completed scans saved in your local scan history, omit the
-scan directory. The selector highlights each repository and shows its finding
+scan selector. The selector highlights each repository and shows its finding
 count, relative run time, and abbreviated scan ID:
 
 ```bash
@@ -856,6 +937,20 @@ added to successful publication results, scan history, or sealed scan artifacts.
 Error messages are preserved as returned. `--dry-run` never contacts Linear in
 either mode.
 
+Use `publish check` to verify that the completed scan and its findings match
+local history, and to see which findings already have recorded Linear issues:
+
+```bash
+npx @openai/codex-security publish check /path/to/completed-scan \
+  --to linear --linear-team TEAM_ID --json
+```
+
+The check does not create issues, migrate scan history, or change sealed scan
+artifacts. With a Linear API key, it also makes read-only authentication, team,
+optional project, and assignee checks. Without a key, connected-app access is
+reported as `not-checked`. Issue-creation permission is always `not-tested`;
+successful read access does not prove write permission.
+
 Each finding creates a separate new issue titled
 `[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
 repository, scanned scope, source locations and code snippets, severity,
@@ -864,13 +959,37 @@ Verified immutable Git revisions include source links. Findings are published
 concurrently in batches of up to 20. Successful issue identifiers are linked
 to their findings in the local scan-history database, and structured results
 are read back from that database rather than generated by Codex. The completed
-scan must already exist in the local scan history. Running publication again
-creates another set of issues for the same scan; existing issues are not
-matched, updated, or reused.
+scan must already exist in the local scan history. By default, running
+publication again creates another set of issues for the same scan. Add
+`--skip-existing` to skip findings with a recorded issue for the exact scan
+occurrence, team, and optional project. Combine it with `--dry-run` to preview
+only the remaining findings. Results distinguish newly `created` issues from
+previously recorded `skipped` issues.
+
+This option uses local publication history; it does not search, update, or
+verify the continued existence of remote issues. Recover any retained handoff
+from an interrupted or uncertain publication before retrying. Concurrent
+publishers and remote creations that were never recorded can still create
+duplicates.
 
 Issue descriptions contain source code and vulnerability details. Select a
 Linear destination authorized to receive that information. Publication receipts
 are stored separately from the sealed scan artifacts.
+
+Before recording a connected-app publication, Codex Security verifies the exact
+mutation arguments and reconciles every recognized issue identifier and
+non-empty URL in the connector result with its durable handoff. If those claims
+conflict, or a completed mutation cannot be verified, publication exits with an
+indeterminate recovery error. The private handoff, connector-event evidence,
+and partial receipts remain in local state; independently verified sibling
+issues may already be recorded in scan history.
+
+Do not immediately rerun an indeterminate publication. Inspect the retained
+evidence and the selected Linear destination, reconcile every issue that may
+already have been created, and retry only after confirming that no unrecorded
+issue would be duplicated. Publication does not perform a fresh remote readback
+or recover unrecorded remote creations. The opt-in `--skip-existing` behavior
+only skips issues already recorded in local history.
 
 You can also publish a scan from TypeScript:
 
@@ -881,7 +1000,9 @@ const publication = await publishScan("/path/to/completed-scan", {
   destination: "linear",
   teamId: "TEAM_ID",
   onProgress: (progress) => {
-    if (progress.type === "issue_completed") {
+    if (progress.type === "handoff_recorded") {
+      console.error("Saved mutation result", progress.recorded);
+    } else if (progress.type === "issue_completed") {
       console.error(
         `Processed ${progress.completed} of ${progress.total} findings.`,
       );
@@ -894,7 +1015,9 @@ console.log(publication.created.length);
 ```
 
 Add `projectId: "PROJECT_ID"` to the options to publish into a specific Linear
-project instead of directly to the team.
+project instead of directly to the team. Pass `skipExisting: true` to skip
+recorded successes, or import `checkScanPublication` and call it with the same
+destination options for a read-only preflight.
 
 Pass `linearApiKey` to publish directly through the Linear API. Omit
 `assigneeId` to leave issues unassigned, or supply a Linear user ID or email
@@ -1025,8 +1148,9 @@ for a personal API key, or `LINEAR_ACCESS_TOKEN` for an OAuth access token.
 `LINEAR_API_KEY` is also accepted. `--linear-api-key KEY` overrides these
 environment settings; prefer the environment variable to keep keys out of shell
 history. Imported content is always literal, and issue URLs must match the
-selected workspace. Linear access is read-only, and its credentials are not
-passed to the patch subprocess.
+selected workspace. Each imported issue includes its title, description, and
+all comments with their source links. Linear access is read-only, and its
+credentials are not passed to the patch subprocess.
 
 Use `verify-fix` to check whether an existing security fix actually closes its
 original vulnerability without modifying the repository. Pass a finding

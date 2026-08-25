@@ -22,6 +22,8 @@ export interface PrepareScanPublicationOptions {
   teamId: string;
   projectId?: string;
   uploadedAt?: string;
+  signal?: AbortSignal;
+  expectedScanId?: string;
 }
 
 export interface PreparedPublicationIssue {
@@ -40,6 +42,24 @@ export interface PreparedScanPublication {
   issues: PreparedPublicationIssue[];
 }
 
+export function linearPublicationArguments(
+  destination: LinearPublicationDestination,
+  issue: PreparedPublicationIssue,
+): Pick<PreparedPublicationIssue, "title" | "description" | "priority"> & {
+  team: string;
+  project?: string;
+} {
+  return {
+    team: destination.teamId,
+    ...(destination.projectId === undefined
+      ? {}
+      : { project: destination.projectId }),
+    title: issue.title,
+    description: issue.description,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+  };
+}
+
 const LINEAR_PRIORITIES = {
   critical: 1,
   high: 2,
@@ -55,6 +75,8 @@ export async function prepareScanPublication(
   const { contract, scanDirectory: canonicalScanDirectory } =
     await loadContractWithScanDirectory(scanDirectory, {
       pluginRoot: await bundledPluginRoot(),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      expectedScanId: options.expectedScanId,
     });
   const uploadedAt = options.uploadedAt ?? new Date().toISOString();
   const scanId = contract.manifest.scan.id;

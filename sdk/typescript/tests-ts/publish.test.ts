@@ -11,6 +11,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  InternalLinearError,
+  NetworkLinearError,
+  UnknownLinearError,
+} from "@linear/sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   publishScanInternal,
@@ -18,6 +23,8 @@ import {
   type PublishScanDependencies,
   type PublishScanOptions,
   type PublishScanProgress,
+  type PublishedScanIssue,
+  type PublishScanResult,
 } from "../src/publish.js";
 import type {
   PreparedPublicationIssue,
@@ -29,6 +36,8 @@ const OPTIONS: PublishScanOptions = {
   teamId: "team-example",
   projectId: "project-example",
 };
+const CLAIM_COLLISION_ERROR =
+  "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence.";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -112,6 +121,29 @@ function issueEvent(
   });
 }
 
+function issueEventWithResult(
+  issue: PreparedPublicationIssue,
+  result: unknown,
+): string {
+  const completed = JSON.parse(issueEvent(issue)) as {
+    item: { result: unknown };
+  };
+  completed.item.result = result;
+  return JSON.stringify(completed);
+}
+
+function failedIssueEventWithResult(
+  issue: PreparedPublicationIssue,
+  result: unknown,
+): string {
+  const failed = JSON.parse(issueEvent(issue, { status: "failed" })) as {
+    item: Record<string, unknown>;
+  };
+  delete failed.item["error"];
+  failed.item["result"] = result;
+  return JSON.stringify(failed);
+}
+
 function dependencies(
   publication: PreparedScanPublication,
   invocation: Partial<PublicationCodexResult> = {},
@@ -125,6 +157,7 @@ function dependencies(
   return {
     environment: {
       ...process.env,
+      CODEX_SECURITY_LINEAR_API_KEY: "",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
     },
     prepare: async () => publication,
@@ -155,6 +188,19 @@ function linearApiClient(
       input: LinearIssueInput,
       signal: AbortSignal | null | undefined,
     ) => Promise<void> | void;
+    result?: (
+      input: LinearIssueInput,
+      index: number,
+    ) => { identifier: string; url: string };
+    response?: (
+      input: LinearIssueInput,
+      index: number,
+    ) =>
+      | {
+          success: boolean;
+          issue: Promise<{ identifier: string; url: string } | undefined>;
+        }
+      | undefined;
   } = {},
 ): NonNullable<PublishScanDependencies["linearClient"]> {
   return ({ apiKey, signal, redirect }) => {
@@ -167,13 +213,16 @@ function linearApiClient(
         const index = publication.issues.findIndex(
           ({ title }) => title === input.title,
         );
+        const response = options.response?.(input, index);
+        if (response !== undefined) return response;
         const identifier = `SEC-${index + 1}`;
+        const result = options.result?.(input, index) ?? {
+          identifier,
+          url: `https://linear.app/example/issue/${identifier}`,
+        };
         return {
           success: true,
-          issue: Promise.resolve({
-            identifier,
-            url: `https://linear.app/example/issue/${identifier}`,
-          }),
+          issue: Promise.resolve(result),
         };
       },
     } as unknown as LinearClient;
@@ -248,6 +297,15 @@ async function writeHandoff(
   );
 }
 
+async function publicationEventsFile(handoffFile: string): Promise<string> {
+  const directory = dirname(handoffFile);
+  const files = (await readdir(directory)).filter(
+    (name) => name.startsWith("events-") && name.endsWith(".jsonl"),
+  );
+  expect(files).toHaveLength(1);
+  return join(directory, files[0]!);
+}
+
 async function processHasExited(pid: number): Promise<boolean> {
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -267,6 +325,244 @@ async function processHasExited(pid: number): Promise<boolean> {
   }
   return false;
 }
+
+describe("skip-recorded publication", () => {
+  test("forwards cancellation into read-only history inspection", async () => {
+    const publication = preparedPublication();
+    const controller = new AbortController();
+    const reason = new Error("Retry inspection canceled.");
+    await expect(
+      publishScanInternal(
+        "scan",
+        { ...OPTIONS, skipExisting: true, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            inspectPublicationStore: async (
+              _publication,
+              _environment,
+              signal,
+            ) => {
+              expect(signal).toBe(controller.signal);
+              controller.abort(reason);
+              signal!.throwIfAborted();
+              return [];
+            },
+            preparePublicationStore: async () => {
+              throw new Error("Canceled retries must not write history.");
+            },
+            resolveCodex: () => {
+              throw new Error("Canceled retries must not start Codex.");
+            },
+          },
+        ),
+      ),
+    ).rejects.toBe(reason);
+  });
+
+  test("keeps the default create-new behavior and makes opt-in previews read-only", async () => {
+    const publication = preparedPublication(2);
+    const recorded: PublishedScanIssue = {
+      findingId: "finding-1",
+      occurrenceId: "occurrence-1",
+      issueIdentifier: "SEC-101",
+    };
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        inspectPublicationStore: async (prepared) => {
+          expect(prepared).toBe(publication);
+          return [recorded];
+        },
+        preparePublicationStore: async () => {
+          throw new Error("Previews must not write history.");
+        },
+        resolveCodex: () => {
+          throw new Error("Previews must not start Codex.");
+        },
+        writeReceipt: async () => {
+          throw new Error("Previews must not write receipts.");
+        },
+      },
+    );
+    const ordinary = await publishScanInternal(
+      "scan",
+      { ...OPTIONS, dryRun: true },
+      {
+        ...injected,
+        inspectPublicationStore: async () => {
+          throw new Error("Ordinary previews stay offline.");
+        },
+      },
+    );
+    expect(ordinary.issues).toEqual(publication.issues);
+    expect(ordinary).not.toHaveProperty("skipped");
+    const preview = await publishScanInternal(
+      "scan",
+      { ...OPTIONS, dryRun: true, skipExisting: true },
+      injected,
+    );
+    expect(preview.issues).toEqual([publication.issues[1]!]);
+    expect(preview.skipped).toEqual([recorded]);
+    expect(preview.counts).toEqual({
+      findings: 2,
+      created: 0,
+      failed: 0,
+      skipped: 1,
+    });
+  });
+
+  test("does nothing remotely or locally when every finding is already recorded", async () => {
+    const publication = preparedPublication();
+    const recorded: PublishedScanIssue = {
+      findingId: "finding-1",
+      occurrenceId: "occurrence-1",
+      issueIdentifier: "SEC-101",
+    };
+    const result = await publishScanInternal(
+      "scan",
+      { ...OPTIONS, skipExisting: true },
+      dependencies(
+        publication,
+        {},
+        {
+          inspectPublicationStore: async () => [recorded],
+          preparePublicationStore: async () => {
+            throw new Error("Nothing needs publication.");
+          },
+          resolveCodex: () => {
+            throw new Error("Nothing needs publication.");
+          },
+          linearClient: () => {
+            throw new Error("Nothing needs publication.");
+          },
+          recordPublishedIssues: async () => {
+            throw new Error("Nothing needs publication.");
+          },
+          writeReceipt: async () => {
+            throw new Error("Nothing needs publication.");
+          },
+        },
+      ),
+    );
+    expect(result.created).toEqual([]);
+    expect(result.skipped).toEqual([recorded]);
+    expect(result.counts).toEqual({
+      findings: 1,
+      created: 0,
+      failed: 0,
+      skipped: 1,
+    });
+  });
+
+  test("publishes only pending findings while validating and recording against the full scan", async () => {
+    for (const transport of ["connected-app", "linear-api"] as const) {
+      const publication = preparedPublication(2);
+      const recorded: PublishedScanIssue = {
+        findingId: "finding-1",
+        occurrenceId: "occurrence-1",
+        issueIdentifier: "SEC-101",
+      };
+      const attempted: string[] = [];
+      const progress: PublishScanProgress[] = [];
+      const injected = dependencies(
+        publication,
+        {},
+        {
+          inspectPublicationStore: async () => [recorded],
+          preparePublicationStore: async (prepared) => {
+            expect(prepared).toBe(publication);
+          },
+          recordPublishedIssues: async (prepared, issues) => {
+            expect(prepared).toBe(publication);
+            expect(issues.map((issue) => issue.findingId)).toEqual([
+              "finding-2",
+            ]);
+            return [...issues];
+          },
+          runCodex: async (_command, _args, input) => {
+            const payload = publicationData(input);
+            attempted.push(
+              ...payload.batches.flat().map((issue) => issue.findingId),
+            );
+            return {
+              exitCode: 0,
+              stdout: issueEvent(publication.issues[1]!),
+              stderr: "",
+            };
+          },
+          linearClient: linearApiClient(publication, {
+            create: (input) => {
+              attempted.push(
+                publication.issues.find((issue) => issue.title === input.title)!
+                  .findingId,
+              );
+            },
+          }),
+        },
+      );
+      delete injected.environment!["CODEX_SECURITY_LINEAR_API_KEY"];
+      const result = await publishScanInternal(
+        "scan",
+        {
+          ...OPTIONS,
+          skipExisting: true,
+          ...(transport === "linear-api"
+            ? { linearApiKey: "synthetic-key" }
+            : {}),
+          onProgress: (event) => progress.push(event),
+        },
+        injected,
+      );
+      expect(attempted).toEqual(["finding-2"]);
+      expect(result.skipped).toEqual([recorded]);
+      expect(result.created.map((issue) => issue.findingId)).toEqual([
+        "finding-2",
+      ]);
+      expect(result.counts).toEqual({
+        findings: 2,
+        created: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(progress[0]).toEqual({
+        type: "started",
+        scanId: publication.scanId,
+        total: 1,
+      });
+      expect(progress.at(-1)).toEqual({
+        type: "completed",
+        created: 1,
+        failed: 0,
+        total: 1,
+      });
+    }
+  });
+
+  test("stops an opt-in retry when its history cannot be verified", async () => {
+    const publication = preparedPublication();
+    await expect(
+      publishScanInternal(
+        "scan",
+        { ...OPTIONS, skipExisting: true },
+        dependencies(
+          publication,
+          {},
+          {
+            inspectPublicationStore: async () => {
+              throw new Error("History is unavailable.");
+            },
+            resolveCodex: () => {
+              throw new Error("Must not publish without verified history.");
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("History is unavailable.");
+  });
+});
 
 describe("direct Linear API publication", () => {
   test("leaves issues unassigned unless an email or user ID is selected", async () => {
@@ -337,17 +633,181 @@ describe("direct Linear API publication", () => {
     }
   });
 
+  test.each([
+    [
+      "rejects after success",
+      undefined,
+      () =>
+        Promise.reject(
+          new Error("Synthetic issue readback failed after publication."),
+        ),
+      "Synthetic issue readback failed after publication.",
+    ],
+    [
+      "is unavailable",
+      undefined,
+      () => Promise.resolve(undefined),
+      "Linear did not create an issue.",
+    ],
+    [
+      "loses its transport response",
+      () => {
+        const error = new NetworkLinearError();
+        error.message =
+          "Synthetic transport response was unavailable after mutation.";
+        return error;
+      },
+      undefined,
+      "Synthetic transport response was unavailable after mutation.",
+    ],
+    [
+      "loses its statusless SDK response",
+      () => {
+        const error = new UnknownLinearError();
+        error.message =
+          "Synthetic statusless response was unavailable after mutation.";
+        return error;
+      },
+      undefined,
+      "Synthetic statusless response was unavailable after mutation.",
+    ],
+    [
+      "receives an internal server response",
+      () => {
+        const error = new InternalLinearError();
+        error.message =
+          "Synthetic internal response was unavailable after mutation.";
+        return error;
+      },
+      undefined,
+      "Synthetic internal response was unavailable after mutation.",
+    ],
+  ] as const)(
+    "retains an ambiguous mutation when Linear %s",
+    async (_label, createError, readIssue, expectedError) => {
+      const publication = preparedPublication(2);
+      const [target, sibling] = publication.issues as [
+        PreparedPublicationIssue,
+        PreparedPublicationIssue,
+      ];
+      const updates: PublishScanProgress[] = [];
+      const receipts: PublishScanResult[] = [];
+      let persisted: string[] = [];
+      const injected = dependencies(
+        publication,
+        {},
+        {
+          linearClient: linearApiClient(publication, {
+            create: (input) => {
+              if (input.title === target.title && createError !== undefined) {
+                throw createError();
+              }
+            },
+            response: (_input, index) =>
+              index === 0 && readIssue !== undefined
+                ? { success: true, issue: readIssue() }
+                : undefined,
+          }),
+          recordPublishedIssues: async (_prepared, issues) => {
+            persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
+            return [...issues];
+          },
+          writeReceipt: async (receipt) => {
+            receipts.push(structuredClone(receipt));
+          },
+        },
+      );
+
+      await expect(
+        publishScanInternal(
+          publication.scanDirectory,
+          {
+            ...OPTIONS,
+            linearApiKey: "synthetic-key",
+            onProgress: (event) => updates.push(event),
+          },
+          injected,
+        ),
+      ).rejects.toThrow(/could not verify every completed mutation/u);
+
+      expect(persisted).toEqual(["SEC-2"]);
+      expect(receipts.at(-1)).toMatchObject({
+        indeterminate: true,
+        created: [
+          {
+            findingId: sibling.findingId,
+            issueIdentifier: "SEC-2",
+          },
+        ],
+        failed: [{ findingId: target.findingId, error: expectedError }],
+        counts: { findings: 2, created: 1, failed: 1 },
+      });
+      expect(
+        updates.some(
+          (event) =>
+            event.type === "issue_completed" &&
+            event.findingId === target.findingId &&
+            event.issueIdentifier !== undefined,
+        ),
+      ).toBe(false);
+
+      const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
+      const handoffRoot = join(
+        stateDirectory,
+        "publications",
+        "linear",
+        "handoffs",
+      );
+      const handoffDirectories = await readdir(handoffRoot);
+      expect(handoffDirectories).toHaveLength(1);
+      const handoffRecords = (
+        await readFile(
+          join(handoffRoot, handoffDirectories[0]!, "issues.jsonl"),
+          "utf8",
+        )
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(handoffRecords).toHaveLength(2);
+      expect(
+        handoffRecords.find(
+          (record) => record["findingId"] === target.findingId,
+        ),
+      ).toMatchObject({
+        error: expectedError,
+        possibleMutation: true,
+      });
+    },
+  );
+
   test("completes direct batches before continuing and preserves individual failures", async () => {
     const publication = preparedPublication(23);
+    const updates: PublishScanProgress[] = [];
     let started = 0;
     let completed = 0;
+    let completedAtFirstIssueProgress: number | undefined;
     let releaseFirstBatch: (() => void) | undefined;
     const firstBatchStarted = new Promise<void>((resolve) => {
       releaseFirstBatch = resolve;
     });
     const result = await publishScanInternal(
       publication.scanDirectory,
-      { ...OPTIONS, linearApiKey: "synthetic-key" },
+      {
+        ...OPTIONS,
+        linearApiKey: "synthetic-key",
+        onProgress: (event) => {
+          updates.push(event);
+          if (event.type === "handoff_recorded" && event.recorded === 1)
+            expect(completed).toBe(20);
+          if (
+            event.type === "issue_completed" &&
+            completedAtFirstIssueProgress === undefined
+          ) {
+            completedAtFirstIssueProgress = completed;
+          }
+        },
+      },
       dependencies(
         publication,
         {},
@@ -375,41 +835,46 @@ describe("direct Linear API publication", () => {
     expect(result.failed).toEqual([
       { findingId: "finding-22", error: "Linear rejected this finding." },
     ]);
+    expect(completedAtFirstIssueProgress).toBe(23);
+    expect(
+      updates.filter((event) => event.type === "handoff_recorded"),
+    ).toHaveLength(23);
+    expect(
+      updates
+        .filter((event) => event.type === "issue_completed")
+        .map((event) => event.findingId),
+    ).toEqual(publication.issues.map((issue) => issue.findingId));
   });
 
-  test("recovers completed direct issues before honoring cancellation", async () => {
-    const publication = preparedPublication(23);
-    const controller = new AbortController();
-    let started = 0;
-    let stopped = 0;
+  test("does not emit terminal direct successes before duplicate identity reconciliation", async () => {
+    const publication = preparedPublication(3);
+    const duplicateIdentifier = "SYNTH-DUPLICATE";
+    const duplicateUrl = "https://linear.app/example/issue/SYNTH-DUPLICATE";
+    const updates: PublishScanProgress[] = [];
+    const receipts: PublishScanResult[] = [];
     let persisted: string[] = [];
-    let receipt: unknown;
     const injected = dependencies(
       publication,
       {},
       {
         linearClient: linearApiClient(publication, {
-          create: async (input, signal) => {
-            started += 1;
-            if (input.title === publication.issues[0]!.title) return;
-            await new Promise<void>((_resolve, reject) => {
-              signal?.addEventListener(
-                "abort",
-                () => {
-                  stopped += 1;
-                  reject(new Error("Publication canceled."));
+          result: (_input, index) =>
+            index < 2
+              ? {
+                  identifier: duplicateIdentifier,
+                  url: duplicateUrl,
+                }
+              : {
+                  identifier: "SEC-3",
+                  url: "https://linear.app/example/issue/SEC-3",
                 },
-                { once: true },
-              );
-            });
-          },
         }),
         recordPublishedIssues: async (_prepared, issues) => {
           persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
           return [...issues];
         },
-        writeReceipt: async (result) => {
-          receipt = result;
+        writeReceipt: async (receipt) => {
+          receipts.push(structuredClone(receipt));
         },
       },
     );
@@ -420,24 +885,177 @@ describe("direct Linear API publication", () => {
         {
           ...OPTIONS,
           linearApiKey: "synthetic-key",
-          signal: controller.signal,
-          onProgress: ({ type }) => {
-            if (type === "issue_completed") controller.abort("SIGINT");
-          },
+          onProgress: (event) => updates.push(event),
         },
         injected,
       ),
-    ).rejects.toThrow(/publication handoff remains at/u);
+    ).rejects.toThrow(/could not verify every completed mutation/u);
 
-    expect({ started, stopped, persisted }).toEqual({
-      started: 20,
-      stopped: 19,
-      persisted: ["SEC-1"],
+    expect(persisted).toEqual(["SEC-3"]);
+    expect(updates.filter((event) => event.type === "issue_completed")).toEqual(
+      [
+        {
+          type: "issue_completed",
+          findingId: "finding-1",
+          error: CLAIM_COLLISION_ERROR,
+          completed: 1,
+          total: 3,
+        },
+        {
+          type: "issue_completed",
+          findingId: "finding-2",
+          error: CLAIM_COLLISION_ERROR,
+          completed: 2,
+          total: 3,
+        },
+        {
+          type: "issue_completed",
+          findingId: "finding-3",
+          issueIdentifier: "SEC-3",
+          completed: 3,
+          total: 3,
+        },
+      ],
+    );
+    expect(
+      updates.some(
+        (event) =>
+          event.type === "issue_completed" &&
+          event.issueIdentifier === duplicateIdentifier,
+      ),
+    ).toBe(false);
+    expect(receipts.at(-1)).toMatchObject({
+      indeterminate: true,
+      created: [{ findingId: "finding-3", issueIdentifier: "SEC-3" }],
+      failed: [
+        { findingId: "finding-1", error: CLAIM_COLLISION_ERROR },
+        { findingId: "finding-2", error: CLAIM_COLLISION_ERROR },
+      ],
+      counts: { findings: 3, created: 1, failed: 2 },
     });
-    expect(receipt).toMatchObject({
-      counts: { findings: 23, created: 1, failed: 22 },
-    });
+
+    const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
+    const handoffRoot = join(
+      stateDirectory,
+      "publications",
+      "linear",
+      "handoffs",
+    );
+    const handoffDirectories = await readdir(handoffRoot);
+    expect(handoffDirectories).toHaveLength(1);
+    const handoff = await readFile(
+      join(handoffRoot, handoffDirectories[0]!, "issues.jsonl"),
+      "utf8",
+    );
+    expect(handoff.trim().split("\n")).toHaveLength(3);
+    expect(handoff.match(new RegExp(duplicateIdentifier, "gu"))).toHaveLength(
+      4,
+    );
   });
+
+  test.each([false, true])(
+    "lets active direct mutations settle after external cancellation with skipExisting=%s",
+    async (skipExisting) => {
+      const publication = preparedPublication(23);
+      const recorded = {
+        findingId: publication.issues[0]!.findingId,
+        occurrenceId: publication.issues[0]!.occurrenceId,
+        issueIdentifier: "SEC-1",
+      };
+      const controller = new AbortController();
+      const firstBatchStarted = Promise.withResolvers<void>();
+      const releaseBatch = Promise.withResolvers<void>();
+      let started = 0;
+      let stopped = 0;
+      let persisted: string[] = [];
+      let receipt: PublishScanResult | undefined;
+      const injected = dependencies(
+        publication,
+        {},
+        {
+          inspectPublicationStore: async (prepared) => {
+            expect(prepared).toBe(publication);
+            return [recorded];
+          },
+          linearClient: linearApiClient(publication, {
+            create: async (_input, signal) => {
+              started += 1;
+              if (started === 20) {
+                firstBatchStarted.resolve();
+              }
+              await releaseBatch.promise;
+              if (signal?.aborted) {
+                stopped += 1;
+                throw new Error("Publication canceled.");
+              }
+            },
+          }),
+          recordPublishedIssues: async (prepared, issues) => {
+            expect(prepared).toBe(publication);
+            persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
+            return [...issues];
+          },
+          writeReceipt: async (result) => {
+            receipt = result;
+          },
+        },
+      );
+
+      const publicationPromise = publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: "synthetic-key",
+          signal: controller.signal,
+          ...(skipExisting ? { skipExisting: true } : {}),
+        },
+        injected,
+      );
+      await firstBatchStarted.promise;
+      controller.abort("external cancellation");
+      releaseBatch.resolve();
+      await expect(publicationPromise).rejects.toThrow(
+        /publication handoff remains at/u,
+      );
+
+      expect({ started, stopped, persisted }).toEqual({
+        started: 20,
+        stopped: 0,
+        persisted: Array.from(
+          { length: 20 },
+          (_, index) => `SEC-${index + 1 + Number(skipExisting)}`,
+        ),
+      });
+      expect(receipt?.skipped).toEqual(skipExisting ? [recorded] : undefined);
+      expect(receipt).toMatchObject({
+        counts: {
+          findings: 23,
+          created: 20,
+          failed: 3 - Number(skipExisting),
+          ...(skipExisting ? { skipped: 1 } : {}),
+        },
+      });
+      const stateDirectory = injected.environment!["CODEX_SECURITY_STATE_DIR"]!;
+      const handoffRoot = join(
+        stateDirectory,
+        "publications",
+        "linear",
+        "handoffs",
+      );
+      const handoffDirectories = await readdir(handoffRoot);
+      expect(handoffDirectories).toHaveLength(1);
+      expect(
+        (
+          await readFile(
+            join(handoffRoot, handoffDirectories[0]!, "issues.jsonl"),
+            "utf8",
+          )
+        )
+          .trim()
+          .split("\n"),
+      ).toHaveLength(20);
+    },
+  );
 });
 
 describe("connected Linear publication", () => {
@@ -700,6 +1318,18 @@ describe("connected Linear publication", () => {
     expect(input).toContain("track-findings");
     expect(input).toContain("linear_save_issue exactly once per finding");
     expect(input).toContain("readFileSync('publication.json', 'utf8')");
+    expect(input).toContain("issueIdentifier is the human Linear issue key");
+    expect(input).toContain("Prefer identifier, issueIdentifier, or key");
+    expect(input).toContain(
+      "Use id only when its value is a Linear issue key ending in -digits",
+    );
+    expect(input).toContain(
+      "Never copy a canonical UUID or opaque entity ID into issueIdentifier",
+    );
+    expect(input).toContain(
+      "If a successful result has no human issue key, append a recovery record",
+    );
+    expect(input).toContain('"possibleMutation": true');
     expect(input).not.toContain("unsafe(input)");
 
     const encoded = input!
@@ -984,6 +1614,7 @@ describe("connected Linear publication", () => {
       content: [],
       structured_content: { nested_connector_response: "unrecognized" },
     };
+    const recoveredUrl = "https://linear.app/example/issue/SEC-808";
 
     const result = await publishScanInternal(
       publication.scanDirectory,
@@ -995,9 +1626,24 @@ describe("connected Linear publication", () => {
           runCodex: async (_command, _args, input, _environment, onEvent) => {
             onEvent?.(event);
             await writeHandoff(input, [
-              handoffRecord(publication, publication.issues[0]!, {
-                identifier: "SEC-808",
-              }),
+              {
+                ...handoffRecord(publication, publication.issues[0]!, {
+                  identifier: "SEC-808",
+                  url: recoveredUrl,
+                }),
+                structured_content: {
+                  identifier: "SEC-808",
+                  url: recoveredUrl,
+                },
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      issue: { issueIdentifier: "SEC-808", url: recoveredUrl },
+                    }),
+                  },
+                ],
+              },
             ]);
             return {
               exitCode: 0,
@@ -1010,6 +1656,7 @@ describe("connected Linear publication", () => {
     );
 
     expect(result.created[0]!.issueIdentifier).toBe("SEC-808");
+    expect(result.created[0]!.url).toBe(recoveredUrl);
     expect(result.failed).toEqual([]);
     expect(
       updates.filter((update) => update.type === "issue_completed"),
@@ -1024,8 +1671,538 @@ describe("connected Linear publication", () => {
     ]);
   });
 
+  type ReconciliationTransition = {
+    events: string[];
+    handoffs: Array<Record<string, unknown> | string>;
+    created: string[];
+    failures: Array<{ index: number; error: string | RegExp }>;
+    indeterminate: boolean;
+    hidden?: string[];
+  };
+  type TransitionBuilder = (
+    publication: PreparedScanPublication,
+  ) => ReconciliationTransition;
+  const keylessHandoff = (
+    publication: PreparedScanPublication,
+    issue: PreparedPublicationIssue,
+    additions: Record<string, unknown> = {},
+  ): Record<string, unknown> => {
+    const record = handoffRecord(publication, issue);
+    delete record["issueIdentifier"];
+    return { ...record, ...additions };
+  };
+  const siblingEvidence = (
+    publication: PreparedScanPublication,
+    index: number,
+    identifier: string,
+  ): {
+    event: string;
+    handoff: Record<string, unknown>;
+  } => {
+    const issue = publication.issues[index]!;
+    const url = `https://linear.app/example/issue/${identifier}`;
+    return {
+      event: issueEvent(issue, { identifier, url }),
+      handoff: handoffRecord(publication, issue, { identifier, url }),
+    };
+  };
+  const uuidCollision =
+    (reverse: boolean): TransitionBuilder =>
+    (publication) => {
+      const [eventOwner, handoffOwner] = publication.issues;
+      const sibling = siblingEvidence(publication, 2, "SYNTH-SIBLING-303");
+      const entityId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const event = issueEventWithResult(eventOwner!, {
+        structured_content: {
+          id: entityId.toUpperCase(),
+          identifier: "SYNTH-EVENT-301",
+        },
+      });
+      const handoff = {
+        ...handoffRecord(publication, handoffOwner!, {
+          identifier: "SYNTH-HANDOFF-302",
+        }),
+        id: entityId,
+      };
+      return {
+        events: reverse ? [sibling.event, event] : [event, sibling.event],
+        handoffs: reverse
+          ? [sibling.handoff, handoff]
+          : [handoff, sibling.handoff],
+        created: ["SYNTH-SIBLING-303"],
+        failures: [
+          { index: 0, error: CLAIM_COLLISION_ERROR },
+          { index: 1, error: CLAIM_COLLISION_ERROR },
+        ],
+        indeterminate: true,
+        hidden: [entityId, entityId.toUpperCase()],
+      };
+    };
+
+  const transitions: Array<[string, number, TransitionBuilder]> = [
+    [
+      "canonical URL spellings corroborate one issue",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        const identifier = "SYNTH-URL-201";
+        const url = `https://linear.app/example/issue/${identifier}`;
+        return {
+          events: [
+            issueEventWithResult(issue, {
+              structured_content: { url: `${url}/synthetic-title/` },
+            }),
+          ],
+          handoffs: [
+            handoffRecord(publication, issue, { identifier, url: `${url}/` }),
+          ],
+          created: [identifier],
+          failures: [],
+          indeterminate: false,
+        };
+      },
+    ],
+    [
+      "entity UUID corroborates a human issue key",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        const entityId = "11111111-2222-4333-8444-555555555555";
+        const identifier = "SYNTH-ENTITY-202";
+        const url = `https://linear.app/example/issue/${identifier}`;
+        return {
+          events: [
+            issueEventWithResult(issue, {
+              structured_content: {
+                id: entityId.toUpperCase(),
+                key: identifier,
+                url,
+              },
+            }),
+          ],
+          handoffs: [
+            {
+              ...handoffRecord(publication, issue, { identifier, url }),
+              id: entityId,
+            },
+          ],
+          created: [identifier],
+          failures: [],
+          indeterminate: false,
+        };
+      },
+    ],
+    [
+      "UUID-only evidence remains absent",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        const entityId = "22222222-3333-4444-8555-666666666666";
+        return {
+          events: [
+            issueEventWithResult(issue, {
+              structured_content: { id: entityId.toUpperCase() },
+            }),
+          ],
+          handoffs: [keylessHandoff(publication, issue, { id: entityId })],
+          created: [],
+          failures: [
+            {
+              index: 0,
+              error: /without a valid created issue identifier/u,
+            },
+          ],
+          indeterminate: true,
+          hidden: [entityId, entityId.toUpperCase()],
+        };
+      },
+    ],
+    [
+      "disjoint URL and key evidence cannot be combined",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        return {
+          events: [
+            issueEventWithResult(issue, {
+              structured_content: {
+                url: "https://linear.app/example/issue/SYNTH-EVENT-203",
+              },
+            }),
+          ],
+          handoffs: [
+            handoffRecord(publication, issue, {
+              identifier: "SYNTH-HANDOFF-204",
+            }),
+          ],
+          created: [],
+          failures: [{ index: 0, error: /conflicting Linear issue/u }],
+          indeterminate: true,
+          hidden: ["SYNTH-EVENT-203", "SYNTH-HANDOFF-204"],
+        };
+      },
+    ],
+    [
+      "same-owner entity relabeling collides",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        const opaque = "synthetic-opaque-entity";
+        return {
+          events: [
+            issueEventWithResult(issue, {
+              structured_content: {
+                id: opaque,
+                identifier: "SYNTH-EVENT-205",
+              },
+            }),
+          ],
+          handoffs: [handoffRecord(publication, issue, { identifier: opaque })],
+          created: [],
+          failures: [{ index: 0, error: CLAIM_COLLISION_ERROR }],
+          indeterminate: true,
+          hidden: [opaque],
+        };
+      },
+    ],
+    [
+      "cross-owner UUID aliases collide in forward order",
+      3,
+      uuidCollision(false),
+    ],
+    [
+      "cross-owner UUID aliases collide in reverse order",
+      3,
+      uuidCollision(true),
+    ],
+    [
+      "a URL value cannot become another owner's human key",
+      3,
+      (publication) => {
+        const [urlOwner, identifierOwner] = publication.issues;
+        const sibling = siblingEvidence(publication, 2, "SYNTH-SIBLING-308");
+        const shared = "https://linear.app/example/issue/SYNTH-SHARED-306";
+        return {
+          events: [
+            issueEvent(urlOwner!, {
+              identifier: "SYNTH-EVENT-306",
+              url: shared,
+            }),
+            sibling.event,
+          ],
+          handoffs: [
+            handoffRecord(publication, identifierOwner!, {
+              identifier: shared,
+            }),
+            sibling.handoff,
+          ],
+          created: ["SYNTH-SIBLING-308"],
+          failures: [
+            { index: 0, error: CLAIM_COLLISION_ERROR },
+            { index: 1, error: CLAIM_COLLISION_ERROR },
+          ],
+          indeterminate: true,
+          hidden: [shared],
+        };
+      },
+    ],
+    [
+      "unknown-owner reservations invalidate a known owner",
+      2,
+      (publication) => {
+        const target = publication.issues[0]!;
+        const sibling = siblingEvidence(publication, 1, "SYNTH-SIBLING-310");
+        const shared = "SYNTH-UNKNOWN-309";
+        const unowned = JSON.parse(
+          issueEvent(target, { identifier: shared }),
+        ) as { item: { arguments: Record<string, unknown> } };
+        unowned.item.arguments["description"] =
+          "Synthetic description without a publication identity.";
+        return {
+          events: [JSON.stringify(unowned), sibling.event],
+          handoffs: [
+            handoffRecord(publication, target, { identifier: shared }),
+            sibling.handoff,
+          ],
+          created: ["SYNTH-SIBLING-310"],
+          failures: [{ index: 0, error: CLAIM_COLLISION_ERROR }],
+          indeterminate: true,
+          hidden: [shared],
+        };
+      },
+    ],
+    [
+      "failed-event claims remain reserved globally",
+      3,
+      (publication) => {
+        const [failedOwner, handoffOwner] = publication.issues;
+        const sibling = siblingEvidence(publication, 2, "SYNTH-SIBLING-313");
+        const shared = "synthetic-failed-entity-311";
+        return {
+          events: [
+            failedIssueEventWithResult(failedOwner!, {
+              structured_content: { id: shared },
+            }),
+            sibling.event,
+          ],
+          handoffs: [
+            handoffRecord(publication, handoffOwner!, {
+              identifier: shared,
+            }),
+            sibling.handoff,
+          ],
+          created: ["SYNTH-SIBLING-313"],
+          failures: [
+            { index: 0, error: CLAIM_COLLISION_ERROR },
+            { index: 1, error: CLAIM_COLLISION_ERROR },
+          ],
+          indeterminate: true,
+          hidden: [shared],
+        };
+      },
+    ],
+    [
+      "exact arguments preserve keyless metadata-mismatched success",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        return {
+          events: [],
+          handoffs: [
+            keylessHandoff(publication, issue, {
+              scanId: "scan-unexpected",
+            }),
+          ],
+          created: [],
+          failures: [
+            {
+              index: 0,
+              error:
+                "Codex wrote a Linear publication with an unexpected scan or finding occurrence.",
+            },
+          ],
+          indeterminate: true,
+        };
+      },
+    ],
+    [
+      "explicit possibleMutation survives wrong copied arguments",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        return {
+          events: [],
+          handoffs: [
+            keylessHandoff(publication, issue, {
+              possibleMutation: true,
+              arguments: { team: "team-unexpected" },
+            }),
+          ],
+          created: [],
+          failures: [
+            {
+              index: 0,
+              error: /without a valid created issue identifier/u,
+            },
+          ],
+          indeterminate: true,
+        };
+      },
+    ],
+    [
+      "an exact completed event recovers incomplete handoff arguments",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        const identifier = "SYNTH-RECOVERED-314";
+        return {
+          events: [issueEvent(issue, { identifier })],
+          handoffs: [
+            {
+              ...handoffRecord(publication, issue, { identifier }),
+              arguments: { team: "team-unexpected" },
+            },
+          ],
+          created: [identifier],
+          failures: [],
+          indeterminate: false,
+        };
+      },
+    ],
+    [
+      "an absent completion cannot hide a duplicate completion",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        return {
+          events: [
+            issueEventWithResult(issue, {
+              structured_content: { title: "No identifier" },
+            }),
+            issueEvent(issue, { identifier: "SYNTH-DUPLICATE-315" }),
+          ],
+          handoffs: [],
+          created: [],
+          failures: [
+            {
+              index: 0,
+              error:
+                "Codex attempted to create more than one Linear issue for this finding.",
+            },
+          ],
+          indeterminate: true,
+        };
+      },
+    ],
+    [
+      "ordinary reported failures remain determinate",
+      1,
+      (publication) => ({
+        events: [],
+        handoffs: [
+          handoffRecord(publication, publication.issues[0]!, {
+            error: "Synthetic ordinary failure.",
+          }),
+        ],
+        created: [],
+        failures: [{ index: 0, error: "Synthetic ordinary failure." }],
+        indeterminate: false,
+      }),
+    ],
+    [
+      "duplicate keyless successes retain every record",
+      1,
+      (publication) => {
+        const issue = publication.issues[0]!;
+        return {
+          events: [],
+          handoffs: [
+            keylessHandoff(publication, issue),
+            keylessHandoff(publication, issue),
+          ],
+          created: [],
+          failures: [
+            {
+              index: 0,
+              error:
+                "Codex wrote more than one Linear publication for this finding.",
+            },
+          ],
+          indeterminate: true,
+        };
+      },
+    ],
+  ];
+
+  test.each(transitions)(
+    "reconciles canonical publication evidence: %s",
+    async (_name, count, build) => {
+      const publication = preparedPublication(count);
+      const expected = build(publication);
+      const receipts: PublishScanResult[] = [];
+      let handoffFile = "";
+      let persisted: string[] = [];
+      const pending = publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              if (expected.handoffs.length > 0) {
+                await writeHandoff(input, expected.handoffs);
+              }
+              return {
+                exitCode: 0,
+                stdout: expected.events.join("\n"),
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = issues.map((issue) => issue.issueIdentifier);
+              return [...issues];
+            },
+            writeReceipt: async (receipt) => {
+              receipts.push(structuredClone(receipt));
+            },
+          },
+        ),
+      );
+
+      let result: PublishScanResult;
+      if (expected.indeterminate) {
+        await expect(pending).rejects.toThrow(
+          "could not verify every completed mutation",
+        );
+        result = receipts.at(-1)!;
+      } else {
+        result = await pending;
+      }
+
+      expect(persisted).toEqual(expected.created);
+      expect(result.created.map((issue) => issue.issueIdentifier)).toEqual(
+        expected.created,
+      );
+      expect(result.failed.map((failure) => failure.findingId)).toEqual(
+        expected.failures.map(
+          ({ index }) => publication.issues[index]!.findingId,
+        ),
+      );
+      for (const failure of expected.failures) {
+        const actual = result.failed.find(
+          ({ findingId }) =>
+            findingId === publication.issues[failure.index]!.findingId,
+        )!;
+        if (typeof failure.error === "string") {
+          expect(actual.error).toBe(failure.error);
+        } else {
+          expect(actual.error).toMatch(failure.error);
+        }
+      }
+      expect(result.counts).toEqual({
+        findings: count,
+        created: expected.created.length,
+        failed: expected.failures.length,
+      });
+      expect(result.indeterminate).toBe(
+        expected.indeterminate ? true : undefined,
+      );
+      for (const hidden of expected.hidden ?? []) {
+        expect(JSON.stringify(result.failed)).not.toContain(hidden);
+      }
+
+      const handoffDirectory = dirname(handoffFile);
+      if (expected.indeterminate) {
+        expect((await stat(handoffDirectory)).isDirectory()).toBe(true);
+        if (expected.handoffs.length > 0) {
+          expect(
+            (await readFile(handoffFile, "utf8")).trim().length,
+          ).toBeGreaterThan(0);
+        }
+        if (expected.events.length > 0) {
+          expect(
+            await readFile(await publicationEventsFile(handoffFile), "utf8"),
+          ).toBe(`${expected.events.join("\n")}\n`);
+        }
+      } else {
+        expect(
+          await stat(handoffDirectory).catch(() => undefined),
+        ).toBeUndefined();
+      }
+    },
+  );
+
   test("creates deterministic concurrent batches of at most 20 and persists every settled batch", async () => {
     const publication = preparedPublication(41);
+    let linearFindAccesses = 0;
+    publication.issues = new Proxy(publication.issues, {
+      get: (target, property, receiver) => {
+        if (property === "find") linearFindAccesses += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
     let batchSizes: number[] = [];
     let handoffFile: string | undefined;
     const result = await publishScanInternal(
@@ -1067,6 +2244,7 @@ describe("connected Linear publication", () => {
       publication.issues.map((issue) => issue.findingId),
     );
     expect(result.counts).toEqual({ findings: 41, created: 41, failed: 0 });
+    expect(linearFindAccesses).toBe(0);
     expect(await readFile(handoffFile!, "utf8").catch(() => null)).toBeNull();
   });
 
@@ -1226,14 +2404,14 @@ describe("connected Linear publication", () => {
             },
             recordPublishedIssues: async () => {
               throw new Error(
-                "The local publication database is temporarily unavailable.",
+                "Synthetic local history token=diagnostic-only is unavailable.",
               );
             },
           },
         ),
       ),
     ).rejects.toThrow(
-      /temporarily unavailable.*publication handoff remains at.*avoid creating duplicate issues/u,
+      /Could not persist created Linear issues: Synthetic local history token=diagnostic-only is unavailable\..*publication handoff remains at.*avoid creating duplicate issues/u,
     );
 
     const records = (await readFile(handoffFile!, "utf8"))
@@ -1321,7 +2499,7 @@ describe("connected Linear publication", () => {
         ),
       ),
     ).rejects.toThrow(
-      /Linear publication was interrupted\. The publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
+      /Linear publication was interrupted.*indeterminate.*publication handoff remains at .*; recover it before retrying to avoid creating duplicate issues\./u,
     );
 
     expect(recorded).toEqual(["SEC-WRITTEN", "SEC-SALVAGED"]);
@@ -1418,14 +2596,16 @@ describe("connected Linear publication", () => {
     ]);
   });
 
-  test("retains cancellation recovery data when its partial receipt cannot be written", async () => {
+  test("preserves an ordinary local diagnostic when a cancellation receipt cannot be written", async () => {
     const publication = preparedPublication();
     const controller = new AbortController();
+    const diagnostic = "Synthetic token cache unavailable";
     let handoffFile: string | undefined;
     let persisted = false;
+    let failure: unknown;
 
-    await expect(
-      publishScanInternal(
+    try {
+      await publishScanInternal(
         publication.scanDirectory,
         { ...OPTIONS, signal: controller.signal },
         dependencies(
@@ -1447,82 +2627,40 @@ describe("connected Linear publication", () => {
               return [...issues];
             },
             writeReceipt: async () => {
-              throw new Error("The receipt disk is full.");
-            },
-          },
-        ),
-      ),
-    ).rejects.toThrow(
-      /partial receipt could not be saved: The receipt disk is full.*publication handoff remains at.*avoid creating duplicate issues/u,
-    );
-
-    expect(persisted).toBe(true);
-    expect(await readFile(handoffFile!, "utf8")).toContain("SEC-SAVED");
-  });
-
-  test("rejects mismatched scan IDs, finding occurrences, duplicate findings, and unknown findings", async () => {
-    const scenarios: Array<{
-      name: string;
-      mutate: (record: Record<string, unknown>) => Record<string, unknown>[];
-    }> = [
-      {
-        name: "another scan",
-        mutate: (record) => [{ ...record, scanId: "another-scan" }],
-      },
-      {
-        name: "another occurrence",
-        mutate: (record) => [{ ...record, occurrenceId: "another-occurrence" }],
-      },
-      {
-        name: "duplicate finding records",
-        mutate: (record) => [record, record],
-      },
-      {
-        name: "an unexpected finding",
-        mutate: (record) => [{ ...record, findingId: "another-finding" }],
-      },
-    ];
-
-    for (const scenario of scenarios) {
-      const publication = preparedPublication();
-      let persisted = false;
-      const result = await publishScanInternal(
-        publication.scanDirectory,
-        OPTIONS,
-        dependencies(
-          publication,
-          {},
-          {
-            runCodex: async (_command, _args, input) => {
-              await writeHandoff(
-                input,
-                scenario.mutate(
-                  handoffRecord(publication, publication.issues[0]!),
-                ),
-              );
-              return { exitCode: 0, stdout: "", stderr: "" };
-            },
-            recordPublishedIssues: async (_prepared, created) => {
-              persisted = true;
-              return [...created];
+              throw new Error(diagnostic);
             },
           },
         ),
       );
-
-      expect(result.created, scenario.name).toEqual([]);
-      expect(result.failed, scenario.name).toHaveLength(1);
-      expect(result.failed[0]!.findingId, scenario.name).toBe("finding-1");
-      expect(persisted, scenario.name).toBe(false);
+    } catch (error) {
+      failure = error;
     }
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toMatch(
+      /partial receipt could not be saved: Synthetic token cache unavailable\..*publication handoff remains at.*avoid creating duplicate issues/u,
+    );
+    expect(persisted).toBe(true);
+    expect(await readFile(handoffFile!, "utf8")).toContain("SEC-SAVED");
   });
 
   test("retains distinct duplicate Linear issue IDs for indeterminate recovery", async () => {
-    const publication = preparedPublication();
+    const publication = preparedPublication(2);
     const issue = publication.issues[0]!;
+    const first = issueEvent(issue, { identifier: "SYNTH-DUPLICATE-A" });
+    const unverified = JSON.parse(
+      issueEvent(issue, { identifier: "SYNTH-DUPLICATE-B" }),
+    );
+    unverified.item.arguments.title = "Changed title";
+    const output = [
+      first,
+      JSON.stringify(unverified),
+      issueEvent(publication.issues[1]!),
+    ].join("\n");
     let handoffFile: string | undefined;
-    let persisted = false;
-    let receipt = false;
+    let persisted: string[] = [];
+    let receipt: unknown;
 
     await expect(
       publishScanInternal(
@@ -1541,32 +2679,38 @@ describe("connected Linear publication", () => {
                 handoffRecord(publication, issue, {
                   identifier: "SYNTH-DUPLICATE-B",
                 }),
+                handoffRecord(publication, publication.issues[1]!),
               ]);
               return {
                 exitCode: 0,
-                stdout: [
-                  issueEvent(issue, { identifier: "SYNTH-DUPLICATE-A" }),
-                  issueEvent(issue, { identifier: "SYNTH-DUPLICATE-B" }),
-                ].join("\n"),
+                stdout: output,
                 stderr: "",
               };
             },
             recordPublishedIssues: async (_prepared, created) => {
-              persisted = true;
+              persisted = created.map((issue) => issue.issueIdentifier);
               return [...created];
             },
-            writeReceipt: async () => {
-              receipt = true;
+            writeReceipt: async (result) => {
+              receipt = result;
             },
           },
         ),
       ),
     ).rejects.toThrow(
-      /SYNTH-DUPLICATE-A and SYNTH-DUPLICATE-B.*indeterminate.*publication handoff remains at.*recover both issues.*avoid creating duplicate issues/u,
+      /could not verify every completed mutation.*publication handoff remains at.*avoid creating duplicate issues/u,
     );
 
-    expect(persisted).toBe(false);
-    expect(receipt).toBe(false);
+    expect(persisted).toEqual(["SEC-2"]);
+    expect(receipt).toMatchObject({
+      counts: { findings: 2, created: 1, failed: 1 },
+      failed: [
+        {
+          findingId: "finding-1",
+          error: expect.stringContaining("more than one"),
+        },
+      ],
+    });
     const records = (await readFile(handoffFile!, "utf8"))
       .trim()
       .split("\n")
@@ -1574,45 +2718,61 @@ describe("connected Linear publication", () => {
     expect(records.map((record) => record["issueIdentifier"])).toEqual([
       "SYNTH-DUPLICATE-A",
       "SYNTH-DUPLICATE-B",
+      "SEC-2",
     ]);
+    expect(
+      await readFile(await publicationEventsFile(handoffFile!), "utf8"),
+    ).toBe(`${output}\n`);
   });
 
-  test("matches durable publication handoffs by scan and finding IDs only", async () => {
-    const publication = preparedPublication(3);
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      OPTIONS,
-      dependencies(
-        publication,
-        {},
-        {
-          runCodex: async (_command, _args, input) => {
-            await writeHandoff(
-              input,
-              publication.issues.map((issue, index) => {
-                const record = handoffRecord(publication, issue);
-                if (index === 0) {
-                  record["arguments"] = { title: "Normalized issue title" };
-                } else if (index === 1) {
-                  delete record["arguments"];
-                } else {
-                  record["connectorRequestId"] = "request-example";
-                }
-                return record;
-              }),
-            );
-            return { exitCode: 0, stdout: "", stderr: "" };
+  test("keeps recovery-write failures from blocking verified history persistence", async () => {
+    const publication = preparedPublication(2);
+    const changed = JSON.parse(issueEvent(publication.issues[1]!));
+    changed.item.arguments.team = "different-team";
+    const phases: string[] = [];
+    let receipt: PublishScanResult | undefined;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {
+            stdout: [
+              issueEvent(publication.issues[0]!),
+              JSON.stringify(changed),
+            ].join("\n"),
           },
-        },
+          {
+            recordPublishedIssues: async (_prepared, issues) => {
+              phases.push("history");
+              return [...issues];
+            },
+            writeEvents: async () => {
+              phases.push("events");
+              throw new Error("Synthetic event writer unavailable.");
+            },
+            writeReceipt: async (result) => {
+              phases.push(result.created.length === 0 ? "initial" : "final");
+              receipt = structuredClone(result);
+            },
+          },
+        ),
       ),
+    ).rejects.toThrow(
+      /could not verify every completed mutation.*Could not preserve Linear connector-event evidence/u,
     );
 
-    expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
-    expect(result.created.map((issue) => issue.findingId)).toEqual([
-      "finding-1",
-      "finding-2",
-      "finding-3",
-    ]);
+    expect(phases).toEqual(["events", "initial", "history", "final"]);
+    expect(receipt).toMatchObject({
+      indeterminate: true,
+      created: [{ findingId: "finding-1", issueIdentifier: "SEC-1" }],
+      counts: { findings: 2, created: 1, failed: 1 },
+      warnings: expect.arrayContaining([
+        expect.stringContaining("Synthetic event writer unavailable"),
+      ]),
+    });
   });
 
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {
@@ -1642,11 +2802,24 @@ describe("connected Linear publication", () => {
           issueEvent(publication.issues[0]!),
         ],
       },
+      {
+        name: "failed retry after an absent completion",
+        events: (publication) => [
+          issueEventWithResult(publication.issues[0]!, {
+            structured_content: { title: "No identifier" },
+          }),
+          issueEvent(publication.issues[0]!, {
+            status: "failed",
+            error: "The connected Linear project denied the retry.",
+          }),
+        ],
+      },
     ];
 
     for (const scenario of scenarios) {
       const publication = preparedPublication();
-      const result = await publishScanInternal(
+      let receipt: unknown;
+      const operation = publishScanInternal(
         publication.scanDirectory,
         OPTIONS,
         dependencies(
@@ -1663,12 +2836,20 @@ describe("connected Linear publication", () => {
                 stderr: "",
               };
             },
+            writeReceipt: async (result) => {
+              receipt = result;
+            },
           },
         ),
       );
 
-      expect(result.created, scenario.name).toEqual([]);
-      expect(result.failed, scenario.name).toHaveLength(1);
+      await expect(operation).rejects.toThrow(
+        "could not verify every completed mutation",
+      );
+      expect(receipt, scenario.name).toMatchObject({
+        created: [],
+        failed: [{ findingId: "finding-1" }],
+      });
     }
   });
 
@@ -1995,7 +3176,7 @@ describe("connected Linear publication", () => {
             ...OPTIONS,
             signal: controller.signal,
             onProgress: (event) => {
-              if (event.type === "issue_completed") controller.abort(reason);
+              if (event.type === "codex_event") controller.abort(reason);
             },
           },
           injected,
@@ -2141,6 +3322,8 @@ describe("connected Linear publication", () => {
       { type: "started", scanId: "scan-example", total: 3 },
       { type: "codex_event", event: reasoning },
       { type: "codex_event", event: issues[0] },
+      { type: "codex_event", event: issues[1] },
+      { type: "codex_event", event: failure },
       {
         type: "issue_completed",
         findingId: "finding-1",
@@ -2148,7 +3331,6 @@ describe("connected Linear publication", () => {
         completed: 1,
         total: 3,
       },
-      { type: "codex_event", event: issues[1] },
       {
         type: "issue_completed",
         findingId: "finding-2",
@@ -2156,7 +3338,6 @@ describe("connected Linear publication", () => {
         completed: 2,
         total: 3,
       },
-      { type: "codex_event", event: failure },
       {
         type: "issue_completed",
         findingId: "finding-3",
@@ -2223,6 +3404,61 @@ describe("connected Linear publication", () => {
           total: 1,
         },
       ],
+    );
+  });
+
+  test("reports final failures when the evidence ledger invalidates streamed successes", async () => {
+    const publication = preparedPublication(2);
+    const sharedUrl = "https://linear.app/example/issue/SYNTH-SHARED";
+    const rawEvents = publication.issues.map((issue, index) =>
+      issueEvent(issue, {
+        identifier: `SYNTH-STREAM-${index + 1}`,
+        url: sharedUrl,
+      }),
+    );
+    const events = rawEvents.map((event) => JSON.parse(event) as unknown);
+    const updates: PublishScanProgress[] = [];
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, onProgress: (event) => updates.push(event) },
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (
+              _command,
+              _args,
+              _input,
+              _environment,
+              onEvent,
+            ) => {
+              for (const event of events) onEvent!(event);
+              return {
+                exitCode: 0,
+                stdout: rawEvents.join("\n"),
+                stderr: "",
+              };
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(/could not verify every completed mutation/u);
+
+    expect(
+      updates
+        .filter((event) => event.type === "codex_event")
+        .map((event) => event.event),
+    ).toEqual(events);
+    expect(updates.filter((event) => event.type === "issue_completed")).toEqual(
+      publication.issues.map((issue, index) => ({
+        type: "issue_completed",
+        findingId: issue.findingId,
+        error: CLAIM_COLLISION_ERROR,
+        completed: index + 1,
+        total: 2,
+      })),
     );
   });
 
