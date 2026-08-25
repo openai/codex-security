@@ -173,9 +173,9 @@ describe("publish scan to Cloud", () => {
     expect(stderr.text()).toContain("Use --scan or scan directory inputs");
   });
 
-  test("selects several saved scans in one multi-select prompt", async () => {
+  test("publishes checked scans in display order from one multi-select prompt", async () => {
     const { scans, deps } = await savedScansFixture();
-    const picks = [scans[1]!.scanId, scans[0]!.scanId];
+    const picks = scans.slice(0, 2).map(({ scanId }) => scanId);
     let selections = 0;
     deps.publishPrompt = {
       isInteractive: () => true,
@@ -199,9 +199,7 @@ describe("publish scan to Cloud", () => {
         expect(choices.map(({ value }) => String(value))).toEqual(
           scans.map(({ scanId }) => scanId),
         );
-        return picks.map(
-          (pick) => choices.find(({ value }) => value === pick)!.value,
-        );
+        return choices.slice(0, 2).map(({ value }) => value);
       },
     };
     const calls: string[] = [];

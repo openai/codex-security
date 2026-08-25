@@ -739,7 +739,9 @@ npx @openai/codex-security publish scan --to cloud --dry-run --json
 ```
 
 The picker shows each scan's repository, finding count, age, and scan ID.
-Choose scans, then select **Done**. No scans are selected automatically.
+Press <kbd>Space</kbd> to select or deselect scans, then press
+<kbd>Enter</kbd> to submit. At least one scan is required, and no scans are
+selected automatically.
 
 For scripts, repeat `--scan` with saved scan IDs or unique ID prefixes (at
 least eight characters):
@@ -753,7 +755,8 @@ npx @openai/codex-security publish scan \
 Use `scans list --json` to find IDs for the current repository. `--scan latest`
 selects its latest completed scan. The CLI resolves IDs through saved history,
 processes each selected scan once, and checks that its sealed artifacts match
-the selected ID. The artifacts must still be available locally.
+the selected ID. Picker selections use the order shown; repeated `--scan`
+selections use argument order. The artifacts must still be available locally.
 
 `--dry-run` validates the scans and prints their findings without uploading or
 requiring a login. Remove `--dry-run` to upload. Live uploads require ChatGPT
