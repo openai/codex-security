@@ -128,6 +128,10 @@ import {
   type ScanComparisonInput,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import {
+  CODEX_SECURITY_THREAD_SOURCES,
+  type CodexSecurityThreadSource,
+} from "./thread-source.js";
 import { readScanLogs } from "./scan-logs.js";
 import {
   renderScanHistory,
@@ -999,6 +1003,12 @@ type MatchingPlan = JsonObject & {
   batches: (JsonObject & MatchingBatch)[];
 };
 
+type SkillThreadSource = Extract<
+  CodexSecurityThreadSource,
+  | typeof CODEX_SECURITY_THREAD_SOURCES.remediation
+  | typeof CODEX_SECURITY_THREAD_SOURCES.validation
+>;
+
 interface SkillCommandOutput {
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
@@ -1006,7 +1016,7 @@ interface SkillCommandOutput {
   readonly appServer?: {
     readonly directory: string;
     readonly prompt: string;
-    readonly threadSource: "security_remediation" | "security_validation";
+    readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
@@ -5067,7 +5077,9 @@ async function runSkill(
   ].join("\n");
   const patch = skill === "fix-finding";
   const appServer = patch || verify;
-  const threadSource = patch ? "security_remediation" : "security_validation";
+  const threadSource = patch
+    ? CODEX_SECURITY_THREAD_SOURCES.remediation
+    : CODEX_SECURITY_THREAD_SOURCES.validation;
   return dependencies.runCodex(
     [
       ...(appServer
@@ -5139,7 +5151,7 @@ export async function readSkillCommandOutput(
   appServer?: {
     readonly directory?: string;
     readonly prompt: string;
-    readonly threadSource: "security_remediation" | "security_validation";
+    readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
