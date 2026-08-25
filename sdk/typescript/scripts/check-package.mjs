@@ -165,6 +165,7 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "cloud-publish",
     "codex-prompt",
     "component-plan",
     "component-scan",

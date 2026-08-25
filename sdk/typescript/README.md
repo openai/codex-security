@@ -730,6 +730,80 @@ and scans stopped at their configured cost limit do not start another turn.
 invocation and defaults to `1`. Results remain under `--output-dir`; rerun the
 same command to resume.
 
+### Publish multiple completed scans to Cloud
+
+Choose completed scans from your local history:
+
+```bash
+npx @openai/codex-security publish scan --to cloud --dry-run --json
+```
+
+The picker shows each scan's repository, finding count, age, and scan ID.
+Choose scans, then select **Done**. No scans are selected automatically.
+
+For scripts, repeat `--scan` with saved scan IDs or unique ID prefixes (at
+least eight characters):
+
+```bash
+npx @openai/codex-security publish scan \
+  --scan SCAN_ID_A --scan SCAN_ID_B \
+  --to cloud --dry-run --json
+```
+
+Use `scans list --json` to find IDs for the current repository. `--scan latest`
+selects its latest completed scan. The CLI resolves IDs through saved history,
+processes each selected scan once, and checks that its sealed artifacts match
+the selected ID. The artifacts must still be available locally.
+
+`--dry-run` validates the scans and prints their findings without uploading or
+requiring a login. Remove `--dry-run` to upload. Live uploads require ChatGPT
+credentials explicitly stored in a file. Set this in your Codex `config.toml`,
+then sign in with ChatGPT again:
+
+```toml
+cli_auth_credentials_store = "file"
+```
+
+Automatic and keyring credential storage are not accepted for Cloud
+publication, even when an `auth.json` file exists, because that file may be
+stale and belong to a different account. The CLI sends one scan at a time,
+with each scan's findings and metadata in a separate request.
+
+For artifacts outside local history, use repeated `--scan-dir PATH` instead.
+A single positional directory is still accepted and can be combined with
+`--scan-dir`. Do not combine directory inputs with `--scan`. Each directory
+must contain one completed, sealed scan; bulk-run directories and
+`results.jsonl` files are not accepted. Relative paths start at the current
+directory, and `~/...` starts at your home directory. Each resolved directory
+is processed once.
+
+For multiple distinct scans, output contains:
+
+- `results`: receipts or dry-run previews, each with its `scanId` and `scanDir`.
+- `failed`: errors with `scanDir` and, for saved selections, `scanId`.
+- `notAttempted`: saved scan IDs, or paths for directory inputs, that the command
+  did not reach before cancellation.
+
+For one distinct scan, the CLI returns the scan result directly,
+without the batch fields above.
+
+The CLI continues after a failed scan and exits with code `2` if any scan
+fails. Ctrl-C or SIGTERM stops new requests and returns the results collected
+so far. When cancellation stops work before every requested publication is
+confirmed, the exit code is `130` for Ctrl-C and `143` for SIGTERM. If the
+single response or final batch response has already confirmed the complete
+publication, the command exits with code `0`. Cloud publication receipts
+appear in command output; the CLI does not save them to scan history.
+
+A successful receipt contains one opaque Cloud finding ID for each submitted
+finding, in request order. These are not local finding IDs. The CLI verifies
+the authenticated response status, count, and ID uniqueness, but cannot map
+opaque server IDs back to individual local findings independently.
+
+The CLI never retries an upload automatically. An upload with a missing or
+invalid receipt may already have been accepted. Check whether Cloud accepted
+that scan before retrying it. Do not resend scans with confirmed receipts.
+
 ### Custom validation
 
 Use a prompt file to replace the final validation step in a standard or diff
@@ -802,17 +876,21 @@ Publish every finding from a completed standard, deep, or scoped scan to one
 Linear team:
 
 ```bash
-npx @openai/codex-security publish scan /path/to/completed-scan \
+npx @openai/codex-security publish scan --scan SCAN_ID \
   --to linear \
   --linear-team TEAM_ID
 ```
+
+Linear accepts one scan. Use a saved scan ID, a unique ID prefix, or `latest`.
+For external artifacts, a positional directory or `--scan-dir PATH` is also
+accepted.
 
 Add `--linear-project PROJECT_ID` to place the issues in a Linear project.
 The existing `--project` flag remains an alias. Without a project, issues are
 created directly in the selected team.
 
 To choose from all completed scans saved in your local scan history, omit the
-scan directory. The selector highlights each repository and shows its finding
+scan selector. The selector highlights each repository and shows its finding
 count, relative run time, and abbreviated scan ID:
 
 ```bash
@@ -1041,8 +1119,9 @@ for a personal API key, or `LINEAR_ACCESS_TOKEN` for an OAuth access token.
 `LINEAR_API_KEY` is also accepted. `--linear-api-key KEY` overrides these
 environment settings; prefer the environment variable to keep keys out of shell
 history. Imported content is always literal, and issue URLs must match the
-selected workspace. Linear access is read-only, and its credentials are not
-passed to the patch subprocess.
+selected workspace. Each imported issue includes its title, description, and
+all comments with their source links. Linear access is read-only, and its
+credentials are not passed to the patch subprocess.
 
 Use `verify-fix` to check whether an existing security fix actually closes its
 original vulnerability without modifying the repository. Pass a finding

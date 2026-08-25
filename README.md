@@ -133,15 +133,18 @@ incomplete or their original location was not reviewed.
 Publish every finding from a completed scan to a Linear team:
 
 ```bash
-npx @openai/codex-security publish scan /path/to/scan \
+npx @openai/codex-security publish scan --scan SCAN_ID \
   --to linear \
   --linear-team TEAM_ID
 ```
 
 Add `--linear-project PROJECT_ID` to place the issues in a Linear project, or
 omit it to create issues directly in the team. The existing `--project` flag
-remains an alias. Omit the scan directory to select a
-completed scan interactively. You can also set `CODEX_SECURITY_LINEAR_TEAM` and
+remains an alias. Omit `--scan` to select a completed scan interactively. Use
+`scans list --json` to find saved scan IDs, or pass `--scan latest` for the
+current repository's latest completed scan. External scan artifacts can still
+be supplied with `--scan-dir PATH` or a positional directory.
+You can also set `CODEX_SECURITY_LINEAR_TEAM` and
 the optional `CODEX_SECURITY_LINEAR_PROJECT` instead of passing the destination
 flags. Add `--dry-run` to preview the issues or `--json` to return
 machine-readable results.

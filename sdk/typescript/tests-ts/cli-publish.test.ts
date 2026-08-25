@@ -74,6 +74,45 @@ function publicationResult(
 }
 
 describe("publish scan", () => {
+  test("resolves a saved scan ID for Linear publication", async () => {
+    const scanDir = await publicationDirectory();
+    const deps = dependencies({
+      onWorkbench: (args) => {
+        expect(args).toEqual(["get-scan", "--scan-id", "scan-123"]);
+        return {
+          scan: {
+            scanId: "scan-123",
+            scanDir,
+            progress: { status: "complete" },
+          },
+        };
+      },
+    });
+    let calls = 0;
+    deps.publishScan = async (directory, options) => {
+      calls++;
+      expect(directory).toBe(scanDir);
+      expect(options.expectedScanId).toBe("scan-123");
+      return publicationResult();
+    };
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--scan",
+          "scan-123",
+          ...DESTINATION_OPTIONS,
+          "--json",
+        ],
+        capture().stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(calls).toBe(1);
+  });
+
   test("accepts the Linear project flag and its published alias", async () => {
     for (const flag of ["--linear-project", "--project"]) {
       let projectId: string | undefined;
@@ -125,49 +164,60 @@ describe("publish scan", () => {
     );
   });
 
-  test("publishes an explicit scan directory without inspecting scan history", async () => {
-    const currentDirectory = join(tmpdir(), "codex-security-publish-current");
-    const stdout = capture();
-    const stderr = capture();
-    let invocation:
-      | { scanDirectory: string; options: Record<string, unknown> }
-      | undefined;
-    const deps = dependencies({
-      currentDirectory,
-      onWorkbench: () => {
-        throw new Error("scan history must not be inspected");
-      },
-    });
-    deps.createSecurity = () => {
-      throw new Error("a new security scan must not be started");
-    };
-    deps.publishScan = async (scanDirectory, options) => {
-      invocation = { scanDirectory, options: { ...options } };
-      return publicationResult();
-    };
+  test.each(["positional", "flag"])(
+    "publishes an explicit %s scan directory without inspecting scan history",
+    async (syntax) => {
+      const currentDirectory = join(tmpdir(), "codex-security-publish-current");
+      const stdout = capture();
+      const stderr = capture();
+      let invocation:
+        | { scanDirectory: string; options: Record<string, unknown> }
+        | undefined;
+      const deps = dependencies({
+        currentDirectory,
+        onWorkbench: () => {
+          throw new Error("scan history must not be inspected");
+        },
+      });
+      deps.createSecurity = () => {
+        throw new Error("a new security scan must not be started");
+      };
+      deps.publishScan = async (scanDirectory, options) => {
+        invocation = { scanDirectory, options: { ...options } };
+        return publicationResult();
+      };
 
-    expect(
-      await main(
-        ["publish", "scan", "completed-scan", ...DESTINATION_OPTIONS, "--json"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(0);
-    expect(invocation).toEqual({
-      scanDirectory: resolve(currentDirectory, "completed-scan"),
-      options: {
-        destination: "linear",
-        teamId: "team-from-flags",
-        projectId: "project-from-flags",
-        dryRun: false,
-        signal: expect.any(AbortSignal),
-        onProgress: expect.any(Function),
-      },
-    });
-    expect(JSON.parse(stdout.text())).toEqual(publicationResult());
-    expect(stderr.text()).toBe("");
-  });
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            ...(syntax === "flag"
+              ? ["--scan-dir", "completed-scan"]
+              : ["completed-scan"]),
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(invocation).toEqual({
+        scanDirectory: resolve(currentDirectory, "completed-scan"),
+        options: {
+          destination: "linear",
+          teamId: "team-from-flags",
+          projectId: "project-from-flags",
+          dryRun: false,
+          signal: expect.any(AbortSignal),
+          onProgress: expect.any(Function),
+        },
+      });
+      expect(JSON.parse(stdout.text())).toEqual(publicationResult());
+      expect(stderr.text()).toBe("");
+    },
+  );
 
   test("selects direct Linear publication and forwards the requested assignee", async () => {
     for (const scenario of [

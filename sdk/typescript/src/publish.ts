@@ -56,6 +56,7 @@ import {
 } from "./runtime.js";
 
 export interface PublishScanOptions {
+  expectedScanId?: string;
   destination: "linear";
   teamId: string;
   projectId?: string;

@@ -1,16 +1,16 @@
-<!-- release-version: 0.1.18 -->
+<!-- release-version: 0.1.19 -->
 
 ## Highlights
 
-- Attribute API-key scans to the originating end user with the CLI's
-  `--safety-identifier` option or the SDK's `safetyIdentifier` option. Use a
-  stable, privacy-preserving identifier rather than personal data. This
-  requires a Codex runtime with native safety identifier support; the bundled
-  runtime does not yet support it, so select a compatible build with
-  `CODEX_CLI_PATH`. See
-  [Safety ID setup and runtime requirements](https://github.com/openai/codex-security/blob/npm-v0.1.18/sdk/typescript/README.md#attribute-scans-to-end-users).
-- Preserve accepted findings and partial artifacts when Deep Scan fails, is
-  canceled, or is interrupted. Recovered results keep their terminal state and
-  incomplete coverage explicit rather than appearing complete.
+- Publish one or more completed scans to Codex Security Cloud with
+  `publish scan --to cloud`. Choose saved scans interactively or with
+  repeatable `--scan` options, or use repeatable `--scan-dir` options for
+  external artifacts. `--dry-run` validates and previews findings without
+  uploading. Live uploads require a file-backed ChatGPT sign-in and an account
+  authorized for Cloud publication. See
+  [Cloud publication setup and behavior](https://github.com/openai/codex-security/blob/npm-v0.1.19/sdk/typescript/README.md#publish-multiple-completed-scans-to-cloud).
+- Select a saved scan for Linear publication by scan ID, unique ID prefix, or
+  `latest`; omitting the selector opens the interactive picker. See
+  [Linear publication](https://github.com/openai/codex-security/blob/npm-v0.1.19/sdk/typescript/README.md#publish-completed-scans-to-linear).
 
 The categorized list below contains the individual changes.
