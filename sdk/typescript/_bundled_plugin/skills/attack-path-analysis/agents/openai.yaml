@@ -1,4 +1,0 @@
-interface:
-  display_name: "Attack Path Analysis"
-  short_description: "Perform attack-path analysis for a security finding"
-  default_prompt: "Use $attack-path-analysis to trace a given security finding from source to sink and calibrate severity accordingly."

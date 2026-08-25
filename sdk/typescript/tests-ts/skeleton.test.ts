@@ -142,7 +142,7 @@ describe("TypeScript package skeleton", () => {
     );
 
     expect(packageJson.scripts.test).toBe(
-      "bun test --timeout 30000 ./tests-ts",
+      "node scripts/build-plugin.mjs && bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
@@ -280,7 +280,12 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts.build).toBe(
       "node --run clean && tsc -p tsconfig.build.json",
     );
-    expect(packageJson.scripts.prepack).toBe("node --run build");
+    expect(packageJson.scripts["build:plugin"]).toBe(
+      "node scripts/build-plugin.mjs",
+    );
+    expect(packageJson.scripts.prepack).toBe(
+      "node --run build:plugin && node --run build",
+    );
     expect(packageJson.scripts["audit:prod"]).toBe(
       "pnpm audit --prod --audit-level high",
     );

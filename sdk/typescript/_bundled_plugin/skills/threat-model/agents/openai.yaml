@@ -1,4 +1,0 @@
-interface:
-  display_name: "Threat Model"
-  short_description: "Build a repository threat model"
-  default_prompt: "Use $threat-model to build a repository threat model."

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Finding Discovery"
-  short_description: "Discover security findings"
-  default_prompt: "Use $finding-discovery to discover security findings in the current repository or a given code change."
