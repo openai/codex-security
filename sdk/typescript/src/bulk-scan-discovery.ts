@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
 import { promisify } from "node:util";
-import { confirm, input, search } from "@inquirer/prompts";
+import { checkbox, confirm, input, search, Separator } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
 import { expandHome } from "./runtime.js";
@@ -71,6 +71,12 @@ export interface BulkScanPrompt {
     presentation?: { header?: string },
     signal?: AbortSignal,
   ): Promise<Value>;
+  checkbox<Value extends string>(
+    question: string,
+    options: readonly { label: string; value: Value; short?: string }[],
+    presentation?: { header?: string; required?: boolean },
+    signal?: AbortSignal,
+  ): Promise<Value[]>;
 }
 
 export interface BulkScanDiscoveryDependencies {
@@ -361,6 +367,24 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       confirm({ message, default: defaultValue }, context(signal)),
     input: (message, defaultValue, signal) =>
       input({ message, default: defaultValue }, context(signal)),
+    checkbox: (message, options, presentation, signal) =>
+      checkbox(
+        {
+          message,
+          choices: [
+            ...(presentation?.header === undefined
+              ? []
+              : [new Separator(presentation.header)]),
+            ...options.map(({ label, value, short }) => ({
+              name: label,
+              value,
+              ...(short === undefined ? {} : { short }),
+            })),
+          ],
+          required: presentation?.required,
+        },
+        context(signal),
+      ),
     select: (message, options, presentation, signal) =>
       search(
         {

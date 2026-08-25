@@ -19,6 +19,8 @@ import {
   NetworkLinearError,
   UnknownLinearError,
   type LinearClient,
+  type Team,
+  type User,
 } from "@linear/sdk";
 import {
   CodexSecurityError,
@@ -50,6 +52,7 @@ import {
   type PublicationEventEvidence,
 } from "./publication-events.js";
 import {
+  inspectPublicationStore,
   preparePublicationStore,
   recordPublishedIssues,
 } from "./publication-store.js";
@@ -60,12 +63,14 @@ import {
 } from "./runtime.js";
 
 export interface PublishScanOptions {
+  expectedScanId?: string;
   destination: "linear";
   teamId: string;
   projectId?: string;
   linearApiKey?: string;
   assigneeId?: string;
   dryRun?: boolean;
+  skipExisting?: boolean;
   signal?: AbortSignal;
   onProgress?: (event: PublishScanProgress) => void;
 }
@@ -107,15 +112,51 @@ export interface PublishScanResult {
   destination: LinearPublicationDestination;
   created: PublishedScanIssue[];
   failed: FailedScanPublication[];
+  skipped?: PublishedScanIssue[];
   counts: {
     findings: number;
     created: number;
     failed: number;
+    skipped?: number;
   };
   dryRun?: boolean;
   issues?: PreparedPublicationIssue[];
   indeterminate?: boolean;
   warnings?: string[];
+}
+
+export type CheckScanPublicationOptions = Pick<
+  PublishScanOptions,
+  | "destination"
+  | "teamId"
+  | "projectId"
+  | "linearApiKey"
+  | "assigneeId"
+  | "signal"
+>;
+
+export interface CheckScanPublicationResult {
+  scanId: string;
+  destination: LinearPublicationDestination;
+  recorded: PublishedScanIssue[];
+  counts: { findings: number; recorded: number; pending: number };
+  access: {
+    transport: "linear-api" | "connected-app";
+    authentication: "verified" | "not-checked";
+    team: "verified" | "not-checked";
+    project: "verified" | "not-checked" | "not-requested";
+    assignee: "verified" | "not-checked" | "not-requested";
+    issueCreation: "not-tested";
+  };
+}
+
+export interface CheckScanPublicationDependencies {
+  environment?: NodeJS.ProcessEnv;
+  prepare?: typeof prepareScanPublication;
+  inspectPublicationStore?: typeof inspectPublicationStore;
+  linearClient?: LinearClientFactory<
+    "viewer" | "team" | "project" | "user" | "users"
+  >;
 }
 
 export interface PublicationCodexResult {
@@ -138,6 +179,7 @@ export interface PublishScanDependencies {
     onEvent?: (event: unknown) => void,
     signal?: AbortSignal,
   ) => Promise<PublicationCodexResult>;
+  inspectPublicationStore?: typeof inspectPublicationStore;
   preparePublicationStore?: typeof preparePublicationStore;
   recordPublishedIssues?: typeof recordPublishedIssues;
   writeEvents?: (
@@ -224,30 +266,14 @@ export async function publishScanInternal(
   dependencies: PublishScanDependencies = {},
 ): Promise<PublishScanResult> {
   options.signal?.throwIfAborted();
-  if (options.destination !== "linear") {
-    throw new ConfigurationError("The publication destination must be linear.");
-  }
-  if (!options.teamId.trim()) {
-    throw new ConfigurationError("A Linear team is required for publication.");
-  }
-  if (options.projectId !== undefined && !options.projectId.trim()) {
-    throw new ConfigurationError(
-      "A Linear project cannot be blank when provided.",
-    );
-  }
-
   const environment = dependencies.environment ?? process.env;
-  const linearApiKey = resolveLinearApiKey(environment, options.linearApiKey);
-  if (options.assigneeId !== undefined && linearApiKey === undefined) {
-    throw new ConfigurationError(
-      "A Linear API key is required to select a publication assignee.",
-    );
-  }
+  const linearApiKey = publicationApiKey(options, environment);
 
-  const prepared = await (dependencies.prepare ?? prepareScanPublication)(
+  const preparedScan = await (dependencies.prepare ?? prepareScanPublication)(
     scanDirectory,
     options,
   );
+  let prepared = preparedScan;
   options.signal?.throwIfAborted();
   const result: PublishScanResult = {
     scanId: prepared.scanId,
@@ -261,6 +287,20 @@ export async function publishScanInternal(
       failed: 0,
     },
   };
+  if (options.skipExisting) {
+    result.skipped = await (
+      dependencies.inspectPublicationStore ?? inspectPublicationStore
+    )(preparedScan, environment, options.signal);
+    result.counts.skipped = result.skipped.length;
+    const recorded = new Set(result.skipped.map((issue) => issue.findingId));
+    prepared = {
+      ...preparedScan,
+      issues: preparedScan.issues.filter(
+        (issue) => !recorded.has(issue.findingId),
+      ),
+    };
+    options.signal?.throwIfAborted();
+  }
   const saveReceipt = dependencies.writeReceipt ?? writePublicationReceipt;
   if (options.dryRun) {
     return { ...result, dryRun: true, issues: prepared.issues };
@@ -268,7 +308,7 @@ export async function publishScanInternal(
   if (prepared.issues.length === 0) return result;
 
   await (dependencies.preparePublicationStore ?? preparePublicationStore)(
-    prepared,
+    preparedScan,
     environment,
   );
   options.signal?.throwIfAborted();
@@ -286,19 +326,10 @@ export async function publishScanInternal(
           },
           dependencies.linearClient,
         );
-  let assigneeId = options.assigneeId;
-  if (linearClient !== undefined && assigneeId?.includes("@")) {
-    const users = await linearClient.users({
-      filter: { email: { eqIgnoreCase: assigneeId } },
-      first: 2,
-    });
-    if (users.nodes.length !== 1) {
-      throw new ConfigurationError(
-        "Linear could not resolve exactly one matching issue assignee.",
-      );
-    }
-    assigneeId = users.nodes[0]!.id;
-  }
+  const assigneeId =
+    linearClient === undefined || options.assigneeId === undefined
+      ? options.assigneeId
+      : await resolvePublicationAssignee(linearClient, options.assigneeId);
   if (linearApiKey !== undefined && usesAbortableLinearClient) {
     options.signal?.throwIfAborted();
     linearClient = createLinearClient(
@@ -471,7 +502,7 @@ export async function publishScanInternal(
       );
       result.created = await (
         dependencies.recordPublishedIssues ?? recordPublishedIssues
-      )(prepared, handoffResults.created, environment);
+      )(preparedScan, handoffResults.created, environment);
     } catch (cause) {
       persistenceFailure = { cause, detail: errorMessage(cause) };
     }
@@ -532,9 +563,184 @@ export async function publishScanInternal(
     type: "completed",
     created: result.counts.created,
     failed: result.counts.failed,
-    total: result.counts.findings,
+    total: prepared.issues.length,
   });
   return result;
+}
+
+export async function checkScanPublication(
+  scanDirectory: string,
+  options: CheckScanPublicationOptions,
+): Promise<CheckScanPublicationResult> {
+  return checkScanPublicationInternal(scanDirectory, options);
+}
+
+export async function checkScanPublicationInternal(
+  scanDirectory: string,
+  options: CheckScanPublicationOptions,
+  dependencies: CheckScanPublicationDependencies = {},
+): Promise<CheckScanPublicationResult> {
+  options.signal?.throwIfAborted();
+  const environment = dependencies.environment ?? process.env;
+  const linearApiKey = publicationApiKey(options, environment);
+  const prepared = await (dependencies.prepare ?? prepareScanPublication)(
+    scanDirectory,
+    options,
+  );
+  options.signal?.throwIfAborted();
+  const recorded = await (
+    dependencies.inspectPublicationStore ?? inspectPublicationStore
+  )(prepared, environment, options.signal);
+  options.signal?.throwIfAborted();
+  const result: CheckScanPublicationResult = {
+    scanId: prepared.scanId,
+    destination: prepared.destination,
+    recorded,
+    counts: {
+      findings: prepared.issues.length,
+      recorded: recorded.length,
+      pending: prepared.issues.length - recorded.length,
+    },
+    access: {
+      transport: linearApiKey === undefined ? "connected-app" : "linear-api",
+      authentication: "not-checked",
+      team: "not-checked",
+      project:
+        options.projectId === undefined ? "not-requested" : "not-checked",
+      assignee:
+        options.assigneeId === undefined ? "not-requested" : "not-checked",
+      issueCreation: "not-tested",
+    },
+  };
+  if (linearApiKey === undefined) return result;
+
+  const client = createLinearClient(
+    {
+      apiKey: linearApiKey,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    },
+    dependencies.linearClient,
+  );
+  let step = "authentication";
+  try {
+    await client.viewer;
+    result.access.authentication = "verified";
+    step = "team access";
+    const team = await client.team(prepared.destination.teamId);
+    if (team.archivedAt || team.retiredAt) {
+      throw new ConfigurationError(
+        "The selected Linear team is archived or retired.",
+      );
+    }
+    result.access.team = "verified";
+    if (prepared.destination.projectId !== undefined) {
+      step = "project access";
+      const project = await client.project(prepared.destination.projectId);
+      if (project.archivedAt || project.autoArchivedAt || project.trashed) {
+        throw new ConfigurationError(
+          "The selected Linear project is archived or deleted.",
+        );
+      }
+      const teams = await project.teams({
+        filter: { id: { eq: team.id } },
+        first: 1,
+      });
+      if (!teams.nodes.some(({ id }) => id === team.id)) {
+        throw new ConfigurationError(
+          "The selected Linear project does not belong to the selected team.",
+        );
+      }
+      result.access.project = "verified";
+    }
+    if (options.assigneeId !== undefined) {
+      step = "assignee access";
+      const assigneeId = await resolvePublicationAssignee(
+        client,
+        options.assigneeId,
+      );
+      const assignee = await client.user(assigneeId);
+      if (!assignee.active) {
+        throw new ConfigurationError(
+          "The selected Linear assignee is inactive.",
+        );
+      }
+      if (!assignee.isAssignable) {
+        throw new ConfigurationError(
+          "The selected Linear user cannot be assigned to issues.",
+        );
+      }
+      if (!(await assigneeCanAccessTeam(team, assignee))) {
+        throw new ConfigurationError(
+          "The selected Linear assignee cannot access the selected team.",
+        );
+      }
+      result.access.assignee = "verified";
+    }
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (error instanceof ConfigurationError) throw error;
+    throw new CodexSecurityError(
+      `Could not verify Linear ${step}. Check the API key and publication destination.`,
+      { cause: error },
+    );
+  }
+  options.signal?.throwIfAborted();
+  return result;
+}
+
+async function assigneeCanAccessTeam(
+  team: Team,
+  assignee: User,
+): Promise<boolean> {
+  if (team.visibility === "public" && assignee.canAccessAnyPublicTeam) {
+    return true;
+  }
+  const members = await team.members({
+    filter: { id: { eq: assignee.id } },
+    first: 1,
+  });
+  return members.nodes.some(({ id }) => id === assignee.id);
+}
+
+function publicationApiKey(
+  options: CheckScanPublicationOptions,
+  environment: NodeJS.ProcessEnv,
+): string | undefined {
+  if (options.destination !== "linear") {
+    throw new ConfigurationError("The publication destination must be linear.");
+  }
+  if (!options.teamId.trim()) {
+    throw new ConfigurationError("A Linear team is required for publication.");
+  }
+  if (options.projectId !== undefined && !options.projectId.trim()) {
+    throw new ConfigurationError(
+      "A Linear project cannot be blank when provided.",
+    );
+  }
+  const linearApiKey = resolveLinearApiKey(environment, options.linearApiKey);
+  if (options.assigneeId !== undefined && linearApiKey === undefined) {
+    throw new ConfigurationError(
+      "A Linear API key is required to select a publication assignee.",
+    );
+  }
+  return linearApiKey;
+}
+
+async function resolvePublicationAssignee(
+  client: Pick<LinearClient, "users">,
+  assigneeId: string,
+): Promise<string> {
+  if (!assigneeId.includes("@")) return assigneeId;
+  const users = await client.users({
+    filter: { email: { eqIgnoreCase: assigneeId } },
+    first: 2,
+  });
+  if (users.nodes.length !== 1) {
+    throw new ConfigurationError(
+      "Linear could not resolve exactly one matching issue assignee.",
+    );
+  }
+  return users.nodes[0]!.id;
 }
 
 async function publishLinearApiIssues(

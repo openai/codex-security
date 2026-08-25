@@ -68,6 +68,40 @@ async function reseal(scanDirectory: string): Promise<void> {
 }
 
 describe("scan publication preparation", () => {
+  test("preserves cancellation while loading the sealed scan", async () => {
+    const scanDirectory = await copyExample();
+    const controller = new AbortController();
+    const reason = new Error("Publication preparation canceled.");
+    controller.abort(reason);
+
+    await expect(
+      prepareScanPublication(scanDirectory, {
+        ...DESTINATION,
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(reason);
+  });
+
+  test("requires artifacts to match the selected saved scan", async () => {
+    const scanDirectory = await copyExample();
+    await expect(
+      prepareScanPublication(scanDirectory, {
+        ...DESTINATION,
+        expectedScanId: "another-scan",
+      }),
+    ).rejects.toThrow(
+      "Scan artifacts do not match selected scan another-scan.",
+    );
+    expect(
+      (
+        await prepareScanPublication(scanDirectory, {
+          ...DESTINATION,
+          expectedScanId: "scan_example_001",
+        })
+      ).scanId,
+    ).toBe("scan_example_001");
+  });
+
   test("prepares sealed findings with scan-based upload IDs and full traceability", async () => {
     const scanDirectory = await copyExample();
     const publication = await prepareScanPublication(
