@@ -142,7 +142,7 @@ describe("TypeScript package skeleton", () => {
     );
 
     expect(packageJson.scripts.test).toBe(
-      "node scripts/build-plugin.mjs && bun test --timeout 30000 ./tests-ts",
+      "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
@@ -156,7 +156,11 @@ describe("TypeScript package skeleton", () => {
   test("runs shared static checks once and keeps report upload non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps);
-    for (const name of ["Typecheck", "Check formatting"]) {
+    for (const name of [
+      "Check plugin source boundary",
+      "Typecheck",
+      "Check formatting",
+    ]) {
       expect(steps.filter((step) => step.name === name)).toEqual([
         expect.objectContaining({
           if: "matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'",
@@ -281,7 +285,10 @@ describe("TypeScript package skeleton", () => {
       "node --run clean && tsc -p tsconfig.build.json",
     );
     expect(packageJson.scripts["build:plugin"]).toBe(
-      "node scripts/build-plugin.mjs",
+      "node --run check:plugin-source && node scripts/build-plugin.mjs",
+    );
+    expect(packageJson.scripts["check:plugin-source"]).toBe(
+      "node scripts/check-plugin-source.mjs",
     );
     expect(packageJson.scripts.prepack).toBe(
       "node --run build:plugin && node --run build",

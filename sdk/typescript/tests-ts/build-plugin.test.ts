@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -10,10 +11,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
+import { assertGeneratedPluginUntracked } from "../scripts/check-plugin-source.mjs";
 
 const temporaryDirectories: string[] = [];
+const execFileAsync = promisify(execFile);
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "codex-security-plugin-"));
@@ -165,5 +169,45 @@ await writeFile(join(output, "server.mjs"), "generated mcp runtime\\n");
     await expect(
       buildBundledPlugin({ contractPath, destination, source }),
     ).rejects.toThrow("Canonical plugin source is missing scripts/missing.py.");
+  });
+});
+
+describe("generated plugin ownership", () => {
+  test("allows an untracked local runtime payload", async () => {
+    const root = await temporaryDirectory();
+    const packageRoot = join(root, "sdk", "typescript");
+    await execFileAsync("git", ["init", "--quiet", root]);
+    await writeFixture(
+      packageRoot,
+      "_bundled_plugin/mcp/server.mjs",
+      "generated runtime\n",
+    );
+
+    await expect(
+      assertGeneratedPluginUntracked({ packageRoot }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("rejects a tracked runtime payload", async () => {
+    const root = await temporaryDirectory();
+    const packageRoot = join(root, "sdk", "typescript");
+    await execFileAsync("git", ["init", "--quiet", root]);
+    await writeFixture(
+      packageRoot,
+      "_bundled_plugin/mcp/server.mjs",
+      "generated runtime\n",
+    );
+    await execFileAsync("git", [
+      "-C",
+      root,
+      "add",
+      "sdk/typescript/_bundled_plugin/mcp/server.mjs",
+    ]);
+
+    await expect(
+      assertGeneratedPluginUntracked({ packageRoot }),
+    ).rejects.toThrow(
+      "Generated plugin payload must not be tracked: _bundled_plugin/mcp/server.mjs",
+    );
   });
 });

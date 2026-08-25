@@ -6,6 +6,7 @@ Run these commands from `sdk/typescript`:
 ```sh
 pnpm install --frozen-lockfile
 npm ci --prefix ../../plugins/codex-security/mcp-app --no-audit --no-fund
+pnpm run check:plugin-source
 bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
 pnpm run types
 pnpm run test:mcp
@@ -22,6 +23,8 @@ the ignored `_bundled_plugin` runtime payload from `plugin-files.json` during
 files there. Run `pnpm run build:plugin` when you need to inspect the staged
 payload locally. `plugins/codex-security` contains authored source and assets,
 not the generated `mcp/server.mjs` or compressed runtime chunks.
+`pnpm run check:plugin-source` fails if any file beneath `_bundled_plugin` is
+tracked by Git. Required CI runs the same check before installing dependencies.
 
 For CI's full archive inspection, pass the exact `.tgz` path printed by
 `pnpm pack` to `pnpm run check:package`.
