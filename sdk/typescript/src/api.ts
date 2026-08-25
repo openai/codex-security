@@ -506,6 +506,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: "security_validation",
         workingDirectory: outputDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -1126,6 +1127,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: "security_scan",
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -1200,6 +1202,7 @@ export class CodexSecurity {
                     filesTotal: scopeFileCount,
                   });
                 const validationThread = codex.startThread({
+                  threadSource: "security_scan",
                   workingDirectory: join(scanDir, "artifacts"),
                   skipGitRepoCheck: true,
                   approvalPolicy,

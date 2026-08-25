@@ -117,7 +117,7 @@ export async function matchScanFindingsInternal(
     comparisonPrompt(input),
     z.toJSONSchema(comparisonSchema, { target: "openapi-3.0" }),
     options,
-    runtimeOptions,
+    { ...runtimeOptions, threadSource: "security_scan_comparison" },
   );
   let response: unknown;
   try {
@@ -138,7 +138,10 @@ export async function runReadOnlyCodex(
   prompt: string,
   outputSchema: unknown,
   options: ReadOnlyCodexOptions,
-  runtimeOptions: { surface: CodexSecuritySurface },
+  runtimeOptions: {
+    surface: CodexSecuritySurface;
+    threadSource: "security_scan" | "security_scan_comparison";
+  },
 ): Promise<string> {
   const config =
     options.config === undefined
@@ -197,6 +200,7 @@ export async function runReadOnlyCodex(
       } as NonNullable<CodexOptions["config"]>,
     });
   const thread = codex.startThread({
+    threadSource: runtimeOptions.threadSource,
     ...(model === undefined ? {} : { model }),
     modelReasoningEffort: reasoningEffort,
     sandboxMode: "read-only",

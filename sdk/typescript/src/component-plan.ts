@@ -88,7 +88,7 @@ export async function planComponents(
     ].join("\n"),
     z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
     { ...options, config: options.config ?? {}, workingDirectory: tmpdir() },
-    { surface: "cli" },
+    { surface: "cli", threadSource: "security_scan" },
   );
   const plan = await normalizeComponentPlan(
     repository,

@@ -37,7 +37,8 @@ async function bundledWorkerExecutor(
   expect(fileSystemImport).toBeDefined();
 
   class FakeCodex {
-    startThread() {
+    startThread(options: { threadSource: string }) {
+      expect(options.threadSource).toBe("security_scan");
       return {
         id: "fixture-worker-thread",
         async runStreamed(_input: string, options: { signal: AbortSignal }) {
