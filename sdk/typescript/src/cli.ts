@@ -91,6 +91,10 @@ import {
   ScanInterruptedError,
 } from "./errors.js";
 import {
+  GITHUB_ALERT_STATES,
+  importGitHubCodeScanningAlerts,
+} from "./github.js";
+import {
   importLinearIssues,
   resolveLinearApiKey,
   type ImportedIssue,
@@ -239,6 +243,9 @@ const VALUE_OPTIONS = new Set([
   "--linear-issue",
   "--linear-project",
   "--linear-filter",
+  "--github-alert",
+  "--github-ref",
+  "--github-state",
   "--fail-on-severity",
   "--patch-severity",
   "--resume-pr",
@@ -1093,6 +1100,7 @@ interface CliDependencies {
   bulkScan?: BulkScanDiscoveryDependencies;
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
+  importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -2532,9 +2540,94 @@ export async function main(
       }
     },
   });
+  const imports = Cli.create("import", {
+    description: "Read upstream findings for local validation or triage.",
+  }).command("github", {
+    description: "Import GitHub code scanning alerts without changing GitHub.",
+    destructive: false,
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .min(1)
+        .describe("GitHub repository in OWNER/REPO form."),
+    }),
+    options: z.object({
+      githubAlert: z
+        .array(
+          optionValue("--github-alert").regex(
+            /^[1-9]\d*$/u,
+            "GitHub alert numbers must be positive integers.",
+          ),
+        )
+        .default([])
+        .describe(
+          "Exact alert number, regardless of state; repeat to select a subset.",
+        ),
+      githubRef: optionValue("--github-ref")
+        .optional()
+        .describe("Git reference to inspect (default: default branch)."),
+      githubState: z
+        .enum(GITHUB_ALERT_STATES)
+        .default("open")
+        .describe(
+          "State to list; all includes dismissed and fixed alerts. Not used with exact alert numbers.",
+        ),
+    }),
+    output: z
+      .array(
+        z.object({
+          source: z.literal("github-code-scanning"),
+          repository: z.string(),
+          number: z.number().int().positive(),
+          url: z.string(),
+          alert: z.record(z.string(), z.unknown()),
+        }),
+      )
+      .optional(),
+    async run({ args, options }) {
+      const controller = new AbortController();
+      const onInterrupt = () => controller.abort("SIGINT");
+      const onTerminate = () => controller.abort("SIGTERM");
+      dependencies.addSignalListener("SIGINT", onInterrupt);
+      dependencies.addSignalListener("SIGTERM", onTerminate);
+      try {
+        return await (
+          dependencies.importGitHubAlerts ?? importGitHubCodeScanningAlerts
+        )(
+          {
+            repository: args.repository,
+            alertNumbers: options.githubAlert.map(Number),
+            ref: options.githubRef,
+            state: options.githubState,
+            signal: controller.signal,
+          },
+          {
+            environment: dependencies.environment,
+            currentDirectory: dependencies.currentDirectory(),
+          },
+        );
+      } catch (error) {
+        const signal = controller.signal.reason;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          exitCode = signal === "SIGINT" ? 130 : 143;
+          errorOutput.write(
+            `codex-security: GitHub import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
+          );
+        } else {
+          exitCode = 2;
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+        }
+        return undefined;
+      } finally {
+        dependencies.removeSignalListener("SIGINT", onInterrupt);
+        dependencies.removeSignalListener("SIGTERM", onTerminate);
+      }
+    },
+  });
   const cli = Cli.create("codex-security", {
     description:
-      "Run, validate, patch, verify fixes, export, and publish Codex Security findings.",
+      "Run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -2874,6 +2967,7 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command(imports)
     .command("scan-components", {
       description:
         "Run standard scans for project components and combine the results.",
@@ -4223,6 +4317,7 @@ function validateCliArguments(
       "findings",
       "export",
       "publish",
+      "import",
       "validate",
       "verify-fix",
       "patch",
@@ -4287,7 +4382,10 @@ function validateCliArguments(
     }
   }
   const nestedCommand =
-    command === "scans" || command === "findings" || command === "publish";
+    command === "scans" ||
+    command === "findings" ||
+    command === "publish" ||
+    command === "import";
   const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
   if (command === "info") {
     const metadataFields = new Set([

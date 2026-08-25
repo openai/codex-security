@@ -1,17 +1,14 @@
-import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
-import { promisify } from "node:util";
 import { checkbox, confirm, input, search, Separator } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
+import { createAuthenticatedGitHub } from "./github.js";
 import { expandHome } from "./runtime.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
 
-const execFile = promisify(execFileCallback);
 const GITHUB_REPOSITORIES_QUERY = `
   query($owner: String!, $cursor: String) {
     repositoryOwner(login: $owner) {
@@ -111,37 +108,12 @@ export function createBulkScanDiscoveryDependencies(options: {
     ...(process.env["GH_HOST"]?.trim()
       ? { githubHost: process.env["GH_HOST"].trim() }
       : {}),
-    createGitHub: async (host, signal) => {
-      const trusted = await resolveTrustedExecutable(
-        "gh",
-        process.env,
-        options.currentDirectory(),
-      );
-      if (trusted === null) {
-        throw new Error(
-          "GitHub CLI is required. Install gh and sign in first.",
-        );
-      }
-
-      let token: string;
-      try {
-        const { stdout } = await execFile(
-          trusted.executable,
-          ["auth", "token", "--hostname", host],
-          { env: trusted.environment, signal },
-        );
-        token = stdout.trim();
-      } catch {
-        signal?.throwIfAborted();
-        throw new Error(
-          "GitHub sign-in is required. Run 'gh auth login' first.",
-        );
-      }
-      return new Octokit({
-        auth: token,
-        ...(host === "github.com" ? {} : { baseUrl: `https://${host}/api/v3` }),
-      });
-    },
+    createGitHub: (host, signal) =>
+      createAuthenticatedGitHub(host, {
+        environment: process.env,
+        currentDirectory: options.currentDirectory(),
+        signal,
+      }),
   };
 }
 
