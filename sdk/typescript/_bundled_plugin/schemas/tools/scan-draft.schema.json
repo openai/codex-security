@@ -574,6 +574,25 @@
         "provenance": {
           "type": "object",
           "properties": {
+            "sourceFindingIds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/text" },
+              "uniqueItems": true,
+              "description": "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once."
+            },
+            "sourceFindings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "$ref": "#/$defs/text" },
+                  "finding": { "type": "object", "additionalProperties": true }
+                },
+                "required": ["id", "finding"],
+                "additionalProperties": false
+              },
+              "description": "Original source payloads retained by the host for lossless semantic merges."
+            },
             "source": {
               "$ref": "#/$defs/text",
               "description": "The actual finding producer. Use local_plugin only for a finding discovered by this plugin."
@@ -805,6 +824,10 @@
     "scanDraftInput": {
       "type": "object",
       "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings."
+        },
         "scanId": {
           "$ref": "#/$defs/scanId"
         },

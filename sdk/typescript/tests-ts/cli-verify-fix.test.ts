@@ -12,6 +12,15 @@ function linearIssue(identifier: string) {
     title: `Verify ${identifier}`,
     description: `Synthetic security evidence for ${identifier}`,
     url: `https://linear.app/example/issue/${identifier}`,
+    comments: async () => ({
+      nodes: [
+        {
+          body: `Additional verification evidence for ${identifier}`,
+          url: `https://linear.app/example/issue/${identifier}#comment-evidence`,
+        },
+      ],
+      pageInfo: { hasNextPage: false },
+    }),
   };
 }
 
@@ -79,6 +88,7 @@ describe("read-only finding verification", () => {
     expect(stderr.text()).not.toContain("lin_api_SYNTHETIC_SECRET");
     expect(prompt).toContain("standalone verification-only mode");
     expect(prompt).toContain("$codex-security:verify-fix");
+    expect(prompt).toContain("Additional verification evidence for SEC-123");
     expect(prompt).toContain(
       await readFile(
         new URL(

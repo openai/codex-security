@@ -60,7 +60,7 @@ When the profile includes remediation patches, present the concrete config delta
 
 Some remediation patches have `kind = "host_setting"`. Present those as host-level setup guidance, not as edits to persistent Codex config.
 
-Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight does not require a particular parent delegation runtime, ownership, capacity, or depth. Discovery workers inherit the scan's model and run under the verified read-only worker sandbox.
+Deep Security Scan uses MCP-owned SDK sessions rather than the parent thread's worker pool. Its preflight does not require a particular parent delegation runtime, ownership, capacity, or depth. Discovery workers inherit the scan's model and use the reserved `codex_security_deep_scan_worker` permission profile with the parent's supported filesystem denials. The selected Codex executable must support permission-profile configuration and allowance checks. If that command fails to start or exits early, report its path and the tool's diagnostic; do not infer that its version is unsupported. If the tool identifies a missing API, ask the user to update the Codex installation at the reported path: the desktop app for an app-bundled executable, or the selected CLI otherwise. If Codex policy rejects the profile, report the tool's administrator guidance. Do not remove deny rules or select a broader sandbox to work around the error.
 
 Do not warn merely because a user's value differs from the profile's suggested patch. Warn or block only when the evaluated capability requirement is unmet.
 

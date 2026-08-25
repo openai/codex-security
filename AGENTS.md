@@ -14,6 +14,17 @@ Codex Security is a thin wrapper around Codex and its security plugin.
   only after checking that it is public. If you cannot confirm its visibility,
   leave it out.
 
+## Avoid speculative defenses
+
+- Do not add sanitization, redaction, validation, or fallback logic for
+  hypothetical problems. State the concrete failure it fixes.
+- When extending an existing command, preserve its output behavior. Do not
+  introduce a new sanitization policy for names, paths, or status messages.
+- Keep existing credential, unsafe-path, and scan-integrity protections.
+  Do not extend them to unrelated values without a demonstrated need.
+- Do not invent a restriction and then add tests whose only purpose is to
+  enforce that restriction.
+
 ## Public CLI changes
 
 Treat commands, arguments, flags, accepted values, public environment

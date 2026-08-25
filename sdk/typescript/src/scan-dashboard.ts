@@ -2,10 +2,15 @@ import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type { ScanModelConfiguration } from "./config.js";
+import type {
+  ComponentReceipt,
+  ComponentScanEvent,
+  ComponentScanResult,
+} from "./component-scan.js";
 import { formatUsd, type ScanCost, type ScanSessionEvent } from "./cost.js";
 import type { ScanActivity } from "./scan-activity.js";
 import type { ScanMode } from "./targets.js";
-import type { ScanProgress } from "./worker-progress.js";
+import { scanPhaseLabel, type ScanProgress } from "./worker-progress.js";
 
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
@@ -44,7 +49,8 @@ interface DashboardInput {
 
 interface ScanDashboardOptions {
   repository: string;
-  presentation?: "scan" | "publication" | "verification";
+  presentation?: "scan" | "publication" | "verification" | "components";
+  componentName?: string;
   mode?: ScanMode;
   model?: ScanModelConfiguration;
   maxCostUsd?: number;
@@ -57,6 +63,11 @@ interface ScanDashboardOptions {
 
 interface TimedScanActivity extends ScanActivity {
   recordedAt: number;
+}
+
+interface ComponentView {
+  receipt: ComponentReceipt;
+  dashboard: ScanDashboard;
 }
 
 type DashboardActivityKind = ScanActivity["kind"] | "status" | "warning";
@@ -98,7 +109,12 @@ const LINE_STYLES: Record<DashboardActivityLine["kind"] | "title", string> = {
 export class ScanDashboard {
   readonly #stream: DashboardStream;
   readonly #options: ScanDashboardOptions;
-  readonly #startedAt: number;
+  #startedAt: number;
+  #finishedAt: number | null = null;
+  #components: ComponentView[] = [];
+  #selectedComponent = 0;
+  #showComponent = false;
+  #componentResult: ComponentScanResult | null = null;
   readonly #activities: TimedScanActivity[] = [];
   readonly #details: (ScanSessionEvent & { recordedAt: number })[] = [];
   #detailsCache: {
@@ -123,6 +139,10 @@ export class ScanDashboard {
   readonly #onInput = (chunk: string | Uint8Array): void => {
     const input =
       typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    if (this.#options.presentation === "components") {
+      this.#componentInput(input);
+      return;
+    }
     let lines = 0;
     for (const key of input.match(
       /[\u0003\u0004\u0015dam1-9]|\u001B\[(?:[ABHF]|[1456]~)/gu,
@@ -251,6 +271,91 @@ export class ScanDashboard {
     this.#refresh();
   }
 
+  public setComponents(receipts: readonly ComponentReceipt[]): void {
+    this.#components = receipts.map((receipt) => {
+      const dashboard = new ScanDashboard(this.#stream, {
+        ...this.#options,
+        presentation: "scan",
+        mode: "standard",
+        componentName: receipt.name,
+      });
+      dashboard.setStage("Queued");
+      dashboard.note(`Scope: ${receipt.paths.join(", ")}`);
+      return { receipt: { ...receipt }, dashboard };
+    });
+    this.showComponents("Scanning components");
+  }
+
+  public updateComponent(receipt: ComponentReceipt): void {
+    const component = this.#components.find(
+      ({ receipt: current }) => current.id === receipt.id,
+    );
+    if (component === undefined) return;
+    const { dashboard } = component;
+    if (receipt.status !== component.receipt.status) {
+      if (receipt.status === "started") {
+        dashboard.#startedAt = this.#options.clock.now();
+        dashboard.setStage("Preparing scan");
+      } else if (receipt.status !== "pending") {
+        dashboard.#finishedAt = this.#options.clock.now();
+        dashboard.setStage(componentStatus(receipt));
+        dashboard.note(
+          receipt.error ??
+            `${componentStatus(receipt)} · ${receipt.findingCount ?? 0} findings before deduplication`,
+        );
+      }
+    }
+    if (receipt.cost !== undefined) dashboard.setCost(receipt.cost);
+    component.receipt = { ...receipt };
+    this.#refresh();
+  }
+
+  public recordComponentEvent(event: ComponentScanEvent): void {
+    const dashboard = this.#components.find(
+      ({ receipt }) => receipt.id === event.componentId,
+    )?.dashboard;
+    if (dashboard === undefined) return;
+    switch (event.type) {
+      case "progress":
+        dashboard.setFiles(event.value);
+        dashboard.setStage(scanPhaseLabel(event.value.phase));
+        break;
+      case "activity":
+        dashboard.record(event.value);
+        break;
+      case "session":
+        dashboard.recordDetails(event.value);
+        break;
+      case "cost":
+        dashboard.setCost(event.value);
+        break;
+      case "workers":
+        if (event.value.kind === "dispatch")
+          dashboard.setStage(scanPhaseLabel(event.value.phase));
+        break;
+      case "warning":
+        dashboard.note(event.value);
+        break;
+    }
+    this.#refresh();
+  }
+
+  public showComponents(stage: string): void {
+    this.#showComponent = false;
+    this.setStage(stage);
+  }
+
+  public finishComponents(result: ComponentScanResult): void {
+    this.#componentResult = result;
+    this.showComponents(
+      result.failed ||
+        result.incomplete ||
+        result.deduplication?.status === "incomplete"
+        ? "Finished with partial results"
+        : "Complete",
+    );
+  }
+
   public setFiles(files: ScanProgress): void {
     this.#files = files;
     this.#refresh();
@@ -360,6 +465,15 @@ export class ScanDashboard {
   }
 
   #render(): void {
+    this.#stream.write(this.#frame());
+  }
+
+  #frame(): string {
+    if (this.#options.presentation === "components") {
+      return this.#showComponent
+        ? this.#components[this.#selectedComponent]!.dashboard.#frame()
+        : this.#componentFrame();
+    }
     const publication = this.#options.presentation === "publication";
     const verification = this.#options.presentation === "verification";
     const findingProgress = publication || verification;
@@ -368,7 +482,10 @@ export class ScanDashboard {
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     const elapsed = Math.max(
       0,
-      Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000),
+      Math.floor(
+        ((this.#finishedAt ?? this.#options.clock.now()) - this.#startedAt) /
+          1_000,
+      ),
     );
     const time = formatElapsed(elapsed);
     const files =
@@ -413,10 +530,12 @@ export class ScanDashboard {
           ? `d activity · a/m/1-9 source · ${scrollStatus}`
           : `d details · ${scrollStatus}`;
     }
+    if (this.#options.componentName !== undefined)
+      scrollStatus = `Esc components · ${scrollStatus}`;
     const model = this.#options.model;
 
     const lines = [
-      `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
+      `  CODEX SECURITY  ·  ${publication ? "PUBLISH  ·  " : verification ? "VERIFY-FIX  ·  " : ""}${basename(this.#options.repository)}${this.#options.componentName === undefined ? "" : `  ·  ${this.#options.componentName}`}${model === undefined ? "" : `  ·  ${model.model} (${model.reasoningEffort})`}${this.#view === "details" ? `  ·  DETAILS${this.#source === "all" ? "" : ` · ${typeof this.#source === "number" ? `worker ${this.#source}` : this.#source}`}` : ""}`,
       divider,
       ...activity,
       divider,
@@ -435,43 +554,168 @@ export class ScanDashboard {
       `  TIME     ${time}  ·  ${scrollStatus}`,
     ];
 
-    this.#stream.write(
+    return this.#formatFrame(lines);
+  }
+
+  #formatFrame(lines: (string | DashboardActivityLine)[]): string {
+    const width = this.#width();
+    return (
       CURSOR_HOME +
-        lines
-          .map((line, index) => {
-            const text = typeof line === "string" ? line : line.text;
-            const clean = fitLine(
-              typeof line !== "string" && this.#view === "details"
-                ? text
-                : this.#options.sanitize?.(text) ?? text,
-              width,
-            );
-            const colored =
-              this.#options.color === true
-                ? styleLine(
-                    clean,
-                    typeof line === "string"
-                      ? index === 0
-                        ? "title"
-                        : undefined
-                      : line.kind,
-                    typeof line !== "string" && this.#view === "details",
-                  )
-                : clean;
-            const formatted =
-              typeof line === "string"
-                ? colored
-                : linkActivity(
-                    this.#options.color === true
-                      ? styleInlineCode(colored, line)
-                      : colored,
-                    line.links,
-                    this.#options.sanitize,
-                  );
-            return `${ERASE_LINE}${formatted}`;
-          })
-          .join("\n"),
+      lines
+        .map((line, index) => {
+          const text = typeof line === "string" ? line : line.text;
+          const clean = fitLine(
+            typeof line !== "string" && this.#view === "details"
+              ? text
+              : this.#options.sanitize?.(text) ?? text,
+            width,
+          );
+          const colored =
+            this.#options.color === true
+              ? styleLine(
+                  clean,
+                  typeof line === "string"
+                    ? index === 0
+                      ? "title"
+                      : undefined
+                    : line.kind,
+                  typeof line !== "string" && this.#view === "details",
+                )
+              : clean;
+          const formatted =
+            typeof line === "string"
+              ? colored
+              : linkActivity(
+                  this.#options.color === true
+                    ? styleInlineCode(colored, line)
+                    : colored,
+                  line.links,
+                  this.#options.sanitize,
+                );
+          return `${ERASE_LINE}${formatted}`;
+        })
+        .join("\n")
     );
+  }
+
+  #componentInput(input: string): void {
+    for (const key of input.match(
+      /\u001B\[(?:[ABHF]|[1456]~)|[\u0003\u0004\u0015\r\n\u001Bbdam1-9]/gu,
+    ) ?? []) {
+      if (key === "\u0003") {
+        this.#options.onInterrupt?.();
+      } else if (this.#showComponent) {
+        if (key === "\u001B" || key === "b") this.#showComponent = false;
+        else this.#components[this.#selectedComponent]!.dashboard.#onInput(key);
+      } else if (
+        (key === "\r" || key === "\n") &&
+        this.#components.length > 0
+      ) {
+        this.#showComponent = true;
+      } else {
+        const change =
+          key === "\u001B[A"
+            ? -1
+            : key === "\u001B[B"
+              ? 1
+              : key === "\u001B[5~"
+                ? -this.#componentRows()
+                : key === "\u001B[6~"
+                  ? this.#componentRows()
+                  : 0;
+        this.#selectedComponent = Math.max(
+          0,
+          Math.min(
+            this.#components.length - 1,
+            this.#selectedComponent + change,
+          ),
+        );
+        if (key === "\u001B[H" || key === "\u001B[1~")
+          this.#selectedComponent = 0;
+        if (key === "\u001B[F" || key === "\u001B[4~")
+          this.#selectedComponent = Math.max(0, this.#components.length - 1);
+      }
+    }
+    this.#refresh();
+  }
+
+  #componentRows(): number {
+    return Math.max(1, (this.#stream.rows ?? 24) - 11);
+  }
+
+  #componentFrame(): string {
+    const width = this.#width();
+    const rows = this.#componentRows();
+    const first = Math.max(
+      0,
+      Math.min(
+        this.#selectedComponent - Math.floor(rows / 2),
+        this.#components.length - rows,
+      ),
+    );
+    const nameWidth = Math.max(10, width - 61);
+    const row = (
+      marker: string,
+      name: string,
+      status: string,
+      files: string,
+      findings: string,
+      cost: string,
+    ): string =>
+      `  ${marker} ${fitLine(this.#options.sanitize?.(name) ?? name, nameWidth).padEnd(nameWidth)} ${fitLine(status, 24).padEnd(24)} ${files.padStart(11)} ${findings.padStart(8)} ${cost.padStart(8)}`;
+    const table = this.#components
+      .slice(first, first + rows)
+      .map(({ receipt, dashboard }, index) => {
+        const files = dashboard.#files;
+        return row(
+          first + index === this.#selectedComponent ? "›" : " ",
+          receipt.name,
+          receipt.status === "started"
+            ? dashboard.#stage
+            : componentStatus(receipt),
+          files === null
+            ? "—"
+            : `${formatCount(files.filesCompleted)}/${formatCount(files.filesTotal)}`,
+          receipt.findingCount === undefined
+            ? "—"
+            : formatCount(receipt.findingCount),
+          dashboard.#cost === null
+            ? "—"
+            : formatUsd(dashboard.#cost.estimatedUsd),
+        );
+      });
+    if (table.length === 0) table.push(`  ${this.#stage}…`);
+    while (table.length < rows) table.push("");
+    const count = (status: ComponentReceipt["status"]) =>
+      this.#components.filter(({ receipt }) => receipt.status === status)
+        .length;
+    const selected = this.#components[this.#selectedComponent]?.receipt;
+    const costs = this.#components.flatMap(({ dashboard }) =>
+      dashboard.#cost === null ? [] : [dashboard.#cost.estimatedUsd],
+    );
+    const rawFindings = this.#components.reduce(
+      (sum, { receipt }) => sum + (receipt.findingCount ?? 0),
+      0,
+    );
+    const findings =
+      this.#componentResult === null
+        ? `${rawFindings} findings before deduplication`
+        : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "incomplete" ? " · matching incomplete" : ""}`;
+    const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
+    return this.#formatFrame([
+      `  CODEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,
+      divider,
+      `  ${count("completed")} complete · ${count("started")} running · ${count("pending")} queued · ${count("incomplete")} incomplete · ${count("failed")} failed`,
+      "",
+      row(" ", "Component", "Status", "Files", "Findings", "Cost"),
+      ...table,
+      divider,
+      `  SCOPE    ${selected?.paths.join(", ") ?? "waiting for component plan"}`,
+      `  STATUS   ${selected?.error ?? findings}`,
+      `  COST     ${costs.length === 0 ? "waiting for usage" : formatUsd(costs.reduce((sum, value) => sum + value, 0))} · component scans only`,
+      `  STAGE    ${this.#stage}`,
+      `  TIME     ${formatElapsed(Math.max(0, Math.floor((this.#options.clock.now() - this.#startedAt) / 1_000)))} · ↑↓ select · Enter activity · Ctrl+C cancel`,
+    ]);
   }
 
   #width(): number {
@@ -785,6 +1029,16 @@ function isFileInventory(activity: ScanActivity): boolean {
 
 function formatElapsed(seconds: number): string {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function componentStatus(receipt: ComponentReceipt): string {
+  return {
+    pending: "Queued",
+    started: "Running",
+    completed: "Complete",
+    incomplete: "Incomplete",
+    failed: "Failed",
+  }[receipt.status];
 }
 
 function formatLocalTime(timestamp: number): string {

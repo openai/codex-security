@@ -16,8 +16,8 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|release|revert|style|test)(\([^()[:space:]]+\))?!?:[[:space:]][^[:space:]].*$'
-          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
-            echo '::error::PR titles must use a supported Conventional Commit type.'
+          conventional_title='^([a-z][a-z0-9-]*)(\([a-z0-9][a-z0-9._/-]*\))?(!)?:[ ]([^[:space:]].*[^[:space:]]|[^[:space:]])$'
+          if [[ ! "$PR_TITLE" =~ $conventional_title ]]; then
+            echo '::error::Pull request title must follow <type>[optional scope][!]: <description>.'
             exit 1
           fi

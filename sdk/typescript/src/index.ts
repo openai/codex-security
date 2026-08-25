@@ -1,4 +1,17 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export { runComponentScans } from "./component-scan.js";
+export type {
+  ComponentDeduplicationSummary,
+  ComponentReceipt,
+  ComponentScanOptions,
+  ComponentScanEvent,
+  ComponentScanResult,
+} from "./component-scan.js";
+export { normalizeComponentPlan, planComponents } from "./component-plan.js";
+export type {
+  ComponentPlan,
+  ComponentPlanningOptions,
+} from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent } from "./cost.js";
 export type { CustomValidationResult } from "./custom-validation.js";
@@ -13,6 +26,8 @@ export type {
   ScanReconnectDetails,
   ScanTrustedAccessStatus,
   ScanWarningDetails,
+  ValidationOptions,
+  ValidationResult,
 } from "./api.js";
 export type {
   ScanPhase,
@@ -48,8 +63,10 @@ export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
-export { publishScan } from "./publish.js";
+export { checkScanPublication, publishScan } from "./publish.js";
 export type {
+  CheckScanPublicationOptions,
+  CheckScanPublicationResult,
   PublishScanOptions,
   PublishScanProgress,
   PublishScanResult,

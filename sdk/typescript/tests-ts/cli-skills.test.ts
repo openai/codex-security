@@ -15,12 +15,25 @@ import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-function linearIssue(identifier: string) {
+function linearIssue(identifier: string, comments: string[] = []) {
+  const nodes = comments.map((body, index) => ({
+    body,
+    url: `https://linear.app/example/issue/${identifier}#comment-${index}`,
+  }));
   return {
     identifier,
     title: `Fix ${identifier}`,
     description: `Synthetic evidence for ${identifier}`,
     url: `https://linear.app/example/issue/${identifier}`,
+    comments: async () => ({
+      nodes: nodes.slice(0, 1),
+      pageInfo: { hasNextPage: nodes.length > 1 },
+      async fetchNext() {
+        this.nodes.push(...nodes.slice(1));
+        this.pageInfo.hasNextPage = false;
+        return this;
+      },
+    }),
   };
 }
 
@@ -128,6 +141,10 @@ describe("CLI skill commands", () => {
 
   test("imports selected Linear issues without exposing its credential to Codex", async () => {
     const requests: string[] = [];
+    const description =
+      "# Report\n\n## Reproduction\n\n```ts\nreadRecord(id);\n```";
+    const laterComment =
+      "# Report\n\n## Extra evidence\n\n```ts\ncheckOwner(id);\n```\n\nCheck **both** paths.";
     let inputs: string[] = [];
     let environment: NodeJS.ProcessEnv | undefined;
 
@@ -157,7 +174,13 @@ describe("CLI skill commands", () => {
             return {
               issue: async (id: string) => {
                 requests.push(id);
-                return linearIssue(id);
+                return {
+                  ...linearIssue(id, [
+                    `Additional evidence for ${id}`,
+                    laterComment,
+                  ]),
+                  description,
+                };
               },
             } as ReturnType<LinearClientFactory>;
           },
@@ -173,7 +196,15 @@ describe("CLI skill commands", () => {
     expect(requests).toEqual(["SEC-123", "SEC-124"]);
     expect(inputs).toHaveLength(2);
     expect(inputs[0]).toContain("Issue: SEC-123");
-    expect(inputs[1]).toContain("Synthetic evidence for SEC-124");
+    expect(inputs[1]).toContain(
+      `<description>\n${description}\n</description>`,
+    );
+    expect(inputs[0]).toContain("Additional evidence for SEC-123");
+    expect(inputs[1]).toContain("Additional evidence for SEC-124");
+    expect(inputs[1]).toContain(laterComment);
+    expect(inputs[0]).toContain(
+      `<comment>\nURL: https://linear.app/example/issue/SEC-123#comment-1\n\n${laterComment}\n</comment>`,
+    );
     expect(environment).toEqual({
       OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
     });
@@ -202,7 +233,7 @@ describe("CLI skill commands", () => {
             `..${paths.sep}`.repeat(32) +
             paths.relative(paths.parse(target).root, target),
         };
-        const expected = `Source: linear\nIssue: SEC-123\nURL: ${issue.url}\n\nTitle: ${issue.title}\n\n${issue.description}`;
+        const expected = `Source: linear\nIssue: SEC-123\nURL: ${issue.url}\n\nTitle: ${issue.title}\n\n<description>\n${issue.description}\n</description>`;
         const forbiddenPath = resolve(repository, expected);
         const originalLstat = filesystem.lstat;
         let probed = false;
@@ -269,11 +300,13 @@ describe("CLI skill commands", () => {
           linearClient: ({ accessToken }) => {
             expect(accessToken).toBe("SYNTHETIC_OAUTH_TOKEN");
             const page = {
-              nodes: [linearIssue("SEC-123")],
+              nodes: [linearIssue("SEC-123", ["First issue comment"])],
               pageInfo: { hasNextPage: true },
               async fetchNext() {
                 nextPages++;
-                this.nodes.push(linearIssue("SEC-124"));
+                this.nodes.push(
+                  linearIssue("SEC-124", ["Second issue comment"]),
+                );
                 this.pageInfo.hasNextPage = false;
                 return this;
               },
@@ -318,6 +351,8 @@ describe("CLI skill commands", () => {
     expect(inputs).toHaveLength(2);
     expect(inputs[0]).toContain("Issue: SEC-123");
     expect(inputs[1]).toContain("Issue: SEC-124");
+    expect(inputs[0]).toContain("First issue comment");
+    expect(inputs[1]).toContain("Second issue comment");
   });
 
   test("rejects invalid Linear selections before starting Codex", async () => {
