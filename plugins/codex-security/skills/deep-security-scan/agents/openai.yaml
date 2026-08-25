@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deep Security Scan"
+  short_description: "Run a deeper security scan"
+  default_prompt: "Use $codex-security:deep-security-scan to run a deep Codex Security scan."

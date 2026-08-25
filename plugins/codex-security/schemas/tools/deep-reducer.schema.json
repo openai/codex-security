@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/deep-reducer.schema.json",
+  "title": "Codex Security Deep Scan semantic reducer operations",
+  "$ref": "#/$defs/reductionInput",
+  "$defs": {
+    "reducerInputs": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "reductionInput": {
+      "$ref": "codex-security://schemas/tools/scan-draft.schema.json#/$defs/scanDraftInput"
+    }
+  }
+}

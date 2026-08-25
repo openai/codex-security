@@ -1550,16 +1550,10 @@ export async function runWorkbench(
 }
 
 export function bundledPluginCandidates(moduleDirectory: string): string[] {
-  const packageCandidates = [
+  return [
     resolve(moduleDirectory, "_bundled_plugin"),
     resolve(moduleDirectory, "../_bundled_plugin"),
   ];
-  return basename(moduleDirectory) === "src"
-    ? [
-        resolve(moduleDirectory, "../../../plugins/codex-security"),
-        ...packageCandidates,
-      ]
-    : packageCandidates;
 }
 
 export async function bundledPluginRoot(): Promise<string> {

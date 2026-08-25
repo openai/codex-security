@@ -1,0 +1,4 @@
+interface:
+  display_name: "Security Diff Scan"
+  short_description: "Run security review on a Git diff"
+  default_prompt: "Run a Codex Security diff scan on this PR, commit, branch diff, or working-tree patch. Cover all in-scope changed files and complete the required scan phases."

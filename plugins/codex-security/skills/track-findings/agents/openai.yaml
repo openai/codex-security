@@ -1,0 +1,6 @@
+interface:
+  display_name: "Track Findings"
+  short_description: "Track findings in Linear, Jira, GitHub issues, or draft advisories"
+  default_prompt: "Track validated Codex Security findings. Show a reviewable dry run before writing."
+policy:
+  allow_implicit_invocation: true
