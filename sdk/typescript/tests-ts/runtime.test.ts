@@ -2007,7 +2007,7 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("upgrades the released 0.1.37 plugin with the real bundled Codex executable", async () => {
+  test("upgrades a cached 0.1.37 plugin with the real bundled Codex executable", async () => {
     const root = await temporaryDirectory();
     const previous = await plugin(join(root, "previous"), "0.1.37");
     await writeFile(
