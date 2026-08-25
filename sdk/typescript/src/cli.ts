@@ -2044,7 +2044,6 @@ export async function main(
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
       let presentation: PublicationProgressPresenter | undefined;
-      let directApiPublication = false;
       let firstSignalAt = 0;
       let observingSignals = false;
       let cloudBatch:
@@ -2059,7 +2058,7 @@ export async function main(
         if (controller.signal.aborted) {
           if (
             options.to !== "linear" ||
-            directApiPublication ||
+            options.dryRun ||
             (controller.signal.reason === signal &&
               dependencies.now() - firstSignalAt < 500)
           ) {
@@ -2149,9 +2148,6 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
-        directApiPublication =
-          !options.dryRun && destination?.linearApiKey !== undefined;
-
         if (options.to === "cloud") {
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
