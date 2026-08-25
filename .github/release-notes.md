@@ -2,7 +2,7 @@
 
 ## Highlights
 
-- Bug fixes and reliability improvements for Linear publication, including
+- Bug fixes and reliability improvements for cloud publication, including
   access checks, recovery handling, and skipping findings that were already
   recorded.
 
