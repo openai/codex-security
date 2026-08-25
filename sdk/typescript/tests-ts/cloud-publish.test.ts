@@ -220,7 +220,7 @@ describe("Cloud publication", () => {
         id: result.scanId,
         producer: { name: "codex-security-cli" },
         status: "completed",
-        startedAt: expect.any(String),
+        startedAt: "1970-01-01T00:00:00.000Z",
         target: {
           kind: "directory_snapshot",
           displayName: "findings.csv",

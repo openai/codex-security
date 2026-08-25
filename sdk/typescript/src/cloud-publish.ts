@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { basename, isAbsolute, join, posix } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 import { z } from "incur";
 import Papa from "papaparse";
 import { parse as parseToml } from "smol-toml";
@@ -179,9 +179,11 @@ export async function publishFindingsCsvToCloud(
   dependencies.signal?.throwIfAborted();
   const rows = parseFindingsCsv(source);
   const digest = sha256(source);
-  const scanId = `scan_csv_${digest.slice(0, 24)}`;
+  const scanId = `scan_csv_${sha256(
+    ["codex-security-csv-import/v1", VERSION, source].join("\0"),
+  ).slice(0, 24)}`;
   const findings = rows.map((row) => csvRowFinding(row, scanId));
-  const timestamp = new Date().toISOString();
+  const timestamp = "1970-01-01T00:00:00.000Z";
   const findingsDocument = JSON.stringify({
     documentType: "codex-security.findings",
     schemaVersion: "1.0",
@@ -216,7 +218,7 @@ export async function publishFindingsCsvToCloud(
     target: {
       kind: "directory_snapshot",
       targetId: CSV_TARGET_ID,
-      displayName: basename(csvPath),
+      displayName: "findings.csv",
       snapshotDigest: `codex-security-snapshot/v1:sha256:${digest}`,
     },
     scope: {
