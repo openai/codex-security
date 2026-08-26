@@ -5,19 +5,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
-import { CodexReviewRunner } from "../src/server/deduplication/codex-review.js";
+import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
 
-for (const scenario of ["correction", "text-only", "failed-turn", "exit"]) {
+for (const scenario of [
+  "correction",
+  "text-only",
+  "failed-turn",
+  "exit",
+  "cancel",
+]) {
   test(`Codex review transport: ${scenario}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
     let directory: string | undefined;
     let args: readonly string[] = [];
+    const controller = new AbortController();
     try {
       await writeFile(
         join(modelHome, "config.toml"),
@@ -40,8 +47,13 @@ for (const scenario of ["correction", "text-only", "failed-turn", "exit"]) {
             [fixture, scenario, transcript],
             options,
           );
+          if (scenario === "cancel")
+            child.once("spawn", () =>
+              controller.abort("synthetic cancellation"),
+            );
           return child;
         },
+        controller.signal,
       );
       let validations = 0;
       const result = runner.run({
@@ -69,19 +81,21 @@ for (const scenario of ["correction", "text-only", "failed-turn", "exit"]) {
       if (scenario === "correction") {
         expect(await result).toEqual({ decision: "SAME" });
         expect(validations).toBe(2);
+      } else if (scenario === "cancel") {
+        await expect(result).rejects.toBe("synthetic cancellation");
       } else {
         await expect(result).rejects.toMatchObject({
-          code: "deduplication_failed",
           message:
-            "Codex did not complete a validated deduplication review. The imported findings remain stored; retry the request.",
+            "Codex did not complete a validated deduplication review. Findings are unchanged; retry the command.",
         });
         expect(validations).toBe(scenario === "failed-turn" ? 1 : 0);
       }
       expect(args).toContain('cli_auth_credentials_store="ephemeral"');
       expect(args.join(" ")).not.toContain("synthetic-review-key");
-      expect(await readFile(transcript, "utf8")).toContain(
-        '"method":"account/login/start"',
-      );
+      if (scenario !== "cancel")
+        expect(await readFile(transcript, "utf8")).toContain(
+          '"method":"account/login/start"',
+        );
       expect(existsSync(join(modelHome, "auth.json"))).toBe(false);
       expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
       expect(existsSync(directory!)).toBe(false);

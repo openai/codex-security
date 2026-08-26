@@ -1,10 +1,13 @@
-import type { Finding } from "../../models.js";
-import { findingNeighborhoods } from "./deduplication-neighbors.js";
+import type { Finding } from "../models.js";
 import {
   pairKey,
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
-import type { FindingsStore } from "../storage.js";
+
+export interface FindingNeighborhood {
+  finding: Finding;
+  potentialDuplicates: Finding[];
+}
 
 export interface DeduplicationResult {
   uniqueFindingIds: string[];
@@ -20,13 +23,18 @@ const severityOrder: Record<Finding["severity"]["level"], number> = {
   informational: 4,
 };
 
-export class DeduplicationService {
+/** @internal */
+export class FindingDeduplicator {
   constructor(
-    private readonly store: Pick<FindingsStore, "listEmbedded">,
+    private readonly candidates: {
+      potentialDuplicates(findingId: string): Promise<FindingNeighborhood>;
+    },
     private readonly reviewer: DeduplicationReviewer,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async run(findingIds: readonly string[]): Promise<DeduplicationResult> {
+    this.signal?.throwIfAborted();
     const ids = [...new Set(findingIds)];
     if (ids.length === 0) {
       return {
@@ -35,15 +43,14 @@ export class DeduplicationService {
         deduplicationStatus: "completed",
       };
     }
-    const entries = await this.store.listEmbedded();
-    const findings = new Map(
-      entries.map(({ finding }) => [finding.findingId, finding]),
-    );
-    const positions = new Map(
-      entries.map(({ finding }, index) => [finding.findingId, index]),
-    );
+    const findings = new Map<string, Finding>();
     const nominated = new Map<string, [string, string]>();
-    for (const neighborhood of findingNeighborhoods(entries, ids)) {
+    for (const id of ids) {
+      this.signal?.throwIfAborted();
+      const result = await this.candidates.potentialDuplicates(id);
+      const neighborhood = [result.finding, ...result.potentialDuplicates];
+      for (const finding of neighborhood)
+        findings.set(finding.findingId, finding);
       if (neighborhood.length < 2) continue;
       const screening = await this.reviewer.screen(neighborhood);
       for (const decision of screening.decisions) {
@@ -55,6 +62,7 @@ export class DeduplicationService {
 
     const adjacent = new Map<string, Set<string>>();
     for (const pair of nominated.values()) {
+      this.signal?.throwIfAborted();
       const originals = pair.map((id) => findings.get(id)!);
       if ((await this.reviewer.reviewPair(originals)).decision !== "SAME")
         continue;
@@ -70,6 +78,7 @@ export class DeduplicationService {
     const duplicateGroups: string[][] = [];
     const canonical = new Map<string, string>();
     for (const id of findings.keys()) {
+      this.signal?.throwIfAborted();
       if (!adjacent.has(id) || visited.has(id)) continue;
       const members: string[] = [];
       const pending = [id];
@@ -85,7 +94,7 @@ export class DeduplicationService {
         (left, right) =>
           severityOrder[findings.get(left)!.severity.level] -
             severityOrder[findings.get(right)!.severity.level] ||
-          positions.get(left)! - positions.get(right)!,
+          (left < right ? -1 : left > right ? 1 : 0),
       );
       if (
         members.length > 2 &&

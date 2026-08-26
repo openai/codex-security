@@ -1,10 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
-import type { CodexReview } from "../src/server/deduplication/codex-review.js";
-import { DeduplicationService } from "../src/server/deduplication/deduplication.js";
-import { findingNeighborhoods } from "../src/server/deduplication/deduplication-neighbors.js";
+import type { CodexReview } from "../src/deduplication/codex-review.js";
+import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
+import { potentialDuplicates } from "../src/server/potential-duplicates.js";
 import {
   CodexDeduplicationReviewer,
   pairKey,
@@ -12,10 +13,13 @@ import {
   type DeduplicationReviewer,
   type DuplicateDecision,
   type ScreeningResult,
-} from "../src/server/deduplication/deduplication-reviewer.js";
-import { FindingsError } from "../src/server/errors.js";
+} from "../src/deduplication/deduplication-reviewer.js";
+import { CodexSecurityError } from "../src/errors.js";
+import { FindingsClient } from "../src/deduplication/findings-client.js";
+import { deduplicateScanInternal } from "../src/deduplication/scan.js";
 import type { EmbeddedFinding } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import type { JsonObject } from "../src/config.js";
 
 const document: FindingsDocument = JSON.parse(
   await readFile(
@@ -40,6 +44,12 @@ function entry(index: number, vector = [1, 0]): EmbeddedFinding {
     embedding: { model: "synthetic", vector },
   };
 }
+function candidates(entries: EmbeddedFinding[]) {
+  return {
+    potentialDuplicates: async (id: string) => potentialDuplicates(entries, id),
+  };
+}
+
 const same: DuplicateDecision = {
   decision: "SAME",
   rationale: "One existing control corrects every path.",
@@ -75,27 +85,28 @@ test("ranks compatible cosine neighbors with the inclusive cutoff and a stable t
   otherModel.embedding.model = "other-model";
   const otherDimensions = entry(4, [1, 0, 0]);
   expect(
-    findingNeighborhoods(
+    potentialDuplicates(
       [anchor, below, otherModel, otherDimensions, boundary],
-      [anchor.finding.findingId],
+      anchor.finding.findingId,
     ),
-  ).toEqual([[anchor.finding, boundary.finding]]);
+  ).toEqual({
+    finding: anchor.finding,
+    potentialDuplicates: [boundary.finding],
+  });
   const tied = Array.from({ length: 60 }, (_, index) => entry(index + 1));
   expect(
-    findingNeighborhoods([anchor, ...tied], [anchor.finding.findingId])[0],
-  ).toEqual([
-    anchor.finding,
-    ...tied.slice(0, 50).map(({ finding }) => finding),
-  ]);
+    potentialDuplicates([anchor, ...tied], anchor.finding.findingId)
+      .potentialDuplicates,
+  ).toEqual([...tied.slice(0, 50).map(({ finding }) => finding)]);
 });
 
 test("missing or invalid embeddings never become evidence of uniqueness", () => {
-  expect(() => findingNeighborhoods([], [entry(1).finding.findingId])).toThrow(
-    "changed before deduplication",
+  expect(() => potentialDuplicates([], entry(1).finding.findingId)).toThrow(
+    "no current embedding",
   );
   const invalid = entry(1, [0, 0]);
   expect(() =>
-    findingNeighborhoods([invalid], [invalid.finding.findingId]),
+    potentialDuplicates([invalid], invalid.finding.findingId),
   ).toThrow("cannot be compared");
 });
 
@@ -140,10 +151,7 @@ test("reviews nominated pairs once and judges the complete group before selectin
       return same;
     },
   };
-  const service = new DeduplicationService(
-    { listEmbedded: async () => entries },
-    reviewer,
-  );
+  const service = new FindingDeduplicator(candidates(entries), reviewer);
   expect(await service.run([...ids, ids[0]!])).toEqual({
     uniqueFindingIds: [ids[1]!, ids[3]!],
     duplicateGroups: [[ids[1]!, ids[0]!, ids[2]!]],
@@ -166,23 +174,20 @@ test("reviews nominated pairs once and judges the complete group before selectin
 test("whole-group rejection keeps a transitive chain separate", async () => {
   const entries = [entry(1), entry(2), entry(3)];
   const ids = entries.map(({ finding }) => finding.findingId);
-  const service = new DeduplicationService(
-    { listEmbedded: async () => entries },
-    {
-      async screen(findings) {
-        return screening(
-          findings,
-          new Set([pairKey([ids[0]!, ids[1]!]), pairKey([ids[1]!, ids[2]!])]),
-        );
-      },
-      async reviewPair() {
-        return same;
-      },
-      async reviewGroup() {
-        return distinct;
-      },
+  const service = new FindingDeduplicator(candidates(entries), {
+    async screen(findings) {
+      return screening(
+        findings,
+        new Set([pairKey([ids[0]!, ids[1]!]), pairKey([ids[1]!, ids[2]!])]),
+      );
     },
-  );
+    async reviewPair() {
+      return same;
+    },
+    async reviewGroup() {
+      return distinct;
+    },
+  });
   expect(await service.run(ids)).toEqual({
     uniqueFindingIds: ids,
     duplicateGroups: [],
@@ -195,20 +200,17 @@ test("matches an import to an existing canonical without judging a two-finding g
   const imported = entry(2);
   imported.finding.severity.level = "low";
   const ids = [existing.finding.findingId, imported.finding.findingId];
-  const service = new DeduplicationService(
-    { listEmbedded: async () => [existing, imported] },
-    {
-      async screen(findings) {
-        return screening(findings, new Set([pairKey(ids)]));
-      },
-      async reviewPair() {
-        return same;
-      },
-      async reviewGroup() {
-        throw new Error("Two-finding groups do not need another review");
-      },
+  const service = new FindingDeduplicator(candidates([existing, imported]), {
+    async screen(findings) {
+      return screening(findings, new Set([pairKey(ids)]));
     },
-  );
+    async reviewPair() {
+      return same;
+    },
+    async reviewGroup() {
+      throw new Error("Two-finding groups do not need another review");
+    },
+  });
   expect(await service.run([imported.finding.findingId])).toEqual({
     uniqueFindingIds: [existing.finding.findingId],
     duplicateGroups: [ids],
@@ -219,10 +221,7 @@ test("matches an import to an existing canonical without judging a two-finding g
 test("empty and isolated imports avoid models, while review failures propagate", async () => {
   const first = entry(1);
   const second = entry(2, [0, 1]);
-  const failure = new FindingsError(
-    "deduplication_failed",
-    "Synthetic review failed",
-  );
+  const failure = new CodexSecurityError("Synthetic review failed");
   const reviewer: DeduplicationReviewer = {
     async screen() {
       throw failure;
@@ -234,8 +233,8 @@ test("empty and isolated imports avoid models, while review failures propagate",
       throw failure;
     },
   };
-  const service = new DeduplicationService(
-    { listEmbedded: async () => [first, second] },
+  const service = new FindingDeduplicator(
+    candidates([first, second]),
     reviewer,
   );
   expect(await service.run([])).toEqual({
@@ -328,4 +327,134 @@ test("uses independent model assignments and complete originals without earlier 
           !prompt.includes("PAIR_ONLY_RATIONALE"),
       ),
   ).toBe(true);
+});
+
+test("resolves a saved scan and retrieves its IDs without uploading or modifying artifacts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dedupe-scan-"));
+  try {
+    await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
+      recursive: true,
+    });
+    if (process.platform !== "win32") await chmod(directory, 0o700);
+    const original = await readFile(join(directory, "findings.json"), "utf8");
+    for (const requestedId of ["scan_example", "latest"]) {
+      const commands: string[][] = [];
+      const requests: string[] = [];
+      const result = await deduplicateScanInternal(
+        requestedId,
+        { findingsUrl: "http://synthetic.test/api" },
+        {
+          currentDirectory: () => directory,
+          runWorkbench: async (args): Promise<JsonObject> => {
+            commands.push([...args]);
+            return args[0] === "list-scans"
+              ? { scans: [{ scanId: "scan_example_001" }] }
+              : {
+                  scan: {
+                    scanId: "scan_example_001",
+                    scanDir: directory,
+                    progress: { status: "complete" },
+                  },
+                };
+          },
+          fetch: async (url, options) => {
+            requests.push(String(url));
+            expect(options?.method).toBeUndefined();
+            expect(options?.body).toBeUndefined();
+            expect(options?.headers).toBeUndefined();
+            return Response.json({
+              finding: document.findings[0],
+              potentialDuplicates: [],
+            });
+          },
+          reviewer: {
+            async screen() {
+              throw new Error("No review for an empty neighborhood");
+            },
+            async reviewPair() {
+              throw new Error("No pair to review");
+            },
+            async reviewGroup() {
+              throw new Error("No group to review");
+            },
+          },
+        },
+      );
+      expect(result).toEqual({
+        scanId: "scan_example_001",
+        uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+        duplicateGroups: [],
+        deduplicationStatus: "completed",
+      });
+      expect(commands.at(-1)).toEqual([
+        "get-scan",
+        "--scan-id",
+        requestedId === "latest" ? "scan_example_001" : requestedId,
+      ]);
+      if (requestedId === "latest")
+        expect(commands[0]).toEqual([
+          "list-scans",
+          "--repository",
+          directory,
+          "--status",
+          "complete",
+        ]);
+      expect(requests).toEqual([
+        `http://synthetic.test/api/v1/finding/${document.findings[0]!.findingId}/potential-duplicates`,
+      ]);
+    }
+    expect(await readFile(join(directory, "findings.json"), "utf8")).toBe(
+      original,
+    );
+    await expect(
+      deduplicateScanInternal(
+        "wrong-scan",
+        { findingsUrl: "http://synthetic.test" },
+        {
+          runWorkbench: async () => ({
+            scan: {
+              scanId: "wrong-scan",
+              scanDir: directory,
+              progress: { status: "complete" },
+            },
+          }),
+          fetch: async () => {
+            throw new Error(
+              "Must not retrieve candidates for a mismatched scan",
+            );
+          },
+        },
+      ),
+    ).rejects.toThrow("do not match selected scan");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("lookup failures and cancellation never produce a completed uniqueness result", async () => {
+  for (const status of [404, 502]) {
+    const client = new FindingsClient(
+      "http://synthetic.test",
+      undefined,
+      async () => new Response("", { status }),
+    );
+    await expect(
+      client.potentialDuplicates(entry(1).finding.findingId),
+    ).rejects.toThrow(`HTTP ${status}`);
+  }
+  const controller = new AbortController();
+  controller.abort("synthetic cancellation");
+  await expect(
+    new FindingDeduplicator(
+      candidates([]),
+      {} as DeduplicationReviewer,
+      controller.signal,
+    ).run([]),
+  ).rejects.toBe("synthetic cancellation");
+  await expect(
+    deduplicateScanInternal("scan-id", {
+      findingsUrl: "http://synthetic.test",
+      signal: controller.signal,
+    }),
+  ).rejects.toBe("synthetic cancellation");
 });

@@ -55,6 +55,8 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { deduplicateScanInternal } from "./deduplication/scan.js";
+import { resolveCompletedScan, type SavedScan } from "./saved-scan.js";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -191,7 +193,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 type FailureSeverity = Exclude<SeverityLevel, "informational">;
-type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 const REPORTABLE_SEVERITIES: readonly FailureSeverity[] = [
   "critical",
@@ -1082,6 +1083,7 @@ interface CliDependencies {
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
+  deduplicateScan?: typeof deduplicateScanInternal;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   confirmPatchReview?: (question: string) => Promise<boolean>;
@@ -2212,7 +2214,7 @@ export async function main(
           directories.map((scanDir) => ({ scanDir }));
         for (const requestedId of new Set(options.scan)) {
           controller.signal.throwIfAborted();
-          const scan = await resolvePublicationScan(requestedId, dependencies);
+          const scan = await resolveCompletedScan(requestedId, dependencies);
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
             selectedScans.push(scan);
           }
@@ -3014,6 +3016,65 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("dedupe", {
+      description:
+        "Review a saved scan for duplicates using the findings API and local Codex.",
+      destructive: true,
+      mcp: false,
+      options: z.object({
+        scan: optionValue("--scan").describe(
+          "Saved scan ID, unique prefix, or latest.",
+        ),
+        findingsUrl: z
+          .string()
+          .url()
+          .describe(
+            "Findings API base URL; the scan's findings must already be indexed.",
+          ),
+      }),
+      output: z
+        .object({
+          scanId: z.string(),
+          uniqueFindingIds: z.array(z.string()),
+          duplicateGroups: z.array(z.array(z.string())),
+          deduplicationStatus: z.literal("completed"),
+        })
+        .optional(),
+      async run({ options }) {
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          return await (
+            dependencies.deduplicateScan ?? deduplicateScanInternal
+          )(
+            options.scan,
+            { findingsUrl: options.findingsUrl, signal: controller.signal },
+            {
+              environment: dependencies.environment,
+              currentDirectory: dependencies.currentDirectory,
+              runWorkbench: dependencies.runWorkbench,
+            },
+          );
+        } catch (error) {
+          const signal = controller.signal.reason;
+          errorOutput.write(
+            `codex-security: ${
+              signal === "SIGINT" || signal === "SIGTERM"
+                ? "Deduplication canceled. Findings are unchanged."
+                : safeErrorMessage(error)
+            }\n`,
+          );
+          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          return undefined;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command(imports)
     .command("scan-components", {
       description:
@@ -4637,71 +4698,6 @@ async function* workbenchFindings(
     yield* page.findings;
     offset = typeof page.nextOffset === "number" ? page.nextOffset : undefined;
   } while (offset !== undefined);
-}
-
-async function resolvePublicationScan(
-  requestedId: string,
-  dependencies: CliDependencies,
-): Promise<SavedScan> {
-  let scanId = requestedId;
-  if (scanId === "latest") {
-    const history = await dependencies.runWorkbench([
-      "list-scans",
-      "--repository",
-      resolve(dependencies.currentDirectory()),
-      "--status",
-      "complete",
-    ]);
-    const scans = history["scans"];
-    const latest = Array.isArray(scans) ? scans[0] : undefined;
-    if (
-      latest === undefined ||
-      !isJsonObject(latest) ||
-      typeof latest["scanId"] !== "string"
-    ) {
-      throw new CodexSecurityError(
-        "No completed saved scan was found for this repository.",
-      );
-    }
-    scanId = latest["scanId"];
-  }
-  const context = await dependencies.runWorkbench([
-    "get-scan",
-    "--scan-id",
-    scanId,
-  ]);
-  const scan = context["scan"];
-  if (
-    scan === undefined ||
-    !isJsonObject(scan) ||
-    typeof scan["scanId"] !== "string"
-  ) {
-    throw new CodexSecurityError(`Could not read saved scan ${scanId}.`);
-  }
-  scanId = scan["scanId"];
-  const progress = scan["progress"];
-  if (
-    progress === undefined ||
-    !isJsonObject(progress) ||
-    progress["status"] !== "complete"
-  ) {
-    throw new CodexSecurityError(`Scan ${scanId} is not complete.`);
-  }
-  const storedDirectory = scan["scanDir"];
-  const scanDir =
-    typeof storedDirectory === "string" && storedDirectory.length > 0
-      ? resolveCliPath(dependencies.currentDirectory(), storedDirectory)
-      : undefined;
-  const metadata =
-    scanDir === undefined
-      ? undefined
-      : await lstat(scanDir).catch(() => undefined);
-  if (scanDir === undefined || metadata?.isDirectory() !== true) {
-    throw new CodexSecurityError(
-      `Artifacts for scan ${scanId} are unavailable. Restore the completed scan artifacts or run a new scan.`,
-    );
-  }
-  return { ...scan, scanId, scanDir };
 }
 
 async function selectSavedFindings(

@@ -10,11 +10,11 @@ import { createInterface } from "node:readline";
 import {
   comparisonEnvironment,
   disabledMcpServers,
-} from "../../scan-comparison.js";
-import { resolveCodexCommand } from "../../runtime.js";
-import { CODEX_SECURITY_THREAD_SOURCES } from "../../thread-source.js";
-import { VERSION } from "../../version.js";
-import { FindingsError } from "../errors.js";
+} from "../scan-comparison.js";
+import { resolveCodexCommand } from "../runtime.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
+import { VERSION } from "../version.js";
+import { CodexSecurityError } from "../errors.js";
 
 export interface CodexReview<T> {
   model: string;
@@ -55,29 +55,37 @@ export class CodexReviewRunner {
   constructor(
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly startCodex: StartCodex = spawn,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
+    this.signal?.throwIfAborted();
     const directory = await mkdtemp(join(tmpdir(), "codex-security-dedupe-"));
     try {
-      const environment = await comparisonEnvironment(this.environment);
+      const environment = await comparisonEnvironment(
+        this.environment,
+        undefined,
+        this.signal,
+      );
       const command = resolveCodexCommand(environment);
       const servers = await disabledMcpServers(
         command,
         undefined,
         environment,
-        { workingDirectory: directory },
+        { workingDirectory: directory, signal: this.signal },
       );
       const apiKey =
         environment["OPENAI_API_KEY"] ?? environment["CODEX_API_KEY"];
       const args = ["app-server", "--stdio", "--disable", "plugins"];
       if (apiKey)
         args.push("--config", 'cli_auth_credentials_store="ephemeral"');
+      this.signal?.throwIfAborted();
       const child = this.startCodex(command.command, args, {
         cwd: directory,
         env: environment,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
+        signal: this.signal,
       });
       const closed = new Promise<void>((resolve) =>
         child.once("close", () => resolve()),
@@ -252,9 +260,9 @@ export class CodexReviewRunner {
         await closed;
       }
     } catch {
-      throw new FindingsError(
-        "deduplication_failed",
-        "Codex did not complete a validated deduplication review. The imported findings remain stored; retry the request.",
+      this.signal?.throwIfAborted();
+      throw new CodexSecurityError(
+        "Codex did not complete a validated deduplication review. Findings are unchanged; retry the command.",
       );
     } finally {
       await rm(directory, { recursive: true, force: true });

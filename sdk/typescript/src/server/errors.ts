@@ -5,7 +5,7 @@ export class FindingsError extends Error {
       | "finding_conflict"
       | "embedding_unavailable"
       | "embedding_failed"
-      | "deduplication_failed",
+      | "finding_not_indexed",
     message: string,
   ) {
     super(message);

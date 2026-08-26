@@ -1,7 +1,5 @@
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
-import { DeduplicationService } from "./deduplication/deduplication.js";
-import { CodexDeduplicationReviewer } from "./deduplication/deduplication-reviewer.js";
 import type { FindingEmbedder } from "./embeddings.js";
 import { FindingsService } from "./findings-service.js";
 import { handleFindingsRequest } from "./routes.js";
@@ -11,18 +9,12 @@ import { findingsRequestValidator } from "./validation.js";
 export async function startFindingsServer(options: {
   store: FindingsStore;
   embeddings: FindingEmbedder;
-  deduplication?: Pick<DeduplicationService, "run">;
   host: string;
   port: number;
 }): Promise<Server> {
   await options.store.initialize();
   const validate = await findingsRequestValidator();
-  const service = new FindingsService(
-    options.store,
-    options.embeddings,
-    options.deduplication ??
-      new DeduplicationService(options.store, new CodexDeduplicationReviewer()),
-  );
+  const service = new FindingsService(options.store, options.embeddings);
   const server = createServer((request, response) => {
     void handleFindingsRequest(request, response, service, validate);
   });

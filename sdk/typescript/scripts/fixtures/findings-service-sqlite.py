@@ -1,8 +1,10 @@
 """Assert persisted findings and embeddings in the smoke-test container."""
 
 import json
+import shutil
 import sqlite3
 import sys
+from pathlib import Path
 
 expected_ids = sorted(json.loads(sys.argv[1]))
 with sqlite3.connect("/state/workbench.sqlite3") as db:
@@ -17,5 +19,24 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
         vector = json.loads(vector_json)
         assert model == "text-embedding-3-large", (finding_id, model)
         assert len(vector) == 1536, (finding_id, len(vector))
+
+    if "--prepare-scan" in sys.argv:
+        scan_dir = Path("/state/smoke-scan")
+        shutil.copytree("_bundled_plugin/examples/completed-scan", scan_dir, dirs_exist_ok=True)
+        scan_dir.chmod(0o700)
+        scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+        timestamp = scan["completedAt"]
+        db.execute(
+            "INSERT OR IGNORE INTO workspaces (id, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000001', ?, ?)",
+            (timestamp, timestamp),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, '00000000-0000-4000-8000-000000000001', '/synthetic/repository', 'revision', '.', 'standard', ?, 'complete', 'reporting', ?, ?, ?, ?)",
+            (scan["id"], str(scan_dir), timestamp, timestamp, timestamp, timestamp),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
+            (scan["id"], timestamp),
+        )
 
 print(f"Verified {len(expected_ids)} stored findings and embeddings.")

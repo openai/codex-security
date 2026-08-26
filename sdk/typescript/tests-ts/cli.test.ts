@@ -257,6 +257,7 @@ describe("CLI", () => {
   test("documents every public command argument and option", async () => {
     const commands = [
       ["scan"],
+      ["dedupe"],
       ["bulk-scan"],
       ["export"],
       ["validate"],

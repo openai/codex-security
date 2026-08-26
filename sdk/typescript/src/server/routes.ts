@@ -18,10 +18,15 @@ export async function handleFindingsRequest(
       json(response, 200, await service.list(pagination(url.searchParams)));
       return;
     }
-    if (
-      route === "POST /v1/bulk/findings" ||
-      route === "POST /v1/bulk/findings/dedupe"
-    ) {
+    const candidates = /^\/v1\/finding\/([^/]+)\/potential-duplicates$/.exec(
+      url.pathname,
+    );
+    if (request.method === "GET" && candidates) {
+      console.log("GET /v1/finding/:id/potential-duplicates");
+      json(response, 200, await service.potentialDuplicates(candidates[1]!));
+      return;
+    }
+    if (route === "POST /v1/bulk/findings") {
       console.log(route);
       const input = await readJson(request);
       if (!validate(input)) {
@@ -30,10 +35,7 @@ export async function handleFindingsRequest(
           "Expected {findings: [...]} using the existing Finding schema.",
         );
       }
-      const result = route.endsWith("/dedupe")
-        ? await service.insertAndDeduplicate(input.findings)
-        : await service.insert(input.findings);
-      json(response, 201, result);
+      json(response, 201, await service.insert(input.findings));
       return;
     }
     request.resume();
@@ -45,7 +47,7 @@ export async function handleFindingsRequest(
         finding_conflict: 409,
         embedding_unavailable: 503,
         embedding_failed: 502,
-        deduplication_failed: 502,
+        finding_not_indexed: 404,
       }[error.code];
       json(response, status, { error: error.code, message: error.message });
     } else {

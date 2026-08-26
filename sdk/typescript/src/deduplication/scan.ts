@@ -1,0 +1,96 @@
+import { loadContract } from "../contract.js";
+import {
+  bundledPluginRoot,
+  codexSecurityStateDirectory,
+  resolvePluginPython,
+  runWorkbench,
+} from "../runtime.js";
+import {
+  resolveCompletedScan,
+  type SavedScanDependencies,
+} from "../saved-scan.js";
+import { CodexReviewRunner } from "./codex-review.js";
+import {
+  FindingDeduplicator,
+  type DeduplicationResult,
+} from "./deduplication.js";
+import {
+  CodexDeduplicationReviewer,
+  type DeduplicationReviewer,
+} from "./deduplication-reviewer.js";
+import { FindingsClient, type FindingsRequest } from "./findings-client.js";
+
+export interface DeduplicateScanOptions {
+  /** Findings API base URL. The scan's findings must already be indexed there. */
+  findingsUrl: string;
+  signal?: AbortSignal;
+}
+
+export interface DeduplicateScanResult extends DeduplicationResult {
+  scanId: string;
+}
+
+/** Review a saved scan against embedding candidates, without changing findings. */
+export async function deduplicateScan(
+  scanId: string,
+  options: DeduplicateScanOptions,
+): Promise<DeduplicateScanResult> {
+  return await deduplicateScanInternal(scanId, options);
+}
+
+/** @internal */
+export async function deduplicateScanInternal(
+  scanId: string,
+  options: DeduplicateScanOptions,
+  dependencies: Partial<SavedScanDependencies> & {
+    environment?: NodeJS.ProcessEnv;
+    reviewer?: DeduplicationReviewer;
+    fetch?: FindingsRequest;
+  } = {},
+): Promise<DeduplicateScanResult> {
+  options.signal?.throwIfAborted();
+  const environment = dependencies.environment ?? process.env;
+  const pluginRoot = await bundledPluginRoot();
+  const scan = await resolveCompletedScan(scanId, {
+    currentDirectory: dependencies.currentDirectory ?? (() => process.cwd()),
+    runWorkbench:
+      dependencies.runWorkbench ??
+      (async (args) => {
+        const stateEnvironment = {
+          ...environment,
+          CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(environment),
+        };
+        return await runWorkbench(
+          {
+            environment: stateEnvironment,
+            pluginRoot,
+            python: await resolvePluginPython({
+              environment: stateEnvironment,
+            }),
+            signal: options.signal,
+            failureMessage: "Could not read Codex Security scan history",
+          },
+          args,
+        );
+      }),
+  });
+  const contract = await loadContract(scan.scanDir, {
+    pluginRoot,
+    expectedScanId: scan.scanId,
+    signal: options.signal,
+  });
+  const deduplicator = new FindingDeduplicator(
+    new FindingsClient(options.findingsUrl, options.signal, dependencies.fetch),
+    dependencies.reviewer ??
+      new CodexDeduplicationReviewer(
+        new CodexReviewRunner(environment, undefined, options.signal),
+      ),
+    options.signal,
+  );
+  return {
+    scanId: scan.scanId,
+    ...(await deduplicator.run(
+      contract.findings.findings.map((finding) => finding.findingId),
+    )),
+  };
+}

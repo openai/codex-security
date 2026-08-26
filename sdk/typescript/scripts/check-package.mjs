@@ -196,11 +196,14 @@ const distFiles = new Set(
     "scan-logs",
     "scan-sessions",
     "server/index",
-    "server/deduplication/codex-review",
-    "server/deduplication/deduplication",
-    "server/deduplication/deduplication-neighbors",
-    "server/deduplication/deduplication-prompts",
-    "server/deduplication/deduplication-reviewer",
+    "deduplication/codex-review",
+    "deduplication/deduplication",
+    "server/potential-duplicates",
+    "deduplication/deduplication-prompts",
+    "deduplication/deduplication-reviewer",
+    "deduplication/findings-client",
+    "deduplication/scan",
+    "saved-scan",
     "server/embeddings",
     "server/errors",
     "server/findings-service",
@@ -232,7 +235,7 @@ for (const file of files) {
       normalized === "package/bin" ||
       normalized === "package/dist" ||
       normalized === "package/dist/server" ||
-      normalized === "package/dist/server/deduplication" ||
+      normalized === "package/dist/deduplication" ||
       pluginDirectories.has(normalized)
     : allowedRoot.has(normalized) ||
       distFiles.has(normalized) ||

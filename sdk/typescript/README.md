@@ -1303,17 +1303,17 @@ and bulk-scan Compose configuration are unchanged.
 
 ### API
 
-Both POST endpoints accept `{"findings": [...]}`, using the existing SDK
+`POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
 `Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.
 A complete exported `findings.json` document is also accepted; only its
 `findings` array is imported. No files or source paths referenced by the
 findings are opened. Only the supplied JSON is processed.
 
-| Method | Path                             | Response                                                       |
-| ------ | -------------------------------- | -------------------------------------------------------------- |
-| `POST` | `/v1/bulk/findings`              | HTTP 201 with an array of stored finding IDs, in request order |
-| `POST` | `/v1/bulk/findings/dedupe`       | HTTP 201 with the workflow result shown below                  |
-| `GET`  | `/v1/findings?limit=50&offset=0` | HTTP 200 with a page of complete findings                      |
+| Method | Path                                    | Response                                                                            |
+| ------ | --------------------------------------- | ----------------------------------------------------------------------------------- |
+| `POST` | `/v1/bulk/findings`                     | HTTP 201 with an array of stored finding IDs, in request order                      |
+| `GET`  | `/v1/findings?limit=50&offset=0`        | HTTP 200 with a page of complete findings                                           |
+| `GET`  | `/v1/finding/{id}/potential-duplicates` | HTTP 200 with the stored finding and up to 50 potential duplicates, without vectors |
 
 Bulk insertion generates embeddings and then writes the findings and vectors
 in one SQLite transaction. If embedding generation fails or a finding identity
@@ -1335,31 +1335,65 @@ curl http://127.0.0.1:3000/v1/bulk/findings \
 ["csf_852f90d6e1177502ff113d4a"]
 ```
 
-The dedupe endpoint performs the same insertion, then awaits
-`DeduplicationService.run` before returning its result:
+The potential-duplicates response contains `finding` (the complete stored
+anchor) and `potentialDuplicates` (an array of complete `Finding` records).
+Neither includes embedding vectors. The anchor is not repeated in the array.
+Candidates have cosine similarity at least 0.55 and the same embedding model
+and dimensions as the anchor. They are ordered by descending similarity, with
+ties resolved by insertion time and finding ID, and limited to 50. Each request
+reads a current snapshot; separate requests do not share a database snapshot.
+The API does not run Codex or decide whether candidates are duplicates.
+
+### Deduplication from the SDK and CLI
+
+Import the scan's findings through the bulk API before deduplicating. The
+workflow reads a completed saved scan, queries candidates by finding ID, and
+runs Luna and Sol in the calling SDK/CLI process. It does not upload findings,
+change scan artifacts, or write grouping results to the service.
+
+```bash
+codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
+```
+
+Both `--scan` and `--findings-url` are required, with no implicit scan or service
+URL. As with `publish scan --scan`, the selector accepts a full ID, unique
+prefix, or `latest` for the current repository. The saved scan must be complete
+and its sealed artifacts must be available. This command replaces the preview
+`POST /v1/bulk/findings/dedupe` route; that route is no longer available.
+
+```typescript
+import { deduplicateScan } from "@openai/codex-security";
+
+const result = await deduplicateScan("scan_example_001", {
+  findingsUrl: "http://127.0.0.1:3000",
+  // signal: controller.signal,
+});
+console.log(result.duplicateGroups);
+```
+
+The CLI and SDK return the same result:
 
 ```json
 {
+  "scanId": "scan_example_001",
   "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
   "duplicateGroups": [],
   "deduplicationStatus": "completed"
 }
 ```
 
-`uniqueFindingIds` contains one representative for each imported finding after
+`uniqueFindingIds` contains one representative for each selected finding after
 accepted duplicate groups are collapsed. A representative can be an existing
-stored finding outside the request. Each `duplicateGroups` entry contains all
+stored finding outside the scan. Each `duplicateGroups` entry contains all
 members of an accepted group, with its canonical finding first. The canonical
-has the highest reported severity; ties use first insertion time, then finding
-ID. Results do not delete, merge, or change stored findings, and are not saved
-as durable group assignments.
+has the highest reported severity; ties use finding ID. Results do not delete,
+merge, or change stored findings, and are not saved as durable group assignments.
 
 ### Deduplication workflow
 
-1. Read a snapshot of complete findings with current embeddings. For each
-   imported finding, retrieve up to 50 nearest neighbors with cosine similarity
-   at least 0.55, across the stored corpus. Only embeddings with the same model
-   and dimensions are compared; self-matches are excluded.
+1. For each distinct finding ID in the scan, request
+   `/v1/finding/{id}/potential-duplicates`. Use the complete stored anchor and
+   candidates returned by that request.
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair and can nominate
    additional duplicate pairs among the supplied neighbors.
@@ -1370,19 +1404,22 @@ as durable group assignments.
    not infer smaller groups from a rejected transitive chain.
 
 Each review uses a fresh, ephemeral Codex app-server thread without environment
-access, with the complete
-original finding records, not earlier model rationales, vector scores, or
+access, with the complete original finding records, not earlier model rationales, vector scores, or
 summaries. Decisions must arrive through the validated `submit_decisions` tool;
 invalid submissions can be corrected in the same session. A final text answer
 alone is insufficient. Reviews have no shell, web, plugin, or MCP access and
 do not open source paths or links from finding content.
 
-The workflow runs synchronously and model calls run sequentially. Larger batches
-can take time and incur multiple model calls per finding; the API key must have
-access to the configured models. Empty imports and findings without eligible
-neighbors do not invoke review models. `completed` means this retrieval and
-review process completed, not that every possible pair in the database was
-compared or that model decisions are infallible.
+Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
+`OPENAI_API_KEY`/`CODEX_API_KEY`, with access to the configured models. Model
+credentials are not sent to the findings API. Larger scans can take time and
+incur multiple model calls per finding. Empty scans and findings without
+eligible neighbors do not invoke review models. `completed` means this
+retrieval and review process completed, not that every possible pair in the
+database was compared or that model decisions are infallible. An API or review
+failure fails the command without claiming a completed result. Retry after
+fixing the failure; stored findings remain unchanged. The CLI supports Ctrl-C
+and SIGTERM, and the SDK accepts an `AbortSignal`.
 
 ### Listing and errors
 
@@ -1408,17 +1445,15 @@ held between HTTP requests.
 
 Malformed JSON, invalid finding objects, and invalid pagination return HTTP
 400 (`invalid_request`). Identity conflicts return 409 (`finding_conflict`),
-embedding provider failures return 502 (`embedding_failed`), incomplete model
-reviews return 502 (`deduplication_failed`), and missing
-embedding credentials return 503 (`embedding_unavailable`). Unknown routes
-return 404 (`not_found`); unexpected server failures return 500
-(`internal_error`). Errors have an `error` code and, for expected failures, a
-`message`. Request bodies and provider error bodies are not logged. Deduplication
-runs after the import transaction commits: if review fails, the imported
-findings and embeddings remain stored. Retry the same dedupe request without
-creating extra rows. A requested finding whose embedding was invalidated by a
-concurrent update returns 409 (`finding_conflict`) rather than a uniqueness
-result.
+embedding provider failures or unusable vectors return 502 (`embedding_failed`),
+and missing embedding credentials return 503 (`embedding_unavailable`). A
+potential-duplicates query without a current embedding returns 404
+(`finding_not_indexed`), including findings whose embedding was invalidated by
+an update; import the finding again before retrying. This is an error, not an
+empty candidate list. Unknown routes return 404 (`not_found`); unexpected
+server failures return 500 (`internal_error`). Errors have an `error` code and,
+for expected failures, a `message`. Request bodies and provider error bodies
+are not logged.
 
 ### Embeddings and storage
 
@@ -1480,11 +1515,13 @@ and vector normalization; it does not access storage. The `FindingsStore`
 interface separately stores findings and vectors without exposing SQL or
 workbench details to the service. The server entrypoint selects the concrete
 embedder and store, so either can be replaced independently.
-`DeduplicationService` receives the store and a `DeduplicationReviewer`, keeping
-retrieval and grouping separate from model transport. `CodexDeduplicationReviewer`
-owns prompts and result validation; `CodexReviewRunner` owns app-server sessions
-and their cleanup. The service reuses the existing Codex runtime and credentials;
-no additional runtime dependencies or CLI flags are required.
+The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
+receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
+separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts
+and result validation; `CodexReviewRunner` owns app-server sessions and cleanup.
+`deduplicateScan` validates saved scan artifacts before running the workflow.
+The SDK reuses the existing Codex runtime and credentials without additional
+runtime dependencies.
 
 ## Containerized bulk scans
 

@@ -1,10 +1,12 @@
 import {
   CodexSecurity,
   DiffTarget,
+  deduplicateScan,
   estimateScanCost,
   planComponents,
   runComponentScans,
   type ComponentScanOptions,
+  type DeduplicateScanResult,
   type Finding,
   type ScanCost,
   type ScanOptions,
@@ -13,6 +15,16 @@ import {
   type ValidationOptions,
   type ValidationResult,
 } from "@openai/codex-security";
+
+export async function dedupe(
+  scanId: string,
+  signal: AbortSignal,
+): Promise<DeduplicateScanResult> {
+  return await deduplicateScan(scanId, {
+    findingsUrl: "http://127.0.0.1:3000",
+    signal,
+  });
+}
 
 const options: ScanOptions = {
   target: DiffTarget.refs({ base: "HEAD~1" }),

@@ -349,7 +349,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "checkScanPublication"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "checkScanPublication", "deduplicateScan"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
     ],
     { cwd: consumer },
   );
@@ -427,6 +427,7 @@ try {
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
+  assert.match(help, /\bdedupe\b/u);
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

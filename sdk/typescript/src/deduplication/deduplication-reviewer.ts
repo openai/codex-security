@@ -1,5 +1,5 @@
 import { z } from "incur";
-import type { Finding } from "../../models.js";
+import type { Finding } from "../models.js";
 import { CodexReviewRunner } from "./codex-review.js";
 import {
   groupReviewPrompt,

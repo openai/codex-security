@@ -5,13 +5,14 @@ import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
-import type { DeduplicationService } from "../src/server/deduplication/deduplication.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { FindingsPage } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
+import { FindingsClient } from "../src/deduplication/findings-client.js";
 
 const servers: Server[] = [];
 const directories: string[] = [];
@@ -72,12 +73,10 @@ async function fixture() {
 async function start(
   store: SqliteFindingsStore,
   embeddings = embedder,
-  deduplication?: Pick<DeduplicationService, "run">,
 ): Promise<string> {
   const server = await startFindingsServer({
     store,
     embeddings,
-    deduplication,
     host: "127.0.0.1",
     port: 0,
   });
@@ -253,40 +252,86 @@ test("upserts retries and rolls back the entire batch on identity conflicts", as
   ).toEqual([[0, 0.5]]);
 });
 
-test("dedupe endpoint awaits the workflow after persistence and returns its result", async () => {
+test("retrieves complete potential duplicates without vectors or review calls", async () => {
   const { store } = await fixture();
-  const findings = [finding(1), finding(2)];
-  const workflow: Pick<DeduplicationService, "run"> = {
-    async run(ids) {
-      expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
-        findings,
-      );
-      await Promise.resolve();
+  const base = await start(store);
+  const findings = [finding(1), finding(2), finding(3)];
+  await store.insert(
+    findings.map((finding, index) => ({
+      finding,
+      embedding: { model: "synthetic", vector: index === 2 ? [0, 1] : [1, 0] },
+    })),
+  );
+  const response = await fetch(
+    `${base}/v1/finding/${findings[0]!.findingId}/potential-duplicates`,
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    finding: findings[0],
+    potentialDuplicates: [findings[1]],
+  });
+  const isolated = await fetch(
+    `${base}/v1/finding/${findings[2]!.findingId}/potential-duplicates`,
+  );
+  expect(await isolated.json()).toEqual({
+    finding: findings[2],
+    potentialDuplicates: [],
+  });
+  const missing = await fetch(
+    `${base}/v1/finding/${finding(4).findingId}/potential-duplicates`,
+  );
+  expect(missing.status).toBe(404);
+  expect(await missing.json()).toMatchObject({ error: "finding_not_indexed" });
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
+    findings,
+  );
+});
+
+test("runs reviews in a caller using the HTTP candidate API", async () => {
+  const { store } = await fixture();
+  const base = await start(store);
+  const findings = [finding(1), finding(2), finding(3)];
+  await store.insert(
+    findings.map((finding) => ({
+      finding,
+      embedding: { model: "synthetic", vector: [1, 0] },
+    })),
+  );
+  const stages: string[] = [];
+  const same = { decision: "SAME" as const, rationale: "Synthetic duplicate" };
+  const workflow = new FindingDeduplicator(new FindingsClient(base), {
+    async screen(neighborhood) {
+      stages.push("screen");
+      expect(neighborhood).toEqual(findings);
       return {
-        uniqueFindingIds: [...ids],
-        duplicateGroups: [],
-        deduplicationStatus: "completed",
+        decisions: neighborhood.slice(1).map((candidate) => ({
+          findingIds: [neighborhood[0]!.findingId, candidate.findingId] as [
+            string,
+            string,
+          ],
+          ...same,
+        })),
       };
     },
-  };
-  const run = spyOn(workflow, "run");
-  try {
-    const base = await start(store, embedder, workflow);
-    const response = await insert(base, findings, "/v1/bulk/findings/dedupe");
-    expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({
-      uniqueFindingIds: findings.map((finding) => finding.findingId),
-      duplicateGroups: [],
-      deduplicationStatus: "completed",
-    });
-    expect(run).toHaveBeenCalledWith(
-      findings.map((finding) => finding.findingId),
-    );
-    expect((await insert(base, findings)).status).toBe(201);
-    expect(run).toHaveBeenCalledTimes(1);
-  } finally {
-    run.mockRestore();
-  }
+    async reviewPair() {
+      stages.push("pair");
+      return same;
+    },
+    async reviewGroup(group) {
+      stages.push("group");
+      expect(group).toEqual(findings);
+      return same;
+    },
+  });
+  expect(await workflow.run([findings[0]!.findingId])).toEqual({
+    uniqueFindingIds: [findings[0]!.findingId],
+    duplicateGroups: [findings.map((finding) => finding.findingId)],
+    deduplicationStatus: "completed",
+  });
+  expect(stages).toEqual(["screen", "pair", "pair", "group"]);
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
+    findings,
+  );
 });
 
 test("rejects invalid requests before embedding and preserves unknown-route behavior", async () => {
@@ -325,6 +370,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
     ["GET", "/unknown"],
     ["POST", "/v1/findings"],
     ["GET", "/v1/bulk/findings"],
+    ["POST", "/v1/bulk/findings/dedupe"],
   ]) {
     const response = await fetch(`${base}${path}`, { method });
     expect(response.status).toBe(404);
@@ -343,7 +389,7 @@ test("embedding failure leaves no partial findings or vectors", async () => {
       );
     },
   });
-  const response = await insert(base, [finding()], "/v1/bulk/findings/dedupe");
+  const response = await insert(base, [finding()]);
   expect(response.status).toBe(502);
   expect(await response.json()).toMatchObject({ error: "embedding_failed" });
   expect((await store.list({ limit: 50, offset: 0 })).total).toBe(0);
@@ -353,28 +399,6 @@ test("embedding failure leaves no partial findings or vectors", async () => {
       `print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`,
     ),
   ).toBe(0);
-});
-
-test("review failure reports an error after insertion without claiming unique findings", async () => {
-  const { store } = await fixture();
-  const findings = [finding()];
-  const base = await start(store, embedder, {
-    async run() {
-      throw new FindingsError(
-        "deduplication_failed",
-        "Synthetic review failed",
-      );
-    },
-  });
-  const response = await insert(base, findings, "/v1/bulk/findings/dedupe");
-  expect(response.status).toBe(502);
-  expect(await response.json()).toEqual({
-    error: "deduplication_failed",
-    message: "Synthetic review failed",
-  });
-  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
-    findings,
-  );
 });
 
 test("does not start when storage initialization fails", async () => {
