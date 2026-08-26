@@ -399,6 +399,7 @@ describe("custom validation", () => {
             });
             return {
               startThread: (threadOptions) => {
+                expect(threadOptions.threadSource).toBe("security_scan");
                 workingDirectories.push(threadOptions.workingDirectory);
                 return {
                   id: "thread-1",
@@ -533,7 +534,16 @@ describe("custom validation", () => {
             (await json<FindingsDocument>(join(scanDir, "findings.json")))
               .findings,
           ).toHaveLength(1);
-          await expect(readFile(join(scanDir, "report.md"))).rejects.toThrow();
+          expect(
+            (
+              await json<{ scan: { status: string } }>(
+                join(scanDir, "scan-manifest.json"),
+              )
+            ).scan.status,
+          ).toBe("failed");
+          expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+            "Fixture 0",
+          );
           return;
         }
         const completed = await pending;

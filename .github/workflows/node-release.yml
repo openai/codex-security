@@ -115,6 +115,24 @@ jobs:
             printf 'mode=%s\n' "$mode"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Validate reviewed release notes
+        if: steps.release.outputs.mode == 'publish'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_notes_file="$(mktemp)"
+          trap 'rm -f "$release_notes_file"' EXIT
+          if ! git show "$GITHUB_SHA:.github/release-notes.md" \
+            > "$release_notes_file" 2>/dev/null; then
+            echo "The tagged commit must include .github/release-notes.md." >&2
+            exit 1
+          fi
+          node sdk/typescript/scripts/release-automation.mjs \
+            validate-release-notes "$RELEASE_VERSION" "$release_notes_file" >/dev/null
+
       - name: Install dependencies
         run: sfw pnpm --dir sdk/typescript install --frozen-lockfile
 

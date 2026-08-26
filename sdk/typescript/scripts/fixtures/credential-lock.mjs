@@ -36,8 +36,8 @@ if (mode === "hold") {
   assert.ok(Date.now() - original.mtimeMs >= 30_000);
   process.kill(JSON.parse(await readFile(ownerPath, "utf8")).pid, 0);
 
-  // Released 0.1.18 clients check for a heartbeat before reclaiming an aged
-  // directory. Observe it directly instead of racing separate process timers.
+  // Released heartbeat-only clients check for a heartbeat before reclaiming an
+  // aged directory. Observe it directly instead of racing process timers.
   const deadline = Date.now() + 8_000;
   let refreshed = original;
   while (refreshed.mtimeMs <= original.mtimeMs && Date.now() < deadline) {

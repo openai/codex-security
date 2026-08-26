@@ -20,6 +20,7 @@ jobs:
       github.repository == 'openai/codex-security' &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'))
     name: cut release tag
     runs-on: ubuntu-latest
@@ -65,6 +66,15 @@ jobs:
           fi
 
           version="$(node sdk/typescript/scripts/release-automation.mjs version sdk/typescript/package.json)"
+          release_notes_file="$(mktemp)"
+          trap 'rm -f "$release_notes_file"' EXIT
+          if ! git show "$RELEASE_SHA:.github/release-notes.md" \
+            > "$release_notes_file" 2>/dev/null; then
+            echo "The tagged commit must include .github/release-notes.md." >&2
+            exit 1
+          fi
+          node sdk/typescript/scripts/release-automation.mjs \
+            validate-release-notes "$version" "$release_notes_file" >/dev/null
 
           if ! published_versions="$(
             npm view @openai/codex-security versions \

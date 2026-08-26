@@ -10,7 +10,7 @@ export interface ScanManifest {
       version: string;
       [k: string]: unknown;
     };
-    status: "completed";
+    status: "completed" | "failed" | "canceled" | "interrupted";
     startedAt: string;
     completedAt: string;
     sealedAt: string;

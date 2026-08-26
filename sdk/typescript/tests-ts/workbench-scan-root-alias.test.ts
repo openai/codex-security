@@ -3,18 +3,13 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import { resolvePluginPython } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 test.skipIf(process.platform !== "win32")(
   "matches scan-root filters across Windows path aliases",
-  () => {
-    const python =
-      process.env["PYTHON"] ??
-      Bun.which("python3") ??
-      Bun.which("python") ??
-      Bun.which("py");
-    expect(python).not.toBeNull();
-    if (python === null) throw new Error("A Python interpreter is required.");
+  async () => {
+    const python = await resolvePluginPython();
 
     const root = realpathSync(
       mkdtempSync(join(tmpdir(), "codex-security-scan-root-case-")),

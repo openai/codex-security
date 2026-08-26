@@ -194,6 +194,7 @@ export function dependencies(
       ...arguments_: Parameters<MainDependencies["runCodex"]>
     ) => number | Promise<number>;
     linearClient?: MainDependencies["linearClient"];
+    importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
@@ -269,6 +270,9 @@ export function dependencies(
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
+    ...(options.importGitHubAlerts === undefined
+      ? {}
+      : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input) =>
       (await options.onWorkbench?.(args, input)) ?? { scans: [] },
     matchFindings: async (input) =>

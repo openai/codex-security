@@ -8,7 +8,7 @@ type WorkerEvent =
   | { type: "turn.failed"; error: { message: string } };
 
 type WorkerExecutorConstructor = new (settings: {
-  parentSandbox: { filesystem: "workspace-write"; network: "restricted" };
+  parentSandbox: { filesystemDenies: string[] };
 }) => {
   run(request: {
     kind: "discovery";
@@ -22,6 +22,7 @@ type WorkerExecutorConstructor = new (settings: {
 
 async function bundledWorkerExecutor(
   events: (signal: AbortSignal) => AsyncGenerator<WorkerEvent>,
+  preflight = async () => {},
 ): Promise<WorkerExecutorConstructor> {
   const runtime = await loadBundledRuntime();
   const source = /var CodexSdkWorkerExecutor = class \{[\s\S]*?\n\};/u.exec(
@@ -36,7 +37,8 @@ async function bundledWorkerExecutor(
   expect(fileSystemImport).toBeDefined();
 
   class FakeCodex {
-    startThread() {
+    startThread(options: { threadSource: string }) {
+      expect(options.threadSource).toBe("security_scan");
       return {
         id: "fixture-worker-thread",
         async runStreamed(_input: string, options: { signal: AbortSignal }) {
@@ -49,7 +51,12 @@ async function bundledWorkerExecutor(
   return new Function(
     "Codex",
     fileSystemImport!,
-    "assertVerifiedParentSandbox",
+    "workerPermissionProfile",
+    "workerPermissionProfileConfigOverrides",
+    "snapshotWorkerEnvironment",
+    "preflightDeepScanWorkerPermissionProfile",
+    "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
+    "deepScanPermissionProfileFallbackError",
     "resolveCodexPath",
     "workerSubagentConfig",
     "appendSafeItemDiagnostic",
@@ -58,7 +65,12 @@ async function bundledWorkerExecutor(
   )(
     FakeCodex,
     { promises: { readFile: async () => "fixture worker prompt" } },
-    () => {},
+    () => ({}),
+    () => [],
+    async () => ({}),
+    preflight,
+    "codex_security_deep_scan_worker",
+    () => undefined,
     () => "/fixture/codex",
     () => ({}),
     () => {},
@@ -72,7 +84,7 @@ function runWorker(
   onThreadStarted?: () => void,
 ) {
   return new WorkerExecutor({
-    parentSandbox: { filesystem: "workspace-write", network: "restricted" },
+    parentSandbox: { filesystemDenies: [] },
   }).run({
     kind: "discovery",
     promptPath: "/fixture/prompt.md",
@@ -82,6 +94,23 @@ function runWorker(
     ...(onThreadStarted ? { onThreadStarted } : {}),
   });
 }
+
+test("does not start a bundled worker when its permission profile check fails", async () => {
+  let started = false;
+  const WorkerExecutor = await bundledWorkerExecutor(
+    async function* () {
+      started = true;
+      yield { type: "turn.completed" };
+    },
+    async () => {
+      throw new Error("worker permission profile rejected");
+    },
+  );
+  await expect(
+    runWorker(WorkerExecutor, new AbortController().signal),
+  ).rejects.toThrow("worker permission profile rejected");
+  expect(started).toBe(false);
+});
 
 test("settles completed bundled Deep Scan workers during coordinator cancellation", async () => {
   const parentController = new AbortController();

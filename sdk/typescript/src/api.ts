@@ -71,6 +71,7 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
+  ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
   errorMessage,
@@ -100,6 +101,7 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
@@ -175,6 +177,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  safetyIdentifier?: string;
   runtime: PreparedRuntime;
   runtimeHome: string;
   effectiveConfig: JsonObject;
@@ -205,6 +208,8 @@ export interface DeepScanOptions {
 
 export interface ScanOptions extends DeepScanOptions {
   auth?: ScanAuthMode;
+  /** Stable, privacy-preserving end-user ID for this scan's model requests. */
+  safetyIdentifier?: string;
   target?: ScanTarget;
   mode?: ScanMode;
   knowledgeBasePaths?: string[];
@@ -375,6 +380,7 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
@@ -426,7 +432,9 @@ export class CodexSecurity {
     repository: string,
     options: ScanOptions = {},
   ): Promise<ScanResult> {
-    return await this.#trackOperation(() => this.#run(repository, options));
+    return await this.#trackOperation(() =>
+      this.#run(repository, { ...options }),
+    );
   }
 
   public async validate(options: ValidationOptions): Promise<ValidationResult> {
@@ -499,6 +507,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
         workingDirectory: outputDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -1119,6 +1128,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -1193,6 +1203,7 @@ export class CodexSecurity {
                     filesTotal: scopeFileCount,
                   });
                 const validationThread = codex.startThread({
+                  threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
                   workingDirectory: join(scanDir, "artifacts"),
                   skipGitRepoCheck: true,
                   approvalPolicy,
@@ -1241,11 +1252,36 @@ export class CodexSecurity {
             );
           }
           completionCost = snapshot.cost;
-          const preparation = await workbench(workbenchOptions, [
-            "prepare-scan-completion",
-            "--scan-id",
-            scanId,
-          ]);
+          let preparation: JsonObject;
+          try {
+            preparation = await workbench(workbenchOptions, [
+              "prepare-scan-completion",
+              "--scan-id",
+              scanId,
+            ]);
+          } catch (error) {
+            const saved = await workbench(workbenchOptions, [
+              "get-scan",
+              "--scan-id",
+              scanId,
+            ]).catch(() => null);
+            const savedScan = isRecord(saved) ? saved["scan"] : undefined;
+            const progress = isRecord(savedScan)
+              ? savedScan["progress"]
+              : undefined;
+            const failureMessage = isRecord(savedScan)
+              ? savedScan["failureMessage"]
+              : undefined;
+            if (
+              isRecord(progress) &&
+              progress["status"] === "failed" &&
+              typeof failureMessage === "string" &&
+              failureMessage.trim() !== ""
+            ) {
+              throw new IncompleteScanError(failureMessage);
+            }
+            throw error;
+          }
           preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
             ? preparation["targetWarnings"].filter(
                 (warning): warning is string => typeof warning === "string",
@@ -1790,7 +1826,7 @@ export class CodexSecurity {
       apiKey,
       sessionConfig,
     } = session;
-    const environment = {
+    const environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
@@ -1803,6 +1839,13 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
     };
+    for (const name of Object.keys(environment)) {
+      if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
+        delete environment[name];
+    }
+    if (session.safetyIdentifier !== undefined) {
+      environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
+    }
     const sdkCodexConfig = { ...sessionConfig };
     // Projects and permissions already live in generated TOML files; the SDK
     // cannot safely encode their path and selector keys as dotted overrides.
@@ -1841,6 +1884,7 @@ export class CodexSecurity {
     options: Pick<
       ScanOptions,
       | "auth"
+      | "safetyIdentifier"
       | "expectedPluginVersion"
       | "onAuthentication"
       | "onWarning"
@@ -1986,6 +2030,18 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
+      if (
+        options.safetyIdentifier !== undefined &&
+        authentication.method !== "api_key" &&
+        !(
+          authentication.method === "stored_credentials" &&
+          authentication.credentialType === "api_key"
+        )
+      ) {
+        throw new ConfigurationError(
+          "safetyIdentifier requires API-key authentication.",
+        );
+      }
       notifyObserver(
         "onAuthentication",
         options.onAuthentication,
@@ -2003,6 +2059,7 @@ export class CodexSecurity {
       checkOpen();
       return {
         runtime,
+        safetyIdentifier: options.safetyIdentifier,
         runtimeHome,
         effectiveConfig,
         preflightConfig,
@@ -2114,6 +2171,18 @@ export class CodexSecurity {
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
     deepScanOptions(options);
+    const identifier = options.safetyIdentifier;
+    if (
+      identifier !== undefined &&
+      (typeof identifier !== "string" ||
+        identifier.trim().length === 0 ||
+        identifier.includes("\0") ||
+        [...identifier].length > 64)
+    ) {
+      throw new ConfigurationError(
+        "safetyIdentifier must contain 1 to 64 characters, must not be blank, and must not contain NUL.",
+      );
+    }
     if (
       options.maxCostUsd !== undefined &&
       (!Number.isFinite(options.maxCostUsd) || options.maxCostUsd <= 0)
@@ -3088,7 +3157,8 @@ async function runtimeScanAuthentication(
   return authentication;
 }
 
-function selectedScanEnvironment(
+/** @internal */
+export function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,

@@ -1691,9 +1691,9 @@ describe("plugin runtime preparation", () => {
     }
   });
 
-  test("refreshes cached plugins before forwarding delegated scan attribution", async () => {
+  test("refreshes the prior bundle before using new runtime helpers", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "0.1.19");
+    const previous = await plugin(join(root, "previous"), "0.1.22");
     await writeFile(
       join(previous, ".mcp.json"),
       JSON.stringify({
@@ -1736,7 +1736,7 @@ describe("plugin runtime preparation", () => {
     };
 
     expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "0.1.19",
+      "0.1.22",
     );
     const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
     const configuration = JSON.parse(
@@ -1747,10 +1747,22 @@ describe("plugin runtime preparation", () => {
     ) as { mcpServers: Record<string, { env_vars: string[] }> };
 
     expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-    expect(upgraded.version).not.toBe("0.1.19");
+    expect(upgraded.version).not.toBe("0.1.22");
     expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
       "CODEX_SECURITY_SURFACE",
     );
+    expect(
+      await readFile(
+        join(
+          marketplace,
+          "plugins",
+          "codex-security",
+          "scripts",
+          "workbench_cli.py",
+        ),
+        "utf8",
+      ),
+    ).toContain('"inspect-linear-publication"');
   });
 
   test("rejects plugin installs without the selected path and version", async () => {
@@ -1933,10 +1945,13 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("upgrades a plugin with the real bundled Codex executable", async () => {
+  test("upgrades a cached 0.1.37 plugin with the real bundled Codex executable", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.4");
+    const previous = await plugin(join(root, "previous"), "0.1.37");
+    await writeFile(
+      join(previous, ".mcp.json"),
+      JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
+    );
     const home = join(root, "home");
     await mkdir(home, { mode: 0o700 });
     await writeFile(
@@ -1961,12 +1976,22 @@ describe("plugin runtime preparation", () => {
     const credentials = await readFile(join(home, "auth.json"), "utf8");
 
     const options = { codexCommand: command, environment };
-    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "1.2.3",
-    );
-    const upgraded = await bootstrapPlugin(home, next, options);
+    const first = await bootstrapPlugin(home, previous, options);
+    expect(first.version).toBe("0.1.37");
+    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
+    const configuration = JSON.parse(
+      await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
+    ) as {
+      mcpServers: Record<string, { command: string; env_vars: string[] }>;
+    };
+    const server = configuration.mcpServers["codex-security"];
 
-    expect(upgraded.version).toBe("1.2.4");
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.version).not.toBe(first.version);
+    expect(upgraded.installedRoot).not.toBe(first.installedRoot);
+    expect(server?.command).toBe("./scripts/launch_codex_security_mcp");
+    expect(server?.env_vars).toContain("CODEX_MANAGED_PACKAGE_ROOT");
+    expect(server?.env_vars).toContain("CODEX_MCP_NODE_PATH");
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
     expect(
       spawnSync(command.command, ["login", "status"], {

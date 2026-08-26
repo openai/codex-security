@@ -90,6 +90,25 @@ async function multiscanInventory(root: string): Promise<void> {
 }
 
 describe("CLI", () => {
+  test("passes the safety identifier as a per-scan option", async () => {
+    let options: unknown;
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "--safety-identifier", "synthetic-user", ".", "--json"],
+        capture().stream,
+        stderr.stream,
+        dependencies({
+          onTurn: (_repository, value) => {
+            options = value;
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(options).toMatchObject({ safetyIdentifier: "synthetic-user" });
+    expect(stderr.text()).not.toContain("synthetic-user");
+  });
+
   test("exposes Incur help, schemas, manifests, and completions", async () => {
     const root = capture();
     const stderr = capture();
@@ -201,6 +220,9 @@ describe("CLI", () => {
     );
     expect(manifest.text()).toContain("codex-security bulk-scan [input]");
     expect(manifest.text()).toContain("codex-security export [scanDir]");
+    expect(manifest.text()).toContain(
+      "codex-security import github <repository>",
+    );
     expect(manifest.text()).toContain("codex-security validate <findings...>");
     expect(manifest.text()).toContain(
       "codex-security verify-fix [findings...]",

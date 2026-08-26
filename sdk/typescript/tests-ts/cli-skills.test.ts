@@ -15,12 +15,25 @@ import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
-function linearIssue(identifier: string) {
+function linearIssue(identifier: string, comments: string[] = []) {
+  const nodes = comments.map((body, index) => ({
+    body,
+    url: `https://linear.app/example/issue/${identifier}#comment-${index}`,
+  }));
   return {
     identifier,
     title: `Fix ${identifier}`,
     description: `Synthetic evidence for ${identifier}`,
     url: `https://linear.app/example/issue/${identifier}`,
+    comments: async () => ({
+      nodes: nodes.slice(0, 1),
+      pageInfo: { hasNextPage: nodes.length > 1 },
+      async fetchNext() {
+        this.nodes.push(...nodes.slice(1));
+        this.pageInfo.hasNextPage = false;
+        return this;
+      },
+    }),
   };
 }
 
@@ -55,6 +68,9 @@ describe("CLI skill commands", () => {
                 invocation = args;
                 prompt = output?.appServer?.prompt ?? input ?? "";
                 expect(input).toBe(command === "patch" ? undefined : prompt);
+                expect(output?.appServer?.threadSource).toBe(
+                  command === "patch" ? "security_remediation" : undefined,
+                );
                 return status;
               },
             }),
@@ -63,7 +79,12 @@ describe("CLI skill commands", () => {
         expect(invocation).toEqual([
           ...(command === "patch"
             ? ["app-server"]
-            : ["exec", "--ignore-user-config"]),
+            : [
+                "exec",
+                "--ignore-user-config",
+                "--thread-source",
+                "security_validation",
+              ]),
           "--disable",
           "plugins",
           ...(command === "patch"
@@ -128,6 +149,10 @@ describe("CLI skill commands", () => {
 
   test("imports selected Linear issues without exposing its credential to Codex", async () => {
     const requests: string[] = [];
+    const description =
+      "# Report\n\n## Reproduction\n\n```ts\nreadRecord(id);\n```";
+    const laterComment =
+      "# Report\n\n## Extra evidence\n\n```ts\ncheckOwner(id);\n```\n\nCheck **both** paths.";
     let inputs: string[] = [];
     let environment: NodeJS.ProcessEnv | undefined;
 
@@ -157,7 +182,13 @@ describe("CLI skill commands", () => {
             return {
               issue: async (id: string) => {
                 requests.push(id);
-                return linearIssue(id);
+                return {
+                  ...linearIssue(id, [
+                    `Additional evidence for ${id}`,
+                    laterComment,
+                  ]),
+                  description,
+                };
               },
             } as ReturnType<LinearClientFactory>;
           },
@@ -173,7 +204,15 @@ describe("CLI skill commands", () => {
     expect(requests).toEqual(["SEC-123", "SEC-124"]);
     expect(inputs).toHaveLength(2);
     expect(inputs[0]).toContain("Issue: SEC-123");
-    expect(inputs[1]).toContain("Synthetic evidence for SEC-124");
+    expect(inputs[1]).toContain(
+      `<description>\n${description}\n</description>`,
+    );
+    expect(inputs[0]).toContain("Additional evidence for SEC-123");
+    expect(inputs[1]).toContain("Additional evidence for SEC-124");
+    expect(inputs[1]).toContain(laterComment);
+    expect(inputs[0]).toContain(
+      `<comment>\nURL: https://linear.app/example/issue/SEC-123#comment-1\n\n${laterComment}\n</comment>`,
+    );
     expect(environment).toEqual({
       OPENAI_API_KEY: "sk-proj-SYNTHETIC_MODEL_KEY",
     });
@@ -202,7 +241,7 @@ describe("CLI skill commands", () => {
             `..${paths.sep}`.repeat(32) +
             paths.relative(paths.parse(target).root, target),
         };
-        const expected = `Source: linear\nIssue: SEC-123\nURL: ${issue.url}\n\nTitle: ${issue.title}\n\n${issue.description}`;
+        const expected = `Source: linear\nIssue: SEC-123\nURL: ${issue.url}\n\nTitle: ${issue.title}\n\n<description>\n${issue.description}\n</description>`;
         const forbiddenPath = resolve(repository, expected);
         const originalLstat = filesystem.lstat;
         let probed = false;
@@ -269,11 +308,13 @@ describe("CLI skill commands", () => {
           linearClient: ({ accessToken }) => {
             expect(accessToken).toBe("SYNTHETIC_OAUTH_TOKEN");
             const page = {
-              nodes: [linearIssue("SEC-123")],
+              nodes: [linearIssue("SEC-123", ["First issue comment"])],
               pageInfo: { hasNextPage: true },
               async fetchNext() {
                 nextPages++;
-                this.nodes.push(linearIssue("SEC-124"));
+                this.nodes.push(
+                  linearIssue("SEC-124", ["Second issue comment"]),
+                );
                 this.pageInfo.hasNextPage = false;
                 return this;
               },
@@ -318,6 +359,8 @@ describe("CLI skill commands", () => {
     expect(inputs).toHaveLength(2);
     expect(inputs[0]).toContain("Issue: SEC-123");
     expect(inputs[1]).toContain("Issue: SEC-124");
+    expect(inputs[0]).toContain("First issue comment");
+    expect(inputs[1]).toContain("Second issue comment");
   });
 
   test("rejects invalid Linear selections before starting Codex", async () => {
@@ -1145,7 +1188,7 @@ lines.on("line", (line) => {
     send({ id: 1, result: {} });
   } else if (request.method === "thread/start") {
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
-    assert.deepEqual(request.params, { approvalPolicy: "never", sandbox: "workspace-write" });
+    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write" });
     send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false } } });
   } else if (request.method === "turn/start") {
     assert.equal(request.params.threadId, "parent");
@@ -1178,6 +1221,7 @@ lines.on("line", (line) => {
           appServer: {
             directory: process.cwd(),
             prompt: "Fix the synthetic finding",
+            threadSource: "security_remediation",
           },
         },
         { command: process.execPath },
@@ -1207,6 +1251,7 @@ lines.on("line", (line) => {
   }
   if (request.method === "thread/start") {
     assert.deepEqual(request.params, {
+      threadSource: "security_validation",
       approvalPolicy: "on-request",
       sandbox: "read-only",
       config: { mcp_servers: { repository: { enabled: false } } },
@@ -1252,6 +1297,7 @@ lines.on("line", (line) => {
             directory: process.cwd(),
             prompt:
               "Verify the synthetic finding without editing the repository",
+            threadSource: "security_validation",
             sandbox: "read-only",
             onEvent: (event) => activity.push(event),
           },
@@ -1322,6 +1368,7 @@ lines.on("line", (line) => {
           appServer: {
             directory: process.cwd(),
             prompt: "Synthetic finding",
+            threadSource: "security_remediation",
           },
         },
         { command: process.execPath },
@@ -1354,6 +1401,7 @@ lines.on("line", (line) => {
           appServer: {
             directory: process.cwd(),
             prompt: "Fix the synthetic finding",
+            threadSource: "security_remediation",
           },
         },
         { command: process.execPath },

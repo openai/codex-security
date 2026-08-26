@@ -314,6 +314,7 @@ describe("CodexSecurity finding validation", () => {
       expect(captured.prompt!.endsWith(JSON.stringify(finding))).toBe(true);
       expect(captured.prompt).not.toContain("Synthetic file contents");
       expect(captured.thread).toMatchObject({
+        threadSource: "security_validation",
         workingDirectory: options.outputDir,
         approvalPolicy: "never",
       });
@@ -442,6 +443,86 @@ describe("CodexSecurity finding validation", () => {
 });
 
 describe("CodexSecurity orchestration", () => {
+  test("isolates per-run safety identifiers across clients and clears them on reuse", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "home");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    const runtimeEnvironment = { codex_safety_identifier: "ambient-user" };
+    const received: Array<CodexOptions> = [];
+    const clients = [0, 1].map(
+      () =>
+        new TestClient(
+          {},
+          {
+            environment: { OPENAI_API_KEY: "synthetic-key" },
+            prepareRuntime: async () => ({
+              ...preparedRuntime(codexHome),
+              persistentCredentialHome: true,
+              environment: runtimeEnvironment,
+            }),
+            resolvePluginPython: async () => "/managed/python",
+            createCodex: (options) => {
+              received.push(options);
+              throw new Error("captured scan");
+            },
+          },
+        ),
+    );
+    try {
+      await Promise.all(
+        clients.map((client, i) =>
+          expect(
+            client.run(repository, {
+              safetyIdentifier: `synthetic-user-${i}`,
+              outputDir: join(root, `scan-${i}`),
+            }),
+          ).rejects.toThrow("captured scan"),
+        ),
+      );
+      expect(
+        received
+          .map((options) => options.env?.["CODEX_SAFETY_IDENTIFIER"])
+          .sort(),
+      ).toEqual(["synthetic-user-0", "synthetic-user-1"]);
+      for (const safetyIdentifier of ["next-user", undefined]) {
+        await expect(
+          clients[0]!.run(repository, {
+            safetyIdentifier,
+            outputDir: join(root, safetyIdentifier ?? "unset"),
+          }),
+        ).rejects.toThrow("captured scan");
+      }
+      expect(
+        received
+          .slice(2)
+          .map((options) => options.env?.["CODEX_SAFETY_IDENTIFIER"]),
+      ).toEqual(["next-user", undefined]);
+      expect(runtimeEnvironment).toEqual({
+        codex_safety_identifier: "ambient-user",
+      });
+      expect(
+        received.every(
+          (options) => options.config?.["safety_identifier"] === undefined,
+        ),
+      ).toBe(true);
+    } finally {
+      await Promise.all(clients.map((client) => client.close()));
+    }
+  });
+
+  test.each(["", " ", "a".repeat(65), "id\0suffix"])(
+    "rejects invalid safety identifier %j before preparing the runtime",
+    async (identifier) => {
+      const client = new TestClient({}, {});
+      await expect(
+        client.run("/unused", { safetyIdentifier: identifier }),
+      ).rejects.toThrow("safetyIdentifier must");
+      await client.close();
+    },
+  );
+
   test("distinguishes local workbench and database errors from model transport failures", () => {
     for (const message of [
       "sqlite3.OperationalError: unable to open database file\nwith closing(connect()) as connection:",
@@ -1558,6 +1639,16 @@ describe("CodexSecurity orchestration", () => {
       ).rejects.toThrow("scan did not start");
       expect(selectedAuthentication).toEqual(expected);
       expect(JSON.stringify(selectedAuthentication)).not.toContain("SYNTHETIC");
+      await expect(
+        client.run(repository, {
+          safetyIdentifier: "synthetic-user",
+          outputDir: join(root, "attributed-scan"),
+        }),
+      ).rejects.toThrow(
+        "credentialType" in expected && expected.credentialType === "api_key"
+          ? "scan did not start"
+          : "safetyIdentifier requires API-key authentication",
+      );
       await client.close();
     }
   });
@@ -2187,6 +2278,7 @@ describe("CodexSecurity orchestration", () => {
       allow_login_shell: false,
     });
     expect(threadOptions as Record<string, unknown> | null).toEqual({
+      threadSource: "security_scan",
       workingDirectory: scanDir,
       skipGitRepoCheck: true,
       approvalPolicy: "on-request",
@@ -2760,6 +2852,75 @@ describe("CodexSecurity orchestration", () => {
       "prepare-scan-completion",
       "fail-scan",
     ]);
+    await client.close();
+  });
+
+  test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: string[] = [];
+    const terminalFailure =
+      "Deep Scan reached its discovery limit after worker policy refusals.";
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          commands.push(args[0]!);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args, input);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          if (args[0] === "prepare-scan-completion") {
+            throw new Error("Only a running scan can be completed.");
+          }
+          if (args[0] === "get-scan") {
+            return {
+              scan: {
+                failureMessage: terminalFailure,
+                progress: { status: "failed" },
+              },
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+      },
+    );
+
+    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+      terminalFailure,
+    );
+    expect(commands).toContain("prepare-scan-completion");
+    expect(commands).toContain("get-scan");
     await client.close();
   });
 
