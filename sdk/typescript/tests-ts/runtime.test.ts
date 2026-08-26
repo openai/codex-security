@@ -2904,6 +2904,71 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("retries interrupted Windows credential ACL enumeration", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const inspectionCount = join(root, "inspection-count");
+    const temporary = join(home, ".auth-temporary");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    await writeFile(temporary, "temporary credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const descriptors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      descriptors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    descriptors.push(directory, file);
+    const script = [
+      'const fs = require("node:fs")',
+      `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+      `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+      `if (fs.existsSync(${JSON.stringify(temporary)})) { fs.unlinkSync(${JSON.stringify(temporary)}); process.exitCode = 2 }`,
+    ].join("; ");
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: ["--eval", script],
+      }),
+    ).resolves.toMatchObject({
+      home: { owner: sid, protected: true },
+      descendantsArePrivate: true,
+    });
+    expect(await readFile(inspectionCount, "utf8")).toBe(
+      "inspection\ninspection\n",
+    );
+  });
+
+  test.each([
+    [2, 3, "Windows credential descendants could not be verified"],
+    [1, 1, "Windows credential ACL inspection failed with exit code 1"],
+  ] as const)(
+    "rejects Windows ACL subprocess exit %i after %i attempts",
+    async (exitCode, attempts, message) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const inspectionCount = join(root, "inspection-count");
+      await mkdir(home);
+      const script = [
+        `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+        `process.exitCode = ${exitCode}`,
+      ].join("; ");
+
+      await expect(
+        inspectWindowsCredentialAclSnapshot(home, "S-1-5-21-111-222-333-1001", {
+          command: process.execPath,
+          args: ["--eval", script],
+        }),
+      ).rejects.toThrow(message);
+      expect(await readFile(inspectionCount, "utf8")).toBe(
+        "inspection\n".repeat(attempts),
+      );
+    },
+  );
+
   test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");

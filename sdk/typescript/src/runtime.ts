@@ -82,6 +82,7 @@ const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
+const WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE = 2;
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -416,6 +417,8 @@ class RepairableWindowsCredentialOwnerError extends Error {
   }
 }
 
+class WindowsCredentialDescendantsChangedError extends Error {}
+
 /** Inspect a Windows DACL without translating locale-specific account names. */
 export function inspectWindowsCredentialAcl(
   descriptor: string,
@@ -651,7 +654,13 @@ export async function verifyStableWindowsCredentialDescendants(
     }
     if (descendants === 0 && options.inspectEmpty !== true) return;
 
-    if ((await inspectDescriptors()) === descendants) return;
+    try {
+      if ((await inspectDescriptors()) === descendants) return;
+    } catch (error) {
+      if (!(error instanceof WindowsCredentialDescendantsChangedError)) {
+        throw error;
+      }
+    }
   }
 
   throw new Error("Windows credential descendants could not be verified");
@@ -675,10 +684,16 @@ export async function streamWindowsCredentialAclDescriptors(
     if (remaining > 0) stderr += chunk.slice(0, remaining);
   });
 
+  let descendantsChanged = false;
   const completion = new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
       if (code === 0) {
+        resolve();
+        return;
+      }
+      if (code === WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE) {
+        descendantsChanged = true;
         resolve();
         return;
       }
@@ -713,6 +728,12 @@ export async function streamWindowsCredentialAclDescriptors(
     throw error;
   }
 
+  if (descendantsChanged) {
+    // Finish descriptor callbacks before allowing another snapshot attempt.
+    throw new WindowsCredentialDescendantsChangedError(
+      "Windows credential descendants changed during ACL inspection",
+    );
+  }
   return descriptors;
 }
 
@@ -864,9 +885,9 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
     "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
     "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-    // A temporary descendant can disappear after enumeration. Its missing
-    // descriptor reduces the count and retries the stable snapshot.
-    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } }",
+    // Temporary descendants can disappear during enumeration or ACL reads.
+    // Retry interrupted enumeration as well as incomplete descriptor counts.
+    `try { Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } } } catch { if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetChildItemCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }; throw }`,
   ].join("; ");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
