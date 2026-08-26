@@ -49,8 +49,8 @@ Use the included Docker Compose configuration for scans of many repositories. Se
 ## Findings service (preview)
 
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
-from the SDK in Docker with persistent SQLite storage. Its three HTTP endpoints
-are currently stubs; they do not insert findings or run deduplication.
+from the SDK in Docker, stores findings and embeddings in SQLite, and lists
+findings with pagination. The deduplication workflow remains a stub.
 
 ## Other providers
 

@@ -1283,7 +1283,13 @@ authorization failures stop immediately.
 
 ## Findings service (preview)
 
-From the repository root, build and start the findings API:
+From the repository root, copy the example if you do not already have a `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Set `OPENAI_API_KEY` in `.env`, then build and start the findings API:
 
 ```bash
 docker compose -f compose.findings.yaml up --build -d
@@ -1295,21 +1301,111 @@ packaged `start:server` script, without invoking the CLI. Docker runs Node
 directly so stop signals reach the server. The existing default Docker target
 and bulk-scan Compose configuration are unchanged.
 
-This first stage only initializes storage and serves mocked endpoints:
+### API
 
-| Method | Path                       | Current behavior                  |
-| ------ | -------------------------- | --------------------------------- |
-| `GET`  | `/v1/findings`             | Log the route and return HTTP 501 |
-| `POST` | `/v1/bulk/findings`        | Log the route and return HTTP 501 |
-| `POST` | `/v1/bulk/findings/dedupe` | Log the route and return HTTP 501 |
+Both POST endpoints accept `{"findings": [...]}`, using the existing SDK
+`Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.
+A complete exported `findings.json` document is also accepted; only its
+`findings` array is imported. No files or source paths referenced by the
+findings are opened. Only the supplied JSON is processed.
 
-Each stub returns `{"error":"not_implemented"}`; unknown routes return HTTP 404
-with `{"error":"not_found"}`. Request bodies are not processed or logged. No
-findings, embeddings, or deduplication results are written by these endpoints.
+| Method | Path                             | Response                                                       |
+| ------ | -------------------------------- | -------------------------------------------------------------- |
+| `POST` | `/v1/bulk/findings`              | HTTP 201 with an array of stored finding IDs, in request order |
+| `POST` | `/v1/bulk/findings/dedupe`       | HTTP 201 with the workflow result shown below                  |
+| `GET`  | `/v1/findings?limit=50&offset=0` | HTTP 200 with a page of complete findings                      |
+
+Bulk insertion generates embeddings and then writes the findings and vectors
+in one SQLite transaction. If embedding generation fails or a finding identity
+conflicts with another stored identity, no part of the batch is written.
+Reusing a `findingId` updates that finding and replaces its embedding; retries
+do not create extra rows. An existing ID's fingerprint, rule, and identity
+anchor/instance cannot be replaced. Repeated IDs in one request are applied in order,
+with the last supplied record retained. Stored scan occurrences are unchanged.
+
+For example, with the API key configured before starting Compose:
+
+```bash
+curl http://127.0.0.1:3000/v1/bulk/findings \
+  -H 'Content-Type: application/json' \
+  --data-binary @sdk/typescript/_bundled_plugin/examples/completed-scan/findings.json
+```
+
+```json
+["csf_852f90d6e1177502ff113d4a"]
+```
+
+The dedupe endpoint performs the same insertion, then awaits
+`DeduplicationService.run`. That service currently only logs its invocation
+and returns a **mock result**:
+
+```json
+{
+  "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
+  "duplicateGroups": [],
+  "deduplicationStatus": "not_implemented"
+}
+```
+
+The unique IDs are provisional: no comparison or duplicate judgment has run.
+Do not treat this response as evidence that findings are distinct. The next
+stage will implement retrieval and model reviews inside the workflow service.
+
+Listing defaults to `limit=50` and `offset=0`; `limit` must be a positive
+integer and `offset` a non-negative integer. Records are ordered by their first
+insertion time, then finding ID. Follow `nextOffset` until it is `null`:
+
+```json
+{
+  "findings": [],
+  "limit": 50,
+  "offset": 0,
+  "total": 0,
+  "nextOffset": null
+}
+```
+
+The list includes API imports and complete finding documents from existing CLI
+scan history. It returns the latest stored document for each finding ID,
+without embedding vectors. Legacy identities without a complete document are
+not included. Pagination reflects current database contents, not a snapshot
+held between HTTP requests.
+
+Malformed JSON, invalid finding objects, and invalid pagination return HTTP
+400 (`invalid_request`). Identity conflicts return 409 (`finding_conflict`),
+embedding provider failures return 502 (`embedding_failed`), and missing
+embedding credentials return 503 (`embedding_unavailable`). Unknown routes
+return 404 (`not_found`); unexpected server failures return 500
+(`internal_error`). Errors have an `error` code and, for expected failures, a
+`message`. Request bodies and embedding provider error bodies are not logged.
+
+### Embeddings and storage
+
+Set `OPENAI_API_KEY` in the repository-root `.env`, using `.env.example` as a
+template, or export `OPENAI_API_KEY` or `CODEX_API_KEY` in the host environment.
+Compose passes the key to the service; exported values override `.env` values.
+The `.env` file is excluded from Git and Docker builds. `OPENAI_API_KEY` takes
+precedence over `CODEX_API_KEY`; remove the `OPENAI_API_KEY` entry if using
+`CODEX_API_KEY` instead. Listing and empty imports do not require a key.
+A Codex ChatGPT login is not an embedding API credential.
+
+The service calls the OpenAI embeddings API with `text-embedding-3-large` and
+1,536 dimensions. The complete finding JSON is tokenized using `js-tiktoken`'s
+bundled `cl100k_base` encoding. Long inputs are split without truncation;
+their vectors are combined by token weight and normalized. Requests respect
+the provider's 8,192-token input, 300,000-token request, and 2,048-input limits.
+See the [embedding API contract](https://developers.openai.com/api/reference/resources/embeddings/methods/create).
 
 Storage initializes before the server listens. The SQLite adapter reuses the
 bundled workbench's schema and migrations at
-`$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`. The `findings-state` named volume
+`$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`. An append-only migration adds
+complete finding documents and an embedding table, while retaining the existing
+finding identity table and scan history. Both the API and current CLI indexing
+use the same finding upsert operation. Changing a stored document invalidates
+its old embedding so later matching cannot use a stale vector. Historical
+findings are not automatically embedded; submit them to a bulk endpoint first.
+
+The `findings-state` named volume
 persists that database across container restarts. Stop the service with
 `docker compose -f compose.findings.yaml down`; add `--volumes` only when you
 intend to delete the stored data.
@@ -1318,9 +1414,10 @@ intend to delete the stored data.
 `PORT=3000`, and `CODEX_SECURITY_STATE_DIR=/state`. Compose publishes the port
 only on the host's loopback interface. There is no API authentication in this
 preview. Do not expose it to an untrusted network; use an authenticated proxy
-before sharing access. No model credentials are needed for the stubs.
+before sharing access.
 
 To run locally, use Node.js and Python 3 as described in the prerequisites.
+Export the API key in your shell; the server does not load `.env` automatically.
 From `sdk/typescript`, install dependencies, build, and start:
 
 ```bash
@@ -1334,19 +1431,16 @@ Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
 without a state override, the service uses the same default state directory as
 the CLI. These settings also work on Windows.
 
-HTTP routing, server startup, and the SQLite adapter live separately under
-`src/server/`. Startup accepts a `FindingsStore` interface; the SQLite
-implementation owns workbench access. The interface currently covers only
-initialization, and will grow with actual data operations rather than with
-unused provider abstractions.
-
-The next stage will persist the existing `Finding` model and embeddings in
-SQLite, return IDs from bulk insertion, and list findings with pagination
-defaulting to 50. Bulk insert with deduplication will call a stub workflow
-service and return unique IDs plus duplicate groups. The third stage will
-implement candidate retrieval, screening, independent pair review, and
-whole-group review for groups larger than two. None of those operations are
-implemented in this preview.
+HTTP routing, orchestration, embedding generation, and the SQLite adapter live
+separately under `src/server/`. `FindingsService` receives a `FindingEmbedder`
+whose `embed(findings)` method returns one `{ model, vector }` per finding in
+input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
+and vector normalization; it does not access storage. The `FindingsStore`
+interface separately stores findings and vectors without exposing SQL or
+workbench details to the service. The server entrypoint selects the concrete
+embedder and store, so either can be replaced independently. The deduplication
+service is separate from both routing and storage; model-driven deduplication
+remains unimplemented in this preview.
 
 ## Containerized bulk scans
 

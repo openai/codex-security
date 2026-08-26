@@ -679,9 +679,11 @@ connection.close()
       fixture,
       "ALTER TABLE deep_scan_runs DROP COLUMN publication_error_message",
     );
-    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
-      31,
-    ]);
+    databaseRows(
+      fixture,
+      "DELETE FROM schema_migrations WHERE version BETWEEN ? AND ?",
+      [31, 32],
+    );
 
     await expect(
       preparePublicationStore(fixture.publication, fixture.environment),
@@ -690,8 +692,8 @@ connection.close()
     expect(
       databaseRows(
         fixture,
-        "SELECT version, name FROM schema_migrations WHERE version >= ? ORDER BY version",
-        [31],
+        "SELECT version, name FROM schema_migrations WHERE version BETWEEN ? AND ? ORDER BY version",
+        [31, 32],
       ),
     ).toEqual([
       { version: 31, name: "freeze stopped scan source digests" },

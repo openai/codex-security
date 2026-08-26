@@ -339,6 +339,10 @@ def parse_args(description: str) -> argparse.Namespace:
         publication.add_argument("--input-file", required=True)
 
     subparsers.add_parser("database-info")
+    subparsers.add_parser("store-findings")
+    stored_findings = subparsers.add_parser("list-stored-findings")
+    stored_findings.add_argument("--limit", type=positive_int, required=True)
+    stored_findings.add_argument("--offset", type=non_negative_int, required=True)
     return parser.parse_args()
 
 

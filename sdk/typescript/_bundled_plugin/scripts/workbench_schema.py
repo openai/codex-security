@@ -697,6 +697,32 @@ MIGRATIONS = (
         ALTER TABLE deep_scan_runs ADD COLUMN publication_error_message TEXT;
         """,
     ),
+    (
+        33,
+        "store complete findings and embeddings without a scan",
+        """
+        ALTER TABLE findings ADD COLUMN details_json TEXT;
+
+        UPDATE findings SET details_json = (
+            SELECT details_json FROM finding_occurrences
+            WHERE finding_id = findings.id AND details_json != '{}'
+            ORDER BY created_at DESC, id DESC LIMIT 1
+        );
+
+        CREATE TABLE finding_embeddings (
+            finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+            model TEXT NOT NULL,
+            vector_json TEXT NOT NULL
+        );
+
+        CREATE TRIGGER invalidate_finding_embedding
+        AFTER UPDATE OF details_json ON findings
+        WHEN OLD.details_json IS NOT NEW.details_json
+        BEGIN
+            DELETE FROM finding_embeddings WHERE finding_id = NEW.id;
+        END;
+        """,
+    ),
 )
 
 

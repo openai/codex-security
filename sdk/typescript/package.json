@@ -67,6 +67,7 @@
     "fflate": "0.8.2",
     "incur": "0.4.13",
     "ink": "6.8.0",
+    "js-tiktoken": "1.0.21",
     "papaparse": "5.5.3",
     "pdfjs-dist": "6.2.108",
     "react": "19.2.4",
