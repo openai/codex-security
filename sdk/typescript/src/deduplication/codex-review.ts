@@ -90,10 +90,7 @@ export class CodexReviewRunner {
       const closed = new Promise<void>((resolve) =>
         child.once("close", () => resolve()),
       );
-      let processError: Error | undefined;
-      child.once("error", (error) => {
-        processError = error;
-      });
+      child.once("error", () => undefined);
       child.stdin.on("error", () => undefined);
       child.stderr.resume();
       const send = (message: object) =>
@@ -251,9 +248,7 @@ export class CodexReviewRunner {
             return accepted;
           }
         }
-        throw (
-          processError ?? new Error("Codex exited before completing the review")
-        );
+        throw new Error("Codex exited before completing the review");
       } finally {
         child.stdin.end();
         if (child.exitCode === null) child.kill();

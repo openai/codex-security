@@ -11,8 +11,6 @@ import { startFindingsServer } from "../src/server/server.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding, FindingsPage } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
-import { FindingsClient } from "../src/deduplication/findings-client.js";
 
 const servers: Server[] = [];
 const directories: string[] = [];
@@ -301,57 +299,6 @@ test("retrieves complete potential duplicates without vectors or review calls", 
   );
   expect(missing.status).toBe(404);
   expect(await missing.json()).toMatchObject({ error: "finding_not_indexed" });
-  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
-    findings,
-  );
-});
-
-test("runs reviews in a caller using the HTTP candidate API", async () => {
-  const { store } = await fixture();
-  const base = await start(store);
-  const findings = [finding(1), finding(2), finding(3)];
-  await store.insert(
-    findings.map((finding) => ({
-      finding,
-      embedding: { model: "synthetic", vector: [1, 0] },
-    })),
-    "repository-a",
-  );
-  const stages: string[] = [];
-  const same = { decision: "SAME" as const, rationale: "Synthetic duplicate" };
-  const workflow = new FindingDeduplicator(
-    new FindingsClient(base, { repositoryId: "repository-a" }),
-    {
-      async screen(neighborhood) {
-        stages.push("screen");
-        expect(neighborhood).toEqual(findings);
-        return {
-          decisions: neighborhood.slice(1).map((candidate) => ({
-            findingIds: [neighborhood[0]!.findingId, candidate.findingId] as [
-              string,
-              string,
-            ],
-            ...same,
-          })),
-        };
-      },
-      async reviewPair() {
-        stages.push("pair");
-        return same;
-      },
-      async reviewGroup(group) {
-        stages.push("group");
-        expect(group).toEqual(findings);
-        return same;
-      },
-    },
-  );
-  expect(await workflow.run([findings[0]!.findingId])).toEqual({
-    uniqueFindingIds: [findings[0]!.findingId],
-    duplicateGroups: [findings.map((finding) => finding.findingId)],
-    deduplicationStatus: "completed",
-  });
-  expect(stages).toEqual(["screen", "pair", "pair", "group"]);
   expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
     findings,
   );

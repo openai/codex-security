@@ -33,7 +33,6 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
         scan_dir = Path("/state/smoke-scan")
         shutil.copytree("_bundled_plugin/examples/completed-scan", scan_dir, dirs_exist_ok=True)
         scan_dir.chmod(0o700)
-        scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
         timestamp = scan["completedAt"]
         db.execute(
             "INSERT OR IGNORE INTO workspaces (id, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000001', ?, ?)",

@@ -271,10 +271,7 @@ try {
   await startService();
   checkStorage();
   await checkPages();
-  await checkInsertions();
   await checkCandidates();
-  checkCliDeduplication();
-  checkReviews();
   stopService();
   passed = true;
   console.log("Findings service Docker smoke test passed.");

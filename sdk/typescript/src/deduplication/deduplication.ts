@@ -32,13 +32,6 @@ export class FindingDeduplicator {
   async run(findingIds: readonly string[]): Promise<DeduplicationResult> {
     this.signal?.throwIfAborted();
     const ids = [...new Set(findingIds)];
-    if (ids.length === 0) {
-      return {
-        uniqueFindingIds: [],
-        duplicateGroups: [],
-        deduplicationStatus: "completed",
-      };
-    }
     const findings = new Map<string, Finding>();
     const nominated = new Map<string, [string, string]>();
     for (const id of ids) {
