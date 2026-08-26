@@ -2350,6 +2350,49 @@ describe("runtime directories and plugin Python boundary", () => {
     expect((await stat(database)).ino).toBe(original.ino);
   });
 
+  testPosix(
+    "creates the credential-lock database without a separate file descriptor",
+    async () => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          "creates the credential-lock database without a separate file descriptor",
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const database = join(home, ".codex-security-scan.sqlite3");
+      const originalWriteFile = fsPromises.writeFile;
+      let separateDatabaseCreates = 0;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        writeFile: async (...args: Parameters<typeof originalWriteFile>) => {
+          if (args[0] === database) separateDatabaseCreates += 1;
+          return await originalWriteFile(...args);
+        },
+      }));
+
+      try {
+        const release = await acquireCredentialHomeLockWithTimeout(home);
+        await release();
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          writeFile: originalWriteFile,
+        }));
+      }
+
+      // Closing another descriptor for this inode can release SQLite's
+      // process-owned POSIX lock, so SQLite must create its own guard file.
+      expect(separateDatabaseCreates).toBe(0);
+      expect((await stat(database)).mode & 0o777).toBe(0o600);
+    },
+  );
+
   test("keeps a fresh live credential-home lock and cancels the waiter", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({

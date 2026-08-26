@@ -1,6 +1,7 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   constants,
   existsSync,
   readdirSync,
@@ -1056,19 +1057,16 @@ export async function acquireCodexSecurityCredentialHomeLock(
   const ownerPath = join(lock, "owner.json");
   const token = randomUUID();
   const databasePath = join(codexHome, CREDENTIAL_LOCK_DATABASE);
-  // Keep this file across releases so every contender locks the same inode.
-  await writeFile(databasePath, "", { flag: "wx", mode: 0o600 }).catch(
+  const existingDatabaseMetadata = await lstat(databasePath).catch(
     (error: unknown) => {
-      if (nodeErrorCode(error) !== "EEXIST") throw error;
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
     },
   );
-  const databaseMetadata = await lstat(databasePath);
-  if (!databaseMetadata.isFile() || databaseMetadata.nlink !== 1) {
-    throw new OutputDirectoryError(
-      `Codex Security credential-home lock must be a regular file, not a symlink or hard link: ${databasePath}`,
-    );
+  if (existingDatabaseMetadata !== null) {
+    requireCredentialLockDatabaseFile(existingDatabaseMetadata, databasePath);
+    requirePrivateCredentialFile(existingDatabaseMetadata, databasePath);
   }
-  requirePrivateCredentialFile(databaseMetadata, databasePath);
   const require = createRequire(import.meta.url);
   // Both supported runtimes bundle SQLite. Keep the transaction in the process
   // doing the protected work, so pausing it cannot expire its lock.
@@ -1080,10 +1078,31 @@ export async function acquireCodexSecurityCredentialHomeLock(
           DatabaseSync: CredentialLockDatabaseConstructor;
         }
       ).DatabaseSync;
+  // Let SQLite create a missing guard so no separate descriptor can close after
+  // another connection acquires its process-owned POSIX lock. Keep the guard
+  // across releases so every contender locks the same inode.
   const database = new Database(databasePath);
   let databaseLocked = false;
 
   try {
+    let databaseMetadata = await lstat(databasePath);
+    requireCredentialLockDatabaseFile(databaseMetadata, databasePath);
+    if (
+      existingDatabaseMetadata !== null &&
+      (databaseMetadata.dev !== existingDatabaseMetadata.dev ||
+        databaseMetadata.ino !== existingDatabaseMetadata.ino)
+    ) {
+      throw new OutputDirectoryError(
+        `Codex Security credential-home lock changed while opening it: ${databasePath}`,
+      );
+    }
+    if (existingDatabaseMetadata === null && process.platform !== "win32") {
+      chmodSync(databasePath, 0o600);
+      databaseMetadata = await lstat(databasePath);
+      requireCredentialLockDatabaseFile(databaseMetadata, databasePath);
+    }
+    requirePrivateCredentialFile(databaseMetadata, databasePath);
+
     database.exec("PRAGMA busy_timeout = 0");
     while (true) {
       throwIfSignalAborted(signal);
@@ -1188,6 +1207,17 @@ export async function acquireCodexSecurityCredentialHomeLock(
   } catch (error) {
     database.close();
     throw error;
+  }
+}
+
+function requireCredentialLockDatabaseFile(
+  metadata: Stats,
+  path: string,
+): void {
+  if (!metadata.isFile() || metadata.nlink !== 1) {
+    throw new OutputDirectoryError(
+      `Codex Security credential-home lock must be a regular file, not a symlink or hard link: ${path}`,
+    );
   }
 }
 
