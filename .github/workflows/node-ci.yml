@@ -17,6 +17,7 @@ jobs:
   validate-title:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}validate pull request
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       ci-mode: ${{ steps.scope.outputs.ci-mode }}
 

@@ -3915,6 +3915,7 @@ describe("GitHub release workflow safeguards", () => {
         {
           name: string;
           if?: string;
+          "timeout-minutes"?: number;
           strategy?: { matrix: Record<string, string[]> };
           steps: Array<{
             if?: string;
@@ -3936,6 +3937,7 @@ describe("GitHub release workflow safeguards", () => {
     for (const job of Object.values(workflow.jobs)) {
       expect(job.name.startsWith(metadataPrefix), job.name).toBe(true);
     }
+    expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
     expect(
       workflow.jobs["validate-title"]?.steps.find(
         ({ name }) =>
@@ -3979,25 +3981,30 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
       "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
-    const unknownMode = {
-      "needs.test.result": "skipped",
-      "needs.validate-title.outputs.ci-mode": "unknown",
-      "needs.validate-title.result": "success",
-      "needs.windows-test.result": "skipped",
-      "needs.windows-verify.result": "skipped",
-    };
-    expect(
-      evaluateWorkflowCondition(
-        workflow.jobs["required-test"]?.steps[0]?.if ?? "",
-        unknownMode,
-      ),
-    ).toBe(true);
-    expect(
-      evaluateWorkflowCondition(
-        workflow.jobs["windows"]?.steps[0]?.if ?? "",
-        unknownMode,
-      ),
-    ).toBe(true);
+    for (const [ciMode, validation, upstream, gateFailure] of [
+      ["full", "success", "success", false],
+      ["full", "success", "skipped", true],
+      ["markdown", "success", "skipped", false],
+      ["markdown", "failure", "skipped", true],
+      ["unknown", "success", "skipped", true],
+    ] as const) {
+      const values = {
+        "needs.test.result": upstream,
+        "needs.validate-title.outputs.ci-mode": ciMode,
+        "needs.validate-title.result": validation,
+        "needs.windows-test.result": upstream,
+        "needs.windows-verify.result": upstream,
+      };
+      for (const job of ["required-test", "windows"]) {
+        expect(
+          evaluateWorkflowCondition(
+            workflow.jobs[job]?.steps[0]?.if ?? "",
+            values,
+          ),
+          `${job}: ${ciMode}/${validation}/${upstream}`,
+        ).toBe(gateFailure);
+      }
+    }
 
     const renderName = (
       template: string,
@@ -4148,50 +4155,53 @@ describe("GitHub release workflow safeguards", () => {
     },
   );
 
-  test("formats every changed regular non-symlink Markdown file", () => {
-    const workspace = mkdtempSync(join(tmpdir(), "release-ci-markdown-"));
-    const argsFile = join(workspace, "prettier-args");
-    const guide = join(workspace, "docs", "guide with spaces.md");
-    const readme = join(workspace, "README.md");
-    mkdirSync(join(workspace, "docs"));
-    writeFileSync(guide, "# Guide\n");
-    writeFileSync(readme, "# Readme\n");
-    symlinkSync(readme, join(workspace, "docs", "link.md"));
-    const mocks = `git() {
+  test.skipIf(process.platform === "win32")(
+    "formats every changed regular non-symlink Markdown file",
+    () => {
+      const workspace = mkdtempSync(join(tmpdir(), "release-ci-markdown-"));
+      const argsFile = join(workspace, "prettier-args");
+      const guide = join(workspace, "docs", "guide with spaces.md");
+      const readme = join(workspace, "README.md");
+      mkdirSync(join(workspace, "docs"));
+      writeFileSync(guide, "# Guide\n");
+      writeFileSync(readme, "# Readme\n");
+      symlinkSync(readme, join(workspace, "docs", "link.md"));
+      const mocks = `git() {
       printf '%s\\0' README.md 'docs/guide with spaces.md' docs/link.md deleted.md
     }
     pnpm() { printf '%s\\n' "$@" > "$MOCK_PNPM_ARGS"; }`;
-    try {
-      const result = spawnSync(
-        bash,
-        [
-          "-c",
-          `${mocks}\n${workflowStepShell(nodeCiWorkflow, "Check Markdown formatting")}`,
-        ],
-        {
-          env: {
-            ...process.env,
-            GITHUB_WORKSPACE: workspace,
-            MOCK_PNPM_ARGS: argsFile,
+      try {
+        const result = spawnSync(
+          bash,
+          [
+            "-c",
+            `${mocks}\n${workflowStepShell(nodeCiWorkflow, "Check Markdown formatting")}`,
+          ],
+          {
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: workspace,
+              MOCK_PNPM_ARGS: argsFile,
+            },
           },
-        },
-      );
-      expect(result.status).toBe(0);
-      expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
-        "--dir",
-        "sdk/typescript",
-        "exec",
-        "prettier",
-        "--ignore-path",
-        "/dev/null",
-        "--check",
-        readme,
-        guide,
-      ]);
-    } finally {
-      rmSync(workspace, { recursive: true, force: true });
-    }
-  });
+        );
+        expect(result.status).toBe(0);
+        expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
+          "--dir",
+          "sdk/typescript",
+          "exec",
+          "prettier",
+          "--ignore-path",
+          "/dev/null",
+          "--check",
+          readme,
+          guide,
+        ]);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("documents a canonical historical-summary prefix block", () => {
     const start = "<!-- codex-security-release-summary:start -->";
