@@ -1065,7 +1065,6 @@ export async function acquireCodexSecurityCredentialHomeLock(
   );
   if (existingDatabaseMetadata !== null) {
     requireCredentialLockDatabaseFile(existingDatabaseMetadata, databasePath);
-    requirePrivateCredentialFile(existingDatabaseMetadata, databasePath);
   }
   const require = createRequire(import.meta.url);
   // Both supported runtimes bundle SQLite. Keep the transaction in the process
@@ -1085,7 +1084,12 @@ export async function acquireCodexSecurityCredentialHomeLock(
   let databaseLocked = false;
 
   try {
-    let databaseMetadata = await lstat(databasePath);
+    // SQLite creates new databases with the process umask. Tighten or repair
+    // the guard synchronously before yielding so concurrent first-time callers
+    // cannot reject its transient mode. The credential home is already private,
+    // and the pre-open check above rejects linked existing files.
+    if (process.platform !== "win32") chmodSync(databasePath, 0o600);
+    const databaseMetadata = await lstat(databasePath);
     requireCredentialLockDatabaseFile(databaseMetadata, databasePath);
     if (
       existingDatabaseMetadata !== null &&
@@ -1095,11 +1099,6 @@ export async function acquireCodexSecurityCredentialHomeLock(
       throw new OutputDirectoryError(
         `Codex Security credential-home lock changed while opening it: ${databasePath}`,
       );
-    }
-    if (existingDatabaseMetadata === null && process.platform !== "win32") {
-      chmodSync(databasePath, 0o600);
-      databaseMetadata = await lstat(databasePath);
-      requireCredentialLockDatabaseFile(databaseMetadata, databasePath);
     }
     requirePrivateCredentialFile(databaseMetadata, databasePath);
 

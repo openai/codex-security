@@ -2351,12 +2351,12 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   testPosix(
-    "creates the credential-lock database without a separate file descriptor",
+    "initializes the credential-lock database without a descriptor or permission race",
     async () => {
       if (
         runTestInSubprocess(
           import.meta.path,
-          "creates the credential-lock database without a separate file descriptor",
+          "initializes the credential-lock database without a descriptor or permission race",
         )
       ) {
         return;
@@ -2366,22 +2366,65 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
       });
       const database = join(home, ".codex-security-scan.sqlite3");
+      const originalLstat = fsPromises.lstat;
       const originalWriteFile = fsPromises.writeFile;
       let separateDatabaseCreates = 0;
+      let observedMode: number | undefined;
+      let paused = false;
+      let reportPaused!: () => void;
+      let resumeCreator!: () => void;
+      const creatorPaused = new Promise<void>((resolve) => {
+        reportPaused = resolve;
+      });
+      const creatorResumed = new Promise<void>((resolve) => {
+        resumeCreator = resolve;
+      });
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
+        lstat: async (...args: Parameters<typeof originalLstat>) => {
+          const metadata = await originalLstat(...args);
+          if (args[0] === database && !paused) {
+            paused = true;
+            observedMode = Number(metadata.mode) & 0o777;
+            reportPaused();
+            await creatorResumed;
+          }
+          return metadata;
+        },
         writeFile: async (...args: Parameters<typeof originalWriteFile>) => {
           if (args[0] === database) separateDatabaseCreates += 1;
           return await originalWriteFile(...args);
         },
       }));
 
+      let first: Promise<() => Promise<void>> | undefined;
+      let releaseSecond: (() => Promise<void>) | undefined;
       try {
-        const release = await acquireCredentialHomeLockWithTimeout(home);
-        await release();
+        first = acquireCredentialHomeLockWithTimeout(home);
+        await Promise.race([
+          creatorPaused,
+          first.then(() => {
+            throw new Error("Credential-lock initialization did not pause");
+          }),
+        ]);
+
+        // Pause the creator at its first post-open inspection. A contender must
+        // see the final mode and acquire normally instead of rejecting it.
+        releaseSecond = await acquireCredentialHomeLockWithTimeout(home);
+        await releaseSecond();
+        releaseSecond = undefined;
+        resumeCreator();
+        const releaseFirst = await first;
+        await releaseFirst();
+        first = undefined;
       } finally {
+        resumeCreator();
+        await releaseSecond?.();
+        const pendingRelease = await first?.catch(() => undefined);
+        await pendingRelease?.();
         mock.module("node:fs/promises", () => ({
           ...fsPromises,
+          lstat: originalLstat,
           writeFile: originalWriteFile,
         }));
       }
@@ -2389,6 +2432,7 @@ describe("runtime directories and plugin Python boundary", () => {
       // Closing another descriptor for this inode can release SQLite's
       // process-owned POSIX lock, so SQLite must create its own guard file.
       expect(separateDatabaseCreates).toBe(0);
+      expect(observedMode).toBe(0o600);
       expect((await stat(database)).mode & 0o777).toBe(0o600);
     },
   );
@@ -2567,7 +2611,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   testPosix(
-    "rejects linked or non-private credential-lock database files",
+    "rejects linked and repairs non-private credential-lock database files",
     async () => {
       const root = await temporaryDirectory();
       const home = await prepareCodexSecurityCredentialHome({
@@ -2584,11 +2628,13 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(await readFile(target, "utf8")).toBe("unchanged");
         await rm(database);
       }
+      // Recover the state left if a creator exits after SQLite opens the guard
+      // but before it tightens the default mode.
       await writeFile(database, "", { mode: 0o600 });
       await chmod(database, 0o644);
-      await expect(
-        acquireCodexSecurityCredentialHomeLock(home),
-      ).rejects.toThrow("must not be accessible to other users");
+      const release = await acquireCodexSecurityCredentialHomeLock(home);
+      await release();
+      expect((await stat(database)).mode & 0o777).toBe(0o600);
     },
   );
 
