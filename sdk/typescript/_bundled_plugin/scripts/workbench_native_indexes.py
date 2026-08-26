@@ -202,23 +202,29 @@ def list_repositories(
     for row in connection.execute(
         "SELECT id, target_id FROM scans ORDER BY started_at DESC, id DESC"
     ):
-        latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
+        scan = scans_by_id.get(row["id"])
+        if scan is not None:
+            latest_scan_by_target.setdefault(row["target_id"], scan)
 
     open_findings_by_target = Counter(
         row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
+    target_ids = [
+        *latest_scan_by_target,
+        *(target_id for target_id in targets if target_id not in latest_scan_by_target),
+    ]
     repositories = [
         {
             "checkoutAvailable": Path(target["current_path"]).is_dir(),
             "displayName": target["display_name"],
-            "latestScan": latest_scan,
+            "latestScan": latest_scan_by_target.get(target_id),
             "openFindingsCount": open_findings_by_target.get(target_id, 0),
-            "scanCount": scan_count_by_target[target_id],
+            "scanCount": scan_count_by_target.get(target_id, 0),
             "targetId": target_id,
             "targetPath": target["current_path"],
         }
-        for target_id, latest_scan in latest_scan_by_target.items()
+        for target_id in target_ids
         if (target := targets.get(target_id)) is not None
     ]
     if args is None:
@@ -229,7 +235,8 @@ def list_repositories(
         repository
         for repository in repositories
         if (args.target_id is None or repository["targetId"] == args.target_id)
-        and args.status != "not_scanned"
+        and (args.status != "scanned" or repository["scanCount"] > 0)
+        and (args.status != "not_scanned" or repository["scanCount"] == 0)
         and (args.status != "open_findings" or repository["openFindingsCount"] > 0)
         and (
             not query
