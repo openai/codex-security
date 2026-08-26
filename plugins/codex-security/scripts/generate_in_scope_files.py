@@ -93,7 +93,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "rg",
         "--files",
         "--hidden",
-        "--no-ignore",
         "--path-separator",
         "/",
         "--glob",

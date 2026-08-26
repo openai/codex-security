@@ -72,39 +72,11 @@ After a native handoff or direct conversation start provides a `scanId`, use its
 
 For standard and diff scans, the app handoff starts preflight without an item count. After every structured helper result, call `update_codex_security_scan_progress` without changing phase and set `preflightChecks` to every entry from the helper's `results` array, projecting each entry to only `capability`, `reason`, `severity`, and `status`. Do not send `phaseItemsTotal`, `phaseItemsCompleted`, or `phaseProgressUnit` with `preflightChecks`: the server derives the total from the array length, counts `pass` and `fail` as completed, excludes `unknown` from completed, and derives the visible `block` or `warn` attention items. Send the full fresh results array after a clean rerun so stale issues disappear. Do not interpret item-count completion as readiness: remain in preflight for every blocked, incomplete, or error result while remediation or retry remains pending, even when every returned check was evaluated. Only after a `ready` result has published its fresh `preflightChecks` should a separate progress call advance to `threat_model`. These counts and issues belong to the current scan rather than the legacy setup-time workspace preflight, and remain visible after the scan advances. Deep Scan preflight and discovery progress remain owned by `start_codex_security_deep_scan`.
 
-Continue after a `ready` result. Explain warn or suggest issues when they materially affect scan quality, capacity, or resumability, and use the documented degraded path. If the result is `blocked` or `incomplete`, follow the remediation handling below. If the helper cannot run or returns its top-level `status: "error"` envelope, report the exact blocker and retry the documented recovery path when possible. Do not call `fail_codex_security_scan` merely because the helper is temporarily unavailable or errors; leave the durable scan running and hand off for a later retry while recovery may still be possible.
-
-When blocked or incomplete preflight includes actionable remediation, first classify the current session before choosing a remediation control. Treat `codex exec`, headless runs, automation runs, and any host that cannot actually pause for a human reply as non-interactive even if `request_user_input` or `request_codex_security_user_input` is named in this document or appears callable. In a non-interactive session, never call either user-input tool and never fall back to a chat question; go directly to the automatic-remediation path below. Only after the session is confirmed interactive, present the exact reasons and config delta in the Codex thread and optimistically call the native `request_user_input` tool so the paused scan is visibly waiting for the user's decision instead of asking only in plain chat prose:
-
-```text
-request_user_input(
-  questions=[
-    {
-      "header": "Preflight?",
-      "id": "apply_preflight_remediation",
-      "question": "Apply the recommended remediation and retry the preflight?",
-      "options": [
-        {
-          "label": "Apply and retry (Recommended)",
-          "description": "Apply the approved remediation, then rerun the capability preflight."
-        },
-        {
-          "label": "Leave paused",
-          "description": "Keep the scan running for a later retry without changing configuration."
-        },
-        {
-          "label": "Cancel scan",
-          "description": "Cancel this scan without applying the remediation."
-        }
-      ]
-    }
-  ]
-)
-```
+Continue only after a `ready` result. Explain material warnings and use the documented degraded path. For a blocked, incomplete, or error result, report the exact reason and preserve any durable running scan while recovery remains possible; do not review source or start workers early.
 
 Do not set `autoResolutionMs`; in an interactive session, an explicit answer is required before persistent configuration changes or scan continuation. If native `request_user_input` is unavailable or errors, call `request_codex_security_user_input` with the same `questions` payload. This MCP fallback is interactive and must remain prohibited in non-interactive sessions. If it returns `accepted`, follow its answer. If it is unavailable or errors, ask the same choices in chat. If it returns `declined` or `cancelled`, do not infer a choice; preserve the running scan, stop, and state that an explicit answer is still required. In every interactive waiting case, stop for the user's answer before creating or adopting a scan goal. Do not call `fail_codex_security_scan` while waiting for that answer. Apply only the approved remediation after `Apply and retry`, preserve the running scan and stop after `Leave paused`, and call `cancel_codex_security_scan` after `Cancel scan`.
 
-In a non-interactive Codex session, do not leave the run waiting for an answer it cannot receive. After showing the exact blocker and config delta, automatically apply only the helper's concrete Codex config patches with ordinary `value` or `remove` operations to the active writable user config, preserving unrelated settings. Never automatically apply `host_setting` remediation or invent a patch. Rerun the same preflight once with the same verified runtime facts and any newly observable effective config. Continue only after that rerun returns `ready`; do not create or adopt scan goals or start substantive scan work earlier. If the new config needs a fresh session before the active runtime can use it, the rerun remains blocked or incomplete, remediation is unavailable, or the helper errors, do not loop, call `fail_codex_security_scan`, or cancel automatically. Preserve an app-generated durable scan and hand it off for a later retry; in CLI or another host without a durable scan, report the exact remaining blocker and end without claiming that a scan is paused.
+In a non-interactive session, never request user input. Automatically apply only the helper's concrete `value` or `remove` patches to its writable `user_config_path`, preserving unrelated settings; never apply `host_setting` patches automatically. Rerun once with the same verified runtime facts and continue only if the result is `ready`. If remediation is unavailable, needs a new session, remains blocked, or errors, report the blocker without looping, canceling, or marking the scan failed; preserve a durable scan for later continuation.
 
 For any non-ready result, do not fail automatically. If an interactive chat fallback declines required remediation without choosing whether to cancel or leave the scan running, ask that follow-up before taking either action. If remediation is unavailable, the helper cannot run, the helper returns an error envelope, or a rerun remains blocked or incomplete, preserve a durable running scan and retry or hand off while recovery may still be possible. Call `fail_codex_security_scan` with the exact reasons only after the documented recovery path is exhausted and the blocker is confirmed unrecoverable. When the user explicitly cancels, call `cancel_codex_security_scan`.
 

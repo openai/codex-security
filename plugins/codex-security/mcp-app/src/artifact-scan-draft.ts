@@ -269,10 +269,11 @@ export async function recordCodexSecurityWorkerScanDraft(
 export async function saveScanDraftCheckpoint(
   context: ArtifactContext,
   input: ScanDraftInput,
+  updateHead = true,
 ): Promise<void> {
   const { handoffClaimToken: _claim, ...snapshot } = input;
   const contents = JSON.stringify(snapshot, null, 2) + "\n";
-  const name = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + ".json";
+  const name = scanDraftCheckpointName(input);
   const destination = await artifactDestination(context, ["checkpoints", name], "scan checkpoint");
   try {
     const existing = await fs.readFile(destination, "utf8");
@@ -281,7 +282,7 @@ export async function saveScanDraftCheckpoint(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     await replaceArtifactJson(destination, snapshot);
   }
-  if (context.layout === "worker") {
+  if (context.layout === "worker" && updateHead) {
     const head = await artifactDestination(
       context,
       ["checkpoint-head.json"],
@@ -296,21 +297,23 @@ async function preserveScanDraft(
   input: ScanDraftInput,
   saveCheckpoint = true,
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
-  if (saveCheckpoint) await saveScanDraftCheckpoint(context, input);
-  const result = structuredClone(input);
+  const currentCheckpointName = scanDraftCheckpointName(input);
+  if (saveCheckpoint) await saveScanDraftCheckpoint(context, input, false);
+  let result = structuredClone(input);
   const previousState = await readPreviousScanDraft(context);
   const previous = previousState.input;
   if (previous && previous.scanId !== input.scanId) throw new Error("scan checkpoint: saved result belongs to a different scan.");
-  if (input.complete === false && previous && previous.complete !== false) {
-    return {
-      input: structuredClone(previous),
-      previousDigest: previousState.digest,
-    };
-  }
+  const current = await readCurrentCheckpoints(context, currentCheckpointName);
   const archived = context.layout === "worker"
     ? await readArchivedWorkerCheckpoints(context)
     : [];
-  const sources: ScanDraftInput[] = previous ? [previous, ...archived] : archived;
+  const sources: ScanDraftInput[] = previous
+    ? [previous, ...current, ...archived]
+    : [...current, ...archived];
+  if (input.complete === false) {
+    const final = sources.find((source) => source.complete !== false);
+    if (final) result = structuredClone(final);
+  }
   const retainedScope = sources.find((source) => source.scope !== undefined)?.scope;
   if (result.scope === undefined && retainedScope !== undefined) {
     result.scope = retainedScope;
@@ -323,13 +326,12 @@ async function preserveScanDraft(
   }
 
   for (const source of sources) {
-    const dispositions = [
-      ...(result.coverage.deferred as JsonObject[]),
-      ...(result.coverage.surfaces as JsonObject[]).filter((surface) => (
-          (surface.disposition === "rejected" || surface.disposition === "not_applicable")
-          && typeof surface.candidateId === "string"
-      )),
-    ];
+    const deferred = result.coverage.deferred as JsonObject[];
+    const dispositions = (result.coverage.surfaces as JsonObject[]).filter((surface) => (
+        (surface.disposition === "rejected" || surface.disposition === "not_applicable")
+        && typeof surface.candidateId === "string"
+    ));
+    const candidateRows = [...deferred, ...dispositions];
     for (const pending of source.coverage.deferred as JsonObject[]) {
       const candidateId = pending.candidateId ?? pending.id;
       if (typeof candidateId !== "string") continue;
@@ -341,12 +343,12 @@ async function preserveScanDraft(
         );
         if (isObject(pending.finding)) preserveFindingDetails(finding, pending.finding);
       } else {
-        const disposition = dispositions.find((item) => (
+        const candidateRow = candidateRows.find((item) => (
           item.candidateId === candidateId || item.id === candidateId
         ));
-        if (disposition) {
+        if (candidateRow) {
           for (const field of ["candidate", "finding"] as const) {
-            if (pending[field] !== undefined) disposition[field] ??= structuredClone(pending[field]);
+            if (pending[field] !== undefined) candidateRow[field] ??= structuredClone(pending[field]);
           }
         }
       }
@@ -371,7 +373,7 @@ async function preserveScanDraft(
     }
     const resolvedIds = new Set([
       ...result.findings.map(findingCandidateId),
-      ...dispositions.map((item) => item.candidateId ?? item.id),
+      ...candidateRows.map((item) => item.candidateId ?? item.id),
     ].filter((value): value is string => typeof value === "string"));
     const previousCoverage = {
       ...source.coverage,
@@ -397,7 +399,101 @@ async function preserveScanDraft(
     };
     result.coverage = preserveScanCoverage(result.coverage, [previousCoverage], false);
   }
+  if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
+}
+
+async function readCurrentCheckpoints(
+  context: ArtifactContext,
+  excludedCheckpoint: string,
+): Promise<ScanDraftInput[]> {
+  const checkpointRoot = join(context.root, "checkpoints");
+  const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
+  if (checkpointRootMetadata === undefined) return [];
+  if (
+    checkpointRootMetadata.isSymbolicLink()
+    || !checkpointRootMetadata.isDirectory()
+  ) {
+    throw new Error("scan checkpoint: current checkpoint set is not a safe directory.");
+  }
+  const [canonicalRoot, canonicalCheckpointRoot] = await Promise.all([
+    fs.realpath(context.root),
+    fs.realpath(checkpointRoot),
+  ]);
+  if (!canonicalCheckpointRoot.startsWith(canonicalRoot + sep)) {
+    throw new Error("scan checkpoint: current checkpoint set escaped its artifact directory.");
+  }
+
+  let checkpointHead: string | undefined;
+  if (context.layout === "worker") {
+    const headMetadata = await lstatIfExists(join(context.root, "checkpoint-head.json"));
+    if (headMetadata !== undefined) {
+      if (headMetadata.isSymbolicLink() || !headMetadata.isFile()) {
+        throw new Error("scan checkpoint: current checkpoint head is not a safe file.");
+      }
+      const head = parseJsonObject(await readArtifactText(
+        context,
+        ["checkpoint-head.json"],
+        "current scan checkpoint head",
+      ), "current scan checkpoint head");
+      if (
+        typeof head.checkpoint !== "string"
+        || !/^[a-f0-9]{64}\.json$/u.test(head.checkpoint)
+      ) {
+        throw new Error("scan checkpoint: current checkpoint head is invalid.");
+      }
+      checkpointHead = head.checkpoint;
+    }
+  }
+
+  const checkpoints: Array<{
+    input: ScanDraftInput;
+    modifiedMs: number;
+    head: boolean;
+    name: string;
+  }> = [];
+  for (const entry of await fs.readdir(canonicalCheckpointRoot, { withFileTypes: true })) {
+    if (
+      !entry.isFile()
+      || !entry.name.endsWith(".json")
+      || entry.name === excludedCheckpoint
+    ) continue;
+    const checkpointPath = join(canonicalCheckpointRoot, entry.name);
+    const checkpointMetadata = await fs.lstat(checkpointPath);
+    if (checkpointMetadata.isSymbolicLink() || !checkpointMetadata.isFile()) {
+      throw new Error("scan checkpoint: current checkpoint is not a safe file.");
+    }
+    const input = parsePersistedCheckpoint(parseJsonObject(await readArtifactText(
+      context,
+      ["checkpoints", entry.name],
+      "current scan checkpoint",
+    ), "current scan checkpoint"));
+    if (input.scanId !== context.scanId) {
+      throw new Error("scan checkpoint: current checkpoint belongs to a different scan.");
+    }
+    checkpoints.push({
+      input,
+      modifiedMs: Number(checkpointMetadata.mtimeMs),
+      head: entry.name === checkpointHead,
+      name: entry.name,
+    });
+  }
+  if (
+    checkpointHead !== undefined
+    && checkpointHead !== excludedCheckpoint
+    && !checkpoints.some(({ head }) => head)
+  ) {
+    throw new Error("scan checkpoint: current checkpoint head is missing.");
+  }
+  checkpoints.sort((left, right) => Number(right.head) - Number(left.head)
+    || right.modifiedMs - left.modifiedMs
+    || right.name.localeCompare(left.name));
+  return checkpoints.map(({ input }) => input);
+}
+
+function scanDraftCheckpointName(input: ScanDraftInput): string {
+  const { handoffClaimToken: _claim, ...snapshot } = input;
+  return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") + ".json";
 }
 
 async function readPreviousScanDraft(
@@ -664,6 +760,9 @@ function withoutPreviousFindings(finding: JsonObject): JsonObject {
 
 /** Preserve both original sources and details synthesized after those sources. */
 export function preserveFindingDetails(current: JsonObject, previous: JsonObject): void {
+  if (current.identity === undefined && previous.identity !== undefined) {
+    current.identity = structuredClone(previous.identity);
+  }
   const provenance = requireObject(current.provenance, "saved finding provenance");
   const oldProvenance = isObject(previous.provenance) ? previous.provenance : {};
   for (const field of ["sourceFindingIds", "sourceFindings", "previousFindings", "originalCandidates"] as const) {
@@ -738,22 +837,31 @@ export function preserveScanCoverage(
   const result = structuredClone(coverage);
   for (const field of ["surfaces", "explicitExclusions", "deferred", "openQuestions"] as const) {
     const current = (result[field] as unknown[] | undefined) ?? [];
-    const previous = exactUnion(...sources.map((source) => (source[field] as unknown[] | undefined) ?? []));
-    const values = preserveCompleteness ? exactUnion(current, previous) : [
-      ...current,
-      ...previous.filter((value) => !current.some((item) => JSON.stringify(item) === JSON.stringify(value))),
-    ];
+    const values = [...current];
+    for (const source of sources) {
+      for (const value of (source[field] as unknown[] | undefined) ?? []) {
+        if (!coverageEntryPresent(values, value)) values.push(structuredClone(value));
+      }
+    }
     if (field !== "openQuestions" || values.length > 0 || result[field] !== undefined) result[field] = values;
   }
   if (
-    (result.deferred as unknown[]).length > 0
-    || (result.surfaces as JsonObject[]).some((surface) => surface.disposition === "needs_follow_up")
-    || (preserveCompleteness && sources.some((source) => source.completeness === "partial"))
+    coverageHasOutstandingWork(result)
+    || (preserveCompleteness && sources.some((source) => (
+      source.completeness === "partial" && !coverageHasOutstandingWork(source)
+    )))
   ) result.completeness = "partial";
   else if (preserveCompleteness && sources.some((source) => source.completeness === "unknown")) {
     result.completeness = "unknown";
   }
   return result;
+}
+
+function coverageHasOutstandingWork(coverage: JsonObject): boolean {
+  return ((coverage.deferred as unknown[] | undefined) ?? []).length > 0
+    || ((coverage.surfaces as JsonObject[] | undefined) ?? []).some((surface) => (
+      surface.disposition === "needs_follow_up"
+    ));
 }
 
 function exactUnion<Value>(...groups: Value[][]): Value[] {
@@ -857,6 +965,36 @@ export function parsePersistedScanDraft(
     normalizePersistedFindingDetails(finding);
   }
   return parseScanDraft(compatible as unknown as ScanDraftInput);
+}
+
+function parsePersistedCheckpoint(input: Record<string, unknown>): ScanDraftInput {
+  const compatible = structuredClone(input);
+  if (isObject(compatible.scope)) {
+    delete compatible.scope.includePaths;
+    delete compatible.scope.excludePaths;
+    if (Object.keys(compatible.scope).length === 0) delete compatible.scope;
+  }
+  if (isObject(compatible.coverage)) {
+    for (const field of [
+      "documentType",
+      "schemaVersion",
+      "scanId",
+      "mode",
+      "includePaths",
+      "excludePaths",
+      "receiptRefs",
+      "inventoryStrategy",
+    ]) delete compatible.coverage[field];
+  }
+  if (Array.isArray(compatible.findings)) {
+    for (const finding of compatible.findings) {
+      if (!isObject(finding)) continue;
+      delete finding.findingId;
+      delete finding.occurrenceId;
+      delete finding.fingerprints;
+    }
+  }
+  return parsePersistedScanDraft(compatible);
 }
 
 function normalizePersistedFindingDetails(finding: JsonObject): void {

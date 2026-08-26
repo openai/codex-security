@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1209,6 +1209,48 @@ async function testExhaustedInvalidDiscoveryArtifactsAreReplaced() {
   );
 }
 
+async function testExhaustedMalformedDiscoveryDoesNotRemainPublishable() {
+  const fixture = await fixtureRun({
+    workers: 1,
+    subagents: 0,
+    stopAfterNoNew: 4,
+    stopAfterConsecutiveErrors: 2,
+    maxDiscoveryRuns: 3
+  });
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor({
+    malformedDiscoveryAttempts: 4,
+    dedupNewFindings: [1]
+  });
+  const coordinator = new DeepScanCoordinator({
+    run: fixture.run,
+    store,
+    executor,
+    pluginRoot: fixture.pluginRoot,
+    retryDelaysMs: [1, 3, 9],
+    clock: immediateClock
+  });
+  coordinator.start();
+
+  const terminal = await coordinator.wait(undefined, 5_000);
+
+  assert.equal(terminal?.status, "succeeded");
+  assert.equal(executor.discoveryAttempts.get("discovery-0001"), 4);
+  await assert.rejects(
+    readFile(path.join(
+      fixture.run.scanDir,
+      "artifacts",
+      "deep_discovery",
+      "workers",
+      "discovery-0001",
+      "output",
+      "result.json"
+    )),
+    { code: "ENOENT" },
+    "an exhausted invalid result must not remain available to stopped-result recovery"
+  );
+}
+
 async function testTransientExecutionFailureResumesWorkerThread() {
   const fixture = await fixtureRun({
     workers: 1,
@@ -2351,13 +2393,14 @@ async function testStoppedPublicationFailurePreservesOriginalDiagnostic() {
   coordinator.start();
   await executor.discoveryStarted;
   store.run.status = "failed";
-  store.run.error = `original worker failure diagnostic ${"x".repeat(2_350)}`;
-  coordinator.failExternallyPersisted(store.run.error);
+  store.run.error = `authoritative worker failure diagnostic ${"x".repeat(2_350)}`;
+  coordinator.failExternallyPersisted("stale coordinator-local failure diagnostic");
 
   const terminal = await coordinator.wait(undefined, 5_000);
 
   assert.equal(terminal?.status, "failed");
-  assert.match(terminal?.error ?? "", /original worker failure diagnostic/);
+  assert.match(terminal?.error ?? "", /authoritative worker failure diagnostic/);
+  assert.doesNotMatch(terminal?.error ?? "", /stale coordinator-local failure diagnostic/);
   assert.match(
     terminal?.error ?? "",
     /Saved result publication failed: fixture retained result publication failure/,
@@ -3503,7 +3546,10 @@ class FakeStore {
 
   async recordStoppedPublicationFailure(_scanId, message) {
     this.publicationFailureMessages.push(message);
-    this.run.error = message;
+    const original = this.run.error?.trim();
+    this.run.error = original
+      ? boundedFixtureErrorPair(message, "\nOriginal Deep Scan failure:\n", original)
+      : message;
     return structuredClone(this.run);
   }
 
@@ -3886,6 +3932,24 @@ const immediateClock = {
   }
 };
 
+function boundedFixtureErrorPair(primary, separator, secondary) {
+  const available = 2_400 - separator.length;
+  let primaryBudget = Math.min(primary.length, Math.floor(available / 2));
+  const secondaryBudget = Math.min(secondary.length, available - primaryBudget);
+  primaryBudget = Math.min(primary.length, available - secondaryBudget);
+  return boundedFixtureErrorText(primary, primaryBudget)
+    + separator
+    + boundedFixtureErrorText(secondary, secondaryBudget);
+}
+
+function boundedFixtureErrorText(message, maximum) {
+  if (message.length <= maximum) return message;
+  const digest = createHash("sha256").update(message).digest("hex");
+  const suffix = `\n...[truncated; sha256:${digest}]`;
+  if (suffix.length >= maximum) return message.slice(0, maximum);
+  return message.slice(0, maximum - suffix.length) + suffix;
+}
+
 try {
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
@@ -3917,6 +3981,7 @@ try {
   await testExhaustedTransientDiscoveryIsReplaced();
   await testSuccessfulDiscoveryResetsConsecutiveFailureThreshold();
   await testExhaustedInvalidDiscoveryArtifactsAreReplaced();
+  await testExhaustedMalformedDiscoveryDoesNotRemainPublishable();
   await testTransientExecutionFailureResumesWorkerThread();
   await testConfigurationFailureDoesNotRetry();
   await testFailureManifestWriteDoesNotMaskOriginalError();

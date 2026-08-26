@@ -37,11 +37,12 @@ export class DeepScanCoordinatorRegistry {
       }
     });
     this.coordinators.set(options.run.scanId, coordinator);
-    void coordinator.settled().then(() => {
+    const removeCoordinator = (): void => {
       if (this.coordinators.get(options.run.scanId) === coordinator) {
         this.coordinators.delete(options.run.scanId);
       }
-    });
+    };
+    void coordinator.settled().then(removeCoordinator, removeCoordinator);
     coordinator.start();
     return coordinator;
   }

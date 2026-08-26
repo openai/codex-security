@@ -200,6 +200,14 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _require_dict(payload: dict[str, Any], key: str, context: str) -> dict[str, Any]:
     value = payload.get(key)
     if not isinstance(value, dict):
@@ -2308,22 +2316,18 @@ def build_sarif_projection(
             raise ContractError("source root: expected an existing directory")
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
-    run = sarif["runs"][0]
-    completeness = coverage["completeness"]
-    scan_status = manifest["scan"]["status"]
-    execution_successful = scan_status == "completed" and completeness == "complete"
-    run["invocations"] = [{"executionSuccessful": execution_successful}]
-    if not execution_successful:
-        run["properties"]["codexSecurityCoverageCompleteness"] = completeness
-        reasons = [item["reason"] for item in coverage["deferred"]]
-        if not reasons:
-            reasons = [
-                f"Scan status is {scan_status}; results may be incomplete."
-                if scan_status != "completed"
-                else f"Scan coverage is {completeness}; results may be incomplete."
-            ]
-        run["invocations"][0]["toolExecutionNotifications"] = [
-            {"level": "warning", "message": {"text": reason}} for reason in reasons
+    execution_successful = manifest["scan"]["status"] == "completed"
+    if not execution_successful or coverage["completeness"] != "complete":
+        run = sarif["runs"][0]
+        run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
+        run["invocations"] = [
+            {
+                "executionSuccessful": execution_successful,
+                "toolExecutionNotifications": [
+                    {"level": "warning", "message": {"text": item["reason"]}}
+                    for item in coverage["deferred"]
+                ],
+            }
         ]
     _validate_sarif(sarif)
     return sarif
@@ -2665,7 +2669,7 @@ def _prepare_scan_finalization(
     _validate_sealed_coverage_receipts(scan, coverage)
     _validate_manifest(manifest)
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings, schema_dir / "findings.schema.json")
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _contract_json_bytes("scan-manifest.json", manifest)
     return (

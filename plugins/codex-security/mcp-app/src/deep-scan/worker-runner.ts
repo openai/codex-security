@@ -203,7 +203,7 @@ export class DeepScanWorkerRunner {
       }, outcome.attempt, outcome.threadId);
       outcome = { ...outcome, status: "canceled" };
     }
-    if (outcome.status === "canceled" && !discoveryValidated) {
+    if (!discoveryValidated) {
       await fs.rm(files.resultPath, { force: true });
     }
     const basePromptSha256 = sha256(basePrompt);

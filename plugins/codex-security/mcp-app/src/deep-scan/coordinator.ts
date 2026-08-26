@@ -108,11 +108,16 @@ export class DeepScanCoordinator {
   private discoveryTimeout: ReturnType<typeof setTimeout> | undefined;
   private ownershipCheck: Promise<boolean> | undefined;
   private resolveTerminal!: (state: DeepScanRunState) => void;
+  private rejectTerminal!: (error: unknown) => void;
   private resolveCancellationReady!: () => void;
   private readonly cancellationReady = new Promise<void>((resolvePromise) => {
     this.resolveCancellationReady = resolvePromise;
   });
-  private cancellationPersistence?: { promise: Promise<void>; resolve: () => void };
+  private cancellationPersistence?: {
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  };
   private started = false;
   private terminal = false;
   private canceled = false;
@@ -160,8 +165,9 @@ export class DeepScanCoordinator {
     this.abortController.signal.addEventListener("abort", () => {
       this.discoveryAbortController.abort(this.abortController.signal.reason);
     }, { once: true });
-    this.terminalPromise = new Promise((resolvePromise) => {
+    this.terminalPromise = new Promise((resolvePromise, rejectPromise) => {
       this.resolveTerminal = resolvePromise;
+      this.rejectTerminal = rejectPromise;
     });
   }
 
@@ -177,6 +183,7 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(error)
       });
+      this.failLocally(error);
     });
   }
 
@@ -197,7 +204,7 @@ export class DeepScanCoordinator {
     signal: AbortSignal | undefined,
     timeoutMs?: number
   ): Promise<DeepScanRunState | undefined> {
-    if (this.terminal) return this.snapshot();
+    if (this.terminal) return await this.settled();
     if (signal?.aborted) throw abortError(signal.reason);
     return await new Promise<DeepScanRunState | undefined>((resolvePromise, rejectPromise) => {
       const timeout = timeoutMs === undefined
@@ -215,10 +222,16 @@ export class DeepScanCoordinator {
         signal?.removeEventListener("abort", onAbort);
       };
       signal?.addEventListener("abort", onAbort, { once: true });
-      void this.terminalPromise.then((state) => {
-        cleanup();
-        resolvePromise(cloneState(state));
-      });
+      void this.terminalPromise.then(
+        (state) => {
+          cleanup();
+          resolvePromise(cloneState(state));
+        },
+        (error: unknown) => {
+          cleanup();
+          rejectPromise(error);
+        }
+      );
     });
   }
 
@@ -237,20 +250,24 @@ export class DeepScanCoordinator {
     reason: string,
     persistCancellation: () => Promise<void>
   ): Promise<DeepScanRunState> {
-    if (this.terminal) return this.snapshot();
+    if (this.terminal) return await this.settled();
     if (!this.cancellationPersistence) {
       let resolve!: () => void;
-      const promise = new Promise<void>((resolvePromise) => {
+      let reject!: (error: unknown) => void;
+      const promise = new Promise<void>((resolvePromise, rejectPromise) => {
         resolve = resolvePromise;
+        reject = rejectPromise;
       });
-      this.cancellationPersistence = { promise, resolve };
+      this.cancellationPersistence = { promise, resolve, reject };
     }
     this.cancel(reason);
     await this.cancellationReady;
     try {
       await persistCancellation();
-    } finally {
       this.cancellationPersistence.resolve();
+    } catch (error) {
+      this.cancellationPersistence.reject(error);
+      throw error;
     }
     return await this.settled();
   }
@@ -369,7 +386,7 @@ export class DeepScanCoordinator {
             const publicationFailure = boundedDeepScanErrorMessage(
               `Saved result publication failed: ${boundedDeepScanErrorMessage(error)}`,
             );
-            const originalFailure = this.state.error?.trim();
+            const originalFailure = current.error?.trim();
             const diagnostic = originalFailure
               ? boundedDeepScanErrorPair(
                 publicationFailure,
@@ -384,7 +401,7 @@ export class DeepScanCoordinator {
             try {
               this.state = await this.options.store.recordStoppedPublicationFailure(
                 this.state.scanId,
-                diagnostic,
+                publicationFailure,
                 current.coordinatorGeneration
               );
             } catch (persistError) {
@@ -423,6 +440,20 @@ export class DeepScanCoordinator {
       this.discoveryTimeout = undefined;
     }
     this.resolveTerminal(cloneState(state));
+  }
+
+  private failLocally(error: unknown): void {
+    if (this.terminal) return;
+    this.terminal = true;
+    if (this.heartbeatTimeout !== undefined) {
+      clearTimeout(this.heartbeatTimeout);
+      this.heartbeatTimeout = undefined;
+    }
+    if (this.discoveryTimeout !== undefined) {
+      clearTimeout(this.discoveryTimeout);
+      this.discoveryTimeout = undefined;
+    }
+    this.rejectTerminal(error);
   }
 
   private scheduleDiscoveryDeadline(): void {

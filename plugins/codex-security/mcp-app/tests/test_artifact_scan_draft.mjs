@@ -155,7 +155,117 @@ try {
     "a later write cannot silently remove a saved validated finding",
   );
   assert.deepEqual(await readFile(path.join(checkpointRoot, "checkpoints", checkpointFiles[0])), checkpointBytes);
-  assert.equal((await readdir(path.join(checkpointRoot, "checkpoints"))).length, 2);
+  assert.equal(
+    (await readdir(path.join(checkpointRoot, "checkpoints"))).length,
+    3,
+    "raw and reconciled drafts remain immutable while the head selects the accepted result",
+  );
+
+  const interruptedRoot = path.join(root, "interrupted-checkpoint-worker");
+  await mkdir(interruptedRoot);
+  const interruptedContext = { ...workerContext, root: interruptedRoot };
+  const interruptedFinding = structuredClone(finding);
+  interruptedFinding.identity = { anchor: "interrupted-checkpoint" };
+  interruptedFinding.provenance.candidateId = "interrupted-checkpoint";
+  interruptedFinding.extensions.candidateId = "interrupted-checkpoint";
+  await saveScanDraftCheckpoint(interruptedContext, {
+    ...workerInput,
+    complete: false,
+    findings: [interruptedFinding],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      deferred: [{ candidateId: "interrupted-review", reason: "Review was checkpointed." }],
+    },
+  }, false);
+  await recordCodexSecurityWorkerScanDraft(interruptedContext, {
+    ...workerInput,
+    findings: [],
+  });
+  const interruptedResult = JSON.parse(
+    await readFile(path.join(interruptedRoot, "result.json"), "utf8"),
+  );
+  assert.deepEqual(interruptedResult.findings, [interruptedFinding]);
+  assert.equal(
+    interruptedResult.coverage.deferred.some((item) => (
+      item.candidateId === "interrupted-review"
+    )),
+    true,
+  );
+
+  const rejectedIncompleteRoot = path.join(root, "rejected-incomplete-worker");
+  await mkdir(rejectedIncompleteRoot);
+  const rejectedIncompleteContext = { ...workerContext, root: rejectedIncompleteRoot };
+  await recordCodexSecurityWorkerScanDraft(rejectedIncompleteContext, workerInput);
+  await recordCodexSecurityWorkerScanDraft(rejectedIncompleteContext, {
+    ...workerInput,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [{
+        candidateId: finding.provenance.candidateId,
+        label: "Archive extraction",
+        disposition: "rejected",
+        notes: "The incomplete writer rejected this candidate.",
+      }],
+      deferred: [{
+        candidateId: "late-incomplete-review",
+        reason: "This arrived after the worker completed.",
+      }],
+    },
+  });
+  const acceptedHead = JSON.parse(
+    await readFile(path.join(rejectedIncompleteRoot, "checkpoint-head.json"), "utf8"),
+  );
+  const acceptedHeadDraft = JSON.parse(await readFile(
+    path.join(rejectedIncompleteRoot, "checkpoints", acceptedHead.checkpoint),
+    "utf8",
+  ));
+  assert.notEqual(
+    acceptedHeadDraft.complete,
+    false,
+    "a rejected incomplete write must not become the authoritative checkpoint head",
+  );
+  assert.deepEqual(acceptedHeadDraft.findings, [finding]);
+  const acceptedResult = JSON.parse(
+    await readFile(path.join(rejectedIncompleteRoot, "result.json"), "utf8"),
+  );
+  assert.equal(
+    acceptedResult.coverage.deferred.some(
+      item => item.candidateId === "late-incomplete-review",
+    ),
+    false,
+    "a rejected incomplete write must not change the completed result",
+  );
+
+  const deferredDoesNotRejectRoot = path.join(root, "deferred-does-not-reject-worker");
+  await mkdir(deferredDoesNotRejectRoot);
+  const deferredDoesNotRejectContext = { ...workerContext, root: deferredDoesNotRejectRoot };
+  await recordCodexSecurityWorkerScanDraft(deferredDoesNotRejectContext, workerInput);
+  await recordCodexSecurityWorkerScanDraft(deferredDoesNotRejectContext, {
+    ...workerInput,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: [],
+      deferred: [{
+        candidateId: finding.provenance.candidateId,
+        reason: "A stale worker row still says validation is pending.",
+      }],
+    },
+  });
+  const deferredDoesNotReject = JSON.parse(
+    await readFile(path.join(deferredDoesNotRejectRoot, "result.json"), "utf8"),
+  );
+  assert.deepEqual(
+    deferredDoesNotReject.findings,
+    [finding],
+    "deferred coverage is not an explicit rejection of an already validated finding",
+  );
 
   const rejection = {
     candidateId: finding.provenance.candidateId,
@@ -283,6 +393,34 @@ try {
   assert.deepEqual(parentSnapshot.findings, [finding]);
   await recordCodexSecurityScanDraft({ ...context, root: parentCheckpointRoot }, { ...input, findings: [] });
   assert.equal((await readJson(parentCheckpointRoot, "findings.json")).findings.length, 1);
+
+  const interruptedParentRoot = path.join(root, "interrupted-checkpoint-parent");
+  await mkdir(interruptedParentRoot);
+  const interruptedParentContext = { ...context, root: interruptedParentRoot };
+  await saveScanDraftCheckpoint(interruptedParentContext, {
+    ...input,
+    complete: false,
+    findings: [interruptedFinding],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      deferred: [{ candidateId: "interrupted-parent-review", reason: "Review was checkpointed." }],
+    },
+  }, false);
+  await recordCodexSecurityScanDraft(interruptedParentContext, {
+    ...input,
+    findings: [],
+  });
+  assert.deepEqual(
+    (await readJson(interruptedParentRoot, "findings.json")).findings,
+    [interruptedFinding],
+  );
+  assert.equal(
+    (await readJson(interruptedParentRoot, "coverage.json")).deferred.some(
+      item => item.candidateId === "interrupted-parent-review",
+    ),
+    true,
+  );
 
   const { scope: _parentScope, threatModel: _parentThreatModel, ...parentWithoutContext } = input;
   await recordCodexSecurityScanDraft(
@@ -444,7 +582,12 @@ try {
   };
   const originalScopedWorkerInput = structuredClone(scopedWorkerInput);
   // Scope-filtering cases are independent scans, not revisions of the saved audit above.
-  await rm(workerResultPath);
+  const resetWorkerDraft = async () => Promise.all([
+    rm(workerResultPath, { force: true }),
+    rm(path.join(workerRoot, "checkpoints"), { recursive: true, force: true }),
+    rm(path.join(workerRoot, "checkpoint-head.json"), { force: true }),
+  ]);
+  await resetWorkerDraft();
   assert.deepEqual(
     await recordCodexSecurityWorkerScanDraft(
       { ...workerContext, scope: "src" },
@@ -463,7 +606,7 @@ try {
     findings: [supportedScopedFinding],
   });
   assert.deepEqual(scopedWorkerInput, originalScopedWorkerInput);
-  await rm(workerResultPath);
+  await resetWorkerDraft();
   assert.deepEqual(
     await recordCodexSecurityWorkerScanDraft(
       { ...workerContext, scope: "src/extract.py" },
@@ -481,7 +624,7 @@ try {
     ...scopedWorkerInput,
     findings: [supportedScopedFinding],
   });
-  await rm(workerResultPath);
+  await resetWorkerDraft();
   assert.deepEqual(
     await recordCodexSecurityWorkerScanDraft(
       { ...workerContext, scope: "." },
@@ -1274,11 +1417,12 @@ try {
   const archivedResolutionResult = JSON.parse(
     await readFile(path.join(archivedResolutionOutput, "result.json"), "utf8"),
   );
-  assert.deepEqual(archivedResolutionResult.findings, []);
   assert.deepEqual(
-    archivedResolutionResult.coverage.deferred,
-    [{ ...demotedCandidate, finding }],
+    archivedResolutionResult.findings,
+    [finding],
+    "deferred coverage does not reject a validated finding from an archived attempt",
   );
+  assert.deepEqual(archivedResolutionResult.coverage.deferred, []);
 
   const repeatedCheckpointRoot = path.join(root, "repeated-checkpoint-worker");
   const repeatedCheckpointOutput = path.join(repeatedCheckpointRoot, "output");
@@ -1379,11 +1523,15 @@ try {
   const multiAttemptResult = JSON.parse(
     await readFile(path.join(multiAttemptOutput, "result.json"), "utf8"),
   );
-  assert.deepEqual(multiAttemptResult.findings, []);
+  assert.deepEqual(
+    multiAttemptResult.findings,
+    [finding],
+    "a newer archived deferred row cannot reject an older validated finding",
+  );
   assert.deepEqual(
     multiAttemptResult.coverage.deferred,
-    [{ ...demotedCandidate, finding }],
-    "a newer archived demotion must supersede an older archived finding",
+    [],
+    "the retained finding resolves the stale archived deferred row",
   );
 
   const malformedArchivedRoot = path.join(root, "malformed-archived-result-worker");
@@ -1773,6 +1921,21 @@ try {
   assert.deepEqual(
     (await readJson(root, "findings.json")).findings[0].identity,
     explicitIdentity,
+  );
+
+  const identityRoot = path.join(root, "preserved-finding-identity-worker");
+  await mkdir(identityRoot);
+  const identityContext = { ...workerContext, root: identityRoot };
+  await recordCodexSecurityWorkerScanDraft(identityContext, {
+    ...workerInput,
+    findings: [{ ...finding, identity: explicitIdentity }],
+  });
+  await recordCodexSecurityWorkerScanDraft(identityContext, workerInput);
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(identityRoot, "result.json"), "utf8"))
+      .findings[0].identity,
+    explicitIdentity,
+    "a later refinement inherits the stable identity of the matched saved finding",
   );
 
   await recordFreshScanDraft(context, {
@@ -2595,8 +2758,11 @@ function expectedReasonOnlyDeferredId(item) {
 
 // Projection cases below use the same fixture root but model independent scans.
 async function recordFreshScanDraft(context, input) {
-  await Promise.all(["scan-manifest.json", "findings.json", "coverage.json"].map(
-    name => rm(path.join(context.root, name), { force: true }),
-  ));
+  await Promise.all([
+    ...["scan-manifest.json", "findings.json", "coverage.json", "checkpoint-head.json"].map(
+      name => rm(path.join(context.root, name), { force: true }),
+    ),
+    rm(path.join(context.root, "checkpoints"), { recursive: true, force: true }),
+  ]);
   return recordCodexSecurityScanDraft(context, input);
 }

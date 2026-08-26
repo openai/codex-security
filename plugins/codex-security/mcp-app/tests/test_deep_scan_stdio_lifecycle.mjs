@@ -252,8 +252,12 @@ async function testDeepScanStdioLifecycle() {
       server.waitForResponse(11),
       server.waitForResponse(12)
     ]);
-    assertCanceled(failedFirstJoin, scanId);
-    assertCanceled(failedSecondJoin, scanId);
+    for (const failedJoin of [failedFirstJoin, failedSecondJoin]) {
+      const failureText = failedJoin.result?.content?.map((item) => item.text).join(" ") ?? "";
+      assert.equal(failedJoin.result?.isError, true);
+      assert.equal(failedJoin.result?.structuredContent, undefined);
+      assert.match(failureText, /injected cancel-scan failure/);
+    }
     const stillDurablyRunning = await runWorkbench(environment, [
       "get-scan", "--scan-id", scanId
     ]);
@@ -276,8 +280,8 @@ async function testDeepScanStdioLifecycle() {
     assert.equal(exitedWorker.pid, startedWorker.pid);
     assert.match(exitedWorker.signal, /^SIG(?:INT|TERM)$/);
     await waitFor(() => server.stderrEvents().some((event) => (
-      event.event === "coordinator_cleanup_settled" && event.scanId === scanId
-    )), "coordinator cleanup to settle");
+      event.event === "coordinator_unhandled_error" && event.scanId === scanId
+    )), "cancellation persistence failure to reach the coordinator");
     const canceledManifest = JSON.parse(await readFile(path.join(
       startedState.scanDir,
       "scan-manifest.json"

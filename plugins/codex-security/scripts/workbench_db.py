@@ -1542,9 +1542,7 @@ def complete_scan_locked(
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
-        if wrote or (
-            scan["mode"] == "deep" and not isinstance(exc, RecoverableContractError)
-        ):
+        if scan["mode"] != "deep" or wrote or not isinstance(exc, RecoverableContractError):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
             fail_scan_locked(connection, args)
@@ -3752,38 +3750,6 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         scan_dir
     ):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
-    # Re-check privacy on every resolution so a mid-scan rename/replace under a
-    # shared parent cannot substitute another user's forged artifact tree.
-    if os.name != "nt":
-        if stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise SystemExit(
-                "Scan directory must not be accessible to other users (chmod 700)."
-            )
-        geteuid = getattr(os, "geteuid", None)
-        effective_uid = geteuid() if geteuid is not None else None
-        if effective_uid is not None and metadata.st_uid != effective_uid:
-            raise SystemExit("Scan directory must be owned by the current user.")
-        for parent in scan_dir.parents:
-            try:
-                parent_metadata = parent.lstat()
-            except OSError as exc:
-                raise SystemExit("Scan output parent could not be inspected.") from exc
-            if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
-                parent_metadata.st_mode
-            ):
-                raise SystemExit("Scan output parent must be a non-symlink directory.")
-            if effective_uid is not None and parent_metadata.st_uid not in {
-                0,
-                effective_uid,
-            }:
-                raise SystemExit("Scan output parent must have a trusted owner.")
-            if (
-                stat.S_IMODE(parent_metadata.st_mode) & 0o022
-                and not parent_metadata.st_mode & stat.S_ISVTX
-            ):
-                raise SystemExit(
-                    "Scan output parent must not be group- or world-writable without the sticky bit."
-                )
     return scan_dir
 
 

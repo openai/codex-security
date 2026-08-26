@@ -39,7 +39,140 @@ const {
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
 await testLateParentDraftPreservesCheckpointWithoutOverwritingTerminalSeal();
+await testRecoveredPublicationRejectsLateFailure();
+await testNoopStoppedRefreshRetainsPublicationFailure();
 await testConcurrentParentDraftsPreserveBothCheckpoints();
+
+async function testRecoveredPublicationRejectsLateFailure() {
+  const fixtureRoot = await mkdtemp(path.join(tmpdir(), "deep-scan-publication-failure-"));
+  const targetPath = path.join(fixtureRoot, "target");
+  const environment = {
+    ...process.env,
+    CODEX_HOME: path.join(fixtureRoot, "home"),
+    CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
+  };
+  const python = process.env.PYTHON?.trim() || "python3";
+  const runWorkbench = async (args) => {
+    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+      cwd: pluginRoot, env: environment, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+    });
+    return JSON.parse(stdout);
+  };
+  try {
+    await mkdir(targetPath, { recursive: true });
+    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
+    const store = new WorkbenchDeepScanStore(runWorkbench);
+    const { run } = await store.begin({
+      targetPath,
+      scope: ".",
+      threadId: "publication-failure-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: "publication-failure-owner",
+    });
+    assert.equal(claim.acquired, true);
+    assert.equal(claim.run.coordinatorGeneration > 1, true);
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(context, {
+      scanId: run.scanId,
+      complete: false,
+      findings: [],
+      coverage: {
+        completeness: "partial",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [{
+          candidateId: "publication-recovery-candidate",
+          reason: "Publication recovery remains pending.",
+          paths: ["fixture.py"],
+        }],
+      },
+    }, runWorkbench);
+    await runWorkbench([
+      "cancel-scan", "--scan-id", run.scanId,
+      "--thread-id", "publication-failure-owner",
+    ]);
+    assert.equal(
+      (await store.get(run.scanId, "publication-failure-owner")).status,
+      "canceled",
+    );
+    const message = "Saved result publication failed: stale fixture publication failure";
+    await store.recordStoppedPublicationFailure(
+      run.scanId,
+      message,
+      claim.run.coordinatorGeneration,
+    );
+    const reloaded = await new WorkbenchDeepScanStore(runWorkbench).get(
+      run.scanId,
+      "publication-failure-owner",
+    );
+    assert.equal(reloaded.status, "canceled");
+    assert.equal(
+      reloaded.error,
+      undefined,
+      "a delayed failure write must not restore an error after publication recovered",
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function testNoopStoppedRefreshRetainsPublicationFailure() {
+  const fixtureRoot = await mkdtemp(path.join(tmpdir(), "deep-scan-noop-publication-"));
+  const targetPath = path.join(fixtureRoot, "target");
+  const environment = {
+    ...process.env,
+    CODEX_HOME: path.join(fixtureRoot, "home"),
+    CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
+  };
+  const python = process.env.PYTHON?.trim() || "python3";
+  const runWorkbench = async (args) => {
+    const { stdout } = await execFileAsync(python, [workbenchPath, ...args], {
+      cwd: pluginRoot, env: environment, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+    });
+    return JSON.parse(stdout);
+  };
+  try {
+    await mkdir(targetPath, { recursive: true });
+    await writeFile(path.join(targetPath, "fixture.py"), "print('fixture')\n");
+    const store = new WorkbenchDeepScanStore(runWorkbench);
+    const { run } = await store.begin({
+      targetPath,
+      scope: ".",
+      threadId: "noop-publication-owner",
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    const claim = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: "noop-publication-owner",
+    });
+    await runWorkbench([
+      "cancel-scan", "--scan-id", run.scanId,
+      "--thread-id", "noop-publication-owner",
+    ]);
+    const message = "Saved result publication failed: fixture no-op publication failure";
+    await store.recordStoppedPublicationFailure(
+      run.scanId,
+      message,
+      claim.run.coordinatorGeneration,
+    );
+    await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+    assert.equal(
+      (await new WorkbenchDeepScanStore(runWorkbench).get(
+        run.scanId,
+        "noop-publication-owner",
+      )).error,
+      message,
+      "a no-op retained-result refresh must keep its publication failure",
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
 
 async function testConcurrentParentDraftsPreserveBothCheckpoints() {
   const fixtureRoot = await mkdtemp(path.join(tmpdir(), "scan-draft-concurrency-integration-"));

@@ -25,8 +25,8 @@ def git_output(
     git_dir: Path | None = None,
     work_tree: Path | None = None,
 ) -> str | None:
-    completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
-    output = os.fsdecode(completed.stdout).strip()
+    completed = git_command(target, *args, text=True, git_dir=git_dir, work_tree=work_tree)
+    output = completed.stdout.strip()
     return output if completed.returncode == 0 and output else None
 
 
@@ -154,8 +154,6 @@ def git_command(
             capture_output=True,
             env=environment,
             text=text,
-            encoding="utf-8" if text else None,
-            errors="surrogateescape" if text else None,
             input=input_data,
         )
     except FileNotFoundError:

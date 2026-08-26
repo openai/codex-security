@@ -262,6 +262,89 @@ async function testReducerValidation(root) {
     /ambiguous threat models/i,
   );
 
+  const inheritedScope = { summary: "Shared request handlers", includePaths: ["src"] };
+  await writeResult(resultPath, draft([firstFinding]));
+  await validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-scope",
+    sources: {
+      discoveries: [{ workerId: first.id, result: draft([firstFinding], { scope: inheritedScope }) }],
+      previous: null,
+    },
+  }, scanId);
+  assert.deepEqual(
+    JSON.parse(await readFile(resultPath, "utf8")).scope,
+    inheritedScope,
+    "a reducer cannot erase an unambiguous accepted scope by omission",
+  );
+
+  const resolvedCoverageSurface = {
+    label: "Archive extraction",
+    disposition: "reported",
+    riskArea: "filesystem",
+    notes: "The reducer completed the extraction review.",
+  };
+  await writeResult(resultPath, draft([firstFinding], {
+    coverage: {
+      completeness: "complete",
+      surfaces: [resolvedCoverageSurface],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  }));
+  await validateReducerArtifacts({
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-updated-coverage",
+    sources: {
+      discoveries: [{
+        workerId: first.id,
+        result: draft([firstFinding], {
+          coverage: {
+            completeness: "partial",
+            surfaces: [{
+              riskArea: "filesystem",
+              notes: "The discovery worker still needed runtime validation.",
+              disposition: "needs_follow_up",
+              label: "Archive extraction",
+            }],
+            explicitExclusions: [],
+            deferred: [],
+          },
+        }),
+      }],
+      previous: null,
+    },
+  }, scanId);
+  const reconciledCoverage = JSON.parse(await readFile(resultPath, "utf8")).coverage;
+  assert.deepEqual(
+    reconciledCoverage.surfaces,
+    [resolvedCoverageSurface],
+    "the reducer's updated semantic surface must supersede stale source coverage",
+  );
+  assert.equal(reconciledCoverage.completeness, "complete");
+
+  await writeResult(resultPath, draft([]));
+  await assert.rejects(
+    validateReducerArtifacts({
+      artifacts,
+      artifactDir,
+      resultPath,
+      reducerId: "dedup-ambiguous-scope",
+      sources: {
+        discoveries: [
+          { workerId: "worker-a", result: draft([], { scope: { summary: "Public API" } }) },
+          { workerId: "worker-b", result: draft([], { scope: { summary: "Admin API" } }) },
+        ],
+        previous: null,
+      },
+    }, scanId),
+    /ambiguous scopes/i,
+  );
+
   const collidingOriginalA = firstFinding;
   const collidingOriginalB = {
     ...firstFinding,

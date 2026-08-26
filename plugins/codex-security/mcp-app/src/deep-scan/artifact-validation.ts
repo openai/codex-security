@@ -136,6 +136,21 @@ export function reconcileDeepReduction(
       result.threatModel = structuredClone(distinctModels[0]);
     }
   }
+  if (result.scope === undefined) {
+    const sourceScopes = [
+      ...discoveries.map((discovery) => discovery.result.scope),
+      previous?.scope,
+    ].filter((scope): scope is Record<string, unknown> => scope !== undefined);
+    const distinctScopes = sourceScopes.filter((scope, index) => (
+      sourceScopes.findIndex((candidate) => isDeepStrictEqual(candidate, scope)) === index
+    ));
+    if (distinctScopes.length > 1) {
+      throw new Error("Deep reduction has ambiguous scopes; provide the reconciled scope explicitly.");
+    }
+    if (distinctScopes[0] !== undefined) {
+      result.scope = structuredClone(distinctScopes[0]);
+    }
+  }
   return result;
 }
 
