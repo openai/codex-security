@@ -57,6 +57,100 @@ async function savedScansFixture() {
 }
 
 describe("publish scan to Cloud", () => {
+  test("documents the findings CSV option", async () => {
+    const stdout = capture();
+    expect(
+      await main(
+        ["publish", "scan", "--help"],
+        stdout.stream,
+        capture().stream,
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("--csv <string>");
+    expect(stdout.text()).toContain("Findings CSV");
+  });
+
+  test("passes --dry-run through when publishing a findings CSV", async () => {
+    const deps = dependencies({
+      currentDirectory: "/workspace/repository",
+      onWorkbench: () => {
+        throw new Error("unexpected scan lookup");
+      },
+    });
+    let publishedPath = "";
+    deps.publishFindingsCsvToCloud = async (path, options) => {
+      publishedPath = path;
+      expect(options?.dryRun).toBe(true);
+      expect(options?.signal).toBeInstanceOf(AbortSignal);
+      return { ...receipt, dryRun: true };
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--to",
+          "cloud",
+          "--csv",
+          "inputs/findings.csv",
+          "--dry-run",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(publishedPath).toBe(
+      resolve("/workspace/repository", "inputs/findings.csv"),
+    );
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanId: "scan-1",
+      findingCount: 1,
+      dryRun: true,
+    });
+    expect(stderr.text()).toBe("");
+  });
+
+  test.each([
+    [
+      "a saved scan",
+      ["--scan", "11111111", "--to", "cloud", "--csv", "findings.csv"],
+      "Use --csv or scan directory and ID inputs",
+    ],
+    [
+      "a scan directory",
+      ["scan", "--to", "cloud", "--csv", "findings.csv"],
+      "Use --csv or scan directory and ID inputs",
+    ],
+    [
+      "Linear",
+      ["--to", "linear", "--linear-team", "team", "--csv", "findings.csv"],
+      "--csv is only supported with --to cloud",
+    ],
+  ])("rejects combining --csv with %s", async (_name, args, message) => {
+    const deps = dependencies();
+    let publications = 0;
+    deps.publishFindingsCsvToCloud = async () => {
+      publications++;
+      return receipt;
+    };
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", ...args],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(publications).toBe(0);
+    expect(stderr.text()).toContain(message);
+  });
+
   test("resolves IDs, prefixes, and latest before publishing and deduplicates aliases", async () => {
     const { scans, deps, workbenchCalls } = await savedScansFixture();
     const [first, second] = scans;

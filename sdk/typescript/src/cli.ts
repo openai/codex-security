@@ -56,6 +56,7 @@ import {
 } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {
+  publishFindingsCsvToCloud,
   publishScanToCloud,
   type CloudPublicationResult,
 } from "./cloud-publish.js";
@@ -90,6 +91,10 @@ import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
+import {
+  GITHUB_ALERT_STATES,
+  importGitHubCodeScanningAlerts,
+} from "./github.js";
 import {
   importLinearIssues,
   resolveLinearApiKey,
@@ -129,6 +134,10 @@ import {
   type ScanComparisonInput,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import {
+  CODEX_SECURITY_THREAD_SOURCES,
+  type CodexSecurityThreadSource,
+} from "./thread-source.js";
 import { readScanLogs } from "./scan-logs.js";
 import {
   renderScanHistory,
@@ -240,6 +249,9 @@ const VALUE_OPTIONS = new Set([
   "--linear-issue",
   "--linear-project",
   "--linear-filter",
+  "--github-alert",
+  "--github-ref",
+  "--github-state",
   "--fail-on-severity",
   "--patch-severity",
   "--resume-pr",
@@ -254,6 +266,7 @@ const VALUE_OPTIONS = new Set([
   "--max-time-hours",
   "--max-attempts",
   "--export-format",
+  "--csv",
   "--output",
   "--source-root",
   "--format",
@@ -1000,6 +1013,12 @@ type MatchingPlan = JsonObject & {
   batches: (JsonObject & MatchingBatch)[];
 };
 
+type SkillThreadSource = Extract<
+  CodexSecurityThreadSource,
+  | typeof CODEX_SECURITY_THREAD_SOURCES.remediation
+  | typeof CODEX_SECURITY_THREAD_SOURCES.validation
+>;
+
 interface SkillCommandOutput {
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
@@ -1007,6 +1026,7 @@ interface SkillCommandOutput {
   readonly appServer?: {
     readonly directory: string;
     readonly prompt: string;
+    readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
@@ -1062,6 +1082,7 @@ interface CliDependencies {
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
+  publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
@@ -1095,6 +1116,7 @@ interface CliDependencies {
   bulkScan?: BulkScanDiscoveryDependencies;
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
+  importGitHubAlerts?: typeof importGitHubCodeScanningAlerts;
   runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1346,6 +1368,7 @@ export async function runCodexSkillCommand(
                 : {
                     directory: output.appServer.directory,
                     prompt: output.appServer.prompt,
+                    threadSource: output.appServer.threadSource,
                     input: invocation.stdin!,
                     sandbox: output.appServer.sandbox,
                     onEvent: output.appServer.onEvent,
@@ -1998,9 +2021,9 @@ export async function main(
     }
   };
   const publication = Cli.create("publish", {
-    description: "Publish completed Codex Security scan findings.",
+    description: "Publish Codex Security findings.",
   }).command("scan", {
-    description: "Publish every finding from a completed scan to Linear.",
+    description: "Publish findings from a completed scan or CSV.",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -2032,7 +2055,10 @@ export async function main(
       dryRun: z
         .boolean()
         .default(false)
-        .describe("Preview the findings without creating Linear issues."),
+        .describe("Preview the findings without publishing them."),
+      csv: optionValue("--csv")
+        .optional()
+        .describe("Findings CSV to publish instead of a completed scan."),
       skipExisting: z
         .boolean()
         .default(false)
@@ -2103,6 +2129,10 @@ export async function main(
       };
       try {
         const currentDirectory = dependencies.currentDirectory();
+        const csvPath =
+          options.csv === undefined
+            ? undefined
+            : resolveCliPath(currentDirectory, options.csv);
         const directories = [
           ...new Set(
             [
@@ -2119,6 +2149,21 @@ export async function main(
         if (options.scan.length > 0 && directories.length > 0) {
           throw new CodexSecurityError(
             "Use --scan or scan directory inputs, not both.",
+          );
+        }
+        if (
+          csvPath !== undefined &&
+          (args.scanDir !== undefined ||
+            options.scan.length > 0 ||
+            options.scanDir.length > 0)
+        ) {
+          throw new CodexSecurityError(
+            "Use --csv or scan directory and ID inputs, not both.",
+          );
+        }
+        if (csvPath !== undefined && options.to !== "cloud") {
+          throw new CodexSecurityError(
+            "--csv is only supported with --to cloud.",
           );
         }
         if (new Set(options.scan).size > 1 && options.to !== "cloud") {
@@ -2152,6 +2197,16 @@ export async function main(
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
+        }
+        if (csvPath !== undefined) {
+          const result = await (
+            dependencies.publishFindingsCsvToCloud ?? publishFindingsCsvToCloud
+          )(csvPath, {
+            environment: dependencies.environment,
+            dryRun: options.dryRun,
+            signal: controller.signal,
+          });
+          return { ...result };
         }
         const selectedScans: { scanDir: string; scanId?: string }[] =
           directories.map((scanDir) => ({ scanDir }));
@@ -2532,9 +2587,94 @@ export async function main(
       }
     },
   });
+  const imports = Cli.create("import", {
+    description: "Read upstream findings for local validation or triage.",
+  }).command("github", {
+    description: "Import GitHub code scanning alerts without changing GitHub.",
+    destructive: false,
+    mcp: false,
+    args: z.object({
+      repository: z
+        .string()
+        .min(1)
+        .describe("GitHub repository in OWNER/REPO form."),
+    }),
+    options: z.object({
+      githubAlert: z
+        .array(
+          optionValue("--github-alert").regex(
+            /^[1-9]\d*$/u,
+            "GitHub alert numbers must be positive integers.",
+          ),
+        )
+        .default([])
+        .describe(
+          "Exact alert number, regardless of state; repeat to select a subset.",
+        ),
+      githubRef: optionValue("--github-ref")
+        .optional()
+        .describe("Git reference to inspect (default: default branch)."),
+      githubState: z
+        .enum(GITHUB_ALERT_STATES)
+        .default("open")
+        .describe(
+          "State to list; all includes dismissed and fixed alerts. Not used with exact alert numbers.",
+        ),
+    }),
+    output: z
+      .array(
+        z.object({
+          source: z.literal("github-code-scanning"),
+          repository: z.string(),
+          number: z.number().int().positive(),
+          url: z.string(),
+          alert: z.record(z.string(), z.unknown()),
+        }),
+      )
+      .optional(),
+    async run({ args, options }) {
+      const controller = new AbortController();
+      const onInterrupt = () => controller.abort("SIGINT");
+      const onTerminate = () => controller.abort("SIGTERM");
+      dependencies.addSignalListener("SIGINT", onInterrupt);
+      dependencies.addSignalListener("SIGTERM", onTerminate);
+      try {
+        return await (
+          dependencies.importGitHubAlerts ?? importGitHubCodeScanningAlerts
+        )(
+          {
+            repository: args.repository,
+            alertNumbers: options.githubAlert.map(Number),
+            ref: options.githubRef,
+            state: options.githubState,
+            signal: controller.signal,
+          },
+          {
+            environment: dependencies.environment,
+            currentDirectory: dependencies.currentDirectory(),
+          },
+        );
+      } catch (error) {
+        const signal = controller.signal.reason;
+        if (signal === "SIGINT" || signal === "SIGTERM") {
+          exitCode = signal === "SIGINT" ? 130 : 143;
+          errorOutput.write(
+            `codex-security: GitHub import ${signal === "SIGINT" ? "canceled" : "terminated"}.\n`,
+          );
+        } else {
+          exitCode = 2;
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+        }
+        return undefined;
+      } finally {
+        dependencies.removeSignalListener("SIGINT", onInterrupt);
+        dependencies.removeSignalListener("SIGTERM", onTerminate);
+      }
+    },
+  });
   const cli = Cli.create("codex-security", {
     description:
-      "Run, validate, patch, verify fixes, export, and publish Codex Security findings.",
+      "Run, import, validate, patch, verify fixes, export, and publish Codex Security findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -2874,6 +3014,7 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command(imports)
     .command("scan-components", {
       description:
         "Run standard scans for project components and combine the results.",
@@ -4223,6 +4364,7 @@ function validateCliArguments(
       "findings",
       "export",
       "publish",
+      "import",
       "validate",
       "verify-fix",
       "patch",
@@ -4287,7 +4429,10 @@ function validateCliArguments(
     }
   }
   const nestedCommand =
-    command === "scans" || command === "findings" || command === "publish";
+    command === "scans" ||
+    command === "findings" ||
+    command === "publish" ||
+    command === "import";
   const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
   if (command === "info") {
     const metadataFields = new Set([
@@ -5065,9 +5210,14 @@ async function runSkill(
   ].join("\n");
   const patch = skill === "fix-finding";
   const appServer = patch || verify;
+  const threadSource = patch
+    ? CODEX_SECURITY_THREAD_SOURCES.remediation
+    : CODEX_SECURITY_THREAD_SOURCES.validation;
   return dependencies.runCodex(
     [
-      ...(appServer ? ["app-server"] : ["exec", "--ignore-user-config"]),
+      ...(appServer
+        ? ["app-server"]
+        : ["exec", "--ignore-user-config", "--thread-source", threadSource]),
       "--disable",
       "plugins",
       ...(appServer ? [] : ["--ephemeral", "--color", "never", "--json"]),
@@ -5115,6 +5265,7 @@ async function runSkill(
             appServer: {
               directory,
               prompt,
+              threadSource,
               ...(verify ? { sandbox: "read-only" as const } : {}),
               ...(options.onEvent === undefined
                 ? {}
@@ -5133,6 +5284,7 @@ export async function readSkillCommandOutput(
   appServer?: {
     readonly directory?: string;
     readonly prompt: string;
+    readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
@@ -5153,12 +5305,14 @@ export async function readSkillCommandOutput(
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
   const startThread = (config?: JsonObject): void => {
+    if (appServer === undefined) return;
     send({
       id: 2,
       method: "thread/start",
       // An explicit cwd makes Codex persist trust for a new project.
       // Inherit the child process cwd and preserve the user's decision.
       params: {
+        threadSource: appServer.threadSource,
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
