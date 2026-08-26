@@ -16,7 +16,7 @@ RUN pnpm run types \
     && pnpm pack --pack-destination /build/package \
     && node scripts/check-package.mjs /build/package/*.tgz
 
-FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
+FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS runtime
 
 LABEL org.opencontainers.image.title="Codex Security" \
       org.opencontainers.image.description="Noninteractive, resumable Codex Security CSV repository scans" \
@@ -55,6 +55,22 @@ ENV CODEX_HOME=/state \
 
 USER 10001:10001
 WORKDIR /state
+
+FROM runtime AS findings-service
+
+LABEL org.opencontainers.image.description="Codex Security findings API"
+
+ENV HOST=0.0.0.0 \
+    PORT=3000 \
+    CODEX_SECURITY_STATE_DIR=/state
+
+WORKDIR /usr/local/lib/node_modules/@openai/codex-security
+EXPOSE 3000
+
+ENTRYPOINT ["node"]
+CMD ["dist/server/index.js"]
+
+FROM runtime AS scanner
 
 ENTRYPOINT ["/usr/local/bin/codex-security-entrypoint"]
 CMD ["--help"]

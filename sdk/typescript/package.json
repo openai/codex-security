@@ -48,6 +48,7 @@
     "generate:models:check": "node scripts/generate-models.cjs --check",
     "lint": "tsc --noEmit",
     "prepack": "node --run build",
+    "start:server": "node dist/server/index.js",
     "test": "bun test --timeout 30000 ./tests-ts",
     "test:ci": "node -e \"require('node:fs').mkdirSync('reports',{recursive:true})\" && pnpm run test --coverage --coverage-reporter=text --coverage-reporter=lcov --reporter=junit --reporter-outfile=reports/junit.xml",
     "test:mutation": "stryker run",

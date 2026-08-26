@@ -1281,6 +1281,73 @@ Progress remains on stderr so JSON output stays machine readable. Network
 failures and rate limits remain retryable; definitive authentication and model
 authorization failures stop immediately.
 
+## Findings service (preview)
+
+From the repository root, build and start the findings API:
+
+```bash
+docker compose -f compose.findings.yaml up --build -d
+curl -i http://127.0.0.1:3000/v1/findings
+```
+
+The `findings-service` Docker target starts the compiled SDK server used by the
+packaged `start:server` script, without invoking the CLI. Docker runs Node
+directly so stop signals reach the server. The existing default Docker target
+and bulk-scan Compose configuration are unchanged.
+
+This first stage only initializes storage and serves mocked endpoints:
+
+| Method | Path                       | Current behavior                  |
+| ------ | -------------------------- | --------------------------------- |
+| `GET`  | `/v1/findings`             | Log the route and return HTTP 501 |
+| `POST` | `/v1/bulk/findings`        | Log the route and return HTTP 501 |
+| `POST` | `/v1/bulk/findings/dedupe` | Log the route and return HTTP 501 |
+
+Each stub returns `{"error":"not_implemented"}`; unknown routes return HTTP 404
+with `{"error":"not_found"}`. Request bodies are not processed or logged. No
+findings, embeddings, or deduplication results are written by these endpoints.
+
+Storage initializes before the server listens. The SQLite adapter reuses the
+bundled workbench's schema and migrations at
+`$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`. The `findings-state` named volume
+persists that database across container restarts. Stop the service with
+`docker compose -f compose.findings.yaml down`; add `--volumes` only when you
+intend to delete the stored data.
+
+`docker/findings.env` contains non-secret container defaults: `HOST=0.0.0.0`,
+`PORT=3000`, and `CODEX_SECURITY_STATE_DIR=/state`. Compose publishes the port
+only on the host's loopback interface. There is no API authentication in this
+preview. Do not expose it to an untrusted network; use an authenticated proxy
+before sharing access. No model credentials are needed for the stubs.
+
+To run locally, use Node.js and Python 3 as described in the prerequisites.
+From `sdk/typescript`, install dependencies, build, and start:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm run start:server
+```
+
+Local defaults are `HOST=127.0.0.1` and `PORT=3000`. The existing
+`CODEX_SECURITY_STATE_DIR` and `PYTHON` settings select storage and Python;
+without a state override, the service uses the same default state directory as
+the CLI. These settings also work on Windows.
+
+HTTP routing, server startup, and the SQLite adapter live separately under
+`src/server/`. Startup accepts a `FindingsStore` interface; the SQLite
+implementation owns workbench access. The interface currently covers only
+initialization, and will grow with actual data operations rather than with
+unused provider abstractions.
+
+The next stage will persist the existing `Finding` model and embeddings in
+SQLite, return IDs from bulk insertion, and list findings with pagination
+defaulting to 50. Bulk insert with deduplication will call a stub workflow
+service and return unique IDs plus duplicate groups. The third stage will
+implement candidate retrieval, screening, independent pair review, and
+whole-group review for groups larger than two. None of those operations are
+implemented in this preview.
+
 ## Containerized bulk scans
 
 Create `repositories.csv` with one full, immutable Git commit per repository:

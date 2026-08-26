@@ -46,6 +46,12 @@ await security.close();
 
 Use the included Docker Compose configuration for scans of many repositories. See the [container quick start](sdk/typescript/README.md#containerized-bulk-scans) for more detail.
 
+## Findings service (preview)
+
+The [findings service](sdk/typescript/README.md#findings-service-preview) runs
+from the SDK in Docker with persistent SQLite storage. Its three HTTP endpoints
+are currently stubs; they do not insert findings or run deduplication.
+
 ## Other providers
 
 
