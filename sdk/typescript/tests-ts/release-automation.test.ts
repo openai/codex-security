@@ -3954,6 +3954,7 @@ describe("GitHub release workflow safeguards", () => {
       .join("\n");
     for (const command of [
       "'*.md'",
+      "! -L",
       "prettier --check",
       "--test-name-pattern",
       "./tests-ts/cli.test.ts",

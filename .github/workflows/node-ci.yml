@@ -119,7 +119,8 @@ jobs:
         run: |
           files=()
           while IFS= read -r -d '' path; do
-            if [[ -f "$GITHUB_WORKSPACE/$path" ]]; then
+            if [[ -f "$GITHUB_WORKSPACE/$path" &&
+                  ! -L "$GITHUB_WORKSPACE/$path" ]]; then
               files+=("$GITHUB_WORKSPACE/$path")
             fi
           done < <(git diff --no-renames --name-only -z HEAD^1 HEAD -- '*.md')
