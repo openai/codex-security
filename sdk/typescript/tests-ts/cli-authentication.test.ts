@@ -878,9 +878,79 @@ describe("CLI authentication", () => {
         expect(stderr.text()).toContain(expected);
         expect(stderr.text()).toContain(source);
         expect(stderr.text()).toContain("--auth chatgpt");
+        expect(stderr.text()).not.toContain("ChatGPT sign-in was not used");
         expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
         expect(stderr.text()).not.toContain("org-private");
       }
+    }
+  });
+
+  test("replaces permanent stored sign-in refresh details with recovery steps", async () => {
+    for (const auth of ["chatgpt", "api-key"] as const) {
+      for (const detail of [
+        "Your access token could not be refreshed.",
+        "Your access token could not be refreshed because your refresh token has expired.",
+        "Your access token could not be refreshed because your refresh token was already used.",
+        "Your access token could not be refreshed because your refresh token was revoked.",
+      ]) {
+        const stdout = capture();
+        const stderr = capture(false);
+        const deps = dependencies({
+          environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
+          onRun: () => {
+            throw new CodexSecurityError(
+              `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. PRIVATE_UPSTREAM_DETAIL`,
+            );
+          },
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--auth", auth, "--json"],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain("workspace-managed policies");
+        expect(stderr.text()).toContain(
+          "API key is selected for model authentication",
+        );
+        expect(stderr.text()).toContain(
+          "npx @openai/codex-security login status",
+        );
+        expect(stderr.text()).toContain(
+          "npx @openai/codex-security logout', then 'npx @openai/codex-security login",
+        );
+        expect(stderr.text()).not.toContain("provide a valid API key");
+        expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
+      }
+    }
+  });
+
+  test("leaves other sign-in recovery messages unchanged", async () => {
+    for (const message of [
+      "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
+      "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
+    ]) {
+      const stdout = capture();
+      const stderr = capture(false);
+      const deps = dependencies({
+        onRun: () => {
+          throw new CodexSecurityError(
+            `Codex Exec exited with code 1: ${message} PRIVATE_UPSTREAM_DETAIL`,
+          );
+        },
+      });
+
+      expect(
+        await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(`${message}\n`);
+      expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
+      expect(stderr.text()).not.toContain("npx @openai/codex-security logout");
     }
   });
 

@@ -239,9 +239,8 @@ $env:OPENAI_API_KEY = "<your-api-key>"
 npx @openai/codex-security scan C:\code\repository
 ```
 
-Check or remove the stored sign-in with `npx @openai/codex-security login status`
-and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
-private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
+Codex Security keeps its sign-in in a private, stable Codex home at
+`$CODEX_SECURITY_STATE_DIR/codex-home`, or at
 `$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
 configured. On managed Windows devices, inherited access for `SYSTEM` and local
 `Administrators` is preserved while protecting the home against future changes
@@ -254,7 +253,15 @@ when the dedicated home does not already contain stored credentials. Logging
 out prevents later scans from automatically reimporting that ambient sign-in
 until you explicitly log in again.
 
-An environment API key takes precedence over a stored sign-in by default.
+If a scan says the stored ChatGPT sign-in could not be refreshed, check it with
+`npx @openai/codex-security login status` and retry if it recently changed.
+Otherwise replace it with `npx @openai/codex-security logout`, then
+`npx @openai/codex-security login`. Codex Security does not automatically clear
+the sign-in or change managed login restrictions.
+
+An environment API key takes precedence for model authentication by default,
+but Codex may still need a valid ChatGPT sign-in to load workspace-managed
+policies.
 When both a stored ChatGPT sign-in and an environment API key are available, an
 interactive scan asks which credential to use. JSON output, dry runs, CI, and
 other noninteractive scans never prompt and retain automatic API-key

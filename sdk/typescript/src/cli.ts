@@ -6593,6 +6593,23 @@ function scanFailureMessage(
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
+  const message = errorMessage(error);
+  const nativeRefreshRecovery = message.match(
+    /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
+  )?.[0];
+  if (nativeRefreshRecovery !== undefined) return nativeRefreshRecovery;
+  if (
+    /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
+      message,
+    )
+  ) {
+    return (
+      "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
+      "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
+      "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
+      "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
+    );
+  }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
       if (authentication?.method === "aws_credentials") {
@@ -6603,7 +6620,6 @@ function scanFailureMessage(
       }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
-            "Your ChatGPT sign-in was not used. " +
             "Retry with '--auth chatgpt' or provide a valid API key."
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
