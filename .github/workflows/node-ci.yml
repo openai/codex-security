@@ -131,8 +131,9 @@ jobs:
         working-directory: sdk/typescript
         run: |
           bun test --timeout 30000 \
-            --test-name-pattern '(documents user-facing environment and deep-scan configuration|keeps documented runtime and deep-scan defaults accurate)$' \
-            ./tests-ts/cli.test.ts
+            --test-name-pattern '(documents user-facing environment and deep-scan configuration|keeps documented runtime and deep-scan defaults accurate|renders only the discovery portion of the shipped workflows)$' \
+            ./tests-ts/cli.test.ts \
+            ./tests-ts/custom-validation.test.ts
 
       - name: Check package contents
         working-directory: sdk/typescript

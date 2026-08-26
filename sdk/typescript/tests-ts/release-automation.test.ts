@@ -3957,6 +3957,7 @@ describe("GitHub release workflow safeguards", () => {
       "prettier --check",
       "--test-name-pattern",
       "./tests-ts/cli.test.ts",
+      "./tests-ts/custom-validation.test.ts",
       "pnpm pack --pack-destination ../../dist",
       "pnpm run check:package ../../dist/*.tgz",
     ]) {
