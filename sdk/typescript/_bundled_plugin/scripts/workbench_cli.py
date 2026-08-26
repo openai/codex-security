@@ -340,6 +340,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("store-findings")
+    subparsers.add_parser("list-embedded-findings")
     stored_findings = subparsers.add_parser("list-stored-findings")
     stored_findings.add_argument("--limit", type=positive_int, required=True)
     stored_findings.add_argument("--offset", type=non_negative_int, required=True)

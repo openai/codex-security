@@ -10,7 +10,7 @@ export class FindingsService {
   constructor(
     private readonly store: FindingsStore,
     private readonly embeddings: FindingEmbedder,
-    private readonly deduplication: DeduplicationService,
+    private readonly deduplication: Pick<DeduplicationService, "run">,
   ) {}
 
   async insert(findings: readonly Finding[]): Promise<string[]> {

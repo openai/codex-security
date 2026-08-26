@@ -1336,20 +1336,55 @@ curl http://127.0.0.1:3000/v1/bulk/findings \
 ```
 
 The dedupe endpoint performs the same insertion, then awaits
-`DeduplicationService.run`. That service currently only logs its invocation
-and returns a **mock result**:
+`DeduplicationService.run` before returning its result:
 
 ```json
 {
   "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
   "duplicateGroups": [],
-  "deduplicationStatus": "not_implemented"
+  "deduplicationStatus": "completed"
 }
 ```
 
-The unique IDs are provisional: no comparison or duplicate judgment has run.
-Do not treat this response as evidence that findings are distinct. The next
-stage will implement retrieval and model reviews inside the workflow service.
+`uniqueFindingIds` contains one representative for each imported finding after
+accepted duplicate groups are collapsed. A representative can be an existing
+stored finding outside the request. Each `duplicateGroups` entry contains all
+members of an accepted group, with its canonical finding first. The canonical
+has the highest reported severity; ties use first insertion time, then finding
+ID. Results do not delete, merge, or change stored findings, and are not saved
+as durable group assignments.
+
+### Deduplication workflow
+
+1. Read a snapshot of complete findings with current embeddings. For each
+   imported finding, retrieve up to 50 nearest neighbors with cosine similarity
+   at least 0.55, across the stored corpus. Only embeddings with the same model
+   and dimensions are compared; self-matches are excluded.
+2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
+   effort. The review covers every anchor-neighbor pair and can nominate
+   additional duplicate pairs among the supplied neighbors.
+3. Independently review each nominated pair once with `gpt-5.6-sol` at `ultra`
+   reasoning effort. Only accepted pairs contribute to candidate groups.
+4. Independently review every connected group larger than two with the same
+   Sol settings. A rejected group is kept entirely separate; the workflow does
+   not infer smaller groups from a rejected transitive chain.
+
+Each review uses a fresh, ephemeral Codex app-server thread without environment
+access, with the complete
+original finding records, not earlier model rationales, vector scores, or
+summaries. Decisions must arrive through the validated `submit_decisions` tool;
+invalid submissions can be corrected in the same session. A final text answer
+alone is insufficient. Reviews have no shell, web, plugin, or MCP access and
+do not open source paths or links from finding content.
+
+The workflow runs synchronously and model calls run sequentially. Larger batches
+can take time and incur multiple model calls per finding; the API key must have
+access to the configured models. Empty imports and findings without eligible
+neighbors do not invoke review models. `completed` means this retrieval and
+review process completed, not that every possible pair in the database was
+compared or that model decisions are infallible.
+
+### Listing and errors
 
 Listing defaults to `limit=50` and `offset=0`; `limit` must be a positive
 integer and `offset` a non-negative integer. Records are ordered by their first
@@ -1373,11 +1408,17 @@ held between HTTP requests.
 
 Malformed JSON, invalid finding objects, and invalid pagination return HTTP
 400 (`invalid_request`). Identity conflicts return 409 (`finding_conflict`),
-embedding provider failures return 502 (`embedding_failed`), and missing
+embedding provider failures return 502 (`embedding_failed`), incomplete model
+reviews return 502 (`deduplication_failed`), and missing
 embedding credentials return 503 (`embedding_unavailable`). Unknown routes
 return 404 (`not_found`); unexpected server failures return 500
 (`internal_error`). Errors have an `error` code and, for expected failures, a
-`message`. Request bodies and embedding provider error bodies are not logged.
+`message`. Request bodies and provider error bodies are not logged. Deduplication
+runs after the import transaction commits: if review fails, the imported
+findings and embeddings remain stored. Retry the same dedupe request without
+creating extra rows. A requested finding whose embedding was invalidated by a
+concurrent update returns 409 (`finding_conflict`) rather than a uniqueness
+result.
 
 ### Embeddings and storage
 
@@ -1438,9 +1479,12 @@ input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
 and vector normalization; it does not access storage. The `FindingsStore`
 interface separately stores findings and vectors without exposing SQL or
 workbench details to the service. The server entrypoint selects the concrete
-embedder and store, so either can be replaced independently. The deduplication
-service is separate from both routing and storage; model-driven deduplication
-remains unimplemented in this preview.
+embedder and store, so either can be replaced independently.
+`DeduplicationService` receives the store and a `DeduplicationReviewer`, keeping
+retrieval and grouping separate from model transport. `CodexDeduplicationReviewer`
+owns prompts and result validation; `CodexReviewRunner` owns app-server sessions
+and their cleanup. The service reuses the existing Codex runtime and credentials;
+no additional runtime dependencies or CLI flags are required.
 
 ## Containerized bulk scans
 

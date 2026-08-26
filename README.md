@@ -50,7 +50,9 @@ Use the included Docker Compose configuration for scans of many repositories. Se
 
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
 from the SDK in Docker, stores findings and embeddings in SQLite, and lists
-findings with pagination. The deduplication workflow remains a stub.
+findings with pagination. Its deduplication workflow retrieves similar findings,
+screens candidates, and independently reviews duplicate pairs and groups through
+the bundled Codex app-server.
 
 ## Other providers
 

@@ -22,4 +22,5 @@ export interface FindingsStore {
   initialize(): Promise<void>;
   insert(entries: readonly EmbeddedFinding[]): Promise<string[]>;
   list(page: { limit: number; offset: number }): Promise<FindingsPage>;
+  listEmbedded(): Promise<EmbeddedFinding[]>;
 }

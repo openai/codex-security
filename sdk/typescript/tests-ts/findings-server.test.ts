@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
-import { DeduplicationService } from "../src/server/deduplication.js";
+import type { DeduplicationService } from "../src/server/deduplication.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
@@ -72,7 +72,7 @@ async function fixture() {
 async function start(
   store: SqliteFindingsStore,
   embeddings = embedder,
-  deduplication?: DeduplicationService,
+  deduplication?: Pick<DeduplicationService, "run">,
 ): Promise<string> {
   const server = await startFindingsServer({
     store,
@@ -171,6 +171,12 @@ test("bulk insert preserves complete findings and embeddings without creating sc
 
   const reopened = new SqliteFindingsStore(environment);
   await reopened.initialize();
+  expect(await reopened.listEmbedded()).toEqual(
+    findings.map((finding, index) => ({
+      finding,
+      embedding: { model: "synthetic-model", vector: [index, 0.5] },
+    })),
+  );
   expect((await reopened.list({ limit: 50, offset: 0 })).findings).toEqual(
     findings,
   );
@@ -250,14 +256,17 @@ test("upserts retries and rolls back the entire batch on identity conflicts", as
 test("dedupe endpoint awaits the workflow after persistence and returns its result", async () => {
   const { store } = await fixture();
   const findings = [finding(1), finding(2)];
-  const stub = new DeduplicationService();
-  const workflow: DeduplicationService = {
+  const workflow: Pick<DeduplicationService, "run"> = {
     async run(ids) {
       expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
         findings,
       );
       await Promise.resolve();
-      return await stub.run(ids);
+      return {
+        uniqueFindingIds: [...ids],
+        duplicateGroups: [],
+        deduplicationStatus: "completed",
+      };
     },
   };
   const run = spyOn(workflow, "run");
@@ -268,7 +277,7 @@ test("dedupe endpoint awaits the workflow after persistence and returns its resu
     expect(await response.json()).toEqual({
       uniqueFindingIds: findings.map((finding) => finding.findingId),
       duplicateGroups: [],
-      deduplicationStatus: "not_implemented",
+      deduplicationStatus: "completed",
     });
     expect(run).toHaveBeenCalledWith(
       findings.map((finding) => finding.findingId),
@@ -346,6 +355,28 @@ test("embedding failure leaves no partial findings or vectors", async () => {
   ).toBe(0);
 });
 
+test("review failure reports an error after insertion without claiming unique findings", async () => {
+  const { store } = await fixture();
+  const findings = [finding()];
+  const base = await start(store, embedder, {
+    async run() {
+      throw new FindingsError(
+        "deduplication_failed",
+        "Synthetic review failed",
+      );
+    },
+  });
+  const response = await insert(base, findings, "/v1/bulk/findings/dedupe");
+  expect(response.status).toBe(502);
+  expect(await response.json()).toEqual({
+    error: "deduplication_failed",
+    message: "Synthetic review failed",
+  });
+  expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
+    findings,
+  );
+});
+
 test("does not start when storage initialization fails", async () => {
   const { store, environment } = await fixture();
   await writeFile(environment.CODEX_SECURITY_STATE_DIR, "synthetic file");
@@ -391,6 +422,7 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
   expect(await database(environment, update, original)).toBe(1);
   const changed = { ...original, summary: "A newer scan updated this finding" };
   expect(await database(environment, update, changed)).toBe(0);
+  expect(await store.listEmbedded()).toEqual([]);
   expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([
     changed,
   ]);

@@ -24,17 +24,26 @@ const document: FindingsDocument = JSON.parse(
 const example = document.findings[0];
 assert.ok(example);
 const findings: Finding[] = [
-  example,
   {
     ...example,
-    findingId: "csf_ffffffffffffffffffffffff",
-    occurrenceId: "occ_ffffffffffffffffffffffff",
-    fingerprints: {
-      ...example.fingerprints,
-      primary: `codex-security/v1:sha256:${"f".repeat(64)}`,
-    },
-    title: "Synthetic second finding",
+    extensions: { ...example.extensions, smokeGroup: "duplicate" },
   },
+  ...[1, 2, 3].map(
+    (index): Finding => ({
+      ...example,
+      findingId: `csf_${"f".repeat(23)}${index}`,
+      occurrenceId: `occ_${"f".repeat(23)}${index}`,
+      fingerprints: {
+        ...example.fingerprints,
+        primary: `codex-security/v1:sha256:${"f".repeat(63)}${index}`,
+      },
+      title: `Synthetic finding ${index}`,
+      extensions: {
+        ...example.extensions,
+        smokeGroup: index < 3 ? "duplicate" : "distinct",
+      },
+    }),
+  ),
 ];
 const ids = findings.map((finding) => finding.findingId);
 
@@ -65,10 +74,14 @@ async function startService(): Promise<void> {
     "--volume",
     `${join(repositoryRoot, "docker/fixtures/mock-embeddings.mjs")}:/test/mock-embeddings.mjs:ro`,
     "--volume",
+    `${join(repositoryRoot, "docker/fixtures/mock-reviews.mjs")}:/test/mock-reviews.mjs:ro`,
+    "--volume",
     `${fileURLToPath(new URL("fixtures/findings-service-sqlite.py", import.meta.url))}:/test/findings-service-sqlite.py:ro`,
     "findings",
     "--import",
     "/test/mock-embeddings.mjs",
+    "--import",
+    "/test/mock-reviews.mjs",
     "dist/server/index.js",
   ]);
   for (let attempt = 0; ; attempt++) {
@@ -88,9 +101,9 @@ async function startService(): Promise<void> {
 
 async function checkInsertions(): Promise<void> {
   const deduplication: DeduplicationResult = {
-    uniqueFindingIds: ids,
-    duplicateGroups: [],
-    deduplicationStatus: "not_implemented",
+    uniqueFindingIds: [ids[0]!, ids[3]!],
+    duplicateGroups: [ids.slice(0, 3)],
+    deduplicationStatus: "completed",
   };
   for (const [path, expected] of [
     ["/v1/bulk/findings", ids],
@@ -134,6 +147,31 @@ function checkStorage(): void {
   ]);
 }
 
+function checkReviews(): void {
+  const calls = docker(["exec", container, "cat", "/state/review-calls.jsonl"])
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          stage: string;
+          model: string;
+          effort: string;
+          findingIds: string[];
+        },
+    );
+  for (const stage of ["screen", "pair", "group"]) {
+    assert.ok(
+      calls.some((call) => call.stage === stage),
+      `${stage} review must run through Codex`,
+    );
+  }
+  assert.ok(
+    calls.some(
+      (call) => call.stage === "group" && call.findingIds.length === 3,
+    ),
+  );
+}
+
 function stopService(): void {
   docker(["stop", "--timeout", "10", container]);
   assert.equal(
@@ -150,12 +188,14 @@ try {
   await checkInsertions();
   await checkPages();
   checkStorage();
+  checkReviews();
   stopService();
   docker(["rm", container]);
   await startService();
   checkStorage();
   await checkPages();
   await checkInsertions();
+  checkReviews();
   stopService();
   passed = true;
   console.log("Findings service Docker smoke test passed.");

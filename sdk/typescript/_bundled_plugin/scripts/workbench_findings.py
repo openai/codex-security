@@ -73,3 +73,23 @@ def list_stored_findings(
         "total": total,
         "nextOffset": next_offset if next_offset < total else None,
     }
+
+
+def list_embedded_findings(connection: sqlite3.Connection) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        SELECT findings.details_json, finding_embeddings.model, finding_embeddings.vector_json
+        FROM findings JOIN finding_embeddings ON finding_embeddings.finding_id = findings.id
+        WHERE findings.details_json IS NOT NULL
+        ORDER BY findings.created_at, findings.id
+        """
+    ).fetchall()
+    return {
+        "entries": [
+            {
+                "finding": json.loads(row["details_json"]),
+                "embedding": {"model": row["model"], "vector": json.loads(row["vector_json"])},
+            }
+            for row in rows
+        ]
+    }

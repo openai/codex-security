@@ -45,6 +45,7 @@ export async function handleFindingsRequest(
         finding_conflict: 409,
         embedding_unavailable: 503,
         embedding_failed: 502,
+        deduplication_failed: 502,
       }[error.code];
       json(response, status, { error: error.code, message: error.message });
     } else {

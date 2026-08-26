@@ -42,6 +42,11 @@ export class SqliteFindingsStore implements FindingsStore {
     ])) as unknown as FindingsPage;
   }
 
+  async listEmbedded(): Promise<EmbeddedFinding[]> {
+    const result = await this.run(["list-embedded-findings"]);
+    return result["entries"] as unknown as EmbeddedFinding[];
+  }
+
   private async run(args: string[], input?: string) {
     const options = await (this.options ??= this.resolveOptions());
     return await runWorkbench(options, args, input);
