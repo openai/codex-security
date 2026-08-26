@@ -7,6 +7,10 @@ import {
 } from "../runtime.js";
 import { FindingsError } from "./errors.js";
 import type {
+  FindingNeighborhood,
+  FindingSearchScope,
+} from "../finding-retrieval.js";
+import type {
   EmbeddedFinding,
   FindingsPage,
   FindingsStore,
@@ -21,8 +25,14 @@ export class SqliteFindingsStore implements FindingsStore {
     await this.run(["database-info"]);
   }
 
-  async insert(entries: readonly EmbeddedFinding[]): Promise<string[]> {
-    const result = await this.run(["store-findings"], JSON.stringify(entries));
+  async insert(
+    entries: readonly EmbeddedFinding[],
+    repositoryId?: string,
+  ): Promise<string[]> {
+    const result = await this.run(
+      ["store-findings"],
+      JSON.stringify({ entries, repositoryId }),
+    );
     if (result["error"] === "finding_conflict") {
       throw new FindingsError(
         "finding_conflict",
@@ -42,9 +52,30 @@ export class SqliteFindingsStore implements FindingsStore {
     ])) as unknown as FindingsPage;
   }
 
-  async listEmbedded(): Promise<EmbeddedFinding[]> {
-    const result = await this.run(["list-embedded-findings"]);
-    return result["entries"] as unknown as EmbeddedFinding[];
+  async findPotentialDuplicates(
+    findingId: string,
+    scope: FindingSearchScope,
+  ): Promise<FindingNeighborhood> {
+    const result = await this.run([
+      "find-potential-duplicates",
+      `--finding-id=${findingId}`,
+      ...(scope.allRepositories === true
+        ? ["--all-repositories"]
+        : [`--repository-id=${scope.repositoryId}`]),
+    ]);
+    if (result["error"] === "finding_not_indexed") {
+      throw new FindingsError(
+        "finding_not_indexed",
+        "The finding has no current embedding in the requested scope. Import it with the matching repositoryId through POST /v1/bulk/findings before requesting potential duplicates.",
+      );
+    }
+    if (result["error"] === "embedding_failed") {
+      throw new FindingsError(
+        "embedding_failed",
+        "A stored embedding cannot be compared. Reimport the finding.",
+      );
+    }
+    return result as unknown as FindingNeighborhood;
   }
 
   private async run(args: string[], input?: string) {

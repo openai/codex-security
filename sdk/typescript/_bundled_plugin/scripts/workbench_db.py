@@ -82,7 +82,7 @@ from workbench_constants import (
 )
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
-from workbench_findings import list_embedded_findings, list_stored_findings, store_findings
+from workbench_findings import find_potential_duplicates, list_stored_findings, store_findings
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
@@ -4027,9 +4027,10 @@ def main() -> None:
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
         elif args.command == "store-findings":
-            result = store_findings(connection, json.load(sys.stdin), now())
-        elif args.command == "list-embedded-findings":
-            result = list_embedded_findings(connection)
+            payload = json.load(sys.stdin)
+            result = store_findings(connection, payload["entries"], now(), payload.get("repositoryId"))
+        elif args.command == "find-potential-duplicates":
+            result = find_potential_duplicates(connection, args.finding_id, args.repository_id)
         elif args.command == "list-stored-findings":
             result = list_stored_findings(connection, limit=args.limit, offset=args.offset)
         else:

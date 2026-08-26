@@ -2,7 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ValidateFunction } from "ajv";
 import { FindingsError } from "./errors.js";
 import type { FindingsService } from "./findings-service.js";
-import { pagination, type FindingsRequest } from "./validation.js";
+import {
+  findingSearchScope,
+  pagination,
+  type FindingsRequest,
+} from "./validation.js";
 
 export async function handleFindingsRequest(
   request: IncomingMessage,
@@ -23,7 +27,14 @@ export async function handleFindingsRequest(
     );
     if (request.method === "GET" && candidates) {
       console.log("GET /v1/finding/:id/potential-duplicates");
-      json(response, 200, await service.potentialDuplicates(candidates[1]!));
+      json(
+        response,
+        200,
+        await service.potentialDuplicates(
+          candidates[1]!,
+          findingSearchScope(url.searchParams),
+        ),
+      );
       return;
     }
     if (route === "POST /v1/bulk/findings") {
@@ -32,10 +43,14 @@ export async function handleFindingsRequest(
       if (!validate(input)) {
         throw new FindingsError(
           "invalid_request",
-          "Expected {findings: [...]} using the existing Finding schema.",
+          "Expected {findings: [...]} with an optional nonempty repositoryId, using the existing Finding schema.",
         );
       }
-      json(response, 201, await service.insert(input.findings));
+      json(
+        response,
+        201,
+        await service.insert(input.findings, input.repositoryId),
+      );
       return;
     }
     request.resume();

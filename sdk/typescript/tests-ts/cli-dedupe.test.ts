@@ -11,29 +11,40 @@ const args = [
   "--json",
 ];
 
-test("dedupe passes the scan selector and explicit service URL to the SDK", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  const deps = dependencies();
-  const result = {
-    scanId: "scan-example",
-    uniqueFindingIds: ["finding-example"],
-    duplicateGroups: [],
-    deduplicationStatus: "completed" as const,
-  };
-  deps.deduplicateScan = async (scanId, options, dependencies) => {
-    expect(scanId).toBe("latest");
-    expect(options).toEqual({
-      findingsUrl: "http://127.0.0.1:3000",
-      signal: expect.any(AbortSignal),
-    });
-    expect(dependencies?.runWorkbench).toBe(deps.runWorkbench);
-    return result;
-  };
-  expect(await main(args, stdout.stream, stderr.stream, deps)).toBe(0);
-  expect(JSON.parse(stdout.text())).toEqual(result);
-  expect(stderr.text()).toBe("");
-});
+test.each([false, true])(
+  "dedupe passes the scan selector, URL, and all-repository scope %s to the SDK",
+  async (allRepositories) => {
+    const stdout = capture();
+    const stderr = capture();
+    const deps = dependencies();
+    const result = {
+      scanId: "scan-example",
+      uniqueFindingIds: ["finding-example"],
+      duplicateGroups: [],
+      deduplicationStatus: "completed" as const,
+    };
+    deps.deduplicateScan = async (scanId, options, dependencies) => {
+      expect(scanId).toBe("latest");
+      expect(options).toEqual({
+        findingsUrl: "http://127.0.0.1:3000",
+        allRepositories,
+        signal: expect.any(AbortSignal),
+      });
+      expect(dependencies?.runWorkbench).toBe(deps.runWorkbench);
+      return result;
+    };
+    expect(
+      await main(
+        [...args, ...(allRepositories ? ["--all-repositories"] : [])],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result);
+    expect(stderr.text()).toBe("");
+  },
+);
 
 test("dedupe requires both explicit inputs and reports SDK failures", async () => {
   const deps = dependencies();

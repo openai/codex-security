@@ -3025,6 +3025,12 @@ export async function main(
         scan: optionValue("--scan").describe(
           "Saved scan ID, unique prefix, or latest.",
         ),
+        allRepositories: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Search all repositories instead of only the saved scan's repository.",
+          ),
         findingsUrl: z
           .string()
           .url()
@@ -3051,7 +3057,11 @@ export async function main(
             dependencies.deduplicateScan ?? deduplicateScanInternal
           )(
             options.scan,
-            { findingsUrl: options.findingsUrl, signal: controller.signal },
+            {
+              findingsUrl: options.findingsUrl,
+              allRepositories: options.allRepositories,
+              signal: controller.signal,
+            },
             {
               environment: dependencies.environment,
               currentDirectory: dependencies.currentDirectory,

@@ -723,6 +723,22 @@ MIGRATIONS = (
         END;
         """,
     ),
+    (
+        34,
+        "associate findings with repositories",
+        """
+        CREATE TABLE finding_repositories (
+            repository_id TEXT NOT NULL,
+            finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+            PRIMARY KEY (repository_id, finding_id)
+        );
+
+        INSERT OR IGNORE INTO finding_repositories (repository_id, finding_id)
+        SELECT scans.target_id, finding_occurrences.finding_id
+        FROM finding_occurrences JOIN scans ON scans.id = finding_occurrences.scan_id
+        WHERE scans.target_id IS NOT NULL;
+        """,
+    ),
 )
 
 

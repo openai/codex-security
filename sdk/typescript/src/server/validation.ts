@@ -2,10 +2,11 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
+import type { FindingSearchScope } from "../finding-retrieval.js";
 import { bundledPluginRoot } from "../runtime.js";
 import { FindingsError } from "./errors.js";
 
-export type FindingsRequest = { findings: Finding[] };
+export type FindingsRequest = { findings: Finding[]; repositoryId?: string };
 
 export async function findingsRequestValidator(): Promise<
   ValidateFunction<FindingsRequest>
@@ -17,8 +18,26 @@ export async function findingsRequestValidator(): Promise<
   return new Ajv2020({ strict: false }).compile<FindingsRequest>({
     type: "object",
     required: ["findings"],
-    properties: { findings: schema.properties.findings },
+    properties: {
+      findings: schema.properties.findings,
+      repositoryId: { type: "string", minLength: 1 },
+    },
   });
+}
+
+export function findingSearchScope(
+  parameters: URLSearchParams,
+): FindingSearchScope {
+  const repositoryId = parameters.get("repositoryId");
+  const allRepositories = parameters.get("allRepositories");
+  if (allRepositories === "true" && repositoryId === null)
+    return { allRepositories: true };
+  if (repositoryId && (allRepositories === null || allRepositories === "false"))
+    return { repositoryId };
+  throw new FindingsError(
+    "invalid_request",
+    "Specify repositoryId or allRepositories=true, not both.",
+  );
 }
 
 export function pagination(parameters: URLSearchParams): {

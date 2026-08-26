@@ -1309,6 +1309,14 @@ A complete exported `findings.json` document is also accepted; only its
 `findings` array is imported. No files or source paths referenced by the
 findings are opened. Only the supplied JSON is processed.
 
+Include `repositoryId` alongside `findings` to associate every imported finding
+with a repository. For SDK/CLI scans, use `scan.target.targetId` from the sealed
+`scan-manifest.json`. IDs are matched exactly; the service does not infer a
+repository from titles, paths, or URLs. Reimports add associations without
+removing earlier ones, so a finding can belong to more than one repository.
+Imports without this metadata remain accepted, but unassociated findings are
+only available to explicit all-repository retrieval until imported with an ID.
+
 | Method | Path                                    | Response                                                                            |
 | ------ | --------------------------------------- | ----------------------------------------------------------------------------------- |
 | `POST` | `/v1/bulk/findings`                     | HTTP 201 with an array of stored finding IDs, in request order                      |
@@ -1323,12 +1331,14 @@ do not create extra rows. An existing ID's fingerprint, rule, and identity
 anchor/instance cannot be replaced. Repeated IDs in one request are applied in order,
 with the last supplied record retained. Stored scan occurrences are unchanged.
 
-For example, with the API key configured before starting Compose:
+For example, add `repositoryId` to a copy of an exported findings document
+saved as `findings-import.json` (leave the sealed scan artifacts unchanged),
+then import it with the API key configured before starting Compose:
 
 ```bash
 curl http://127.0.0.1:3000/v1/bulk/findings \
   -H 'Content-Type: application/json' \
-  --data-binary @sdk/typescript/_bundled_plugin/examples/completed-scan/findings.json
+  --data-binary @findings-import.json
 ```
 
 ```json
@@ -1338,15 +1348,31 @@ curl http://127.0.0.1:3000/v1/bulk/findings \
 The potential-duplicates response contains `finding` (the complete stored
 anchor) and `potentialDuplicates` (an array of complete `Finding` records).
 Neither includes embedding vectors. The anchor is not repeated in the array.
+Specify one scope explicitly on the request:
+
+```text
+GET /v1/finding/{id}/potential-duplicates?repositoryId=target_sha256_example
+GET /v1/finding/{id}/potential-duplicates?allRepositories=true
+```
+
+Repository scope requires the anchor and each candidate to be associated with
+that repository. All-repository scope includes tagged and untagged findings.
+Omitting scope or combining a repository with `allRepositories=true` returns
+HTTP 400. Scope selects candidates; it is not an authorization boundary.
+
 Candidates have cosine similarity at least 0.55 and the same embedding model
 and dimensions as the anchor. They are ordered by descending similarity, with
 ties resolved by insertion time and finding ID, and limited to 50. Each request
 reads a current snapshot; separate requests do not share a database snapshot.
+SQLite first filters repository associations, reads only IDs and embedding
+vectors (plus the anchor's model), and performs exact cosine ranking. It then
+loads complete documents only for the anchor and the selected top 50 candidates,
+all within the same read transaction.
 The API does not run Codex or decide whether candidates are duplicates.
 
 ### Deduplication from the SDK and CLI
 
-Import the scan's findings through the bulk API before deduplicating. The
+Import the scan's findings with their `repositoryId` through the bulk API before deduplicating. The
 workflow reads a completed saved scan, queries candidates by finding ID, and
 runs Luna and Sol in the calling SDK/CLI process. It does not upload findings,
 change scan artifacts, or write grouping results to the service.
@@ -1354,6 +1380,12 @@ change scan artifacts, or write grouping results to the service.
 ```bash
 codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
 ```
+
+The default scope is the saved scan's repository, identified by
+`scan.target.targetId` in its manifest. Add `--all-repositories` to search the
+entire stored corpus explicitly; the flag defaults to false. The SDK has the
+equivalent optional `allRepositories: true` setting. This narrows the previous
+preview's implicit all-repository behavior.
 
 Both `--scan` and `--findings-url` are required, with no implicit scan or service
 URL. As with `publish scan --scan`, the selector accepts a full ID, unique
@@ -1366,6 +1398,7 @@ import { deduplicateScan } from "@openai/codex-security";
 
 const result = await deduplicateScan("scan_example_001", {
   findingsUrl: "http://127.0.0.1:3000",
+  // allRepositories: true, // Omit to search only this scan's repository.
   // signal: controller.signal,
 });
 console.log(result.duplicateGroups);
@@ -1392,7 +1425,8 @@ merge, or change stored findings, and are not saved as durable group assignments
 ### Deduplication workflow
 
 1. For each distinct finding ID in the scan, request
-   `/v1/finding/{id}/potential-duplicates`. Use the complete stored anchor and
+   `/v1/finding/{id}/potential-duplicates` with the selected repository or
+   explicit all-repository scope. Use the complete stored anchor and
    candidates returned by that request.
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
    effort. The review covers every anchor-neighbor pair and can nominate
@@ -1443,13 +1477,14 @@ without embedding vectors. Legacy identities without a complete document are
 not included. Pagination reflects current database contents, not a snapshot
 held between HTTP requests.
 
-Malformed JSON, invalid finding objects, and invalid pagination return HTTP
+Malformed JSON, invalid finding objects, repository metadata, scopes, and pagination return HTTP
 400 (`invalid_request`). Identity conflicts return 409 (`finding_conflict`),
 embedding provider failures or unusable vectors return 502 (`embedding_failed`),
 and missing embedding credentials return 503 (`embedding_unavailable`). A
 potential-duplicates query without a current embedding returns 404
-(`finding_not_indexed`), including findings whose embedding was invalidated by
-an update; import the finding again before retrying. This is an error, not an
+(`finding_not_indexed`), including findings outside the requested repository or
+whose embedding was invalidated by an update; import the finding with the
+matching `repositoryId` before retrying. This is an error, not an
 empty candidate list. Unknown routes return 404 (`not_found`); unexpected
 server failures return 500 (`internal_error`). Errors have an `error` code and,
 for expected failures, a `message`. Request bodies and provider error bodies
@@ -1512,8 +1547,14 @@ separately under `src/server/`. `FindingsService` receives a `FindingEmbedder`
 whose `embed(findings)` method returns one `{ model, vector }` per finding in
 input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
 and vector normalization; it does not access storage. The `FindingsStore`
-interface separately stores findings and vectors without exposing SQL or
-workbench details to the service. The server entrypoint selects the concrete
+interface stores findings and vectors and exposes
+`findPotentialDuplicates(findingId, scope)`. Repository filtering, vector ranking,
+and fetching selected documents stay inside the store implementation; replacing
+SQLite with an indexed store does not change the service or SDK/CLI. Repository
+associations are stored separately from finding documents, with an append-only
+migration that also imports known associations from stored scan occurrences.
+New scan findings retain their target associations when indexed locally.
+The server entrypoint selects the concrete
 embedder and store, so either can be replaced independently.
 The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
 receives a candidate API client and a `DeduplicationReviewer`, keeping grouping

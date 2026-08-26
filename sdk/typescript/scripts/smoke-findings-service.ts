@@ -4,14 +4,14 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { Finding, FindingsDocument } from "../src/models.js";
+import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import type { DeduplicateScanResult } from "../src/deduplication/scan.js";
 import type { FindingsPage } from "../src/server/storage.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const container = "findings-ci";
 const compose = ["compose", "-p", container, "-f", "compose.findings.yaml"];
-const base = "http://127.0.0.1:3000";
+let base: string;
 const document: FindingsDocument = JSON.parse(
   await readFile(
     new URL(
@@ -21,6 +21,16 @@ const document: FindingsDocument = JSON.parse(
     "utf8",
   ),
 );
+const manifest: ScanManifest = JSON.parse(
+  await readFile(
+    new URL(
+      "../_bundled_plugin/examples/completed-scan/scan-manifest.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+const repositoryId = manifest.scan.target.targetId;
 const example = document.findings[0];
 assert.ok(example);
 const findings: Finding[] = [
@@ -66,7 +76,8 @@ async function startService(): Promise<void> {
     ...compose,
     "run",
     "--detach",
-    "--service-ports",
+    "--publish",
+    "127.0.0.1::3000",
     "--name",
     container,
     "--env",
@@ -82,6 +93,7 @@ async function startService(): Promise<void> {
     "/test/mock-embeddings.mjs",
     "dist/server/index.js",
   ]);
+  base = `http://${docker(["port", container, "3000/tcp"])}`;
   for (let attempt = 0; ; attempt++) {
     try {
       const response = await fetch(`${base}/v1/findings`, {
@@ -98,14 +110,21 @@ async function startService(): Promise<void> {
 }
 
 async function checkInsertions(): Promise<void> {
-  const response = await fetch(`${base}/v1/bulk/findings`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ findings }),
-  });
-  assert.equal(response.status, 201);
-  const actual: unknown = await response.json();
-  assert.deepEqual(actual, ids);
+  for (const [repository, batch] of [
+    [repositoryId, findings.slice(0, 3)],
+    ["synthetic-other", findings.slice(3)],
+  ] as const) {
+    const response = await fetch(`${base}/v1/bulk/findings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repositoryId: repository, findings: batch }),
+    });
+    assert.equal(response.status, 201);
+    assert.deepEqual(
+      await response.json(),
+      batch.map((finding) => finding.findingId),
+    );
+  }
   assert.equal(
     (await fetch(`${base}/v1/bulk/findings/dedupe`, { method: "POST" })).status,
     404,
@@ -113,17 +132,23 @@ async function checkInsertions(): Promise<void> {
 }
 
 async function checkCandidates(): Promise<void> {
-  for (const finding of findings) {
-    const response = await fetch(
-      `${base}/v1/finding/${finding.findingId}/potential-duplicates`,
-    );
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      finding,
-      potentialDuplicates: findings.filter(
-        (candidate) => candidate.findingId !== finding.findingId,
-      ),
-    });
+  for (const [index, finding] of findings.entries()) {
+    for (const allRepositories of [false, true]) {
+      const repository = index < 3 ? repositoryId : "synthetic-other";
+      const response = await fetch(
+        `${base}/v1/finding/${finding.findingId}/potential-duplicates?${allRepositories ? "allRepositories=true" : `repositoryId=${encodeURIComponent(repository)}`}`,
+      );
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        finding,
+        potentialDuplicates: (allRepositories
+          ? findings
+          : index < 3
+            ? findings.slice(0, 3)
+            : findings.slice(3)
+        ).filter((candidate) => candidate.findingId !== finding.findingId),
+      });
+    }
   }
 }
 
@@ -136,29 +161,32 @@ function checkCliDeduplication(): void {
     JSON.stringify(ids),
     "--prepare-scan",
   ]);
-  const actual: unknown = JSON.parse(
-    docker([
-      "exec",
-      container,
-      "node",
-      "--import",
-      "/test/mock-reviews.mjs",
-      "dist/cli.js",
-      "dedupe",
-      "--scan",
-      "scan_example_001",
-      "--findings-url",
-      base,
-      "--json",
-    ]),
-  );
-  const expected: DeduplicateScanResult = {
-    scanId: "scan_example_001",
-    uniqueFindingIds: [ids[0]!],
-    duplicateGroups: [ids.slice(0, 3)],
-    deduplicationStatus: "completed",
-  };
-  assert.deepEqual(actual, expected);
+  for (const allRepositories of [false, true]) {
+    const actual: unknown = JSON.parse(
+      docker([
+        "exec",
+        container,
+        "node",
+        "--import",
+        "/test/mock-reviews.mjs",
+        "dist/cli.js",
+        "dedupe",
+        "--scan",
+        "scan_example_001",
+        "--findings-url",
+        "http://127.0.0.1:3000",
+        "--json",
+        ...(allRepositories ? ["--all-repositories"] : []),
+      ]),
+    );
+    const expected: DeduplicateScanResult = {
+      scanId: "scan_example_001",
+      uniqueFindingIds: [ids[0]!],
+      duplicateGroups: [ids.slice(0, 3)],
+      deduplicationStatus: "completed",
+    };
+    assert.deepEqual(actual, expected);
+  }
 }
 
 async function checkPages(): Promise<void> {
@@ -206,6 +234,12 @@ function checkReviews(): void {
       `${stage} review must run through Codex`,
     );
   }
+  for (const count of [3, 4])
+    assert.ok(
+      calls.some(
+        (call) => call.stage === "screen" && call.findingIds.length === count,
+      ),
+    );
   assert.ok(
     calls.some(
       (call) => call.stage === "group" && call.findingIds.length === 3,

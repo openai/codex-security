@@ -1,4 +1,8 @@
 import type { Finding } from "../models.js";
+import type {
+  FindingNeighborhood,
+  FindingSearchScope,
+} from "../finding-retrieval.js";
 
 export interface FindingEmbedding {
   model: string;
@@ -20,7 +24,13 @@ export interface FindingsPage {
 
 export interface FindingsStore {
   initialize(): Promise<void>;
-  insert(entries: readonly EmbeddedFinding[]): Promise<string[]>;
+  insert(
+    entries: readonly EmbeddedFinding[],
+    repositoryId?: string,
+  ): Promise<string[]>;
   list(page: { limit: number; offset: number }): Promise<FindingsPage>;
-  listEmbedded(): Promise<EmbeddedFinding[]>;
+  findPotentialDuplicates(
+    findingId: string,
+    scope: FindingSearchScope,
+  ): Promise<FindingNeighborhood>;
 }

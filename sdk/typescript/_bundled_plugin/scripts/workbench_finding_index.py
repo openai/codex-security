@@ -9,7 +9,10 @@ from typing import Any
 
 
 def upsert_finding(
-    connection: sqlite3.Connection, finding: dict[str, Any], timestamp: str
+    connection: sqlite3.Connection,
+    finding: dict[str, Any],
+    timestamp: str,
+    repository_id: str | None = None,
 ) -> None:
     connection.execute(
         """
@@ -36,6 +39,11 @@ def upsert_finding(
             timestamp,
         ),
     )
+    if repository_id is not None:
+        connection.execute(
+            "INSERT OR IGNORE INTO finding_repositories (repository_id, finding_id) VALUES (?, ?)",
+            (repository_id, finding["findingId"]),
+        )
 
 
 def index_findings(
@@ -47,12 +55,15 @@ def index_findings(
     findings = document.get("findings")
     if not isinstance(findings, list):
         raise SystemExit("findings.json must contain a findings array.")
+    repository_id = connection.execute(
+        "SELECT target_id FROM scans WHERE id = ?", (scan_id,)
+    ).fetchone()["target_id"]
     for finding in findings:
         if not isinstance(finding, dict):
             raise SystemExit("findings.json entries must be objects.")
         severity = finding["severity"]
         confidence = finding["confidence"]
-        upsert_finding(connection, finding, timestamp)
+        upsert_finding(connection, finding, timestamp, repository_id)
         connection.execute(
             """
             INSERT INTO finding_occurrences (

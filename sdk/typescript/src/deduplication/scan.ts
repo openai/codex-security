@@ -23,6 +23,8 @@ import { FindingsClient, type FindingsRequest } from "./findings-client.js";
 export interface DeduplicateScanOptions {
   /** Findings API base URL. The scan's findings must already be indexed there. */
   findingsUrl: string;
+  /** Search all repositories instead of the saved scan's targetId. Defaults to false. */
+  allRepositories?: boolean;
   signal?: AbortSignal;
 }
 
@@ -80,7 +82,14 @@ export async function deduplicateScanInternal(
     signal: options.signal,
   });
   const deduplicator = new FindingDeduplicator(
-    new FindingsClient(options.findingsUrl, options.signal, dependencies.fetch),
+    new FindingsClient(
+      options.findingsUrl,
+      options.allRepositories === true
+        ? { allRepositories: true }
+        : { repositoryId: contract.manifest.scan.target.targetId },
+      options.signal,
+      dependencies.fetch,
+    ),
     dependencies.reviewer ??
       new CodexDeduplicationReviewer(
         new CodexReviewRunner(environment, undefined, options.signal),

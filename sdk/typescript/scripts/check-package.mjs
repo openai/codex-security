@@ -198,7 +198,7 @@ const distFiles = new Set(
     "server/index",
     "deduplication/codex-review",
     "deduplication/deduplication",
-    "server/potential-duplicates",
+    "finding-retrieval",
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
     "deduplication/findings-client",

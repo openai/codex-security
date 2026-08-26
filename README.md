@@ -51,8 +51,9 @@ Use the included Docker Compose configuration for scans of many repositories. Se
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
 from the SDK in Docker, stores findings and embeddings in SQLite, and lists
 findings with pagination. It also returns potential duplicates by embedding
-similarity. The SDK and `codex-security dedupe` CLI command retrieve those
-candidates and run independent Codex reviews locally.
+similarity within a repository or an explicit all-repository scope. The SDK and
+`codex-security dedupe` CLI command retrieve those candidates and run independent
+Codex reviews locally; `--all-repositories` opts into the broader scope.
 
 ## Other providers
 

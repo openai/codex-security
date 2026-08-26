@@ -22,6 +22,7 @@ export async function dedupe(
 ): Promise<DeduplicateScanResult> {
   return await deduplicateScan(scanId, {
     findingsUrl: "http://127.0.0.1:3000",
+    allRepositories: true,
     signal,
   });
 }

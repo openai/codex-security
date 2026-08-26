@@ -5,7 +5,6 @@ import { expect, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
-import { potentialDuplicates } from "../src/server/potential-duplicates.js";
 import {
   CodexDeduplicationReviewer,
   pairKey,
@@ -17,7 +16,6 @@ import {
 import { CodexSecurityError } from "../src/errors.js";
 import { FindingsClient } from "../src/deduplication/findings-client.js";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
-import type { EmbeddedFinding } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { JsonObject } from "../src/config.js";
 
@@ -27,26 +25,28 @@ const document: FindingsDocument = JSON.parse(
     "utf8",
   ),
 );
-function entry(index: number, vector = [1, 0]): EmbeddedFinding {
+function entry(index: number): Finding {
   return {
-    finding: {
-      ...structuredClone(document.findings[0]!),
-      findingId: `csf_${index.toString(16).padStart(24, "0")}`,
-      occurrenceId: `occ_${index.toString(16).padStart(24, "0")}`,
-      title: `Synthetic finding ${index}`,
-      extensions: {
-        originalEvidence: {
-          text: `Complete report ${index}`,
-          repository: `synthetic-${index}`,
-        },
+    ...structuredClone(document.findings[0]!),
+    findingId: `csf_${index.toString(16).padStart(24, "0")}`,
+    occurrenceId: `occ_${index.toString(16).padStart(24, "0")}`,
+    title: `Synthetic finding ${index}`,
+    extensions: {
+      originalEvidence: {
+        text: `Complete report ${index}`,
+        repository: `synthetic-${index}`,
       },
     },
-    embedding: { model: "synthetic", vector },
   };
 }
-function candidates(entries: EmbeddedFinding[]) {
+function candidates(findings: Finding[]) {
   return {
-    potentialDuplicates: async (id: string) => potentialDuplicates(entries, id),
+    potentialDuplicates: async (id: string) => ({
+      finding: findings.find((finding) => finding.findingId === id)!,
+      potentialDuplicates: findings.filter(
+        (finding) => finding.findingId !== id,
+      ),
+    }),
   };
 }
 
@@ -77,43 +77,10 @@ function screening(
   };
 }
 
-test("ranks compatible cosine neighbors with the inclusive cutoff and a stable top 50", () => {
-  const anchor = entry(0, [7, 0]);
-  const boundary = entry(1, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
-  const below = entry(2, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
-  const otherModel = entry(3);
-  otherModel.embedding.model = "other-model";
-  const otherDimensions = entry(4, [1, 0, 0]);
-  expect(
-    potentialDuplicates(
-      [anchor, below, otherModel, otherDimensions, boundary],
-      anchor.finding.findingId,
-    ),
-  ).toEqual({
-    finding: anchor.finding,
-    potentialDuplicates: [boundary.finding],
-  });
-  const tied = Array.from({ length: 60 }, (_, index) => entry(index + 1));
-  expect(
-    potentialDuplicates([anchor, ...tied], anchor.finding.findingId)
-      .potentialDuplicates,
-  ).toEqual([...tied.slice(0, 50).map(({ finding }) => finding)]);
-});
-
-test("missing or invalid embeddings never become evidence of uniqueness", () => {
-  expect(() => potentialDuplicates([], entry(1).finding.findingId)).toThrow(
-    "no current embedding",
-  );
-  const invalid = entry(1, [0, 0]);
-  expect(() =>
-    potentialDuplicates([invalid], invalid.finding.findingId),
-  ).toThrow("cannot be compared");
-});
-
 test("reviews nominated pairs once and judges the complete group before selecting its canonical", async () => {
   const entries = [entry(1), entry(2), entry(3), entry(4)];
-  entries[1]!.finding.severity.level = "critical";
-  const ids = entries.map(({ finding }) => finding.findingId);
+  entries[1]!.severity.level = "critical";
+  const ids = entries.map((finding) => finding.findingId);
   const nominations = new Set([
     pairKey([ids[0]!, ids[1]!]),
     pairKey([ids[1]!, ids[2]!]),
@@ -127,9 +94,7 @@ test("reviews nominated pairs once and judges the complete group before selectin
       expect(findings).toHaveLength(4);
       for (const finding of findings)
         expect(finding).toEqual(
-          entries.find(
-            (entry) => entry.finding.findingId === finding.findingId,
-          )!.finding,
+          entries.find((entry) => entry.findingId === finding.findingId)!,
         );
       return screening(findings, nominations);
     },
@@ -143,11 +108,7 @@ test("reviews nominated pairs once and judges the complete group before selectin
     },
     async reviewGroup(findings) {
       phases.push("group");
-      expect(findings).toEqual([
-        entries[1]!.finding,
-        entries[0]!.finding,
-        entries[2]!.finding,
-      ]);
+      expect(findings).toEqual([entries[1]!, entries[0]!, entries[2]!]);
       return same;
     },
   };
@@ -173,7 +134,7 @@ test("reviews nominated pairs once and judges the complete group before selectin
 
 test("whole-group rejection keeps a transitive chain separate", async () => {
   const entries = [entry(1), entry(2), entry(3)];
-  const ids = entries.map(({ finding }) => finding.findingId);
+  const ids = entries.map((finding) => finding.findingId);
   const service = new FindingDeduplicator(candidates(entries), {
     async screen(findings) {
       return screening(
@@ -198,8 +159,8 @@ test("whole-group rejection keeps a transitive chain separate", async () => {
 test("matches an import to an existing canonical without judging a two-finding group again", async () => {
   const existing = entry(1);
   const imported = entry(2);
-  imported.finding.severity.level = "low";
-  const ids = [existing.finding.findingId, imported.finding.findingId];
+  imported.severity.level = "low";
+  const ids = [existing.findingId, imported.findingId];
   const service = new FindingDeduplicator(candidates([existing, imported]), {
     async screen(findings) {
       return screening(findings, new Set([pairKey(ids)]));
@@ -211,8 +172,8 @@ test("matches an import to an existing canonical without judging a two-finding g
       throw new Error("Two-finding groups do not need another review");
     },
   });
-  expect(await service.run([imported.finding.findingId])).toEqual({
-    uniqueFindingIds: [existing.finding.findingId],
+  expect(await service.run([imported.findingId])).toEqual({
+    uniqueFindingIds: [existing.findingId],
     duplicateGroups: [ids],
     deduplicationStatus: "completed",
   });
@@ -220,7 +181,8 @@ test("matches an import to an existing canonical without judging a two-finding g
 
 test("empty and isolated imports avoid models, while review failures propagate", async () => {
   const first = entry(1);
-  const second = entry(2, [0, 1]);
+  const second = entry(2);
+  const findings = [first];
   const failure = new CodexSecurityError("Synthetic review failed");
   const reviewer: DeduplicationReviewer = {
     async screen() {
@@ -233,24 +195,21 @@ test("empty and isolated imports avoid models, while review failures propagate",
       throw failure;
     },
   };
-  const service = new FindingDeduplicator(
-    candidates([first, second]),
-    reviewer,
-  );
+  const service = new FindingDeduplicator(candidates(findings), reviewer);
   expect(await service.run([])).toEqual({
     uniqueFindingIds: [],
     duplicateGroups: [],
     deduplicationStatus: "completed",
   });
-  expect(
-    (await service.run([first.finding.findingId])).uniqueFindingIds,
-  ).toEqual([first.finding.findingId]);
-  second.embedding.vector = [1, 0];
-  await expect(service.run([first.finding.findingId])).rejects.toBe(failure);
+  expect((await service.run([first.findingId])).uniqueFindingIds).toEqual([
+    first.findingId,
+  ]);
+  findings.push(second);
+  await expect(service.run([first.findingId])).rejects.toBe(failure);
 });
 
 test("validates complete screening assignments including off-edge nominations", () => {
-  const findings = [entry(1).finding, entry(2).finding, entry(3).finding];
+  const findings = [entry(1), entry(2), entry(3)];
   const ids = findings.map((finding) => finding.findingId);
   const result = screening(findings, new Set([pairKey([ids[0]!, ids[1]!])]));
   result.decisions.push({ findingIds: [ids[1]!, ids[2]!], ...same });
@@ -286,7 +245,7 @@ test("validates complete screening assignments including off-edge nominations", 
 });
 
 test("uses independent model assignments and complete originals without earlier rationales", async () => {
-  const findings = [entry(1).finding, entry(2).finding, entry(3).finding];
+  const findings = [entry(1), entry(2), entry(3)];
   const calls: CodexReview<unknown>[] = [];
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>(review: CodexReview<T>): Promise<T> {
@@ -337,12 +296,16 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
     });
     if (process.platform !== "win32") await chmod(directory, 0o700);
     const original = await readFile(join(directory, "findings.json"), "utf8");
-    for (const requestedId of ["scan_example", "latest"]) {
+    for (const [requestedId, allRepositories] of [
+      ["scan_example", false],
+      ["latest", false],
+      ["scan_example_001", true],
+    ] as const) {
       const commands: string[][] = [];
       const requests: string[] = [];
       const result = await deduplicateScanInternal(
         requestedId,
-        { findingsUrl: "http://synthetic.test/api" },
+        { findingsUrl: "http://synthetic.test/api", allRepositories },
         {
           currentDirectory: () => directory,
           runWorkbench: async (args): Promise<JsonObject> => {
@@ -400,7 +363,7 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
           "complete",
         ]);
       expect(requests).toEqual([
-        `http://synthetic.test/api/v1/finding/${document.findings[0]!.findingId}/potential-duplicates`,
+        `http://synthetic.test/api/v1/finding/${document.findings[0]!.findingId}/potential-duplicates?${allRepositories ? "allRepositories=true" : "repositoryId=target_sha256_example"}`,
       ]);
     }
     expect(await readFile(join(directory, "findings.json"), "utf8")).toBe(
@@ -435,11 +398,12 @@ test("lookup failures and cancellation never produce a completed uniqueness resu
   for (const status of [404, 502]) {
     const client = new FindingsClient(
       "http://synthetic.test",
+      { allRepositories: true },
       undefined,
       async () => new Response("", { status }),
     );
     await expect(
-      client.potentialDuplicates(entry(1).finding.findingId),
+      client.potentialDuplicates(entry(1).findingId),
     ).rejects.toThrow(`HTTP ${status}`);
   }
   const controller = new AbortController();

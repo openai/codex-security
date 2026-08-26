@@ -340,7 +340,11 @@ def parse_args(description: str) -> argparse.Namespace:
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("store-findings")
-    subparsers.add_parser("list-embedded-findings")
+    potential_duplicates = subparsers.add_parser("find-potential-duplicates")
+    potential_duplicates.add_argument("--finding-id", required=True)
+    scope = potential_duplicates.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--repository-id")
+    scope.add_argument("--all-repositories", action="store_true")
     stored_findings = subparsers.add_parser("list-stored-findings")
     stored_findings.add_argument("--limit", type=positive_int, required=True)
     stored_findings.add_argument("--offset", type=non_negative_int, required=True)

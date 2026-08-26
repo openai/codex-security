@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from typing import Any
 
@@ -10,7 +11,10 @@ from workbench_finding_index import upsert_finding
 
 
 def store_findings(
-    connection: sqlite3.Connection, entries: list[dict[str, Any]], timestamp: str
+    connection: sqlite3.Connection,
+    entries: list[dict[str, Any]],
+    timestamp: str,
+    repository_id: str | None = None,
 ) -> dict[str, Any]:
     try:
         with connection:
@@ -31,7 +35,7 @@ def store_findings(
                 ).fetchone()
                 if current is not None and tuple(current) != identity:
                     raise sqlite3.IntegrityError("The stored finding identity cannot be replaced.")
-                upsert_finding(connection, finding, timestamp)
+                upsert_finding(connection, finding, timestamp, repository_id)
                 connection.execute(
                     """
                     INSERT INTO finding_embeddings (finding_id, model, vector_json)
@@ -75,21 +79,70 @@ def list_stored_findings(
     }
 
 
-def list_embedded_findings(connection: sqlite3.Connection) -> dict[str, Any]:
-    rows = connection.execute(
-        """
-        SELECT findings.details_json, finding_embeddings.model, finding_embeddings.vector_json
-        FROM findings JOIN finding_embeddings ON finding_embeddings.finding_id = findings.id
-        WHERE findings.details_json IS NOT NULL
-        ORDER BY findings.created_at, findings.id
-        """
-    ).fetchall()
-    return {
-        "entries": [
-            {
-                "finding": json.loads(row["details_json"]),
-                "embedding": {"model": row["model"], "vector": json.loads(row["vector_json"])},
-            }
-            for row in rows
-        ]
-    }
+def find_potential_duplicates(
+    connection: sqlite3.Connection, finding_id: str, repository_id: str | None
+) -> dict[str, Any]:
+    """Rank IDs and vectors in the requested scope before loading finding documents."""
+    connection.execute("BEGIN")
+    with connection:
+        if repository_id is None:
+            source = "finding_embeddings AS embeddings"
+            predicate = ""
+            scope_parameters: tuple[str, ...] = ()
+        else:
+            source = (
+                "finding_repositories AS repositories JOIN finding_embeddings AS embeddings "
+                "ON embeddings.finding_id = repositories.finding_id"
+            )
+            predicate = "repositories.repository_id = ? AND "
+            scope_parameters = (repository_id,)
+        anchor = connection.execute(
+            f"SELECT embeddings.model, embeddings.vector_json FROM {source} "
+            f"WHERE {predicate}embeddings.finding_id = ?",
+            (*scope_parameters, finding_id),
+        ).fetchone()
+        if anchor is None:
+            return {"error": "finding_not_indexed"}
+        rows = connection.execute(
+            f"SELECT embeddings.finding_id, embeddings.vector_json FROM {source} "
+            "JOIN findings ON findings.id = embeddings.finding_id "
+            f"WHERE {predicate}embeddings.model = ? AND embeddings.finding_id != ? "
+            "ORDER BY findings.created_at, findings.id",
+            (*scope_parameters, anchor["model"], finding_id),
+        )
+        ranked: list[tuple[str, float]] = []
+        try:
+            vector = normalized_vector(json.loads(anchor["vector_json"]))
+            for row in rows:
+                candidate = json.loads(row["vector_json"])
+                if len(candidate) != len(vector):
+                    continue
+                other = normalized_vector(candidate)
+                similarity = sum(left * right for left, right in zip(vector, other))
+                if similarity >= 0.55:
+                    ranked.append((row["finding_id"], similarity))
+        except ValueError:
+            return {"error": "embedding_failed"}
+        # Stable sorting retains insertion-time / finding-ID order for ties.
+        ranked.sort(key=lambda candidate: candidate[1], reverse=True)
+        selected_ids = [finding_id, *(candidate[0] for candidate in ranked[:50])]
+        documents = {
+            row["id"]: json.loads(row["details_json"])
+            for row in connection.execute(
+                "SELECT id, details_json FROM findings WHERE id IN ("
+                + ",".join("?" for _ in selected_ids)
+                + ")",
+                selected_ids,
+            )
+        }
+        return {
+            "finding": documents[finding_id],
+            "potentialDuplicates": [documents[id] for id in selected_ids[1:]],
+        }
+
+
+def normalized_vector(vector: list[float]) -> list[float]:
+    norm = math.hypot(*vector)
+    if norm == 0 or not math.isfinite(norm):
+        raise ValueError("A stored embedding cannot be compared.")
+    return [value / norm for value in vector]

@@ -9,7 +9,7 @@ import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
-import type { FindingsPage } from "../src/server/storage.js";
+import type { EmbeddedFinding, FindingsPage } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
 import { FindingsClient } from "../src/deduplication/findings-client.js";
@@ -37,6 +37,14 @@ function finding(index = 1): Finding {
     title: `Synthetic finding ${index}`,
     extensions: { evidence: { text: "complete evidence ✓", values: [1, 2] } },
   };
+}
+
+function embedded(
+  index: number,
+  vector = [1, 0],
+  model = "synthetic",
+): EmbeddedFinding {
+  return { finding: finding(index), embedding: { model, vector } };
 }
 
 const embedder: FindingEmbedder = {
@@ -87,11 +95,15 @@ async function start(
   return `http://127.0.0.1:${address.port}`;
 }
 
-function insert(base: string, findings: Finding[], path = "/v1/bulk/findings") {
-  return fetch(`${base}${path}`, {
+function insert(
+  base: string,
+  findings: Finding[],
+  repositoryId = "repository-a",
+) {
+  return fetch(`${base}/v1/bulk/findings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ findings }),
+    body: JSON.stringify({ findings, repositoryId }),
   });
 }
 
@@ -170,12 +182,11 @@ test("bulk insert preserves complete findings and embeddings without creating sc
 
   const reopened = new SqliteFindingsStore(environment);
   await reopened.initialize();
-  expect(await reopened.listEmbedded()).toEqual(
-    findings.map((finding, index) => ({
-      finding,
-      embedding: { model: "synthetic-model", vector: [index, 0.5] },
-    })),
-  );
+  expect(
+    await reopened.findPotentialDuplicates(findings[0]!.findingId, {
+      repositoryId: "repository-a",
+    }),
+  ).toEqual({ finding: findings[0]!, potentialDuplicates: [] });
   expect((await reopened.list({ limit: 50, offset: 0 })).findings).toEqual(
     findings,
   );
@@ -230,10 +241,11 @@ test("upserts retries and rolls back the entire batch on identity conflicts", as
   const updated = { ...original, summary: "Updated complete summary" };
   expect((await insert(base, [updated])).status).toBe(201);
   const conflicting = { ...finding(2), fingerprints: original.fingerprints };
-  const response = await insert(base, [
-    { ...original, summary: "Must roll back" },
-    conflicting,
-  ]);
+  const response = await insert(
+    base,
+    [{ ...original, summary: "Must roll back" }, conflicting],
+    "repository-b",
+  );
   expect(response.status).toBe(409);
   expect(await response.json()).toMatchObject({ error: "finding_conflict" });
   const replacedIdentity = {
@@ -250,6 +262,12 @@ test("upserts retries and rolls back the entire batch on identity conflicts", as
       `print(json.dumps([json.loads(row[0]) for row in db.execute("SELECT vector_json FROM finding_embeddings")]))`,
     ),
   ).toEqual([[0, 0.5]]);
+  expect(
+    await database(
+      environment,
+      "print(json.dumps([list(row) for row in db.execute('SELECT repository_id, finding_id FROM finding_repositories')]))",
+    ),
+  ).toEqual([["repository-a", original.findingId]]);
 });
 
 test("retrieves complete potential duplicates without vectors or review calls", async () => {
@@ -261,9 +279,10 @@ test("retrieves complete potential duplicates without vectors or review calls", 
       finding,
       embedding: { model: "synthetic", vector: index === 2 ? [0, 1] : [1, 0] },
     })),
+    "repository-a",
   );
   const response = await fetch(
-    `${base}/v1/finding/${findings[0]!.findingId}/potential-duplicates`,
+    `${base}/v1/finding/${findings[0]!.findingId}/potential-duplicates?repositoryId=repository-a`,
   );
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({
@@ -271,14 +290,14 @@ test("retrieves complete potential duplicates without vectors or review calls", 
     potentialDuplicates: [findings[1]],
   });
   const isolated = await fetch(
-    `${base}/v1/finding/${findings[2]!.findingId}/potential-duplicates`,
+    `${base}/v1/finding/${findings[2]!.findingId}/potential-duplicates?repositoryId=repository-a`,
   );
   expect(await isolated.json()).toEqual({
     finding: findings[2],
     potentialDuplicates: [],
   });
   const missing = await fetch(
-    `${base}/v1/finding/${finding(4).findingId}/potential-duplicates`,
+    `${base}/v1/finding/${finding(4).findingId}/potential-duplicates?repositoryId=repository-a`,
   );
   expect(missing.status).toBe(404);
   expect(await missing.json()).toMatchObject({ error: "finding_not_indexed" });
@@ -296,33 +315,37 @@ test("runs reviews in a caller using the HTTP candidate API", async () => {
       finding,
       embedding: { model: "synthetic", vector: [1, 0] },
     })),
+    "repository-a",
   );
   const stages: string[] = [];
   const same = { decision: "SAME" as const, rationale: "Synthetic duplicate" };
-  const workflow = new FindingDeduplicator(new FindingsClient(base), {
-    async screen(neighborhood) {
-      stages.push("screen");
-      expect(neighborhood).toEqual(findings);
-      return {
-        decisions: neighborhood.slice(1).map((candidate) => ({
-          findingIds: [neighborhood[0]!.findingId, candidate.findingId] as [
-            string,
-            string,
-          ],
-          ...same,
-        })),
-      };
+  const workflow = new FindingDeduplicator(
+    new FindingsClient(base, { repositoryId: "repository-a" }),
+    {
+      async screen(neighborhood) {
+        stages.push("screen");
+        expect(neighborhood).toEqual(findings);
+        return {
+          decisions: neighborhood.slice(1).map((candidate) => ({
+            findingIds: [neighborhood[0]!.findingId, candidate.findingId] as [
+              string,
+              string,
+            ],
+            ...same,
+          })),
+        };
+      },
+      async reviewPair() {
+        stages.push("pair");
+        return same;
+      },
+      async reviewGroup(group) {
+        stages.push("group");
+        expect(group).toEqual(findings);
+        return same;
+      },
     },
-    async reviewPair() {
-      stages.push("pair");
-      return same;
-    },
-    async reviewGroup(group) {
-      stages.push("group");
-      expect(group).toEqual(findings);
-      return same;
-    },
-  });
+  );
   expect(await workflow.run([findings[0]!.findingId])).toEqual({
     uniqueFindingIds: [findings[0]!.findingId],
     duplicateGroups: [findings.map((finding) => finding.findingId)],
@@ -332,6 +355,161 @@ test("runs reviews in a caller using the HTTP candidate API", async () => {
   expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
     findings,
   );
+});
+
+test("SQLite filters repository and embedding compatibility before exact cosine ranking", async () => {
+  const { store, environment } = await fixture();
+  await store.initialize();
+  const anchor = embedded(1, [7, 0]);
+  const boundary = embedded(2, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
+  const below = embedded(3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
+  const otherModel = embedded(4, [1, 0], "other-model");
+  const otherDimensions = embedded(5, [1, 0, 0]);
+  const foreign = embedded(6);
+  await store.insert(
+    [anchor, below, otherModel, otherDimensions, boundary],
+    "repository-a",
+  );
+  await store.insert([foreign], "repository-b");
+  expect(
+    await store.findPotentialDuplicates(anchor.finding.findingId, {
+      repositoryId: "repository-a",
+    }),
+  ).toEqual({
+    finding: anchor.finding,
+    potentialDuplicates: [boundary.finding],
+  });
+  expect(
+    await store.findPotentialDuplicates(anchor.finding.findingId, {
+      allRepositories: true,
+    }),
+  ).toEqual({
+    finding: anchor.finding,
+    potentialDuplicates: [foreign.finding, boundary.finding],
+  });
+  await expect(
+    store.findPotentialDuplicates(anchor.finding.findingId, {
+      repositoryId: "repository-b",
+    }),
+  ).rejects.toMatchObject({ code: "finding_not_indexed" });
+  await database(
+    environment,
+    `with db:
+    db.execute("UPDATE finding_embeddings SET vector_json = '[0,0]' WHERE finding_id = ?", (json.load(sys.stdin),))
+print("null")`,
+    foreign.finding.findingId,
+  );
+  expect(
+    (
+      await store.findPotentialDuplicates(anchor.finding.findingId, {
+        repositoryId: "repository-a",
+      })
+    ).potentialDuplicates,
+  ).toEqual([boundary.finding]);
+  await expect(
+    store.findPotentialDuplicates(anchor.finding.findingId, {
+      allRepositories: true,
+    }),
+  ).rejects.toMatchObject({ code: "embedding_failed" });
+});
+
+test("SQLite reads only IDs and vectors before fetching the anchor and stable top 50 documents", async () => {
+  const { store, environment } = await fixture();
+  await store.initialize();
+  const entries = Array.from({ length: 61 }, (_, index) => embedded(index + 1));
+  await store.insert(entries, "repository-a");
+  await store.insert([entries[1]!], "repository-b");
+  const { result, queries } = (await database(
+    environment,
+    `from workbench_findings import find_potential_duplicates
+queries = []
+db.set_trace_callback(queries.append)
+result = find_potential_duplicates(db, json.load(sys.stdin), "repository-a")
+print(json.dumps({"result": result, "queries": queries}))`,
+    entries[0]!.finding.findingId,
+  )) as {
+    result: { finding: Finding; potentialDuplicates: Finding[] };
+    queries: string[];
+  };
+  expect(result).toEqual({
+    finding: entries[0]!.finding,
+    potentialDuplicates: entries.slice(1, 51).map((entry) => entry.finding),
+  });
+  const reads = queries.filter((query) => query.startsWith("SELECT"));
+  expect(reads).toHaveLength(3);
+  expect(reads[0]).toStartWith(
+    "SELECT embeddings.model, embeddings.vector_json ",
+  );
+  expect(reads[1]).toStartWith(
+    "SELECT embeddings.finding_id, embeddings.vector_json ",
+  );
+  expect(reads[1]).toContain("repositories.repository_id = 'repository-a'");
+  expect(reads[2]).toStartWith(
+    "SELECT id, details_json FROM findings WHERE id IN (",
+  );
+  const loadedIds = [...reads[2]!.matchAll(/csf_[0-9a-f]+/g)].map(([id]) => id);
+  expect(loadedIds).toEqual(
+    entries.slice(0, 51).map((entry) => entry.finding.findingId),
+  );
+  expect(
+    (
+      await store.findPotentialDuplicates(entries[0]!.finding.findingId, {
+        allRepositories: true,
+      })
+    ).potentialDuplicates,
+  ).toEqual(result.potentialDuplicates);
+});
+
+test("imports persist repository associations and keep untagged findings in explicit all-repository scope", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store, {
+    async embed(findings) {
+      return findings.map(() => ({ model: "synthetic", vector: [1, 0] }));
+    },
+  });
+  const findings = [finding(1), finding(2), finding(3)];
+  expect((await insert(base, [findings[0]!], "repository-a")).status).toBe(201);
+  expect(
+    (await insert(base, [findings[0]!, findings[1]!], "repository-b")).status,
+  ).toBe(201);
+  expect((await insert(base, [findings[0]!], "repository-a")).status).toBe(201);
+  expect(
+    (
+      await fetch(`${base}/v1/bulk/findings`, {
+        method: "POST",
+        body: JSON.stringify({ findings: [findings[2]] }),
+      })
+    ).status,
+  ).toBe(201);
+  const reopened = await start(new SqliteFindingsStore(environment));
+  const path = `${reopened}/v1/finding/${findings[0]!.findingId}/potential-duplicates`;
+  expect(
+    await (await fetch(`${path}?repositoryId=repository-a`)).json(),
+  ).toEqual({ finding: findings[0], potentialDuplicates: [] });
+  expect(
+    await (await fetch(`${path}?repositoryId=repository-b`)).json(),
+  ).toEqual({ finding: findings[0], potentialDuplicates: [findings[1]] });
+  expect(await (await fetch(`${path}?allRepositories=true`)).json()).toEqual({
+    finding: findings[0],
+    potentialDuplicates: findings.slice(1),
+  });
+  expect(
+    (
+      await fetch(
+        `${reopened}/v1/finding/${findings[2]!.findingId}/potential-duplicates?repositoryId=repository-a`,
+      )
+    ).status,
+  ).toBe(404);
+  expect(
+    await database(
+      environment,
+      "print(json.dumps([list(row) for row in db.execute('SELECT repository_id, finding_id FROM finding_repositories ORDER BY repository_id, finding_id')]))",
+    ),
+  ).toEqual([
+    ["repository-a", findings[0]!.findingId],
+    ["repository-b", findings[0]!.findingId],
+    ["repository-b", findings[1]!.findingId],
+  ]);
 });
 
 test("rejects invalid requests before embedding and preserves unknown-route behavior", async () => {
@@ -350,6 +528,8 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
     "{}",
     '{"findings":{}}',
     '{"findings":[{}]}',
+    '{"repositoryId":"","findings":[]}',
+    '{"repositoryId":42,"findings":[]}',
   ]) {
     const response = await fetch(`${base}/v1/bulk/findings`, {
       method: "POST",
@@ -365,6 +545,21 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
     "offset=9007199254740992",
   ]) {
     expect((await fetch(`${base}/v1/findings?${query}`)).status).toBe(400);
+  }
+  for (const query of [
+    "",
+    "repositoryId=",
+    "allRepositories=false",
+    "allRepositories=yes",
+    "repositoryId=repository-a&allRepositories=true",
+  ]) {
+    expect(
+      (
+        await fetch(
+          `${base}/v1/finding/${finding().findingId}/potential-duplicates?${query}`,
+        )
+      ).status,
+    ).toBe(400);
   }
   for (const [method, path] of [
     ["GET", "/unknown"],
@@ -425,7 +620,8 @@ timestamp = "2026-01-01T00:00:00Z"
 apply_migrations(db, tuple(m for m in MIGRATIONS if m[0] <= 32), lambda: timestamp, lambda _: None)
 with db:
     db.execute("INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', ?, ?)", (timestamp, timestamp))
-    db.execute("INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES ('scan', 'workspace', '/synthetic/repository', 'revision', '.', 'standard', '/synthetic/output', 'complete', 'reporting', ?, ?, ?)", (timestamp, timestamp, timestamp))
+    db.execute("INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES ('repository-history', '/synthetic/repository', 'Synthetic repository', ?, ?)", (timestamp, timestamp))
+    db.execute("INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES ('scan', 'workspace', 'repository-history', '/synthetic/repository', 'revision', '.', 'standard', '/synthetic/output', 'complete', 'reporting', ?, ?, ?)", (timestamp, timestamp, timestamp))
     db.execute("INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", (finding["findingId"], finding["fingerprints"]["primary"], finding["ruleId"], finding["identity"]["anchor"], timestamp, timestamp))
     db.execute("INSERT INTO finding_occurrences (id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, 'scan', ?, ?, ?, ?, ?, ?, ?)", (finding["occurrenceId"], finding["findingId"], finding["title"], finding["summary"], finding["severity"]["level"], finding["confidence"]["level"], finding["remediation"], json.dumps(finding), timestamp))
 print("null")`,
@@ -435,6 +631,12 @@ print("null")`,
   expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([
     original,
   ]);
+  expect(
+    await database(
+      environment,
+      "print(json.dumps([list(row) for row in db.execute('SELECT repository_id, finding_id FROM finding_repositories')]))",
+    ),
+  ).toEqual([["repository-history", original.findingId]]);
   await store.insert([
     { finding: original, embedding: { model: "synthetic", vector: [1, 0] } },
   ]);
@@ -446,8 +648,22 @@ print(db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0])`;
   expect(await database(environment, update, original)).toBe(1);
   const changed = { ...original, summary: "A newer scan updated this finding" };
   expect(await database(environment, update, changed)).toBe(0);
-  expect(await store.listEmbedded()).toEqual([]);
+  await expect(
+    store.findPotentialDuplicates(original.findingId, {
+      allRepositories: true,
+    }),
+  ).rejects.toMatchObject({ code: "finding_not_indexed" });
   expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual([
     changed,
+  ]);
+  await database(environment, update, finding(2));
+  expect(
+    await database(
+      environment,
+      "print(json.dumps([list(row) for row in db.execute('SELECT repository_id, finding_id FROM finding_repositories ORDER BY finding_id')]))",
+    ),
+  ).toEqual([
+    ["repository-history", original.findingId],
+    ["repository-history", finding(2).findingId],
   ]);
 });

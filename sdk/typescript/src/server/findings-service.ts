@@ -1,5 +1,5 @@
 import type { Finding } from "../models.js";
-import { potentialDuplicates } from "./potential-duplicates.js";
+import type { FindingSearchScope } from "../finding-retrieval.js";
 import type { FindingEmbedder } from "./embeddings.js";
 import type { FindingsPage, FindingsStore } from "./storage.js";
 
@@ -9,18 +9,22 @@ export class FindingsService {
     private readonly embeddings: FindingEmbedder,
   ) {}
 
-  async insert(findings: readonly Finding[]): Promise<string[]> {
+  async insert(
+    findings: readonly Finding[],
+    repositoryId?: string,
+  ): Promise<string[]> {
     const embeddings = await this.embeddings.embed(findings);
     return await this.store.insert(
       findings.map((finding, index) => ({
         finding,
         embedding: embeddings[index]!,
       })),
+      repositoryId,
     );
   }
 
-  async potentialDuplicates(findingId: string) {
-    return potentialDuplicates(await this.store.listEmbedded(), findingId);
+  async potentialDuplicates(findingId: string, scope: FindingSearchScope) {
+    return await this.store.findPotentialDuplicates(findingId, scope);
   }
 
   async list(page: { limit: number; offset: number }): Promise<FindingsPage> {

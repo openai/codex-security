@@ -1,13 +1,9 @@
 import type { Finding } from "../models.js";
+import type { FindingNeighborhood } from "../finding-retrieval.js";
 import {
   pairKey,
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
-
-export interface FindingNeighborhood {
-  finding: Finding;
-  potentialDuplicates: Finding[];
-}
 
 export interface DeduplicationResult {
   uniqueFindingIds: string[];
