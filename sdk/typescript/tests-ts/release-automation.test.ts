@@ -3895,7 +3895,7 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(nodeCiWorkflow).toContain("needs: validate-title");
     expect(nodeCiWorkflow).toContain(
-      "needs: [validate-title, readme-checks, windows-test, windows-verify]",
+      "needs: [validate-title, markdown-checks, windows-test, windows-verify]",
     );
   });
 
@@ -3919,7 +3919,6 @@ describe("GitHub release workflow safeguards", () => {
             if?: string;
             name?: string;
             run?: string;
-            "working-directory"?: string;
           }>;
         }
       >;
@@ -3936,56 +3935,41 @@ describe("GitHub release workflow safeguards", () => {
     for (const job of Object.values(workflow.jobs)) {
       expect(job.name.startsWith(metadataPrefix), job.name).toBe(true);
     }
-    for (const stepName of [
-      "Checkout pull request for change classification",
-      "Detect README-only changes",
-    ]) {
-      expect(
-        workflow.jobs["validate-title"]?.steps.find(
-          ({ name }) => name === stepName,
-        )?.if,
-      ).toContain("github.event.changes.base == null");
-    }
+    expect(
+      workflow.jobs["validate-title"]?.steps.find(
+        ({ name }) =>
+          name === "Checkout pull request for change classification",
+      )?.if,
+    ).toContain("github.event.changes.base == null");
 
-    const fullCiCondition =
-      "needs.validate-title.outputs.run-full-ci == 'true'";
+    const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
     for (const job of ["test", "windows-test", "windows-verify"]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
     }
-    expect(workflow.jobs["readme-checks"]?.if).toBe(
-      "needs.validate-title.outputs.readme-only == 'true'",
+    expect(workflow.jobs["markdown-checks"]?.if).toBe(
+      "needs.validate-title.outputs.ci-mode == 'markdown'",
     );
-    const readmeSteps = workflow.jobs["readme-checks"]?.steps ?? [];
-    expect(
-      readmeSteps.find(({ name }) => name === "Check README formatting")?.run,
-    ).toBe("pnpm --dir sdk/typescript run format");
-    const consistencyCommand =
-      readmeSteps.find(({ name }) => name === "Check README consistency")
-        ?.run ?? "";
-    expect(consistencyCommand).toContain("--test-name-pattern");
-    expect(consistencyCommand).toContain(
-      "documents user-facing environment and deep-scan configuration",
-    );
-    expect(consistencyCommand).toContain(
-      "keeps documented runtime and deep-scan defaults accurate",
-    );
-    expect(consistencyCommand).toContain("./tests-ts/cli.test.ts");
-    for (const [name, run] of [
-      ["Pack", "pnpm pack --pack-destination ../../dist"],
-      ["Inspect package", "pnpm run check:package ../../dist/*.tgz"],
+    const markdownCommands = (workflow.jobs["markdown-checks"]?.steps ?? [])
+      .map(({ run }) => run ?? "")
+      .join("\n");
+    for (const command of [
+      "'*.md'",
+      "prettier --check",
+      "--test-name-pattern",
+      "./tests-ts/cli.test.ts",
+      "pnpm pack --pack-destination ../../dist",
+      "pnpm run check:package ../../dist/*.tgz",
     ]) {
-      const step = readmeSteps.find((candidate) => candidate.name === name);
-      expect(step?.["working-directory"]).toBe("sdk/typescript");
-      expect(step?.run).toBe(run);
+      expect(markdownCommands).toContain(command);
     }
     const requiredJobCondition = `always() && !(${metadataOnly})`;
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.run-full-ci == 'true' && needs.test.result != 'success') || (needs.validate-title.outputs.readme-only == 'true' && needs.readme-checks.result != 'success') || (needs.validate-title.outputs.run-full-ci != 'true' && needs.validate-title.outputs.readme-only != 'true')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.run-full-ci == 'true' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.readme-only == 'true' && needs.readme-checks.result != 'success') || (needs.validate-title.outputs.run-full-ci != 'true' && needs.validate-title.outputs.readme-only != 'true')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')",
     );
 
     const renderName = (
@@ -4042,86 +4026,16 @@ describe("GitHub release workflow safeguards", () => {
 
   test.each([
     {
-      name: "a root README",
-      paths: ["README.md"],
-      readmeOnly: true,
-    },
-    {
-      name: "nested READMEs",
-      paths: ["examples/README.md", "sdk/typescript/README.md"],
-      readmeOnly: true,
-    },
-    {
-      name: "another Markdown file",
-      paths: ["docs/guide.md"],
-      readmeOnly: false,
-    },
-    {
-      name: "a README and source code",
-      paths: ["README.md", "sdk/typescript/src/index.ts"],
-      readmeOnly: false,
-    },
-    {
-      name: "a source file renamed to README",
-      paths: ["sdk/typescript/src/index.ts", "README.md"],
-      readmeOnly: false,
-    },
-    {
-      name: "a differently cased readme",
-      paths: ["readme.md"],
-      readmeOnly: false,
-    },
-    {
-      name: "an empty diff",
-      paths: [],
-      readmeOnly: false,
-    },
-  ])("classifies $name without weakening full CI", ({ paths, readmeOnly }) => {
-    const script = workflowStepShell(
-      nodeCiWorkflow,
-      "Detect README-only changes",
-    );
-    const workspace = mkdtempSync(join(tmpdir(), "release-ci-readme-"));
-    const output = join(workspace, "output");
-    const mock = [
-      "git() {",
-      '  if [[ "$*" != "diff --no-renames --name-only -z HEAD^1 HEAD" ]]; then return 64; fi',
-      "  while IFS= read -r path; do",
-      '    if [[ -n "$path" ]]; then printf \'%s\\0\' "$path"; fi',
-      '  done <<< "$MOCK_CHANGED_FILES"',
-      "}",
-    ].join("\n");
-    try {
-      const result = spawnSync(bash, ["-c", `${mock}\n${script}`], {
-        env: {
-          ...process.env,
-          GITHUB_OUTPUT: output,
-          MOCK_CHANGED_FILES: paths.join("\n"),
-        },
-      });
-      expect(result.status).toBe(0);
-      expect(readFileSync(output, "utf8")).toBe(
-        `readme-only=${String(readmeOnly)}\n`,
-      );
-    } finally {
-      rmSync(workspace, { recursive: true, force: true });
-    }
-  });
-
-  test.each([
-    {
       name: "body-only edit with a valid title",
       eventName: "pull_request",
       action: "edited",
       titleChanged: false,
       baseChanged: false,
       title: "docs: clarify release notes",
-      detectedReadmeOnly: false,
-      readmeOnly: false,
-      fullCi: false,
+      changedPaths: [],
+      ciMode: "skip",
       titleValid: true,
-      readmeChecks: "skipped",
-      upstream: "skipped",
+      activeResult: "skipped",
       gateFailure: false,
       cancellation: false,
     },
@@ -4132,93 +4046,113 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: false,
       baseChanged: false,
       title: "Docs: invalid title ",
-      detectedReadmeOnly: false,
-      readmeOnly: false,
-      fullCi: false,
+      changedPaths: [],
+      ciMode: "skip",
       titleValid: false,
-      readmeChecks: "skipped",
-      upstream: "skipped",
+      activeResult: "skipped",
       gateFailure: false,
       cancellation: false,
     },
     {
-      name: "title edit",
+      name: "Markdown-only title edit",
       eventName: "pull_request",
       action: "edited",
       titleChanged: true,
       baseChanged: false,
-      title: "ci: update title",
-      detectedReadmeOnly: false,
-      readmeOnly: false,
-      fullCi: true,
+      title: "docs: update title",
+      changedPaths: ["README.md", "examples/custom-validation/scan.md"],
+      ciMode: "markdown",
       titleValid: true,
-      readmeChecks: "skipped",
-      upstream: "success",
+      activeResult: "success",
       gateFailure: false,
       cancellation: true,
     },
     {
-      name: "README-only base edit",
+      name: "Markdown-only base edit",
       eventName: "pull_request",
       action: "edited",
       titleChanged: false,
       baseChanged: true,
-      title: "docs: retarget README update",
-      detectedReadmeOnly: true,
-      readmeOnly: false,
-      fullCi: true,
+      title: "docs: retarget documentation update",
+      changedPaths: ["README.md"],
+      ciMode: "full",
       titleValid: true,
-      readmeChecks: "skipped",
-      upstream: "success",
+      activeResult: "success",
       gateFailure: false,
       cancellation: true,
     },
     {
-      name: "code synchronization",
+      name: "mixed Markdown and code changes",
       eventName: "pull_request",
       action: "synchronize",
       titleChanged: false,
       baseChanged: false,
-      title: "ci: update code",
-      detectedReadmeOnly: false,
-      readmeOnly: false,
-      fullCi: true,
+      title: "ci: update code and guidance",
+      changedPaths: ["README.md", "sdk/typescript/src/index.ts"],
+      ciMode: "full",
       titleValid: true,
-      readmeChecks: "skipped",
-      upstream: "success",
+      activeResult: "success",
       gateFailure: false,
       cancellation: true,
     },
     {
-      name: "README-only synchronization",
+      name: "Markdown-only synchronization",
       eventName: "pull_request",
       action: "synchronize",
       titleChanged: false,
       baseChanged: false,
-      title: "docs: clarify examples",
-      detectedReadmeOnly: true,
-      readmeOnly: true,
-      fullCi: false,
+      title: "docs: clarify guidance",
+      changedPaths: [
+        "SECURITY.md",
+        "examples/custom-validation/validation.md",
+        "sdk/typescript/_bundled_plugin/skills/security-scan/SKILL.md",
+      ],
+      ciMode: "markdown",
       titleValid: true,
-      readmeChecks: "success",
-      upstream: "skipped",
+      activeResult: "success",
       gateFailure: false,
       cancellation: true,
     },
     {
-      name: "README-only synchronization with failed formatting",
+      name: "Markdown-only synchronization with failed checks",
       eventName: "pull_request",
       action: "synchronize",
       titleChanged: false,
       baseChanged: false,
-      title: "docs: misformat examples",
-      detectedReadmeOnly: true,
-      readmeOnly: true,
-      fullCi: false,
+      title: "docs: update guidance",
+      changedPaths: ["CONTRIBUTING.md"],
+      ciMode: "markdown",
       titleValid: true,
-      readmeChecks: "failure",
-      upstream: "skipped",
+      activeResult: "failure",
       gateFailure: true,
+      cancellation: true,
+    },
+    {
+      name: "source renamed to Markdown",
+      eventName: "pull_request",
+      action: "synchronize",
+      titleChanged: false,
+      baseChanged: false,
+      title: "ci: rename source file",
+      changedPaths: ["sdk/typescript/src/index.ts", "docs/index.md"],
+      ciMode: "full",
+      titleValid: true,
+      activeResult: "success",
+      gateFailure: false,
+      cancellation: true,
+    },
+    {
+      name: "empty synchronization",
+      eventName: "pull_request",
+      action: "synchronize",
+      titleChanged: false,
+      baseChanged: false,
+      title: "ci: refresh branch",
+      changedPaths: [],
+      ciMode: "full",
+      titleValid: true,
+      activeResult: "success",
+      gateFailure: false,
       cancellation: true,
     },
     {
@@ -4228,12 +4162,10 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: false,
       baseChanged: false,
       title: "",
-      detectedReadmeOnly: false,
-      readmeOnly: false,
-      fullCi: true,
+      changedPaths: ["README.md"],
+      ciMode: "full",
       titleValid: true,
-      readmeChecks: "skipped",
-      upstream: "success",
+      activeResult: "success",
       gateFailure: false,
       cancellation: false,
     },
@@ -4244,12 +4176,10 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged: false,
       baseChanged: false,
       title: "ci: update code",
-      detectedReadmeOnly: false,
-      readmeOnly: false,
-      fullCi: true,
+      changedPaths: ["sdk/typescript/src/index.ts"],
+      ciMode: "full",
       titleValid: true,
-      readmeChecks: "skipped",
-      upstream: "skipped",
+      activeResult: "skipped",
       gateFailure: true,
       cancellation: true,
     },
@@ -4261,12 +4191,10 @@ describe("GitHub release workflow safeguards", () => {
       titleChanged,
       baseChanged,
       title,
-      detectedReadmeOnly,
-      readmeOnly,
-      fullCi,
+      changedPaths,
+      ciMode,
       titleValid,
-      readmeChecks,
-      upstream,
+      activeResult,
       gateFailure,
       cancellation,
     }) => {
@@ -4274,32 +4202,35 @@ describe("GitHub release workflow safeguards", () => {
         concurrency: { "cancel-in-progress": string };
         jobs: Record<string, { steps: Array<{ if?: string }> }>;
       };
-      const scopeScript = workflowStepShell(
-        nodeCiWorkflow,
-        "Decide whether full CI is needed",
-      );
+      const scopeScript = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
       const titleScript = workflowStepShell(
         nodeCiWorkflow,
         "Require a Conventional Commit pull request title",
       );
       const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
       const output = join(workspace, "output");
+      const gitMock = [
+        "git() {",
+        '  if [[ "$*" != "diff --no-renames --name-only -z HEAD^1 HEAD" ]]; then return 64; fi',
+        "  while IFS= read -r path; do",
+        '    if [[ -n "$path" ]]; then printf \'%s\\0\' "$path"; fi',
+        '  done <<< "$MOCK_CHANGED_FILES"',
+        "}",
+      ].join("\n");
       try {
-        const scope = spawnSync(bash, ["-c", scopeScript], {
+        const scope = spawnSync(bash, ["-c", `${gitMock}\n${scopeScript}`], {
           env: {
             ...process.env,
             BASE_CHANGED: String(baseChanged),
             EVENT_ACTION: action === "none" ? "" : action,
             EVENT_NAME: eventName,
             GITHUB_OUTPUT: output,
-            README_ONLY: String(detectedReadmeOnly),
+            MOCK_CHANGED_FILES: changedPaths.join("\n"),
             TITLE_CHANGED: String(titleChanged),
           },
         });
         expect(scope.status).toBe(0);
-        expect(readFileSync(output, "utf8")).toBe(
-          `readme-only=${String(readmeOnly)}\nrun-full-ci=${String(fullCi)}\n`,
-        );
+        expect(readFileSync(output, "utf8")).toBe(`ci-mode=${ciMode}\n`);
 
         const validation =
           eventName === "pull_request"
@@ -4311,18 +4242,19 @@ describe("GitHub release workflow safeguards", () => {
             : "success";
         expect(validation === "success").toBe(titleValid);
 
+        const markdownResult = ciMode === "markdown" ? activeResult : "skipped";
+        const upstreamResult = ciMode === "full" ? activeResult : "skipped";
         const values = {
-          "needs.readme-checks.result": readmeChecks,
-          "needs.test.result": upstream,
-          "needs.validate-title.outputs.readme-only": String(readmeOnly),
-          "needs.validate-title.outputs.run-full-ci": String(fullCi),
+          "needs.markdown-checks.result": markdownResult,
+          "needs.test.result": upstreamResult,
+          "needs.validate-title.outputs.ci-mode": ciMode,
           "needs.validate-title.result": validation,
-          "needs.windows-test.result": upstream,
-          "needs.windows-verify.result": upstream,
+          "needs.windows-test.result": upstreamResult,
+          "needs.windows-verify.result": upstreamResult,
         };
         const unixGate = workflow.jobs["required-test"]?.steps[0]?.if ?? "";
         const windowsGate = workflow.jobs["windows"]?.steps[0]?.if ?? "";
-        if (fullCi || readmeOnly) {
+        if (ciMode !== "skip") {
           expect(evaluateWorkflowCondition(unixGate, values)).toBe(gateFailure);
           expect(evaluateWorkflowCondition(windowsGate, values)).toBe(
             gateFailure,

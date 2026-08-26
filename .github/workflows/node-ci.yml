@@ -18,8 +18,7 @@ jobs:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}validate pull request title
     runs-on: ubuntu-latest
     outputs:
-      readme-only: ${{ steps.scope.outputs.readme-only }}
-      run-full-ci: ${{ steps.scope.outputs.run-full-ci }}
+      ci-mode: ${{ steps.scope.outputs.ci-mode }}
 
     steps:
       - name: Checkout pull request for change classification
@@ -29,30 +28,7 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Detect README-only changes
-        id: changes
-        if: github.event_name == 'pull_request' && github.event.changes.base == null && (github.event.action != 'edited' || github.event.changes.title != null)
-        shell: bash
-        run: |
-          set -euo pipefail
-          changed_files="$(mktemp)"
-          trap 'rm -f "$changed_files"' EXIT
-          git diff --no-renames --name-only -z HEAD^1 HEAD > "$changed_files"
-
-          changed=false
-          readme_only=true
-          while IFS= read -r -d '' path; do
-            changed=true
-            if [[ "$path" != "README.md" && "$path" != */README.md ]]; then
-              readme_only=false
-            fi
-          done < "$changed_files"
-          if [[ "$changed" != "true" ]]; then
-            readme_only=false
-          fi
-          printf 'readme-only=%s\n' "$readme_only" >> "$GITHUB_OUTPUT"
-
-      - name: Decide whether full CI is needed
+      - name: Decide CI mode
         id: scope
         shell: bash
         env:
@@ -60,24 +36,33 @@ jobs:
           EVENT_ACTION: ${{ github.event.action }}
           TITLE_CHANGED: ${{ github.event.changes.title != null }}
           BASE_CHANGED: ${{ github.event.changes.base != null }}
-          README_ONLY: ${{ steps.changes.outputs.readme-only || 'false' }}
         run: |
           set -euo pipefail
-          run_full_ci=true
-          readme_only=false
+          ci_mode=full
           if [[ "$EVENT_NAME" == "pull_request" &&
                 "$EVENT_ACTION" == "edited" &&
                 "$TITLE_CHANGED" != "true" &&
                 "$BASE_CHANGED" != "true" ]]; then
-            run_full_ci=false
+            ci_mode=skip
           elif [[ "$EVENT_NAME" == "pull_request" &&
-                  "$BASE_CHANGED" != "true" &&
-                  "$README_ONLY" == "true" ]]; then
-            readme_only=true
-            run_full_ci=false
+                  "$BASE_CHANGED" != "true" ]]; then
+            changed_files="$(mktemp)"
+            trap 'rm -f "$changed_files"' EXIT
+            git diff --no-renames --name-only -z HEAD^1 HEAD > "$changed_files"
+
+            changed=false
+            markdown_only=true
+            while IFS= read -r -d '' path; do
+              changed=true
+              if [[ "$path" != *.md ]]; then
+                markdown_only=false
+              fi
+            done < "$changed_files"
+            if [[ "$changed" == "true" && "$markdown_only" == "true" ]]; then
+              ci_mode=markdown
+            fi
           fi
-          printf 'readme-only=%s\n' "$readme_only" >> "$GITHUB_OUTPUT"
-          printf 'run-full-ci=%s\n' "$run_full_ci" >> "$GITHUB_OUTPUT"
+          printf 'ci-mode=%s\n' "$ci_mode" >> "$GITHUB_OUTPUT"
 
       - name: Require a Conventional Commit pull request title
         if: github.event_name == 'pull_request'
@@ -93,10 +78,10 @@ jobs:
             exit 1
           fi
 
-  readme-checks:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}README checks
+  markdown-checks:
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}Markdown checks
     needs: validate-title
-    if: needs.validate-title.outputs.readme-only == 'true'
+    if: needs.validate-title.outputs.ci-mode == 'markdown'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -104,6 +89,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Set up pnpm
@@ -128,29 +114,37 @@ jobs:
       - name: Install dependencies
         run: pnpm --dir sdk/typescript install --frozen-lockfile
 
-      - name: Check README formatting
-        run: pnpm --dir sdk/typescript run format
+      - name: Check Markdown formatting
+        shell: bash
+        run: |
+          files=()
+          while IFS= read -r -d '' path; do
+            if [[ -f "$GITHUB_WORKSPACE/$path" ]]; then
+              files+=("$GITHUB_WORKSPACE/$path")
+            fi
+          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD -- '*.md')
+          if ((${#files[@]} > 0)); then
+            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
+          fi
 
-      - name: Check README consistency
+      - name: Check documentation consistency
         working-directory: sdk/typescript
         run: |
           bun test --timeout 30000 \
             --test-name-pattern '(documents user-facing environment and deep-scan configuration|keeps documented runtime and deep-scan defaults accurate)$' \
             ./tests-ts/cli.test.ts
 
-      - name: Pack
-        working-directory: sdk/typescript
-        run: pnpm pack --pack-destination ../../dist
-
-      - name: Inspect package
+      - name: Check package contents
         working-directory: sdk/typescript
         shell: bash
-        run: pnpm run check:package ../../dist/*.tgz
+        run: |
+          pnpm pack --pack-destination ../../dist
+          pnpm run check:package ../../dist/*.tgz
 
   test:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     needs: validate-title
-    if: needs.validate-title.outputs.run-full-ci == 'true'
+    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -242,7 +236,7 @@ jobs:
 
   required-test:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}${{ matrix.os }} / node-22
-    needs: [validate-title, readme-checks, test]
+    needs: [validate-title, markdown-checks, test]
     if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
     runs-on: ubuntu-latest
     strategy:
@@ -252,13 +246,13 @@ jobs:
 
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.run-full-ci == 'true' && needs.test.result != 'success') || (needs.validate-title.outputs.readme-only == 'true' && needs.readme-checks.result != 'success') || (needs.validate-title.outputs.run-full-ci != 'true' && needs.validate-title.outputs.readme-only != 'true')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')
         run: exit 1
 
   windows-test:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
     needs: validate-title
-    if: needs.validate-title.outputs.run-full-ci == 'true'
+    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -318,7 +312,7 @@ jobs:
   windows-verify:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
     needs: validate-title
-    if: needs.validate-title.outputs.run-full-ci == 'true'
+    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -359,7 +353,7 @@ jobs:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
-    needs: [validate-title, readme-checks, windows-test, windows-verify]
+    needs: [validate-title, markdown-checks, windows-test, windows-verify]
     strategy:
       fail-fast: false
       matrix:
@@ -367,5 +361,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.run-full-ci == 'true' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.readme-only == 'true' && needs.readme-checks.result != 'success') || (needs.validate-title.outputs.run-full-ci != 'true' && needs.validate-title.outputs.readme-only != 'true')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')
         run: exit 1
