@@ -3969,9 +3969,9 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(markdownCommand).toContain("! -L");
     expect(markdownCommand).toContain(
-      "pnpm --dir sdk/typescript exec prettier",
+      "pnpm --dir sdk/typescript exec prettier --check",
     );
-    expect(markdownCommand).toContain("--ignore-path /dev/null --check");
+    expect(markdownCommand).not.toContain("--ignore-path");
     const requiredJobCondition = `always() && !(${metadataOnly})`;
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
@@ -4191,8 +4191,6 @@ describe("GitHub release workflow safeguards", () => {
           "sdk/typescript",
           "exec",
           "prettier",
-          "--ignore-path",
-          "/dev/null",
           "--check",
           readme,
           guide,

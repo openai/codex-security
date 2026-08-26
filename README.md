@@ -48,7 +48,6 @@ Use the included Docker Compose configuration for scans of many repositories. Se
 
 ## Other providers
 
-
 To use another inference provider, set its API key and select a model:
 
 ```bash

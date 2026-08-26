@@ -111,8 +111,7 @@ jobs:
             fi
           done < <(git diff --no-renames --name-only -z HEAD^1 HEAD)
           if ((${#files[@]} > 0)); then
-            pnpm --dir sdk/typescript exec prettier \
-              --ignore-path /dev/null --check "${files[@]}"
+            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
           fi
 
   test:
