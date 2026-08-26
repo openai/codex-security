@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   validate-title:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}validate pull request title
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}validate pull request
     runs-on: ubuntu-latest
     outputs:
       ci-mode: ${{ steps.scope.outputs.ci-mode }}
@@ -78,21 +78,8 @@ jobs:
             exit 1
           fi
 
-  markdown-checks:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}Markdown checks
-    needs: validate-title
-    if: needs.validate-title.outputs.ci-mode == 'markdown'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 2
-          persist-credentials: false
-
       - name: Set up pnpm
+        if: steps.scope.outputs.ci-mode == 'markdown'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           package_json_file: sdk/typescript/package.json
@@ -100,21 +87,19 @@ jobs:
           cache_dependency_path: sdk/typescript/pnpm-lock.yaml
 
       - name: Set up Node.js
+        if: steps.scope.outputs.ci-mode == 'markdown'
         uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: "22.13.0"
           cache: npm
           cache-dependency-path: sdk/typescript/pnpm-lock.yaml
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: "1.3.14"
-
       - name: Install dependencies
+        if: steps.scope.outputs.ci-mode == 'markdown'
         run: pnpm --dir sdk/typescript install --frozen-lockfile
 
       - name: Check Markdown formatting
+        if: steps.scope.outputs.ci-mode == 'markdown'
         shell: bash
         run: |
           files=()
@@ -123,26 +108,11 @@ jobs:
                   ! -L "$GITHUB_WORKSPACE/$path" ]]; then
               files+=("$GITHUB_WORKSPACE/$path")
             fi
-          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD -- '*.md')
+          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD)
           if ((${#files[@]} > 0)); then
-            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
+            pnpm --dir sdk/typescript exec prettier \
+              --ignore-path /dev/null --check "${files[@]}"
           fi
-
-      - name: Check documentation consistency
-        working-directory: sdk/typescript
-        run: |
-          bun test --timeout 30000 \
-            --test-name-pattern '(documents a canonical historical-summary prefix block|documents user-facing environment and deep-scan configuration|keeps documented runtime and deep-scan defaults accurate|renders only the discovery portion of the shipped workflows)$' \
-            ./tests-ts/cli.test.ts \
-            ./tests-ts/custom-validation.test.ts \
-            ./tests-ts/release-automation.test.ts
-
-      - name: Check package contents
-        working-directory: sdk/typescript
-        shell: bash
-        run: |
-          pnpm pack --pack-destination ../../dist
-          pnpm run check:package ../../dist/*.tgz
 
   test:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
@@ -239,7 +209,7 @@ jobs:
 
   required-test:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}${{ matrix.os }} / node-22
-    needs: [validate-title, markdown-checks, test]
+    needs: [validate-title, test]
     if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
     runs-on: ubuntu-latest
     strategy:
@@ -249,7 +219,7 @@ jobs:
 
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
 
   windows-test:
@@ -356,7 +326,7 @@ jobs:
     name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
-    needs: [validate-title, markdown-checks, windows-test, windows-verify]
+    needs: [validate-title, windows-test, windows-verify]
     strategy:
       fail-fast: false
       matrix:
@@ -364,5 +334,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1

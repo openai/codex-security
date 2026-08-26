@@ -123,7 +123,6 @@ describe("TypeScript package skeleton", () => {
     );
     expect(jobs["windows"]?.needs).toEqual([
       "validate-title",
-      "markdown-checks",
       "windows-test",
       "windows-verify",
     ]);

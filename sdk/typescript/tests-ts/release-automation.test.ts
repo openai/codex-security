@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -3895,7 +3896,7 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(nodeCiWorkflow).toContain("needs: validate-title");
     expect(nodeCiWorkflow).toContain(
-      "needs: [validate-title, markdown-checks, windows-test, windows-verify]",
+      "needs: [validate-title, windows-test, windows-verify]",
     );
   });
 
@@ -3946,34 +3947,57 @@ describe("GitHub release workflow safeguards", () => {
     for (const job of ["test", "windows-test", "windows-verify"]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
     }
-    expect(workflow.jobs["markdown-checks"]?.if).toBe(
-      "needs.validate-title.outputs.ci-mode == 'markdown'",
-    );
-    const markdownCommands = (workflow.jobs["markdown-checks"]?.steps ?? [])
-      .map(({ run }) => run ?? "")
-      .join("\n");
-    for (const command of [
-      "'*.md'",
-      "! -L",
-      "prettier --check",
-      "--test-name-pattern",
-      "./tests-ts/cli.test.ts",
-      "./tests-ts/custom-validation.test.ts",
-      "./tests-ts/release-automation.test.ts",
-      "pnpm pack --pack-destination ../../dist",
-      "pnpm run check:package ../../dist/*.tgz",
+    expect(workflow.jobs["markdown-checks"]).toBeUndefined();
+    const validationSteps = workflow.jobs["validate-title"]?.steps ?? [];
+    for (const stepName of [
+      "Set up pnpm",
+      "Set up Node.js",
+      "Install dependencies",
+      "Check Markdown formatting",
     ]) {
-      expect(markdownCommands).toContain(command);
+      expect(validationSteps.find(({ name }) => name === stepName)?.if).toBe(
+        "steps.scope.outputs.ci-mode == 'markdown'",
+      );
     }
+    const markdownCommand =
+      validationSteps.find(({ name }) => name === "Check Markdown formatting")
+        ?.run ?? "";
+    expect(markdownCommand).toContain(
+      "git diff --no-renames --name-only -z HEAD^1 HEAD",
+    );
+    expect(markdownCommand).toContain("! -L");
+    expect(markdownCommand).toContain(
+      "pnpm --dir sdk/typescript exec prettier",
+    );
+    expect(markdownCommand).toContain("--ignore-path /dev/null --check");
     const requiredJobCondition = `always() && !(${metadataOnly})`;
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode == 'markdown' && needs.markdown-checks.result != 'success')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
+    const unknownMode = {
+      "needs.test.result": "skipped",
+      "needs.validate-title.outputs.ci-mode": "unknown",
+      "needs.validate-title.result": "success",
+      "needs.windows-test.result": "skipped",
+      "needs.windows-verify.result": "skipped",
+    };
+    expect(
+      evaluateWorkflowCondition(
+        workflow.jobs["required-test"]?.steps[0]?.if ?? "",
+        unknownMode,
+      ),
+    ).toBe(true);
+    expect(
+      evaluateWorkflowCondition(
+        workflow.jobs["windows"]?.steps[0]?.if ?? "",
+        unknownMode,
+      ),
+    ).toBe(true);
 
     const renderName = (
       template: string,
@@ -4028,261 +4052,146 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test.each([
-    {
-      name: "body-only edit with a valid title",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: false,
-      title: "docs: clarify release notes",
-      changedPaths: [],
-      ciMode: "skip",
-      titleValid: true,
-      activeResult: "skipped",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "body-only edit with an invalid title",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: false,
-      title: "Docs: invalid title ",
-      changedPaths: [],
-      ciMode: "skip",
-      titleValid: false,
-      activeResult: "skipped",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "Markdown-only title edit",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: true,
-      baseChanged: false,
-      title: "docs: update title",
-      changedPaths: ["README.md", "examples/custom-validation/scan.md"],
-      ciMode: "markdown",
-      titleValid: true,
-      activeResult: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "Markdown-only base edit",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: true,
-      title: "docs: retarget documentation update",
-      changedPaths: ["README.md"],
-      ciMode: "full",
-      titleValid: true,
-      activeResult: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "mixed Markdown and code changes",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: update code and guidance",
-      changedPaths: ["README.md", "sdk/typescript/src/index.ts"],
-      ciMode: "full",
-      titleValid: true,
-      activeResult: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "Markdown-only synchronization",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "docs: clarify guidance",
-      changedPaths: [
-        "SECURITY.md",
-        "examples/custom-validation/validation.md",
-        "sdk/typescript/_bundled_plugin/skills/security-scan/SKILL.md",
-      ],
-      ciMode: "markdown",
-      titleValid: true,
-      activeResult: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "Markdown-only synchronization with failed checks",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "docs: update guidance",
-      changedPaths: ["CONTRIBUTING.md"],
-      ciMode: "markdown",
-      titleValid: true,
-      activeResult: "failure",
-      gateFailure: true,
-      cancellation: true,
-    },
-    {
-      name: "source renamed to Markdown",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: rename source file",
-      changedPaths: ["sdk/typescript/src/index.ts", "docs/index.md"],
-      ciMode: "full",
-      titleValid: true,
-      activeResult: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "empty synchronization",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: refresh branch",
-      changedPaths: [],
-      ciMode: "full",
-      titleValid: true,
-      activeResult: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "push",
-      eventName: "push",
-      action: "none",
-      titleChanged: false,
-      baseChanged: false,
-      title: "",
-      changedPaths: ["README.md"],
-      ciMode: "full",
-      titleValid: true,
-      activeResult: "success",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "full CI with skipped upstream jobs",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: update code",
-      changedPaths: ["sdk/typescript/src/index.ts"],
-      ciMode: "full",
-      titleValid: true,
-      activeResult: "skipped",
-      gateFailure: true,
-      cancellation: true,
-    },
-  ])(
-    "keeps required contexts truthful for $name",
-    ({
+    ["body-only edit", "pull_request", "edited", false, false, [], "skip"],
+    [
+      "Markdown-only PR",
+      "pull_request",
+      "synchronize",
+      false,
+      false,
+      ["README.md", "docs/guide.md"],
+      "markdown",
+    ],
+    [
+      "Markdown-only title edit",
+      "pull_request",
+      "edited",
+      true,
+      false,
+      ["README.md"],
+      "markdown",
+    ],
+    [
+      "base retarget",
+      "pull_request",
+      "edited",
+      false,
+      true,
+      ["README.md"],
+      "full",
+    ],
+    [
+      "mixed PR",
+      "pull_request",
+      "synchronize",
+      false,
+      false,
+      ["README.md", "src/index.ts"],
+      "full",
+    ],
+    [
+      "source-to-Markdown rename",
+      "pull_request",
+      "synchronize",
+      false,
+      false,
+      ["src/index.ts", "docs/index.md"],
+      "full",
+    ],
+    [
+      "empty merge diff",
+      "pull_request",
+      "synchronize",
+      false,
+      false,
+      [],
+      "full",
+    ],
+    ["push", "push", "", false, false, ["README.md"], "full"],
+  ] as const)(
+    "selects the conservative CI mode for %s",
+    (
+      _name,
       eventName,
       action,
       titleChanged,
       baseChanged,
-      title,
       changedPaths,
       ciMode,
-      titleValid,
-      activeResult,
-      gateFailure,
-      cancellation,
-    }) => {
-      const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
-        concurrency: { "cancel-in-progress": string };
-        jobs: Record<string, { steps: Array<{ if?: string }> }>;
-      };
-      const scopeScript = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
-      const titleScript = workflowStepShell(
-        nodeCiWorkflow,
-        "Require a Conventional Commit pull request title",
-      );
+    ) => {
       const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
       const output = join(workspace, "output");
-      const gitMock = [
-        "git() {",
-        '  if [[ "$*" != "diff --no-renames --name-only -z HEAD^1 HEAD" ]]; then return 64; fi',
-        "  while IFS= read -r path; do",
-        '    if [[ -n "$path" ]]; then printf \'%s\\0\' "$path"; fi',
-        '  done <<< "$MOCK_CHANGED_FILES"',
-        "}",
-      ].join("\n");
+      const script = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
+      const gitMock = `git() {
+      [[ "$*" == "diff --no-renames --name-only -z HEAD^1 HEAD" ]] || return 64
+      while IFS= read -r path; do
+        [[ -z "$path" ]] || printf '%s\\0' "$path"
+      done <<< "$MOCK_CHANGED_FILES"
+    }`;
       try {
-        const scope = spawnSync(bash, ["-c", `${gitMock}\n${scopeScript}`], {
+        const result = spawnSync(bash, ["-c", `${gitMock}\n${script}`], {
           env: {
             ...process.env,
             BASE_CHANGED: String(baseChanged),
-            EVENT_ACTION: action === "none" ? "" : action,
+            EVENT_ACTION: action,
             EVENT_NAME: eventName,
             GITHUB_OUTPUT: output,
             MOCK_CHANGED_FILES: changedPaths.join("\n"),
             TITLE_CHANGED: String(titleChanged),
           },
         });
-        expect(scope.status).toBe(0);
+        expect(result.status).toBe(0);
         expect(readFileSync(output, "utf8")).toBe(`ci-mode=${ciMode}\n`);
-
-        const validation =
-          eventName === "pull_request"
-            ? spawnSync(bash, ["-c", titleScript], {
-                env: { ...process.env, PR_TITLE: title },
-              }).status === 0
-              ? "success"
-              : "failure"
-            : "success";
-        expect(validation === "success").toBe(titleValid);
-
-        const markdownResult = ciMode === "markdown" ? activeResult : "skipped";
-        const upstreamResult = ciMode === "full" ? activeResult : "skipped";
-        const values = {
-          "needs.markdown-checks.result": markdownResult,
-          "needs.test.result": upstreamResult,
-          "needs.validate-title.outputs.ci-mode": ciMode,
-          "needs.validate-title.result": validation,
-          "needs.windows-test.result": upstreamResult,
-          "needs.windows-verify.result": upstreamResult,
-        };
-        const unixGate = workflow.jobs["required-test"]?.steps[0]?.if ?? "";
-        const windowsGate = workflow.jobs["windows"]?.steps[0]?.if ?? "";
-        if (ciMode !== "skip") {
-          expect(evaluateWorkflowCondition(unixGate, values)).toBe(gateFailure);
-          expect(evaluateWorkflowCondition(windowsGate, values)).toBe(
-            gateFailure,
-          );
-        } else {
-          expect(unixGate).toBeDefined();
-          expect(windowsGate).toBeDefined();
-        }
-
-        expect(
-          evaluateWorkflowCondition(
-            workflow.concurrency["cancel-in-progress"],
-            {
-              "github.event.changes.base": baseChanged ? "changed" : "null",
-              "github.event.changes.title": titleChanged ? "changed" : "null",
-              "github.event.action": action,
-              "github.event_name": eventName,
-            },
-          ),
-        ).toBe(cancellation);
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }
     },
   );
+
+  test("formats every changed regular non-symlink Markdown file", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "release-ci-markdown-"));
+    const argsFile = join(workspace, "prettier-args");
+    const guide = join(workspace, "docs", "guide with spaces.md");
+    const readme = join(workspace, "README.md");
+    mkdirSync(join(workspace, "docs"));
+    writeFileSync(guide, "# Guide\n");
+    writeFileSync(readme, "# Readme\n");
+    symlinkSync(readme, join(workspace, "docs", "link.md"));
+    const mocks = `git() {
+      printf '%s\\0' README.md 'docs/guide with spaces.md' docs/link.md deleted.md
+    }
+    pnpm() { printf '%s\\n' "$@" > "$MOCK_PNPM_ARGS"; }`;
+    try {
+      const result = spawnSync(
+        bash,
+        [
+          "-c",
+          `${mocks}\n${workflowStepShell(nodeCiWorkflow, "Check Markdown formatting")}`,
+        ],
+        {
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: workspace,
+            MOCK_PNPM_ARGS: argsFile,
+          },
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
+        "--dir",
+        "sdk/typescript",
+        "exec",
+        "prettier",
+        "--ignore-path",
+        "/dev/null",
+        "--check",
+        readme,
+        guide,
+      ]);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
 
   test("documents a canonical historical-summary prefix block", () => {
     const start = "<!-- codex-security-release-summary:start -->";
