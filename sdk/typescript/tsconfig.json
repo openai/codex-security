@@ -1,5 +1,10 @@
 {
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tests-ts/**/*.ts"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests-ts/**/*.ts",
+    "scripts/smoke-findings-service.ts"
+  ],
   "exclude": ["dist", "node_modules", "tests-ts/package.test.ts"],
   "compilerOptions": {
     "allowJs": false,
