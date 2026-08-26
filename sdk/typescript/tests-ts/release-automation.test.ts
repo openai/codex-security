@@ -3900,11 +3900,9 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("isolates body-only edits from full CI names and concurrency", () => {
+  test("keeps required contexts for body-only edits without full CI", () => {
     const metadataOnly =
       "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null";
-    const metadataPrefix =
-      "${{ " + metadataOnly + " && 'metadata-only / ' || '' }}";
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3934,9 +3932,6 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
       "${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}",
     );
-    for (const job of Object.values(workflow.jobs)) {
-      expect(job.name.startsWith(metadataPrefix), job.name).toBe(true);
-    }
     expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
     expect(
       workflow.jobs["validate-title"]?.steps.find(
@@ -3972,20 +3967,22 @@ describe("GitHub release workflow safeguards", () => {
       "pnpm --dir sdk/typescript exec prettier --check",
     );
     expect(markdownCommand).not.toContain("--ignore-path");
-    const requiredJobCondition = `always() && !(${metadataOnly})`;
+    const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')",
     );
     for (const [ciMode, validation, upstream, gateFailure] of [
       ["full", "success", "success", false],
       ["full", "success", "skipped", true],
       ["markdown", "success", "skipped", false],
       ["markdown", "failure", "skipped", true],
+      ["skip", "success", "skipped", false],
+      ["skip", "failure", "skipped", true],
       ["unknown", "success", "skipped", true],
     ] as const) {
       const values = {
@@ -4006,15 +4003,8 @@ describe("GitHub release workflow safeguards", () => {
       }
     }
 
-    const renderName = (
-      template: string,
-      values: Record<string, string>,
-      metadata: boolean,
-    ) => {
-      let name = template.replace(
-        metadataPrefix,
-        metadata ? "metadata-only / " : "",
-      );
+    const renderName = (template: string, values: Record<string, string>) => {
+      let name = template;
       for (const [key, value] of Object.entries(values)) {
         name = name.replaceAll("${{ matrix." + key + " }}", value);
       }
@@ -4027,18 +4017,10 @@ describe("GitHub release workflow safeguards", () => {
     const windowsJob = workflow.jobs["windows"];
     const fullNames = [
       ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }, false),
+        renderName(unixJob?.name ?? "", { os }),
       ),
       ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }, false),
-      ),
-    ];
-    const metadataNames = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }, true),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }, true),
+        renderName(windowsJob?.name ?? "", { node }),
       ),
     ];
     const requiredContexts = new Set([
@@ -4050,12 +4032,6 @@ describe("GitHub release workflow safeguards", () => {
     expect(
       fullNames.filter((name) => requiredContexts.has(name)).sort(),
     ).toEqual([...requiredContexts].sort());
-    expect(metadataNames.some((name) => requiredContexts.has(name))).toBe(
-      false,
-    );
-    expect(
-      metadataNames.every((name) => name.startsWith("metadata-only / ")),
-    ).toBe(true);
   });
 
   test.each([

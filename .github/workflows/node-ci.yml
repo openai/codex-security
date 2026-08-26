@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   validate-title:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}validate pull request
+    name: validate pull request
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -115,7 +115,7 @@ jobs:
           fi
 
   test:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     needs: validate-title
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
@@ -208,9 +208,9 @@ jobs:
         run: pnpm run check:package ../../dist/*.tgz
 
   required-test:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}${{ matrix.os }} / node-22
+    name: ${{ matrix.os }} / node-22
     needs: [validate-title, test]
-    if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
+    if: always()
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -219,11 +219,11 @@ jobs:
 
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')
         run: exit 1
 
   windows-test:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
     needs: validate-title
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
@@ -283,7 +283,7 @@ jobs:
         run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
     needs: validate-title
     if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
@@ -323,9 +323,9 @@ jobs:
         run: pnpm run check:package ../../dist/*.tgz
 
   windows:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
-    if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
+    if: always()
     needs: [validate-title, windows-test, windows-verify]
     strategy:
       fail-fast: false
@@ -334,5 +334,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')
         run: exit 1
