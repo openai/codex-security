@@ -1614,15 +1614,8 @@ export class CodexSecurity {
       } catch (error) {
         warnCleanupFailed(options, error);
       } finally {
-        // The startup lock is normally released before workbench registration and Codex
-        // execution. This fallback covers failures during runtime preparation or
-        // authentication. The release only marks itself done once the lock directory is
-        // gone, so a failure leaves an owner.json naming this still-running process;
-        // recoverStaleCredentialHomeLock then refuses to reclaim it because that pid is
-        // alive, and later scans in this process wait on a lock nothing frees. Reporting
-        // success while leaving the client in that state is worse than failing, so the
-        // failure is only downgraded to a warning when the scan already failed and that
-        // error is the one worth keeping.
+        // Release any remaining startup lock, but preserve the scan's error if both
+        // the scan and lock cleanup fail.
         try {
           await releaseCredentialHome?.();
         } catch (error) {

@@ -222,6 +222,15 @@ file or keyring backend and honors managed-device policies. An existing
 file-based Codex sign-in is imported if this home has no credentials. Logout
 disables that import until you log in again.
 
+Scan runtime preparation locks this home even if the process pauses; exiting or
+crashing releases the lock. A compatibility heartbeat prevents released
+heartbeat-only clients from replacing an active newer owner's lock, but those
+clients can still replace a paused newer owner's lock. Finish operations using
+older versions before upgrading. Keep `.codex-security-scan.sqlite3` between
+operations and never remove it while an operation is running. PID reuse can make
+older PID-only locks look live and block recovery. Stop all operations using
+this home before manually removing an old `.codex-security-scan.lock` directory.
+
 If ChatGPT credentials cannot be refreshed, run `login status`. Retry if the
 sign-in recently changed; otherwise run `logout`, then `login`.
 
