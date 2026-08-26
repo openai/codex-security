@@ -210,9 +210,43 @@ jobs:
         shell: bash
         run: pnpm run check:package ../../dist/*.tgz
 
+  plugin-source:
+    name: plugin source contracts
+    needs: validate-title
+    if: needs.validate-title.outputs.ci-mode == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins/codex-security/pyproject.toml
+
+      - name: Install Python test dependencies
+        run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
+
+      - name: Test Python source contracts
+        run: python -m pytest plugins/codex-security/tests -q
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+
+      - name: Test deterministic triage eval contracts
+        run: npm --prefix plugins/codex-security/skills/triage-finding/evals run test:deterministic
+
   required-test:
     name: ${{ matrix.os }} / node-22
-    needs: [validate-title, test]
+    needs: [validate-title, test, plugin-source]
     if: always()
     runs-on: ubuntu-latest
     strategy:
@@ -222,7 +256,7 @@ jobs:
 
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.test.result != 'success' || needs.plugin-source.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
 
   windows-test:
