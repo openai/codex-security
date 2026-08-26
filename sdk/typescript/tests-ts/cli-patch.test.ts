@@ -142,6 +142,146 @@ describe("scan and patch workflow", () => {
     }
   });
 
+  test("assesses only changes made during a literal patch run", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-patch-risk-"),
+    );
+    const repository = join(directory, "repository");
+    await mkdir(repository, { recursive: true });
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repository,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+
+    try {
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.ts"), "original\n");
+      git("add", "--", "app.ts");
+      git("commit", "-m", "Initial synthetic checkout");
+      await writeFile(join(repository, "app.ts"), "original\nuser change\n");
+
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk"],
+        {
+          currentDirectory: repository,
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; sha256: string };
+              const patch = await readFile(artifact.path, "utf8");
+              expect(patch).toContain("+patch change");
+              expect(patch).not.toContain("+user change");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            await writeFile(
+              join(repository, "app.ts"),
+              "original\nuser change\npatch change\n",
+            );
+            output?.stdout.write("Patch complete.");
+            return 0;
+          },
+          onRepositoryCommand: (command, args, workingDirectory, options) => {
+            expect(command).toBe("git");
+            const result = execFileSync("git", args, {
+              cwd: workingDirectory,
+              encoding: "utf8",
+              env: { ...process.env, ...options?.environment },
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            return options?.trim === false ? result : result.trim();
+          },
+        },
+      );
+
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(outcome.stderr).toContain("Patch risk assessment:");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("assesses a patch larger than the repository command buffer", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-large-patch-"),
+    );
+    const repository = join(directory, "repository");
+    await mkdir(repository, { recursive: true });
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repository,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+
+    try {
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "large.txt"), "original\n");
+      git("add", "--", "large.txt");
+      git("commit", "-m", "Initial synthetic checkout");
+
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic large issue", "--assess-patch-risk"],
+        {
+          currentDirectory: repository,
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { path: string; sha256: string };
+              const patch = await readFile(artifact.path);
+              expect(patch.byteLength).toBeGreaterThan(1024 * 1024);
+              expect(createHash("sha256").update(patch).digest("hex")).toBe(
+                artifact.sha256,
+              );
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            await writeFile(
+              join(repository, "large.txt"),
+              "x".repeat(2 * 1024 * 1024),
+            );
+            output?.stdout.write("Patch complete.");
+            return 0;
+          },
+          onRepositoryCommand: (command, args, workingDirectory, options) => {
+            expect(command).toBe("git");
+            const result = execFileSync("git", args, {
+              cwd: workingDirectory,
+              encoding: "utf8",
+              env: { ...process.env, ...options?.environment },
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            return options?.trim === false ? result : result.trim();
+          },
+        },
+      );
+
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("patches selected scan findings in the scanned repository and returns JSON", async () => {
     const result = resultWithFindings(["critical", "high", "medium", "low"]);
     const invocations: Array<{

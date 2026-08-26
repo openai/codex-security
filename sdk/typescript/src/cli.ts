@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import {
   accessSync,
   constants,
+  createReadStream,
   existsSync,
   lstatSync,
   realpathSync,
@@ -1088,6 +1089,7 @@ interface SelectedFindings {
 
 interface PatchRiskRequest {
   repository: string;
+  base: string;
   files?: readonly string[];
   codexOverrides: readonly string[];
   effort: ScanReasoningEffort | undefined;
@@ -3914,6 +3916,9 @@ export async function main(
               options.severity,
               dependencies,
             );
+            const patchRiskBase = options.assessPatchRisk
+              ? await snapshotPatchTree(selected.repository, dependencies)
+              : undefined;
             const patches = await runFindingPatches(
               selected,
               options.codex,
@@ -3929,6 +3934,7 @@ export async function main(
                 patchRisk = await runPatchRiskAssessment(
                   {
                     repository: selected.repository,
+                    base: patchRiskBase!,
                     files,
                     codexOverrides: options.codex,
                     effort: options.effort,
@@ -4000,6 +4006,10 @@ export async function main(
                       ),
                   ),
                 );
+          const repository = dependencies.currentDirectory();
+          const patchRiskBase = options.assessPatchRisk
+            ? await snapshotPatchTree(repository, dependencies)
+            : undefined;
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
@@ -4013,7 +4023,8 @@ export async function main(
           if (options.assessPatchRisk && exitCode === 0) {
             await runPatchRiskAssessment(
               {
-                repository: dependencies.currentDirectory(),
+                repository,
+                base: patchRiskBase!,
                 codexOverrides: options.codex,
                 effort: options.effort,
               },
@@ -5076,51 +5087,43 @@ async function assessPatchRisk(
       ? []
       : ["--", ...request.files.map((file) => file)];
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
-  const gitEnvironment = { GIT_INDEX_FILE: join(root, "index") };
   const patchPath = join(root, "patch.diff");
   try {
-    await run(["read-tree", "HEAD"], { environment: gitEnvironment });
-    await run(
-      request.files === undefined
-        ? ["--literal-pathspecs", "add", "--all"]
-        : ["--literal-pathspecs", "add", "--", ...request.files],
-      { environment: gitEnvironment },
-    );
-    const [base, head, patchBody, changedFilesOutput] = await Promise.all([
-      run(["rev-parse", "HEAD"]),
-      run(["write-tree"], { environment: gitEnvironment }),
+    const head = await snapshotPatchTree(request.repository, dependencies);
+    await writeFile(patchPath, "", { encoding: "utf8", mode: 0o600 });
+    const [, changedFilesOutput] = await Promise.all([
+      run([
+        "--literal-pathspecs",
+        "diff",
+        "--binary",
+        "--full-index",
+        `--output=${patchPath}`,
+        request.base,
+        head,
+        ...pathspec,
+      ]),
       run(
         [
           "--literal-pathspecs",
           "diff",
-          "--cached",
-          "--binary",
-          "--full-index",
-          "HEAD",
-          ...pathspec,
-        ],
-        { trim: false, environment: gitEnvironment },
-      ),
-      run(
-        [
-          "--literal-pathspecs",
-          "diff",
-          "--cached",
           "--name-only",
           "-z",
-          "HEAD",
+          request.base,
+          head,
           ...pathspec,
         ],
-        { trim: false, environment: gitEnvironment },
+        { trim: false },
       ),
     ]);
     const changedFiles = changedFilesOutput.split("\0").filter(Boolean);
-    if (!patchBody || changedFiles.length === 0) {
+    if ((await lstat(patchPath)).size === 0 || changedFiles.length === 0) {
       throw new CodexSecurityError("No completed patch changes to assess.");
     }
-    const digest = createHash("sha256").update(patchBody).digest("hex");
-    await writeFile(patchPath, patchBody, { encoding: "utf8", mode: 0o400 });
     await chmod(patchPath, 0o400);
+    const digest = createHash("sha256");
+    for await (const chunk of createReadStream(patchPath)) {
+      digest.update(chunk);
+    }
     let report = "";
     const stdout: Writable = {
       write(value: string | Uint8Array): boolean {
@@ -5142,10 +5145,10 @@ async function assessPatchRisk(
           path: patchPath,
           repository: basename(resolve(request.repository)),
           sourceType: "patch_file",
-          base,
+          base: request.base,
           head,
           changedFiles,
-          sha256: digest,
+          sha256: digest.digest("hex"),
         },
       },
     );
@@ -5155,6 +5158,25 @@ async function assessPatchRisk(
       );
     }
     return { report: report.trim() };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function snapshotPatchTree(
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
+  const environment = { GIT_INDEX_FILE: join(root, "index") };
+  const run = (args: string[]) =>
+    dependencies.runRepositoryCommand("git", args, repository, {
+      environment,
+    });
+  try {
+    await run(["read-tree", "HEAD"]);
+    await run(["--literal-pathspecs", "add", "--all"]);
+    return await run(["write-tree"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
