@@ -1,10 +1,10 @@
-import type { Finding } from "../models.js";
+import type { Finding } from "../../models.js";
 import { findingNeighborhoods } from "./deduplication-neighbors.js";
 import {
   pairKey,
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
-import type { FindingsStore } from "./storage.js";
+import type { FindingsStore } from "../storage.js";
 
 export interface DeduplicationResult {
   uniqueFindingIds: string[];

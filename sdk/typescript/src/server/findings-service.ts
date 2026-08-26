@@ -2,7 +2,7 @@ import type { Finding } from "../models.js";
 import type {
   DeduplicationService,
   DeduplicationResult,
-} from "./deduplication.js";
+} from "./deduplication/deduplication.js";
 import type { FindingEmbedder } from "./embeddings.js";
 import type { FindingsPage, FindingsStore } from "./storage.js";
 

@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
-import { DeduplicationService } from "./deduplication.js";
-import { CodexDeduplicationReviewer } from "./deduplication-reviewer.js";
+import { DeduplicationService } from "./deduplication/deduplication.js";
+import { CodexDeduplicationReviewer } from "./deduplication/deduplication-reviewer.js";
 import type { FindingEmbedder } from "./embeddings.js";
 import { FindingsService } from "./findings-service.js";
 import { handleFindingsRequest } from "./routes.js";

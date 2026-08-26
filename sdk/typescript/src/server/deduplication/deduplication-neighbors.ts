@@ -1,6 +1,6 @@
-import type { Finding } from "../models.js";
-import { FindingsError } from "./errors.js";
-import type { EmbeddedFinding } from "./storage.js";
+import type { Finding } from "../../models.js";
+import { FindingsError } from "../errors.js";
+import type { EmbeddedFinding } from "../storage.js";
 
 export const MAX_DEDUPLICATION_NEIGHBORS = 50;
 export const MIN_DEDUPLICATION_SIMILARITY = 0.55;

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { Finding, FindingsDocument } from "../src/models.js";
-import type { DeduplicationResult } from "../src/server/deduplication.js";
+import type { DeduplicationResult } from "../src/server/deduplication/deduplication.js";
 import type { FindingsPage } from "../src/server/storage.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));

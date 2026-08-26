@@ -10,11 +10,11 @@ import { createInterface } from "node:readline";
 import {
   comparisonEnvironment,
   disabledMcpServers,
-} from "../scan-comparison.js";
-import { resolveCodexCommand } from "../runtime.js";
-import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
-import { VERSION } from "../version.js";
-import { FindingsError } from "./errors.js";
+} from "../../scan-comparison.js";
+import { resolveCodexCommand } from "../../runtime.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "../../thread-source.js";
+import { VERSION } from "../../version.js";
+import { FindingsError } from "../errors.js";
 
 export interface CodexReview<T> {
   model: string;

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
-import { CodexReviewRunner } from "../src/server/codex-review.js";
+import { CodexReviewRunner } from "../src/server/deduplication/codex-review.js";
 
 const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),

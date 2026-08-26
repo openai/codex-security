@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
-import type { DeduplicationService } from "../src/server/deduplication.js";
+import type { DeduplicationService } from "../src/server/deduplication/deduplication.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";

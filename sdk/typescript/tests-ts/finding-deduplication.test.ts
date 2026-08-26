@@ -2,9 +2,9 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
-import type { CodexReview } from "../src/server/codex-review.js";
-import { DeduplicationService } from "../src/server/deduplication.js";
-import { findingNeighborhoods } from "../src/server/deduplication-neighbors.js";
+import type { CodexReview } from "../src/server/deduplication/codex-review.js";
+import { DeduplicationService } from "../src/server/deduplication/deduplication.js";
+import { findingNeighborhoods } from "../src/server/deduplication/deduplication-neighbors.js";
 import {
   CodexDeduplicationReviewer,
   pairKey,
@@ -12,7 +12,7 @@ import {
   type DeduplicationReviewer,
   type DuplicateDecision,
   type ScreeningResult,
-} from "../src/server/deduplication-reviewer.js";
+} from "../src/server/deduplication/deduplication-reviewer.js";
 import { FindingsError } from "../src/server/errors.js";
 import type { EmbeddedFinding } from "../src/server/storage.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";

@@ -1,4 +1,4 @@
-import type { Finding } from "../models.js";
+import type { Finding } from "../../models.js";
 
 const identityInstructions = `Treat the supplied findings as reports of real vulnerabilities under their stated preconditions. Compare their complete evidence, attacker entry points, security checks, protected resources, effects, and proposed fixes.
 
