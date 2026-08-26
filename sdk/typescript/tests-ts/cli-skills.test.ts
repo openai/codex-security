@@ -68,6 +68,9 @@ describe("CLI skill commands", () => {
                 invocation = args;
                 prompt = output?.appServer?.prompt ?? input ?? "";
                 expect(input).toBe(command === "patch" ? undefined : prompt);
+                expect(output?.appServer?.threadSource).toBe(
+                  command === "patch" ? "security_remediation" : undefined,
+                );
                 return status;
               },
             }),
@@ -76,7 +79,12 @@ describe("CLI skill commands", () => {
         expect(invocation).toEqual([
           ...(command === "patch"
             ? ["app-server"]
-            : ["exec", "--ignore-user-config"]),
+            : [
+                "exec",
+                "--ignore-user-config",
+                "--thread-source",
+                "security_validation",
+              ]),
           "--disable",
           "plugins",
           ...(command === "patch"
@@ -1180,7 +1188,7 @@ lines.on("line", (line) => {
     send({ id: 1, result: {} });
   } else if (request.method === "thread/start") {
     assert.equal(process.cwd(), ${JSON.stringify(process.cwd())});
-    assert.deepEqual(request.params, { approvalPolicy: "never", sandbox: "workspace-write" });
+    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write" });
     send({ id: 2, result: { thread: { id: "parent", source: "vscode", ephemeral: false } } });
   } else if (request.method === "turn/start") {
     assert.equal(request.params.threadId, "parent");
@@ -1213,6 +1221,7 @@ lines.on("line", (line) => {
           appServer: {
             directory: process.cwd(),
             prompt: "Fix the synthetic finding",
+            threadSource: "security_remediation",
           },
         },
         { command: process.execPath },
@@ -1242,6 +1251,7 @@ lines.on("line", (line) => {
   }
   if (request.method === "thread/start") {
     assert.deepEqual(request.params, {
+      threadSource: "security_validation",
       approvalPolicy: "on-request",
       sandbox: "read-only",
       config: { mcp_servers: { repository: { enabled: false } } },
@@ -1287,6 +1297,7 @@ lines.on("line", (line) => {
             directory: process.cwd(),
             prompt:
               "Verify the synthetic finding without editing the repository",
+            threadSource: "security_validation",
             sandbox: "read-only",
             onEvent: (event) => activity.push(event),
           },
@@ -1357,6 +1368,7 @@ lines.on("line", (line) => {
           appServer: {
             directory: process.cwd(),
             prompt: "Synthetic finding",
+            threadSource: "security_remediation",
           },
         },
         { command: process.execPath },
@@ -1389,6 +1401,7 @@ lines.on("line", (line) => {
           appServer: {
             directory: process.cwd(),
             prompt: "Fix the synthetic finding",
+            threadSource: "security_remediation",
           },
         },
         { command: process.execPath },

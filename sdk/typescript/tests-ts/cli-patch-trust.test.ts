@@ -135,6 +135,8 @@ test.each([
         const output = await readSkillCommandOutput(events(), {
           directory: repository,
           prompt: "Synthetic finding",
+          threadSource:
+            mode === "patch" ? "security_remediation" : "security_validation",
           input,
           ...(mode === "patch" ? {} : { sandbox: "read-only" }),
         });

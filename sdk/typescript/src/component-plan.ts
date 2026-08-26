@@ -9,6 +9,7 @@ import {
   runReadOnlyCodex,
   type ReadOnlyCodexOptions,
 } from "./scan-comparison.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import {
   enclosingGitWorktreeRoot,
   normalizeRepository,
@@ -88,7 +89,10 @@ export async function planComponents(
     ].join("\n"),
     z.toJSONSchema(componentPlanSchema, { target: "openapi-3.0" }),
     { ...options, config: options.config ?? {}, workingDirectory: tmpdir() },
-    { surface: "cli" },
+    {
+      surface: "cli",
+      threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
+    },
   );
   const plan = await normalizeComponentPlan(
     repository,

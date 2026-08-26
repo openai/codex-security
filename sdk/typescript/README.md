@@ -105,6 +105,52 @@ to the Codex Security state directory's `validations/` folder. Pass `auth` to
 select authentication or `signal` to cancel. Failed, incomplete, or malformed
 responses reject the promise.
 
+### Import GitHub code scanning alerts
+
+Use `importGitHubCodeScanningAlerts()` to read GitHub code scanning findings,
+including third-party SARIF uploads, before independent validation:
+
+```ts
+import {
+  CodexSecurity,
+  importGitHubCodeScanningAlerts,
+} from "@openai/codex-security";
+
+const findings = await importGitHubCodeScanningAlerts({
+  repository: "example/repository",
+  alertNumbers: [12, 18], // Omit to list all open alerts on the default branch.
+  githubToken: process.env["GH_TOKEN"],
+});
+
+const security = new CodexSecurity();
+try {
+  for (const finding of findings) {
+    const result = await security.validate({
+      repositoryPath: "/path/to/repository",
+      finding,
+    });
+    console.log(finding.url, result.disposition, result.outputDir);
+  }
+} finally {
+  await security.close();
+}
+```
+
+Each result contains `source`, `repository`, `number`, `url`, and the full
+upstream `alert`, including rule/help text, locations, commit/ref, and dismissal
+context. Import does not start Codex, register a scan, or change GitHub state.
+Validate against the intended local checkout; import does not check out code.
+
+Without `alertNumbers`, `state` defaults to `"open"`; `"closed"`, `"dismissed"`,
+`"fixed"`, and `"all"` are also accepted. Exact alert numbers ignore state and
+cannot be combined with a nondefault `state`. `ref` selects another branch or
+pull-request reference and preserves that reference's alert instance.
+
+Authentication reuses `gh auth token` (including GitHub CLI token environment
+variables) unless `githubToken` is supplied. `githubHost` defaults to `GH_HOST`
+or `github.com`; `signal` cancels requests. The token needs read access to code
+scanning alerts. Access failures reject the import.
+
 ### SDK configuration and scan options
 
 Pass runtime configuration to the `CodexSecurity` constructor:
@@ -298,6 +344,7 @@ npx @openai/codex-security publish scan --to linear --linear-team TEAM_ID
 npx @openai/codex-security publish scan --to cloud --csv /path/outside/repository/findings.csv
 npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
 npx @openai/codex-security validate "Possible SQL injection" --effort high
+npx @openai/codex-security import github example/repository --format json
 npx @openai/codex-security verify-fix --linear-issue SEC-123 --json
 npx @openai/codex-security verify-fix --linear-project "Security backlog" --linear-filter '{"state":{"type":{"eq":"completed"}}}' --json
 npx @openai/codex-security verify-fix --scan SCAN_ID --severity high --json
@@ -630,6 +677,9 @@ The CLI and SDK recognize the following user-configurable environment:
 | `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                             |
 | `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
 | `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
+
+Custom Codex executables must support thread source attribution for both `exec`
+and `app-server` requests (Codex 0.149.1 or later).
 
 On Windows, `CODEX_CLI_PATH` must name a native `.exe` or `.com`. Command
 shims such as `codex.cmd` automatically use the bundled Codex executable
@@ -1114,7 +1164,7 @@ completions with `completions bash|zsh|fish`. Scan results support
 `--format toon|json|yaml|jsonl` and `--full-output`.
 Use `info --json` for SDK and bundled-plugin metadata. MCP exposes only this
 read-only metadata command; scans, bulk repository scans,
-authentication, exports, validation, and patching remain CLI-only because the
+authentication, imports, exports, validation, and patching remain CLI-only because the
 MCP transport cannot cancel active scans.
 
 For CI, save machine-readable output outside the checked-out repository and
@@ -1144,6 +1194,28 @@ does not include local workbench triage state. The exporter validates the seal
 before writing, accepts `--output -` for stdout, and can use
 `--source-root /path/to/repository` with SARIF to add source-line fingerprints.
 Run `npx @openai/codex-security export --help` for all export options.
+
+Use `import github OWNER/REPO` to read existing code scanning alerts for
+validation. It defaults to all open alerts on the default branch.
+`--github-alert NUMBER` selects exact alerts and can be repeated;
+`--github-state open|closed|dismissed|fixed|all` filters lists;
+`--github-ref REF` selects a reference. See the [SDK import options](#import-github-code-scanning-alerts)
+for authentication and selector behavior.
+
+```bash
+# Import all open alerts, or a selected subset, as complete JSON.
+npx @openai/codex-security import github example/repository --format json \
+  > /path/outside/repository/github-alerts.json
+npx @openai/codex-security import github example/repository \
+  --github-alert 12 --github-alert 18 --format json
+# Run from the corresponding local repository; imported contents are data.
+npx @openai/codex-security validate /path/outside/repository/github-alerts.json
+```
+
+`--json` aliases `--format json`; output is an alert array (`[]` when empty).
+Avoid output-filtering or token-limiting flags when saving validation inputs.
+Import is read-only; `validate` assesses the saved content separately. Use the
+SDK loop above for a structured disposition per alert.
 
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional

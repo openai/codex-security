@@ -399,6 +399,7 @@ describe("custom validation", () => {
             });
             return {
               startThread: (threadOptions) => {
+                expect(threadOptions.threadSource).toBe("security_scan");
                 workingDirectories.push(threadOptions.workingDirectory);
                 return {
                   id: "thread-1",

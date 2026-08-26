@@ -314,6 +314,7 @@ describe("CodexSecurity finding validation", () => {
       expect(captured.prompt!.endsWith(JSON.stringify(finding))).toBe(true);
       expect(captured.prompt).not.toContain("Synthetic file contents");
       expect(captured.thread).toMatchObject({
+        threadSource: "security_validation",
         workingDirectory: options.outputDir,
         approvalPolicy: "never",
       });
@@ -2277,6 +2278,7 @@ describe("CodexSecurity orchestration", () => {
       allow_login_shell: false,
     });
     expect(threadOptions as Record<string, unknown> | null).toEqual({
+      threadSource: "security_scan",
       workingDirectory: scanDir,
       skipGitRepoCheck: true,
       approvalPolicy: "on-request",
