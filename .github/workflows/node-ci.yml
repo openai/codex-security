@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only' || 'full' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate-title:
@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout pull request for change classification
-        if: github.event_name == 'pull_request' && github.event.changes.base == null && (github.event.action != 'edited' || github.event.changes.title != null)
+        if: github.event_name == 'pull_request' && github.event.changes.base == null
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 2
@@ -34,19 +34,12 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          TITLE_CHANGED: ${{ github.event.changes.title != null }}
           BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
           ci_mode=full
           if [[ "$EVENT_NAME" == "pull_request" &&
-                "$EVENT_ACTION" == "edited" &&
-                "$TITLE_CHANGED" != "true" &&
                 "$BASE_CHANGED" != "true" ]]; then
-            ci_mode=skip
-          elif [[ "$EVENT_NAME" == "pull_request" &&
-                  "$BASE_CHANGED" != "true" ]]; then
             changed_files="$(mktemp)"
             trap 'rm -f "$changed_files"' EXIT
             git diff --no-renames --name-only -z HEAD^1 HEAD > "$changed_files"
@@ -219,7 +212,7 @@ jobs:
 
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
 
   windows-test:
@@ -334,5 +327,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1

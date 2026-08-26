@@ -3900,9 +3900,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("keeps required contexts for body-only edits without full CI", () => {
-    const metadataOnly =
-      "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null";
+  test("keeps required contexts stable across reduced CI", () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3925,12 +3923,10 @@ describe("GitHub release workflow safeguards", () => {
     };
 
     expect(workflow.concurrency.group).toBe(
-      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ " +
-        metadataOnly +
-        " && 'metadata-only' || 'full' }}",
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
     );
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
-      "${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}",
+      "${{ github.event_name == 'pull_request' }}",
     );
     expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
     expect(
@@ -3971,18 +3967,17 @@ describe("GitHub release workflow safeguards", () => {
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown' && needs.validate-title.outputs.ci-mode != 'skip')",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     for (const [ciMode, validation, upstream, gateFailure] of [
       ["full", "success", "success", false],
       ["full", "success", "skipped", true],
       ["markdown", "success", "skipped", false],
       ["markdown", "failure", "skipped", true],
-      ["skip", "success", "skipped", false],
-      ["skip", "failure", "skipped", true],
+      ["skip", "success", "skipped", true],
       ["unknown", "success", "skipped", true],
     ] as const) {
       const values = {
@@ -4035,73 +4030,27 @@ describe("GitHub release workflow safeguards", () => {
   });
 
   test.each([
-    ["body-only edit", "pull_request", "edited", false, false, [], "skip"],
     [
       "Markdown-only PR",
       "pull_request",
-      "synchronize",
-      false,
       false,
       ["README.md", "docs/guide.md"],
       "markdown",
     ],
-    [
-      "Markdown-only title edit",
-      "pull_request",
-      "edited",
-      true,
-      false,
-      ["README.md"],
-      "markdown",
-    ],
-    [
-      "base retarget",
-      "pull_request",
-      "edited",
-      false,
-      true,
-      ["README.md"],
-      "full",
-    ],
-    [
-      "mixed PR",
-      "pull_request",
-      "synchronize",
-      false,
-      false,
-      ["README.md", "src/index.ts"],
-      "full",
-    ],
+    ["base retarget", "pull_request", true, ["README.md"], "full"],
+    ["mixed PR", "pull_request", false, ["README.md", "src/index.ts"], "full"],
     [
       "source-to-Markdown rename",
       "pull_request",
-      "synchronize",
-      false,
       false,
       ["src/index.ts", "docs/index.md"],
       "full",
     ],
-    [
-      "empty merge diff",
-      "pull_request",
-      "synchronize",
-      false,
-      false,
-      [],
-      "full",
-    ],
-    ["push", "push", "", false, false, ["README.md"], "full"],
+    ["empty merge diff", "pull_request", false, [], "full"],
+    ["push", "push", false, ["README.md"], "full"],
   ] as const)(
     "selects the conservative CI mode for %s",
-    (
-      _name,
-      eventName,
-      action,
-      titleChanged,
-      baseChanged,
-      changedPaths,
-      ciMode,
-    ) => {
+    (_name, eventName, baseChanged, changedPaths, ciMode) => {
       const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
       const output = join(workspace, "output");
       const script = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
@@ -4116,11 +4065,9 @@ describe("GitHub release workflow safeguards", () => {
           env: {
             ...process.env,
             BASE_CHANGED: String(baseChanged),
-            EVENT_ACTION: action,
             EVENT_NAME: eventName,
             GITHUB_OUTPUT: output,
             MOCK_CHANGED_FILES: changedPaths.join("\n"),
-            TITLE_CHANGED: String(titleChanged),
           },
         });
         expect(result.status).toBe(0);
