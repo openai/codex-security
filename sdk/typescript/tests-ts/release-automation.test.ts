@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -3899,11 +3900,7 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("isolates body-only edits from full CI names and concurrency", () => {
-    const metadataOnly =
-      "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null";
-    const metadataPrefix =
-      "${{ " + metadataOnly + " && 'metadata-only / ' || '' }}";
+  test("keeps required contexts stable across reduced CI", () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3914,48 +3911,95 @@ describe("GitHub release workflow safeguards", () => {
         {
           name: string;
           if?: string;
+          "timeout-minutes"?: number;
           strategy?: { matrix: Record<string, string[]> };
-          steps: Array<{ if?: string }>;
+          steps: Array<{
+            if?: string;
+            name?: string;
+            run?: string;
+          }>;
         }
       >;
     };
 
     expect(workflow.concurrency.group).toBe(
-      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ " +
-        metadataOnly +
-        " && 'metadata-only' || 'full' }}",
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
     );
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
-      "${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}",
+      "${{ github.event_name == 'pull_request' }}",
     );
-    for (const job of Object.values(workflow.jobs)) {
-      expect(job.name.startsWith(metadataPrefix), job.name).toBe(true);
-    }
+    expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
+    expect(
+      workflow.jobs["validate-title"]?.steps.find(
+        ({ name }) =>
+          name === "Checkout pull request for change classification",
+      )?.if,
+    ).toContain("github.event.changes.base == null");
 
-    const fullCiCondition =
-      "needs.validate-title.outputs.run-full-ci == 'true'";
+    const fullCiCondition = "needs.validate-title.outputs.ci-mode == 'full'";
     for (const job of ["test", "windows-test", "windows-verify"]) {
       expect(workflow.jobs[job]?.if).toBe(fullCiCondition);
     }
-    const requiredJobCondition = `always() && !(${metadataOnly})`;
+    expect(workflow.jobs["markdown-checks"]).toBeUndefined();
+    const validationSteps = workflow.jobs["validate-title"]?.steps ?? [];
+    for (const stepName of [
+      "Set up pnpm",
+      "Set up Node.js",
+      "Install dependencies",
+      "Check Markdown formatting",
+    ]) {
+      expect(validationSteps.find(({ name }) => name === stepName)?.if).toBe(
+        "steps.scope.outputs.ci-mode == 'markdown'",
+      );
+    }
+    const markdownCommand =
+      validationSteps.find(({ name }) => name === "Check Markdown formatting")
+        ?.run ?? "";
+    expect(markdownCommand).toContain(
+      "git diff --no-renames --name-only -z HEAD^1 HEAD",
+    );
+    expect(markdownCommand).toContain("! -L");
+    expect(markdownCommand).toContain(
+      "pnpm --dir sdk/typescript exec prettier --check",
+    );
+    expect(markdownCommand).not.toContain("--ignore-path");
+    const requiredJobCondition = "always()";
     expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
     expect(workflow.jobs["required-test"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || needs.test.result != 'success'",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
     expect(workflow.jobs["windows"]?.steps[0]?.if).toBe(
-      "needs.validate-title.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'",
+      "needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')",
     );
+    for (const [ciMode, validation, upstream, gateFailure] of [
+      ["full", "success", "success", false],
+      ["full", "success", "skipped", true],
+      ["markdown", "success", "skipped", false],
+      ["markdown", "failure", "skipped", true],
+      ["skip", "success", "skipped", true],
+      ["unknown", "success", "skipped", true],
+    ] as const) {
+      const values = {
+        "needs.test.result": upstream,
+        "needs.validate-title.outputs.ci-mode": ciMode,
+        "needs.validate-title.result": validation,
+        "needs.windows-test.result": upstream,
+        "needs.windows-verify.result": upstream,
+      };
+      for (const job of ["required-test", "windows"]) {
+        expect(
+          evaluateWorkflowCondition(
+            workflow.jobs[job]?.steps[0]?.if ?? "",
+            values,
+          ),
+          `${job}: ${ciMode}/${validation}/${upstream}`,
+        ).toBe(gateFailure);
+      }
+    }
 
-    const renderName = (
-      template: string,
-      values: Record<string, string>,
-      metadata: boolean,
-    ) => {
-      let name = template.replace(
-        metadataPrefix,
-        metadata ? "metadata-only / " : "",
-      );
+    const renderName = (template: string, values: Record<string, string>) => {
+      let name = template;
       for (const [key, value] of Object.entries(values)) {
         name = name.replaceAll("${{ matrix." + key + " }}", value);
       }
@@ -3968,18 +4012,10 @@ describe("GitHub release workflow safeguards", () => {
     const windowsJob = workflow.jobs["windows"];
     const fullNames = [
       ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }, false),
+        renderName(unixJob?.name ?? "", { os }),
       ),
       ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }, false),
-      ),
-    ];
-    const metadataNames = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }, true),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }, true),
+        renderName(windowsJob?.name ?? "", { node }),
       ),
     ];
     const requiredContexts = new Set([
@@ -3991,189 +4027,97 @@ describe("GitHub release workflow safeguards", () => {
     expect(
       fullNames.filter((name) => requiredContexts.has(name)).sort(),
     ).toEqual([...requiredContexts].sort());
-    expect(metadataNames.some((name) => requiredContexts.has(name))).toBe(
-      false,
-    );
-    expect(
-      metadataNames.every((name) => name.startsWith("metadata-only / ")),
-    ).toBe(true);
   });
 
   test.each([
-    {
-      name: "body-only edit with a valid title",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: false,
-      title: "docs: clarify release notes",
-      fullCi: false,
-      titleValid: true,
-      upstream: "skipped",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "body-only edit with an invalid title",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: false,
-      title: "Docs: invalid title ",
-      fullCi: false,
-      titleValid: false,
-      upstream: "skipped",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "title edit",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: true,
-      baseChanged: false,
-      title: "ci: update title",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "base edit",
-      eventName: "pull_request",
-      action: "edited",
-      titleChanged: false,
-      baseChanged: true,
-      title: "ci: update base",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "code synchronization",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: update code",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: true,
-    },
-    {
-      name: "push",
-      eventName: "push",
-      action: "none",
-      titleChanged: false,
-      baseChanged: false,
-      title: "",
-      fullCi: true,
-      titleValid: true,
-      upstream: "success",
-      gateFailure: false,
-      cancellation: false,
-    },
-    {
-      name: "full CI with skipped upstream jobs",
-      eventName: "pull_request",
-      action: "synchronize",
-      titleChanged: false,
-      baseChanged: false,
-      title: "ci: update code",
-      fullCi: true,
-      titleValid: true,
-      upstream: "skipped",
-      gateFailure: true,
-      cancellation: true,
-    },
-  ])(
-    "keeps required contexts truthful for $name",
-    ({
-      eventName,
-      action,
-      titleChanged,
-      baseChanged,
-      title,
-      fullCi,
-      titleValid,
-      upstream,
-      gateFailure,
-      cancellation,
-    }) => {
-      const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
-        concurrency: { "cancel-in-progress": string };
-        jobs: Record<string, { steps: Array<{ if?: string }> }>;
-      };
-      const scopeScript = workflowStepShell(
-        nodeCiWorkflow,
-        "Decide whether full CI is needed",
-      );
-      const titleScript = workflowStepShell(
-        nodeCiWorkflow,
-        "Require a Conventional Commit pull request title",
-      );
+    [
+      "Markdown-only PR",
+      "pull_request",
+      false,
+      ["README.md", "docs/guide.md"],
+      "markdown",
+    ],
+    ["base retarget", "pull_request", true, ["README.md"], "full"],
+    ["mixed PR", "pull_request", false, ["README.md", "src/index.ts"], "full"],
+    [
+      "source-to-Markdown rename",
+      "pull_request",
+      false,
+      ["src/index.ts", "docs/index.md"],
+      "full",
+    ],
+    ["empty merge diff", "pull_request", false, [], "full"],
+    ["push", "push", false, ["README.md"], "full"],
+  ] as const)(
+    "selects the conservative CI mode for %s",
+    (_name, eventName, baseChanged, changedPaths, ciMode) => {
       const workspace = mkdtempSync(join(tmpdir(), "release-ci-scope-"));
       const output = join(workspace, "output");
+      const script = workflowStepShell(nodeCiWorkflow, "Decide CI mode");
+      const gitMock = `git() {
+      [[ "$*" == "diff --no-renames --name-only -z HEAD^1 HEAD" ]] || return 64
+      while IFS= read -r path; do
+        [[ -z "$path" ]] || printf '%s\\0' "$path"
+      done <<< "$MOCK_CHANGED_FILES"
+    }`;
       try {
-        const scope = spawnSync(bash, ["-c", scopeScript], {
+        const result = spawnSync(bash, ["-c", `${gitMock}\n${script}`], {
           env: {
             ...process.env,
             BASE_CHANGED: String(baseChanged),
-            EVENT_ACTION: action === "none" ? "" : action,
             EVENT_NAME: eventName,
             GITHUB_OUTPUT: output,
-            TITLE_CHANGED: String(titleChanged),
+            MOCK_CHANGED_FILES: changedPaths.join("\n"),
           },
         });
-        expect(scope.status).toBe(0);
-        expect(readFileSync(output, "utf8")).toBe(
-          `run-full-ci=${String(fullCi)}\n`,
-        );
+        expect(result.status).toBe(0);
+        expect(readFileSync(output, "utf8")).toBe(`ci-mode=${ciMode}\n`);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
-        const validation =
-          eventName === "pull_request"
-            ? spawnSync(bash, ["-c", titleScript], {
-                env: { ...process.env, PR_TITLE: title },
-              }).status === 0
-              ? "success"
-              : "failure"
-            : "success";
-        expect(validation === "success").toBe(titleValid);
-
-        const values = {
-          "needs.test.result": upstream,
-          "needs.validate-title.result": validation,
-          "needs.windows-test.result": upstream,
-          "needs.windows-verify.result": upstream,
-        };
-        const unixGate = workflow.jobs["required-test"]?.steps[0]?.if ?? "";
-        const windowsGate = workflow.jobs["windows"]?.steps[0]?.if ?? "";
-        if (fullCi) {
-          expect(evaluateWorkflowCondition(unixGate, values)).toBe(gateFailure);
-          expect(evaluateWorkflowCondition(windowsGate, values)).toBe(
-            gateFailure,
-          );
-        } else {
-          expect(unixGate).toBeDefined();
-          expect(windowsGate).toBeDefined();
-        }
-
-        expect(
-          evaluateWorkflowCondition(
-            workflow.concurrency["cancel-in-progress"],
-            {
-              "github.event.changes.base": baseChanged ? "changed" : "null",
-              "github.event.changes.title": titleChanged ? "changed" : "null",
-              "github.event.action": action,
-              "github.event_name": eventName,
+  test.skipIf(process.platform === "win32")(
+    "formats every changed regular non-symlink Markdown file",
+    () => {
+      const workspace = mkdtempSync(join(tmpdir(), "release-ci-markdown-"));
+      const argsFile = join(workspace, "prettier-args");
+      const guide = join(workspace, "docs", "guide with spaces.md");
+      const readme = join(workspace, "README.md");
+      mkdirSync(join(workspace, "docs"));
+      writeFileSync(guide, "# Guide\n");
+      writeFileSync(readme, "# Readme\n");
+      symlinkSync(readme, join(workspace, "docs", "link.md"));
+      const mocks = `git() {
+      printf '%s\\0' README.md 'docs/guide with spaces.md' docs/link.md deleted.md
+    }
+    pnpm() { printf '%s\\n' "$@" > "$MOCK_PNPM_ARGS"; }`;
+      try {
+        const result = spawnSync(
+          bash,
+          [
+            "-c",
+            `${mocks}\n${workflowStepShell(nodeCiWorkflow, "Check Markdown formatting")}`,
+          ],
+          {
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: workspace,
+              MOCK_PNPM_ARGS: argsFile,
             },
-          ),
-        ).toBe(cancellation);
+          },
+        );
+        expect(result.status).toBe(0);
+        expect(readFileSync(argsFile, "utf8").trim().split("\n")).toEqual([
+          "--dir",
+          "sdk/typescript",
+          "exec",
+          "prettier",
+          "--check",
+          readme,
+          guide,
+        ]);
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }

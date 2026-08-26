@@ -10,35 +10,53 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only' || 'full' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate-title:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}validate pull request title
+    name: validate pull request
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
-      run-full-ci: ${{ steps.scope.outputs.run-full-ci }}
+      ci-mode: ${{ steps.scope.outputs.ci-mode }}
 
     steps:
-      - name: Decide whether full CI is needed
+      - name: Checkout pull request for change classification
+        if: github.event_name == 'pull_request' && github.event.changes.base == null
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Decide CI mode
         id: scope
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          TITLE_CHANGED: ${{ github.event.changes.title != null }}
           BASE_CHANGED: ${{ github.event.changes.base != null }}
         run: |
           set -euo pipefail
-          run_full_ci=true
+          ci_mode=full
           if [[ "$EVENT_NAME" == "pull_request" &&
-                "$EVENT_ACTION" == "edited" &&
-                "$TITLE_CHANGED" != "true" &&
                 "$BASE_CHANGED" != "true" ]]; then
-            run_full_ci=false
+            changed_files="$(mktemp)"
+            trap 'rm -f "$changed_files"' EXIT
+            git diff --no-renames --name-only -z HEAD^1 HEAD > "$changed_files"
+
+            changed=false
+            markdown_only=true
+            while IFS= read -r -d '' path; do
+              changed=true
+              if [[ "$path" != *.md ]]; then
+                markdown_only=false
+              fi
+            done < "$changed_files"
+            if [[ "$changed" == "true" && "$markdown_only" == "true" ]]; then
+              ci_mode=markdown
+            fi
           fi
-          printf 'run-full-ci=%s\n' "$run_full_ci" >> "$GITHUB_OUTPUT"
+          printf 'ci-mode=%s\n' "$ci_mode" >> "$GITHUB_OUTPUT"
 
       - name: Require a Conventional Commit pull request title
         if: github.event_name == 'pull_request'
@@ -54,10 +72,45 @@ jobs:
             exit 1
           fi
 
+      - name: Set up pnpm
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: sdk/typescript/package.json
+          cache: true
+          cache_dependency_path: sdk/typescript/pnpm-lock.yaml
+
+      - name: Set up Node.js
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+          cache: npm
+          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+
+      - name: Install dependencies
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        run: pnpm --dir sdk/typescript install --frozen-lockfile
+
+      - name: Check Markdown formatting
+        if: steps.scope.outputs.ci-mode == 'markdown'
+        shell: bash
+        run: |
+          files=()
+          while IFS= read -r -d '' path; do
+            if [[ -f "$GITHUB_WORKSPACE/$path" &&
+                  ! -L "$GITHUB_WORKSPACE/$path" ]]; then
+              files+=("$GITHUB_WORKSPACE/$path")
+            fi
+          done < <(git diff --no-renames --name-only -z HEAD^1 HEAD)
+          if ((${#files[@]} > 0)); then
+            pnpm --dir sdk/typescript exec prettier --check "${files[@]}"
+          fi
+
   test:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     needs: validate-title
-    if: needs.validate-title.outputs.run-full-ci == 'true'
+    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -148,9 +201,9 @@ jobs:
         run: pnpm run check:package ../../dist/*.tgz
 
   required-test:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}${{ matrix.os }} / node-22
+    name: ${{ matrix.os }} / node-22
     needs: [validate-title, test]
-    if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
+    if: always()
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -159,13 +212,13 @@ jobs:
 
     steps:
       - name: Require every Unix coverage job
-        if: needs.validate-title.result != 'success' || needs.test.result != 'success'
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && needs.test.result != 'success') || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
 
   windows-test:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / tests-${{ matrix.shard }}
     needs: validate-title
-    if: needs.validate-title.outputs.run-full-ci == 'true'
+    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -223,9 +276,9 @@ jobs:
         run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify
     needs: validate-title
-    if: needs.validate-title.outputs.run-full-ci == 'true'
+    if: needs.validate-title.outputs.ci-mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -263,9 +316,9 @@ jobs:
         run: pnpm run check:package ../../dist/*.tgz
 
   windows:
-    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && 'metadata-only / ' || '' }}windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
+    name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
-    if: always() && !(github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null)
+    if: always()
     needs: [validate-title, windows-test, windows-verify]
     strategy:
       fail-fast: false
@@ -274,5 +327,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.validate-title.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
+        if: needs.validate-title.result != 'success' || (needs.validate-title.outputs.ci-mode == 'full' && (needs.windows-test.result != 'success' || needs.windows-verify.result != 'success')) || (needs.validate-title.outputs.ci-mode != 'full' && needs.validate-title.outputs.ci-mode != 'markdown')
         run: exit 1
