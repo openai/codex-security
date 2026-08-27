@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_finding_index import upsert_finding
 
 
@@ -146,3 +150,7 @@ def normalized_vector(vector: list[float]) -> list[float]:
     if norm == 0 or not math.isfinite(norm):
         raise ValueError("A stored embedding cannot be compared.")
     return [value / norm for value in vector]
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
