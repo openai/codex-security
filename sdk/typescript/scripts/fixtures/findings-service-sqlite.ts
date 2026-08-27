@@ -75,6 +75,48 @@ try {
       members.map((row) => row["finding_id"]),
       importedIds.slice(0, 3).sort(),
     );
+    const workflows = db
+      .prepare("SELECT dedupe_status, results_json FROM finding_workflows")
+      .all();
+    assert.equal(workflows.length, 2);
+    for (const row of workflows) {
+      const results = JSON.parse(row["results_json"] as string);
+      assert.equal(row["dedupe_status"], "completed");
+      assert.deepEqual(results.dedupe.duplicateGroups, [
+        importedIds.slice(0, 3),
+      ]);
+      assert.ok(!("dedupePendingWrite" in results));
+    }
+    const reviews = db
+      .prepare(
+        "SELECT model, source_content_digest, prompt_digest, contract_digest, result_json FROM finding_workflow_reviews",
+      )
+      .all();
+    const models = new Set<string>();
+    const decisions = new Set<string>();
+    for (const row of reviews) {
+      const result = JSON.parse(row["result_json"] as string);
+      models.add(row["model"] as string);
+      assert.ok(row["source_content_digest"]);
+      assert.ok(row["prompt_digest"] && row["contract_digest"]);
+      for (const decision of "decisions" in result
+        ? result.decisions
+        : [result]) {
+        decisions.add(decision.decision);
+        if (decision.decision === "SAME") {
+          assert.equal(typeof decision.canonicalFindingId, "string");
+          assert.equal(
+            decision.mergedFinding.findingId,
+            decision.canonicalFindingId,
+          );
+          assert.ok(
+            decision.mergedFinding.extensions.mergedOriginals.length > 0,
+          );
+        }
+      }
+    }
+    assert.deepEqual(models, new Set(["gpt-5.6-luna", "gpt-5.6-sol"]));
+    assert.deepEqual(decisions, new Set(["SAME", "DISTINCT"]));
   }
 
   if (process.argv.includes("--prepare-scan")) {

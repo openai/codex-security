@@ -930,6 +930,47 @@ packaged `start:server` script, without invoking the CLI. Docker runs Node
 directly so stop signals reach the server. The existing default Docker target
 and bulk-scan Compose configuration are unchanged.
 
+### Read-only dashboard
+
+Open `http://localhost:3000/dashboard` on the running findings service. The UI
+uses the public OpenAI Apps SDK UI design system, follows the browser's light
+or dark preference, and polls the service every five seconds. It never starts,
+cancels, resumes, publishes, edits, or deduplicates anything.
+
+The dashboard opens on Findings, followed by Duplicate groups. Both views
+support search, repository filtering, sorting, pagination, and record details.
+Findings show stored content and links to their duplicate groups. Groups link
+back to their member findings, preserving separate overlapping groups and the
+original finding records.
+
+The dashboard reads only findings, repository associations, and duplicate groups
+stored in the service's configured database. It does not display scans or
+workflows: publication sends findings, not remote scan or workflow history. It
+does not read report or source paths from stored records. The UI retains the last
+successful data on a refresh failure and shows a connection warning until polling
+succeeds.
+
+`GET /v1/dashboard` returns a consistent read snapshot with overview counts,
+repository choices, a page of records, and optional selected-record details:
+
+- `view`: `findings` (default) or `groups`.
+- `query`, `repository`: optional search text and exact repository ID.
+- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
+- `id`: optional exact record ID to include in `detail`; unknown IDs return
+  `detail: null` without hiding the list.
+
+Overview counts are service-wide, not filtered page totals. Responses and UI
+assets are served by the same Node process; no separate frontend server, CDN,
+model credentials, or new CLI flags are needed to view the dashboard. Compiled
+HTML, JavaScript, and CSS are included in the npm package and container. Frontend
+source, build tools, and tests are not shipped as runtime dependencies.
+
+The existing preview access boundary is unchanged. The dashboard contains
+sensitive finding content: keep the service on a trusted local endpoint or behind
+an authenticated proxy. It does not add authentication or broaden the default
+network binding.
+
 ### API
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
@@ -1122,6 +1163,74 @@ associations do not rewrite original findings, fingerprints, scan artifacts,
 embeddings, or external tickets. They do not require an embedding API key or
 trigger model calls. Review-generated merged findings remain review outputs;
 they do not replace stored documents.
+
+### Resuming a local findings workflow
+
+Add `--workflow-id` to opt into durable state shared by `scan`, `publish scan
+--to custom`, and `dedupe`. The SDK equivalents are the optional `workflowId`
+fields on `ScanOptions`, `PublishScanToCustomOptions`, and `DeduplicateScanOptions`.
+Without a workflow ID, existing command behavior and output shapes are unchanged.
+
+```bash
+codex-security scan /path/to/repository --workflow-id run-001
+codex-security publish scan --workflow-id run-001 --to custom --findings-url http://localhost:3000
+codex-security dedupe --workflow-id run-001 --findings-url http://localhost:3000 --json
+```
+
+Repeat this sequence with the same ID after a process stops. Completed scans and
+acknowledged publications are reused; unfinished stages run again. If the scan
+completed before the workflow recorded its receipt, recovery verifies the saved
+scan and its sealed artifacts instead of scanning again. Scan IDs and artifact
+locations are recorded in the scan-registration transaction. This resumes between
+completed steps; it does not resume individual model turns inside an unfinished
+scan. Existing output-directory and archive safeguards still apply to scan retries.
+
+Publication and dedupe can use the workflow ID in place of `--scan`; an explicit
+scan selector must identify that same scan. A workflow can also begin at custom
+publication of a completed scan. Dedupe still requires local scan history to locate
+the approved source checkout. For a workflow, dedupe first completes publication
+if its receipt is missing. `--all-repositories` retains its existing default of
+false. Changing a workflow's scan, destination, or bound scope is an error: choose
+a different workflow ID. Use one coordinating process per workflow.
+
+Workflow metadata, stage statuses, errors, publication receipts, and results live
+in the local workbench SQLite database under `CODEX_SECURITY_STATE_DIR`, outside
+the sealed scan artifacts. Identity, scan/artifact references, destination, scope,
+hashes, stage statuses, and errors use explicit columns; only receipts and result
+payloads use JSON. Review source, scope, model settings, and contract/hash bindings
+also use columns; review results remain JSON. Existing workflows and checkpoints
+are migrated atomically in place without changing their review keys.
+Successful empty results are stored as completed
+results, not treated as missing work. An empty scan can complete workflow
+publication with an empty receipt. Dry-run never advances a workflow stage.
+
+A completed `dedupe --workflow-id` returns its saved result without repeating
+reviews or group writes. A publication whose acknowledgement was lost is retried
+using the service's existing idempotent upsert.
+
+Each validated screening and pair review is checkpointed locally,
+including DISTINCT decisions. Every SAME checkpoint retains its required
+`canonicalFindingId` and generated `mergedFinding`. The merged record must satisfy
+the Finding schema and preserve the canonical finding ID. Validation still happens
+through `review_validator.submit_decisions`; invalid submissions are corrected in
+the same review conversation, and invalid or unfinished reviews are not cached.
+
+Checkpoints bind to the exact original records and ordering, approved source path,
+Git revision and current file contents (including ignored files), repository scope,
+model and reasoning settings, Codex configuration and version, and prompt/contract version. Changed
+inputs cause a new review rather than reusing a decision. Source changes during
+review stop that attempt before group writes; restart with the same ID to review
+the changed source. Original findings, never prior rationales or merged findings,
+are supplied to later independent reviews. Source snapshots do not follow directory
+links outside the approved checkout.
+
+Before posting groups, the workflow saves the exact final result and write payload.
+If posting fails or its acknowledgement is lost, rerunning dedupe replays that
+payload without looking up candidates or running models. Group persistence reuses
+the existing membership identity, so replay does not create another group. The
+dedupe stage completes only after acknowledgement. Empty results are also retained.
+A completed workflow or pending write represents its already reviewed snapshot;
+use another workflow ID for a fresh review rather than changing that saved result.
 
 ### Deduplication workflow
 

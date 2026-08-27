@@ -11,6 +11,7 @@ import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { EmbeddedFinding, FindingsPage } from "../src/server/storage.js";
+import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const servers: Server[] = [];
@@ -113,6 +114,173 @@ function storeGroups(base: string, groups: unknown) {
     body: JSON.stringify({ groups }),
   });
 }
+
+async function dashboard(
+  base: string,
+  parameters: Record<string, string> = {},
+) {
+  const response = await fetch(
+    `${base}/v1/dashboard?${new URLSearchParams(parameters)}`,
+  );
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  return (await response.json()) as DashboardSnapshot;
+}
+
+test("dashboard serves only findings and groups, and never calls an embedding provider", async () => {
+  const { store } = await fixture();
+  const base = await start(store, {
+    async embed() {
+      throw new Error("Read-only dashboard called embeddings");
+    },
+  });
+  const redirect = await fetch(`${base}/dashboard`, { redirect: "manual" });
+  expect(redirect.status).toBe(308);
+  for (const prefix of ["", "/service"]) {
+    expect(
+      new URL(redirect.headers.get("location")!, `${base}${prefix}/dashboard`)
+        .pathname,
+    ).toBe(`${prefix}/dashboard/`);
+  }
+  for (const view of ["findings", "groups"]) {
+    const result = await dashboard(base, { view });
+    expect(result).toMatchObject({
+      items: [],
+      total: 0,
+      nextOffset: null,
+      detail: null,
+      overview: { findings: 0, groups: 0 },
+    });
+  }
+  for (const parameters of [
+    "view=unknown",
+    "view=scans",
+    "view=workflows",
+    "sort=unknown",
+    "offset=-1",
+    "limit=0",
+  ]) {
+    expect((await fetch(`${base}/v1/dashboard?${parameters}`)).status).toBe(
+      400,
+    );
+  }
+  expect(
+    (await fetch(`${base}/v1/dashboard`, { method: "POST", body: "{}" }))
+      .status,
+  ).toBe(404);
+  expect((await fetch(`${base}/dashboard/not-a-bundled-asset`)).status).toBe(
+    404,
+  );
+});
+
+test("dashboard browses imported findings and overlapping groups without local runs", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const first = finding(1),
+    second = finding(2),
+    third = finding(3);
+  first.title = "Évaluation synthétique";
+  await store.insert(
+    [{ ...embedded(1), finding: first }, embedded(2)],
+    "repository-a",
+  );
+  await store.insert([embedded(3)], "repository-b");
+  const groups = await store.storeDedupeGroups([
+    [first.findingId, second.findingId],
+    [second.findingId, third.findingId],
+  ]);
+  const before = await database(
+    environment,
+    "print(json.dumps(list(db.iterdump())))",
+  );
+  expect(
+    await database(
+      environment,
+      `from workbench_dashboard import dashboard
+allowed = {'findings', 'finding_repositories', 'finding_dedupe_groups', 'finding_dedupe_group_members'}
+def authorize(action, table, column, database, source):
+    if action == sqlite3.SQLITE_READ and table not in allowed:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+db.set_authorizer(authorize)
+queries = json.load(sys.stdin)
+print(json.dumps([dashboard(db, query)['total'] for query in queries]))`,
+      [
+        {
+          view: "findings",
+          limit: 50,
+          offset: 0,
+          sort: "activity",
+          id: first.findingId,
+        },
+        {
+          view: "groups",
+          limit: 50,
+          offset: 0,
+          sort: "newest",
+          id: groups[0]!.groupId,
+        },
+      ],
+    ),
+  ).toEqual([3, 2]);
+
+  const page = await dashboard(base, {
+    limit: "1",
+    repository: "repository-a",
+    id: first.findingId,
+  });
+  expect(page.total).toBe(2);
+  expect(page.repositories).toEqual([
+    { id: "repository-a", label: "repository-a" },
+    { id: "repository-b", label: "repository-b" },
+  ]);
+  expect(page.nextOffset).toBe(1);
+  expect(page.overview).toEqual({
+    findings: 3,
+    groups: 2,
+  });
+  expect(page.detail).toMatchObject({
+    finding: first,
+    groups: [groups[0]],
+  });
+  const next = await dashboard(base, {
+    view: "findings",
+    limit: "1",
+    offset: "1",
+    repository: "repository-a",
+  });
+  expect(next.items[0]!.id).not.toBe(page.items[0]!.id);
+  expect(next.nextOffset).toBeNull();
+  expect(
+    (await dashboard(base, { view: "findings", query: first.title })).items.map(
+      (item) => item.id,
+    ),
+  ).toEqual([first.findingId]);
+  for (const query of ["évaluation", "SYNTHÉTIQUE"]) {
+    expect(
+      (await dashboard(base, { view: "findings", query })).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([first.findingId]);
+  }
+  expect(
+    (
+      await dashboard(base, { view: "groups", repository: "repository-b" })
+    ).items.map((item) => item.id),
+  ).toEqual([groups[1]!.groupId]);
+  const group = await dashboard(base, {
+    view: "groups",
+    id: groups[0]!.groupId,
+  });
+  expect(group.detail!.group).toEqual(groups[0]!);
+  expect(group.items).toHaveLength(2);
+  expect(
+    (await dashboard(base, { view: "findings", id: "not-stored" })).detail,
+  ).toBeNull();
+  expect(
+    await database(environment, "print(json.dumps(list(db.iterdump())))"),
+  ).toEqual(before);
+});
 
 async function getGroups(
   base: string,

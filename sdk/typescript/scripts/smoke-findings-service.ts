@@ -9,6 +9,7 @@ import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import type { DeduplicateScanResult } from "../src/deduplication/scan.js";
 import type { FindingsPage } from "../src/server/storage.js";
 import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
+import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const container = "findings-ci";
@@ -168,6 +169,25 @@ async function checkHostPublication(): Promise<void> {
   });
 }
 
+async function checkDashboard(): Promise<void> {
+  for (const [path, type] of [
+    ["/dashboard", "text/html"],
+    ["/dashboard/app.js", "text/javascript"],
+    ["/dashboard/app.css", "text/css"],
+  ]) {
+    const response = await fetch(`${base}${path}`);
+    assert.equal(response.status, 200);
+    assert.ok(response.headers.get("content-type")?.startsWith(type!));
+    assert.ok((await response.text()).length > 0);
+  }
+  const response = await fetch(`${base}/v1/dashboard?view=findings`);
+  assert.equal(response.status, 200);
+  const snapshot = (await response.json()) as DashboardSnapshot;
+  assert.equal(snapshot.total, findings.length);
+  assert.equal(snapshot.overview.findings, findings.length);
+  assert.equal(snapshot.items.length, findings.length);
+}
+
 async function checkInsertions(): Promise<void> {
   for (const [repository, batch] of [
     [repositoryId, findings.slice(0, 3)],
@@ -218,23 +238,24 @@ function checkCliDeduplication(): void {
     "--prepare-scan",
   ]);
   for (const allRepositories of [false, true]) {
-    const actual: unknown = JSON.parse(
-      docker([
-        "exec",
-        container,
-        "node",
-        "--import",
-        "/test/mock-reviews.mjs",
-        "dist/cli.js",
-        "dedupe",
-        "--scan",
-        manifest.scan.id,
-        "--findings-url",
-        "http://127.0.0.1:3000",
-        "--json",
-        ...(allRepositories ? ["--all-repositories"] : []),
-      ]),
-    );
+    const command = [
+      "exec",
+      container,
+      "node",
+      "--import",
+      "/test/mock-reviews.mjs",
+      "dist/cli.js",
+      "dedupe",
+      "--scan",
+      manifest.scan.id,
+      "--workflow-id",
+      allRepositories ? "smoke-all" : "smoke-repository",
+      "--findings-url",
+      "http://127.0.0.1:3000",
+      "--json",
+      ...(allRepositories ? ["--all-repositories"] : []),
+    ];
+    const actual: unknown = JSON.parse(docker(command));
     const expected: DeduplicateScanResult = {
       scanId: manifest.scan.id,
       uniqueFindingIds: [ids[0]!],
@@ -242,7 +263,19 @@ function checkCliDeduplication(): void {
       deduplicationStatus: "completed",
     };
     assert.deepEqual(actual, expected);
+    const calls = docker([
+      "exec",
+      container,
+      "cat",
+      "/state/review-calls.jsonl",
+    ]);
+    assert.deepEqual(JSON.parse(docker(command)), expected);
+    assert.equal(
+      docker(["exec", container, "cat", "/state/review-calls.jsonl"]),
+      calls,
+    );
   }
+  findings[0] = example!;
 }
 
 async function checkPages(): Promise<void> {
@@ -337,6 +370,7 @@ try {
   await startService();
   await checkHostPublication();
   await checkInsertions();
+  await checkDashboard();
   await checkCandidates();
   await checkPages();
   checkStorage();
