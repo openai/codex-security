@@ -1283,23 +1283,45 @@ authorization failures stop immediately.
 
 ## Findings service (preview)
 
+The findings API is distributed separately from the scanner as
+`ghcr.io/openai/codex-security-findings`, for Linux `amd64` and `arm64`.
+Once a release is published, it can be pulled without a GitHub login. See
+[container release setup](../../docker/README.md) for the required maintainer
+setup and publication process.
+
 From the repository root, copy the example if you do not already have a `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` in `.env`, then build and start the findings API:
+Set `OPENAI_API_KEY` in `.env`, then pull and start the findings API:
 
 ```bash
-docker compose -f compose.findings.yaml up --build -d
+docker compose -f compose.findings.yaml pull
+docker compose -f compose.findings.yaml up --no-build -d
 curl -i http://127.0.0.1:3000/v1/findings
 ```
 
-The `findings-service` Docker target starts the compiled SDK server used by the
-packaged `start:server` script, without invoking the CLI. Docker runs Node
-directly so stop signals reach the server. The existing default Docker target
-and bulk-scan Compose configuration are unchanged.
+The consumer Compose file has no build context. You can also copy just
+`compose.findings.yaml` into a deployment directory and create a private `.env`
+there; a source checkout and Node.js installation are not required. Compose
+defaults to `latest`. For repeatable deployments, set
+`CODEX_SECURITY_FINDINGS_IMAGE` in `.env` to a published version tag or digest,
+for example `ghcr.io/openai/codex-security-findings:<version>` or
+`ghcr.io/openai/codex-security-findings@sha256:<digest>` (replace the placeholders).
+The image uses the SDK package version, with `sha-<commit>` tags also available.
+
+To build from a source checkout instead:
+
+```bash
+docker build --target findings-service -t codex-security-findings:local .
+export CODEX_SECURITY_FINDINGS_IMAGE=codex-security-findings:local
+docker compose -f compose.findings.yaml up --no-build -d
+```
+
+The `findings-service` Docker target runs the packaged Node server directly.
+The default scanner target and bulk-scan Compose configuration are unchanged.
 
 ### API
 
@@ -1529,16 +1551,58 @@ use the same finding upsert operation. Changing a stored document invalidates
 its old embedding so later matching cannot use a stale vector. Historical
 findings are not automatically embedded; submit them to a bulk endpoint first.
 
-The `findings-state` named volume
-persists that database across container restarts. Stop the service with
+The `findings-state` named volume persists `/state`, including
+`/state/workbench.sqlite3`, across container restarts and replacements. The
+image runs as UID/GID `10001:10001`; Docker initializes the named volume with
+the image's ownership. If replacing it with a bind mount, create a private
+directory writable by that UID/GID first. Keep the same Compose project name
+and deployment directory to reuse the existing volume.
+
+Stop the service with
 `docker compose -f compose.findings.yaml down`; add `--volumes` only when you
 intend to delete the stored data.
 
-`docker/findings.env` contains non-secret container defaults: `HOST=0.0.0.0`,
-`PORT=3000`, and `CODEX_SECURITY_STATE_DIR=/state`. Compose publishes the port
+The image defaults to `HOST=0.0.0.0`, `PORT=3000`, and
+`CODEX_SECURITY_STATE_DIR=/state`. Compose publishes the port
 only on the host's loopback interface. There is no API authentication in this
 preview. Do not expose it to an untrusted network; use an authenticated proxy
-before sharing access.
+with TLS before sharing access. Keep the container's port and state path aligned
+with the port mapping and volume mount if customizing the Compose file. Finding
+JSON is sent to the OpenAI embeddings API, so the service needs outbound HTTPS
+access to `api.openai.com`. The database and generated embeddings remain in the
+local volume; this is not an offline service.
+
+### Upgrades and backups
+
+Read the release notes and stop the service before backing up the entire
+`/state` directory. For the published-image Compose configuration:
+
+```bash
+docker compose -f compose.findings.yaml stop findings
+mkdir -p backups
+chmod 700 backups
+docker compose -f compose.findings.yaml run --rm --no-deps --user 0:0 \
+  --entrypoint tar -T findings -C /state -czf - . > backups/findings-state.tgz
+chmod 600 backups/findings-state.tgz
+```
+
+Keep each backup separately; the command above overwrites an existing file of
+that name. After backing up, update `CODEX_SECURITY_FINDINGS_IMAGE` to the
+desired published version or digest in `.env`, then run:
+
+```bash
+docker compose -f compose.findings.yaml pull
+docker compose -f compose.findings.yaml up --no-build -d
+curl --fail http://127.0.0.1:3000/v1/findings
+docker compose -f compose.findings.yaml logs --tail=50 findings
+```
+
+Startup applies the bundled SQLite migrations automatically. Do not delete or
+replace the volume during an upgrade. For rollback, stop the new version,
+restore the pre-upgrade `/state` backup, and select the previous image digest;
+do not assume an older image can read a database migrated by a newer one.
+
+### Running without Docker
 
 To run locally, use Node.js and Python 3 as described in the prerequisites.
 Export the API key in your shell; the server does not load `.env` automatically.

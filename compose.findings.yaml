@@ -1,10 +1,7 @@
 services:
   findings:
-    build:
-      context: .
-      target: findings-service
+    image: ${CODEX_SECURITY_FINDINGS_IMAGE:-ghcr.io/openai/codex-security-findings:latest}
     init: true
-    env_file: docker/findings.env
     environment:
       OPENAI_API_KEY:
       CODEX_API_KEY:

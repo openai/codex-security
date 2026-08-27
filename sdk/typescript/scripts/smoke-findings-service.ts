@@ -10,6 +10,7 @@ import type { FindingsPage } from "../src/server/storage.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const container = "findings-ci";
+const image = process.argv[2] ?? "codex-security-findings:local";
 const compose = ["compose", "-p", container, "-f", "compose.findings.yaml"];
 let base: string;
 const document: FindingsDocument = JSON.parse(
@@ -60,6 +61,10 @@ const ids = findings.map((finding) => finding.findingId);
 function docker(args: string[], { check = true } = {}): string {
   const result = spawnSync("docker", args, {
     cwd: repositoryRoot,
+    env: {
+      ...process.env,
+      CODEX_SECURITY_FINDINGS_IMAGE: image,
+    },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -71,7 +76,7 @@ function docker(args: string[], { check = true } = {}): string {
   return result.stdout?.trim() ?? "";
 }
 
-async function startService(): Promise<void> {
+async function startService(mockEmbeddings = true): Promise<void> {
   docker([
     ...compose,
     "run",
@@ -89,9 +94,9 @@ async function startService(): Promise<void> {
     "--volume",
     `${fileURLToPath(new URL("fixtures/findings-service-sqlite.py", import.meta.url))}:/test/findings-service-sqlite.py:ro`,
     "findings",
-    "--import",
-    "/test/mock-embeddings.mjs",
-    "dist/server/index.js",
+    ...(mockEmbeddings
+      ? ["--import", "/test/mock-embeddings.mjs", "dist/server/index.js"]
+      : []),
   ]);
   base = `http://${docker(["port", container, "3000/tcp"])}`;
   for (let attempt = 0; ; attempt++) {
@@ -262,7 +267,12 @@ function stopService(): void {
 
 let passed = false;
 try {
-  docker([...compose, "build"]);
+  if (!process.argv[2])
+    docker(["build", "--target", "findings-service", "--tag", image, "."]);
+  // Verify the image's default CMD before overriding it for synthetic API calls.
+  await startService(false);
+  stopService();
+  docker(["rm", container]);
   await startService();
   await checkInsertions();
   await checkCandidates();

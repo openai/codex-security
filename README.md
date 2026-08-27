@@ -49,7 +49,8 @@ Use the included Docker Compose configuration for scans of many repositories. Se
 ## Findings service (preview)
 
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
-from the SDK in Docker, stores findings and embeddings in SQLite, and lists
+from the separate `ghcr.io/openai/codex-security-findings` image (or a local
+source build), stores findings and embeddings in SQLite, and lists
 findings with pagination. It also returns potential duplicates by embedding
 similarity within a repository or an explicit all-repository scope. The SDK and
 `codex-security dedupe` CLI command retrieve those candidates and run independent
