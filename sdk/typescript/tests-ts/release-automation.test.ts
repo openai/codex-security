@@ -4043,6 +4043,13 @@ describe("GitHub release workflow safeguards", () => {
       ["README.md", "docs/guide.md"],
       "markdown",
     ],
+    [
+      "generated-plugin Markdown-only PR",
+      "pull_request",
+      false,
+      ["sdk/typescript/_bundled_plugin/skills/example/SKILL.md"],
+      "full",
+    ],
     ["base retarget", "pull_request", true, ["README.md"], "full"],
     ["mixed PR", "pull_request", false, ["README.md", "src/index.ts"], "full"],
     [

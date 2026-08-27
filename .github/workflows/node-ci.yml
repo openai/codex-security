@@ -48,7 +48,8 @@ jobs:
             markdown_only=true
             while IFS= read -r -d '' path; do
               changed=true
-              if [[ "$path" != *.md ]]; then
+              if [[ "$path" != *.md ||
+                    "$path" == sdk/typescript/_bundled_plugin/* ]]; then
                 markdown_only=false
               fi
             done < "$changed_files"
