@@ -6,9 +6,11 @@ import argparse
 import json
 import hashlib
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_target import directory_content_digest, git_output, git_revision
 
 WORKFLOW_BINDINGS = {

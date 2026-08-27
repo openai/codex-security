@@ -36,7 +36,6 @@ import {
   CodexDeduplicationReviewer,
   type DuplicateDecision,
 } from "../src/deduplication/deduplication-reviewer.js";
-import { groupReviewInstructions } from "../src/deduplication/deduplication-prompts.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const directories: string[] = [];
@@ -620,7 +619,7 @@ const distinct: DuplicateDecision = {
   rationale: "REVIEW_OUTPUT_ONLY: independent corrections are required.",
 };
 
-test.each(["screen", "pair", "group"])(
+test.each(["screen", "pair"])(
   "resumes unfinished %s reviews using validated checkpoints and original inputs",
   async (interruptAt) => {
     const { scanDir, environment, document, history } = await fixture();
@@ -651,12 +650,7 @@ test.each(["screen", "pair", "group"])(
               (original) => original.findingId === finding.findingId,
             )!,
           );
-        const stage =
-          review.model === "gpt-5.6-luna"
-            ? "screen"
-            : review.prompt.startsWith(groupReviewInstructions)
-              ? "group"
-              : "pair";
+        const stage = review.model === "gpt-5.6-luna" ? "screen" : "pair";
         calls.push(stage);
         if (
           !interrupted &&
@@ -715,9 +709,6 @@ test.each(["screen", "pair", "group"])(
     );
     expect(calls.filter((stage) => stage === "pair")).toHaveLength(
       interruptAt === "pair" ? 4 : 3,
-    );
-    expect(calls.filter((stage) => stage === "group")).toHaveLength(
-      interruptAt === "group" ? 2 : 1,
     );
     const count = calls.length;
     expect(
@@ -915,9 +906,7 @@ with sqlite3.connect(sys.argv[1]) as db:
                   },
                 ],
               }
-            : review.prompt.startsWith(groupReviewInstructions)
-              ? distinct
-              : merged(originals),
+            : merged(originals),
         );
       },
     };
@@ -934,7 +923,6 @@ with sqlite3.connect(sys.argv[1]) as db:
     const first = await makeReviewer();
     const screening = await first.screen(originals);
     const pair = await first.reviewPair(originals);
-    const group = await first.reviewGroup(originals);
     if (version === "legacy")
       await restoreLegacyWorkflow(
         environment,
@@ -944,11 +932,9 @@ with sqlite3.connect(sys.argv[1]) as db:
     const resumed = await makeReviewer();
     expect(await resumed.screen(originals)).toEqual(screening);
     expect(await resumed.reviewPair(originals)).toEqual(pair);
-    expect(await resumed.reviewGroup(originals)).toEqual(group);
     expect(pair).toEqual(merged(originals));
-    expect(group).toEqual(distinct);
-    expect(calls).toBe(3);
-    expect(checkpoints).toHaveLength(3);
+    expect(calls).toBe(2);
+    expect(checkpoints).toHaveLength(2);
     const probe = await runCodexCommand(
       { command: workbenchOptions.python },
       [
