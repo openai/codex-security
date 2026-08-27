@@ -64,6 +64,11 @@ export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
 export { checkScanPublication, publishScan } from "./publish.js";
+export { publishScanToCustom } from "./custom-publish.js";
+export type {
+  PublishScanToCustomOptions,
+  CustomPublicationResult,
+} from "./custom-publish.js";
 export { deduplicateScan } from "./deduplication/scan.js";
 export type {
   DeduplicateScanOptions,

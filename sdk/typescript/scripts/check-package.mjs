@@ -175,6 +175,7 @@ const distFiles = new Set(
     "cost-model",
     "custom-validation",
     "custom-validation-prompt",
+    "custom-publish",
     "errors",
     "github",
     "index",
@@ -197,14 +198,19 @@ const distFiles = new Set(
     "scan-sessions",
     "server/index",
     "deduplication/codex-review",
+    "deduplication/checkpointed-review",
     "deduplication/deduplication",
     "finding-retrieval",
+    "finding-workflow",
+    "findings-client",
+    "finding-dedupe-groups",
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
-    "deduplication/findings-client",
     "deduplication/scan",
     "saved-scan",
     "server/embeddings",
+    "server/dashboard",
+    "server/dashboard-types",
     "server/errors",
     "server/findings-service",
     "server/routes",
@@ -224,6 +230,15 @@ const distFiles = new Set(
     ),
   ),
 );
+const dashboardFiles = new Set([
+  "package/dist/server/dashboard/index.html",
+  "package/dist/server/dashboard/app.js",
+  "package/dist/server/dashboard/app.css",
+  "package/dist/server/dashboard/THIRD_PARTY_NOTICES.txt",
+]);
+for (const file of dashboardFiles) {
+  if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+}
 for (const file of distFiles) {
   if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
 }
@@ -235,10 +250,12 @@ for (const file of files) {
       normalized === "package/bin" ||
       normalized === "package/dist" ||
       normalized === "package/dist/server" ||
+      normalized === "package/dist/server/dashboard" ||
       normalized === "package/dist/deduplication" ||
       pluginDirectories.has(normalized)
     : allowedRoot.has(normalized) ||
       distFiles.has(normalized) ||
+      dashboardFiles.has(normalized) ||
       pluginEntries.has(normalized);
   if (!allowed || unsafePath.test(file) || file.includes("\\")) {
     throw new Error(`npm tarball contains an unexpected file: ${file}.`);

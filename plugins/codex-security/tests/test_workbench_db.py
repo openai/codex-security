@@ -58,6 +58,8 @@ EXPECTED_TABLES = {
     "deep_scan_runs",
     "deep_scan_workers",
     "finding_decisions",
+    "finding_dedupe_group_members",
+    "finding_dedupe_groups",
     "finding_embeddings",
     "finding_locations",
     "finding_occurrences",
@@ -65,6 +67,8 @@ EXPECTED_TABLES = {
     "finding_remediation_attempts",
     "finding_repositories",
     "finding_triage",
+    "finding_workflow_reviews",
+    "finding_workflows",
     "findings",
     "scan_artifacts",
     "scan_comparison_matches",
@@ -992,7 +996,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (34,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (39,)
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 

@@ -16,7 +16,7 @@ import {
   type ScreeningResult,
 } from "../src/deduplication/deduplication-reviewer.js";
 import { CodexSecurityError } from "../src/errors.js";
-import { FindingsClient } from "../src/deduplication/findings-client.js";
+import { FindingsClient } from "../src/findings-client.js";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { JsonObject } from "../src/config.js";
@@ -361,6 +361,14 @@ test("accepts complete canonical and merged reviews and rejects invalid assignme
     { ...result, canonicalFindingId: null },
     { ...result, mergedFinding: undefined },
     { ...result, mergedFinding: null },
+    { ...result, mergedFinding: {} },
+    {
+      ...result,
+      mergedFinding: {
+        ...result.mergedFinding,
+        findingId: findings[1]!.findingId,
+      },
+    },
     { ...result, canonicalFindingId: "outside" },
     {
       ...result,
@@ -493,12 +501,11 @@ test("lookup failures and cancellation never produce a completed uniqueness resu
   for (const status of [404, 502]) {
     const client = new FindingsClient(
       "http://synthetic.test",
-      { allRepositories: true },
       undefined,
       async () => new Response("", { status }),
     );
     await expect(
-      client.potentialDuplicates(entry(1).findingId),
+      client.potentialDuplicates(entry(1).findingId, { allRepositories: true }),
     ).rejects.toThrow(`HTTP ${status}`);
   }
   const controller = new AbortController();
@@ -516,4 +523,84 @@ test("lookup failures and cancellation never produce a completed uniqueness resu
       signal: controller.signal,
     }),
   ).rejects.toBe("synthetic cancellation");
+});
+
+test("writes accepted groups only after all reviews and fails when write-back fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dedupe-writeback-"));
+  try {
+    await cp(join(PLUGIN_ROOT, "examples/completed-scan"), directory, {
+      recursive: true,
+    });
+    if (process.platform !== "win32") await chmod(directory, 0o700);
+    const findings = [document.findings[0]!, entry(2), entry(3)];
+    const ids = findings.map((finding) => finding.findingId);
+    for (const status of [201, 409]) {
+      const phases: string[] = [];
+      const controller = new AbortController();
+      const result = deduplicateScanInternal(
+        "scan_example_001",
+        {
+          findingsUrl: "http://synthetic.test/api/",
+          signal: controller.signal,
+        },
+        {
+          runWorkbench: async () => ({
+            scan: {
+              scanId: "scan_example_001",
+              scanDir: directory,
+              progress: { status: "complete" },
+            },
+          }),
+          fetch: async (url, options) => {
+            expect(options.signal).toBe(controller.signal);
+            if (options.method === "POST") {
+              phases.push("store");
+              expect(String(url)).toBe(
+                "http://synthetic.test/api/v1/dedupe-groups",
+              );
+              expect(JSON.parse(options.body as string)).toEqual({
+                groups: [[...ids].sort()],
+              });
+              return Response.json([], { status });
+            }
+            phases.push("lookup");
+            return Response.json({
+              finding: findings[0],
+              potentialDuplicates: findings.slice(1),
+            });
+          },
+          reviewer: {
+            async screen(values) {
+              phases.push("screen");
+              return screening(
+                values,
+                new Set(
+                  values
+                    .slice(1)
+                    .map((value) => pairKey([ids[0]!, value.findingId])),
+                ),
+              );
+            },
+            async reviewPair(values) {
+              phases.push("pair");
+              return same(values);
+            },
+          },
+        },
+      );
+      if (status === 201) {
+        expect((await result).duplicateGroups).toEqual([[...ids].sort()]);
+      } else {
+        await expect(result).rejects.toThrow(
+          "POST /v1/dedupe-groups failed (HTTP 409)",
+        );
+      }
+      expect(phases).toEqual(["lookup", "screen", "pair", "pair", "store"]);
+    }
+    expect(
+      JSON.parse(await readFile(join(directory, "findings.json"), "utf8")),
+    ).toEqual(document);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

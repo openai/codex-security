@@ -6,6 +6,8 @@ import {
   type WorkbenchCommandOptions,
 } from "../runtime.js";
 import { FindingsError } from "./errors.js";
+import type { DashboardQuery, DashboardSnapshot } from "./dashboard-types.js";
+import type { FindingDedupeGroup } from "../finding-dedupe-groups.js";
 import type {
   FindingNeighborhood,
   FindingSearchScope,
@@ -23,6 +25,13 @@ export class SqliteFindingsStore implements FindingsStore {
 
   async initialize(): Promise<void> {
     await this.run(["database-info"]);
+  }
+
+  async dashboard(query: DashboardQuery): Promise<DashboardSnapshot> {
+    return (await this.run(
+      ["dashboard"],
+      JSON.stringify(query),
+    )) as unknown as DashboardSnapshot;
   }
 
   async insert(
@@ -76,6 +85,30 @@ export class SqliteFindingsStore implements FindingsStore {
       );
     }
     return result as unknown as FindingNeighborhood;
+  }
+
+  async storeDedupeGroups(
+    groups: readonly string[][],
+  ): Promise<FindingDedupeGroup[]> {
+    const result = await this.run(
+      ["store-dedupe-groups"],
+      JSON.stringify({ groups }),
+    );
+    if (result["error"] === "finding_conflict") {
+      throw new FindingsError(
+        "finding_conflict",
+        "Every dedupe group member must already exist in the findings database.",
+      );
+    }
+    return result["groups"] as unknown as FindingDedupeGroup[];
+  }
+
+  async listDedupeGroups(findingId: string): Promise<FindingDedupeGroup[]> {
+    const result = await this.run([
+      "list-dedupe-groups",
+      `--finding-id=${findingId}`,
+    ]);
+    return result["groups"] as unknown as FindingDedupeGroup[];
   }
 
   private async run(args: string[], input?: string) {

@@ -1,10 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ValidateFunction } from "ajv";
 import { FindingsError } from "./errors.js";
+import { dashboardQuery, serveDashboard } from "./dashboard.js";
 import type { FindingsService } from "./findings-service.js";
 import {
   findingSearchScope,
   pagination,
+  validateDedupeGroups,
   type FindingsRequest,
 } from "./validation.js";
 
@@ -17,6 +19,20 @@ export async function handleFindingsRequest(
   try {
     const url = new URL(request.url ?? "/", "http://localhost");
     const route = `${request.method} ${url.pathname}`;
+    if (
+      request.method === "GET" &&
+      (await serveDashboard(url.pathname, response))
+    )
+      return;
+    if (route === "GET /v1/dashboard") {
+      response.setHeader("Cache-Control", "no-store");
+      json(
+        response,
+        200,
+        await service.dashboard(dashboardQuery(url.searchParams)),
+      );
+      return;
+    }
     if (route === "GET /v1/findings") {
       console.log(route);
       json(response, 200, await service.list(pagination(url.searchParams)));
@@ -35,6 +51,26 @@ export async function handleFindingsRequest(
           findingSearchScope(url.searchParams),
         ),
       );
+      return;
+    }
+    const dedupeGroups = /^\/v1\/finding\/([^/]+)\/dedupe-groups$/.exec(
+      url.pathname,
+    );
+    if (request.method === "GET" && dedupeGroups) {
+      console.log("GET /v1/finding/:id/dedupe-groups");
+      json(response, 200, await service.listDedupeGroups(dedupeGroups[1]!));
+      return;
+    }
+    if (route === "POST /v1/dedupe-groups") {
+      console.log(route);
+      const input = await readJson(request);
+      if (!validateDedupeGroups(input)) {
+        throw new FindingsError(
+          "invalid_request",
+          "Expected {groups: [[findingId, ...], ...]} with at least two distinct finding IDs per group.",
+        );
+      }
+      json(response, 201, await service.storeDedupeGroups(input.groups));
       return;
     }
     if (route === "POST /v1/bulk/findings") {
