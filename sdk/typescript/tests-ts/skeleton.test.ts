@@ -142,7 +142,7 @@ describe("TypeScript package skeleton", () => {
     );
 
     expect(packageJson.scripts.test).toBe(
-      "bun test --timeout 30000 ./tests-ts",
+      "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     );
     expect(bunConfig).toMatchObject({ test: { randomize: true } });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
@@ -153,10 +153,52 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
+  test("generates the bundled plugin before Windows test shards", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const steps = jobs["windows-test"]!.steps;
+    const dependencyInstallation = steps.findIndex(
+      (step) => step.name === "Install dependencies",
+    );
+    const pluginGeneration = steps.findIndex(
+      (step) => step.name === "Generate bundled plugin",
+    );
+    const shard = steps.findIndex(
+      (step) => step.name === "Test shard ${{ matrix.shard }}",
+    );
+
+    expect(steps[dependencyInstallation]?.run).toContain(
+      "npm ci --prefix plugins/codex-security/mcp-app",
+    );
+    expect(steps[pluginGeneration]?.run).toBe(
+      "pnpm --dir sdk/typescript run build:plugin",
+    );
+    expect(dependencyInstallation).toBeLessThan(pluginGeneration);
+    expect(pluginGeneration).toBeLessThan(shard);
+  });
+
+  test("installs ripgrep before the MCP app tests", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const steps = jobs["test"]!.steps;
+    const ripgrepInstallation = steps.findIndex(
+      (step) => step.name === "Install ripgrep",
+    );
+    const mcpTests = steps.findIndex((step) => step.name === "Test MCP app");
+
+    expect(steps[ripgrepInstallation]).toMatchObject({
+      if: "matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'",
+      run: expect.stringContaining("apt-get install --yes ripgrep"),
+    });
+    expect(ripgrepInstallation).toBeLessThan(mcpTests);
+  });
+
   test("runs shared static checks once and keeps report upload non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps);
-    for (const name of ["Typecheck", "Check formatting"]) {
+    for (const name of [
+      "Check plugin source boundary",
+      "Typecheck",
+      "Check formatting",
+    ]) {
       expect(steps.filter((step) => step.name === name)).toEqual([
         expect.objectContaining({
           if: "matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'",
@@ -280,7 +322,16 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts.build).toBe(
       "node --run clean && tsc -p tsconfig.build.json",
     );
-    expect(packageJson.scripts.prepack).toBe("node --run build");
+    expect(packageJson.scripts["build:plugin"]).toBe(
+      "node scripts/build-plugin.mjs",
+    );
+    expect(packageJson.scripts["check:plugin-source"]).toBe(
+      "node scripts/check-plugin-source.mjs",
+    );
+    expect(packageJson.scripts.prepack).toBe(
+      "node --run build:plugin && node --run build",
+    );
+    expect(packageJson.scripts.types).not.toContain("check:plugin-source");
     expect(packageJson.scripts["audit:prod"]).toBe(
       "pnpm audit --prod --audit-level high",
     );

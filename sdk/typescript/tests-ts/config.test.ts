@@ -1,6 +1,13 @@
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
@@ -12,6 +19,11 @@ import {
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
+import {
+  prepareCodexSecurityCredentialHome,
+  requireSecureCredentialHome,
+} from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -29,13 +41,18 @@ async function temporaryDirectory(): Promise<string> {
   return path;
 }
 
-function runPinnedCodex(codexHome: string, arguments_: readonly string[]) {
+function runPinnedCodex(
+  codexHome: string,
+  arguments_: readonly string[],
+  overrides: NodeJS.ProcessEnv = {},
+) {
   const node = Bun.which("node");
   if (node === null) {
     throw new Error("The pinned Codex CLI requires Node.js.");
   }
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
+    ...overrides,
     CODEX_HOME: codexHome,
   };
   delete environment["OPENAI_API_KEY"];
@@ -84,21 +101,27 @@ function macOsSandboxUnavailable(): boolean {
 
 async function scanSandboxFixture() {
   const root = await temporaryDirectory();
-  const codexHome = join(root, "codex-home");
-  const workspace = join(root, "workspace");
   const stateDirectory = join(root, "state");
+  const codexHome = await prepareCodexSecurityCredentialHome({
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  });
+  const workspace = join(stateDirectory, "scans", "workspace");
+  const temporary = join(root, "temp");
   await Promise.all(
-    [codexHome, workspace, stateDirectory].map((path) => mkdir(path)),
+    [workspace, temporary].map((path) => mkdir(path, { recursive: true })),
   );
   await writeCodexConfig(
     join(codexHome, "config.toml"),
-    scanRuntimeCodexConfig(
-      await mergedCodexConfig({}),
-      stateDirectory,
-      codexHome,
-    ),
+    scanRuntimeCodexConfig(await mergedCodexConfig({}), codexHome),
   );
-  return { root, codexHome, workspace };
+  return {
+    root,
+    codexHome,
+    stateDirectory,
+    workspace,
+    // Native sandbox temp grants must not cover the credential-home ancestry.
+    environment: { TEMP: temporary, TMP: temporary, TMPDIR: temporary },
+  };
 }
 
 describe("Codex configuration", () => {
@@ -354,10 +377,9 @@ describe("Codex configuration", () => {
   });
 
   test("retains the Windows sandbox in the hardened scan profile", async () => {
-    const stateDirectory = join(tmpdir(), "codex-security-windows-state");
     const merged = await mergedCodexConfig({});
 
-    expect(scanRuntimeCodexConfig(merged, stateDirectory)).toMatchObject({
+    expect(scanRuntimeCodexConfig(merged)).toMatchObject({
       windows: { sandbox: "unelevated" },
       default_permissions: "codex_security_scan",
       permissions: {
@@ -365,7 +387,6 @@ describe("Codex configuration", () => {
           filesystem: {
             ":root": "read",
             ":workspace_roots": "write",
-            [stateDirectory]: "write",
           },
         },
       },
@@ -373,43 +394,50 @@ describe("Codex configuration", () => {
   });
 
   test("writes scan permissions accepted by the pinned Codex CLI", async () => {
-    const { codexHome, workspace } = await scanSandboxFixture();
-    const result = runPinnedCodex(codexHome, [
-      "--cd",
-      workspace,
-      "features",
-      "list",
-    ]);
+    const { codexHome, workspace, environment } = await scanSandboxFixture();
+    const result = runPinnedCodex(
+      codexHome,
+      ["--cd", workspace, "features", "list"],
+      environment,
+    );
     expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
     expect(result.stdout.length).toBeGreaterThan(0);
   });
 
   test.skipIf(macOsSandboxUnavailable())(
-    "denies writes outside the scan workspace and state directory",
+    "allows scan helpers to write workspace files without writable credential ancestry",
     async () => {
-      const { root, codexHome, workspace } = await scanSandboxFixture();
+      const { root, codexHome, stateDirectory, workspace, environment } =
+        await scanSandboxFixture();
       const node = Bun.which("node");
       expect(node).not.toBeNull();
       const attemptWrite = (path: string) =>
-        runPinnedCodex(codexHome, [
-          "sandbox",
-          "--config",
-          "permissions.codex_security_scan.network.enabled=true",
-          "--permission-profile",
-          "codex_security_scan",
-          "--cd",
-          workspace,
-          node!,
-          "-e",
-          "require('node:fs').writeFileSync(process.argv[1], 'probe')",
-          path,
-        ]);
+        runPinnedCodex(
+          codexHome,
+          [
+            "sandbox",
+            "--config",
+            "permissions.codex_security_scan.network.enabled=true",
+            "--permission-profile",
+            "codex_security_scan",
+            "--cd",
+            workspace,
+            node!,
+            "-e",
+            "require('node:fs').writeFileSync(process.argv[1], 'probe')",
+            path,
+          ],
+          environment,
+        );
 
       const allowed = join(workspace, "inside.txt");
       const permitted = attemptWrite(allowed);
       const outside = join(root, "outside.txt");
       expect(attemptWrite(outside).exitCode).not.toBe(0);
       await expect(stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
+      const stateFile = join(stateDirectory, "outside.txt");
+      expect(attemptWrite(stateFile).exitCode).not.toBe(0);
+      await expect(stat(stateFile)).rejects.toMatchObject({ code: "ENOENT" });
       if (permitted.exitCode !== 0) {
         const details = new TextDecoder().decode(permitted.stderr);
         if (
@@ -428,6 +456,47 @@ describe("Codex configuration", () => {
         );
       }
       expect(await readFile(allowed, "utf8")).toBe("probe");
+
+      const repository = join(root, "repository");
+      await mkdir(repository);
+      await writeFile(join(repository, "fixture.txt"), "synthetic source\n");
+      const inventory = join(workspace, "in-scope-files.txt");
+      const python =
+        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      expect(python).not.toBeNull();
+      const helper = runPinnedCodex(
+        codexHome,
+        [
+          "sandbox",
+          "--config",
+          "permissions.codex_security_scan.network.enabled=true",
+          "--permission-profile",
+          "codex_security_scan",
+          "--cd",
+          workspace,
+          python!,
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          inventory,
+        ],
+        environment,
+      );
+      expect(helper.exitCode, new TextDecoder().decode(helper.stderr)).toBe(0);
+      const inventoryPaths = (await readFile(inventory, "utf8"))
+        .trim()
+        .split(/\r?\n/u)
+        .map((path) => resolve(repository, path));
+      expect(inventoryPaths).toEqual([join(repository, "fixture.txt")]);
+      await requireSecureCredentialHome(codexHome);
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        }),
+      ).toBe(codexHome);
     },
   );
 

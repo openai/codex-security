@@ -91,7 +91,7 @@ function screening(
   };
 }
 
-test("reviews nominated pairs once and judges the complete group before selecting its canonical", async () => {
+test("reviews nominated pairs once and groups accepted pairs by reported severity", async () => {
   const entries = [entry(1), entry(2), entry(3), entry(4)];
   entries[1]!.severity.level = "critical";
   const ids = entries.map((finding) => finding.findingId);
@@ -120,11 +120,6 @@ test("reviews nominated pairs once and judges the complete group before selectin
         ? distinct
         : same(findings);
     },
-    async reviewGroup(findings) {
-      phases.push("group");
-      expect(findings).toEqual([entries[1]!, entries[0]!, entries[2]!]);
-      return same(findings);
-    },
   };
   const service = new FindingDeduplicator(candidates(entries), reviewer);
   expect(await service.run([...ids, ids[0]!])).toEqual({
@@ -142,15 +137,16 @@ test("reviews nominated pairs once and judges the complete group before selectin
     "pair",
     "pair",
     "pair",
-    "group",
   ]);
 });
 
-test("whole-group rejection keeps a transitive chain separate", async () => {
+test("groups accepted neighbors transitively without screening them as anchors", async () => {
   const entries = [entry(1), entry(2), entry(3)];
   const ids = entries.map((finding) => finding.findingId);
+  const screened: string[] = [];
   const service = new FindingDeduplicator(candidates(entries), {
     async screen(findings) {
+      screened.push(findings[0]!.findingId);
       return screening(
         findings,
         new Set([pairKey([ids[0]!, ids[1]!]), pairKey([ids[1]!, ids[2]!])]),
@@ -159,18 +155,16 @@ test("whole-group rejection keeps a transitive chain separate", async () => {
     async reviewPair(findings) {
       return same(findings);
     },
-    async reviewGroup() {
-      return distinct;
-    },
   });
-  expect(await service.run(ids)).toEqual({
-    uniqueFindingIds: ids,
-    duplicateGroups: [],
+  expect(await service.run([ids[1]!])).toEqual({
+    uniqueFindingIds: [ids[0]!],
+    duplicateGroups: [ids],
     deduplicationStatus: "completed",
   });
+  expect(screened).toEqual([ids[1]!]);
 });
 
-test("matches an import to an existing canonical without judging a two-finding group again", async () => {
+test("matches an import to an existing canonical", async () => {
   const existing = entry(1);
   const imported = entry(2);
   imported.severity.level = "low";
@@ -181,9 +175,6 @@ test("matches an import to an existing canonical without judging a two-finding g
     },
     async reviewPair(findings) {
       return same(findings);
-    },
-    async reviewGroup() {
-      throw new Error("Two-finding groups do not need another review");
     },
   });
   expect(await service.run([imported.findingId])).toEqual({
@@ -205,9 +196,6 @@ test("empty and isolated imports avoid models, while review failures propagate",
     async reviewPair() {
       throw failure;
     },
-    async reviewGroup() {
-      throw failure;
-    },
   };
   const service = new FindingDeduplicator(candidates(findings), reviewer);
   expect(await service.run([])).toEqual({
@@ -222,14 +210,10 @@ test("empty and isolated imports avoid models, while review failures propagate",
   await expect(service.run([first.findingId])).rejects.toBe(failure);
 });
 
-test("validates complete screening assignments including off-edge nominations", () => {
+test("validates complete screening assignments and rejects non-anchor pairs", () => {
   const findings = [entry(1), entry(2), entry(3)];
   const ids = findings.map((finding) => finding.findingId);
   const result = screening(findings, new Set([pairKey([ids[0]!, ids[1]!])]));
-  result.decisions.push({
-    findingIds: [ids[1]!, ids[2]!],
-    ...same(findings.slice(1)),
-  });
   expect(validateScreening(result, findings)).toEqual(result);
   for (const invalid of [
     { decisions: result.decisions.slice(1) },
@@ -242,7 +226,13 @@ test("validates complete screening assignments including off-edge nominations", 
     {
       decisions: [
         ...result.decisions.slice(0, 2),
-        { findingIds: [ids[1], "outside"], ...same(findings.slice(1)) },
+        { findingIds: [ids[0], "outside"], ...same(findings.slice(0, 2)) },
+      ],
+    },
+    {
+      decisions: [
+        ...result.decisions,
+        { findingIds: [ids[1], ids[2]], ...same(findings.slice(1)) },
       ],
     },
     {
@@ -288,7 +278,9 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
             decision.mergedFinding["title"] = "SCREENING_ONLY_MERGED";
         }
       } else {
-        result = same(calls.length === 2 ? findings.slice(0, 2) : findings);
+        result = same(
+          calls.length === 2 ? findings.slice(0, 2) : findings.slice(1),
+        );
         result.rationale = "PAIR_ONLY_RATIONALE";
         result.mergedFinding["title"] = "PAIR_ONLY_MERGED";
       }
@@ -316,17 +308,19 @@ test("requires complete SAME tool outputs and keeps reviews independent", async 
   });
   await reviewer.screen(findings);
   await reviewer.reviewPair(findings.slice(0, 2));
-  await reviewer.reviewGroup(findings);
+  await reviewer.reviewPair(findings.slice(1));
   expect(calls.map(({ model, effort }) => [model, effort])).toEqual([
     ["gpt-5.6-luna", "xhigh"],
-    ["gpt-5.6-sol", "ultra"],
-    ["gpt-5.6-sol", "ultra"],
+    ["gpt-5.6-sol", "xhigh"],
+    ["gpt-5.6-sol", "xhigh"],
   ]);
   expect(calls[0]!.prompt).toContain(JSON.stringify({ findings }));
   expect(calls[1]!.prompt).toContain(
     JSON.stringify({ findings: findings.slice(0, 2) }),
   );
-  expect(calls[2]!.prompt).toContain(JSON.stringify({ findings }));
+  expect(calls[2]!.prompt).toContain(
+    JSON.stringify({ findings: findings.slice(1) }),
+  );
   expect(
     calls
       .slice(1)
@@ -440,9 +434,6 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
             },
             async reviewPair() {
               throw new Error("No pair to review");
-            },
-            async reviewGroup() {
-              throw new Error("No group to review");
             },
           },
         },

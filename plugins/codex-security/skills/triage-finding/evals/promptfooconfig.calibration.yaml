@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: "Codex Security triage-finding OSS calibration eval"
+
+prompts:
+  - file://./prompts/triage-request.txt
+
+providers:
+  - id: openai:codex-sdk:gpt-5.5
+    label: "Codex SDK triage-finding calibration"
+    config:
+      working_dir: ../../../../..
+      sandbox_mode: read-only
+      approval_policy: never
+      network_access_enabled: false
+      cli_env:
+        HTTP_PROXY: "{{env.HTTP_PROXY}}"
+        HTTPS_PROXY: "{{env.HTTPS_PROXY}}"
+        ALL_PROXY: "{{env.ALL_PROXY}}"
+        NO_PROXY: "{{env.NO_PROXY}}"
+
+evaluateOptions:
+  maxConcurrency: 1
+
+defaultTest:
+  vars:
+    invocation_preamble: "Use $codex-security:triage-finding to triage the supplied existing security finding."
+  assert:
+    - type: contains-json
+      value: file://./schemas/triage-result-v0.schema.json
+    - type: javascript
+      value: file://./assertions/triage-io.js
+    - type: javascript
+      value: file://./assertions/calibration-evidence.js
+
+tests: file://./tests/calibration-oss.yaml
