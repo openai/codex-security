@@ -3,7 +3,7 @@ import { pollDashboard } from "../dashboard/polling.js";
 import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 
 const snapshot: DashboardSnapshot = {
-  overview: { scans: {}, workflows: {}, findings: 0, groups: 0 },
+  overview: { findings: 0, groups: 0 },
   repositories: [],
   items: [],
   total: 0,

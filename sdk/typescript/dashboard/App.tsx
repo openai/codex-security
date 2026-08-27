@@ -5,30 +5,16 @@ import { Input } from "@openai/apps-sdk-ui/components/Input";
 import type {
   DashboardDetail,
   DashboardItem,
-  DashboardScan,
   DashboardSnapshot,
   DashboardView,
 } from "../src/server/dashboard-types.js";
-import type { WorkflowState } from "../src/finding-workflow.js";
-import type { CustomPublicationResult } from "../src/custom-publish.js";
-import type { DeduplicateScanResult } from "../src/deduplication/scan.js";
 import { pollDashboard } from "./polling.js";
 
 const views: { id: DashboardView; label: string; description: string }[] = [
   {
-    id: "workflows",
-    label: "Workflows",
-    description: "Optional scan → publish → dedupe workflows.",
-  },
-  {
-    id: "scans",
-    label: "Scans",
-    description: "Scan activity and history, with or without a workflow.",
-  },
-  {
     id: "findings",
     label: "Findings",
-    description: "All stored findings, including imports without local scans.",
+    description: "Findings stored in this service.",
   },
   {
     id: "groups",
@@ -37,29 +23,10 @@ const views: { id: DashboardView; label: string; description: string }[] = [
       "Reviewed duplicate relationships. Overlapping groups stay separate.",
   },
 ];
-const labels: Record<string, string> = {
-  scan: "Scan",
-  publish: "Publish",
-  dedupe: "Dedupe",
-  pending: "Pending",
-  running: "Running",
-  failed: "Failed",
-  completed: "Completed",
-  canceled: "Canceled",
-  preflight: "Preflight",
-  threat_model: "Threat modeling",
-  discovery: "Discovery",
-  validation: "Validation",
-  attack_path: "Attack-path analysis",
-  reporting: "Reporting",
-};
-const label = (value: string) => labels[value] ?? value;
 const count = (value: number | null | undefined) =>
   value == null ? "—" : value.toLocaleString();
 const timestamp = (value: string | null | undefined) =>
   value ? new Date(value).toLocaleString() : "—";
-const total = (counts: Record<string, number>) =>
-  Object.values(counts).reduce((sum, n) => sum + n, 0);
 
 function age(value: string | null | undefined, now: number) {
   if (!value) return "—";
@@ -68,24 +35,6 @@ function age(value: string | null | undefined, now: number) {
   if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
   return `${Math.floor(seconds / 86_400)}d ago`;
-}
-
-function Status({ value }: { value: string }) {
-  return (
-    <Badge
-      color={
-        value === "failed"
-          ? "danger"
-          : value === "completed"
-            ? "success"
-            : value === "running"
-              ? "info"
-              : "secondary"
-      }
-    >
-      {label(value)}
-    </Badge>
-  );
 }
 
 function Field({ name, children }: { name: string; children: ReactNode }) {
@@ -124,241 +73,6 @@ function RecordLinks({
   );
 }
 
-function ScanDetail({
-  scan,
-  navigate,
-}: {
-  scan: DashboardScan;
-  navigate: Navigate;
-}) {
-  const { reviewed, total: reviewTotal, reportable, deepPass } = scan.progress;
-  return (
-    <>
-      <section className="detail-section">
-        <div className="section-title">
-          <h3>Scan progress</h3>
-          <Status value={scan.status} />
-        </div>
-        <p>{label(scan.phase)}</p>
-        {reviewTotal != null && reviewTotal > 0 && reviewed != null ? (
-          <>
-            <progress
-              aria-label="Reviewed items"
-              value={reviewed}
-              max={reviewTotal}
-            />
-            <p className="text-secondary">
-              {count(reviewed)} / {count(reviewTotal)} review items completed
-            </p>
-          </>
-        ) : (
-          <p className="text-secondary">Review total not reported</p>
-        )}
-        <dl>
-          <Field name="Reportable findings">{count(reportable)}</Field>
-          {deepPass != null && <Field name="Deep-scan pass">{deepPass}</Field>}
-          <Field name="Started">{timestamp(scan.startedAt)}</Field>
-          <Field name="Finished">{timestamp(scan.completedAt)}</Field>
-          <Field name="Last recorded update">{timestamp(scan.updatedAt)}</Field>
-        </dl>
-        {scan.error && (
-          <div className="error-message" role="note">
-            <strong>Scan error</strong>
-            <p>{scan.error}</p>
-          </div>
-        )}
-      </section>
-      <section className="detail-section">
-        <h3>Scan identity</h3>
-        <dl>
-          <Field name="Scan ID">
-            <code>{scan.scanId}</code>
-          </Field>
-          <Field name="Repository">{scan.repositoryPath}</Field>
-          <Field name="Repository ID">
-            <code>{scan.repositoryId ?? "—"}</code>
-          </Field>
-          <Field name="Revision">
-            <code>{scan.revision}</code>
-          </Field>
-          <Field name="Mode">{scan.mode}</Field>
-          <Field name="Scope">{scan.scope}</Field>
-          <Field name="Artifact directory">
-            <code>{scan.scanDir}</code>
-          </Field>
-        </dl>
-      </section>
-      <section className="detail-section">
-        <h3>Scan findings · {scan.findingIds.length}</h3>
-        <RecordLinks
-          ids={scan.findingIds}
-          view="findings"
-          navigate={navigate}
-          empty="No finding records for this scan."
-        />
-      </section>
-      <section className="detail-section">
-        <h3>Linked workflows</h3>
-        <RecordLinks
-          ids={scan.workflowIds}
-          view="workflows"
-          navigate={navigate}
-          empty="Standalone scan — no workflow required."
-        />
-      </section>
-    </>
-  );
-}
-
-function WorkflowDetail({
-  workflow,
-  item,
-  scan,
-  navigate,
-}: {
-  workflow: WorkflowState;
-  item: DashboardItem;
-  scan?: DashboardScan;
-  navigate: Navigate;
-}) {
-  const publication = workflow.stages.publish.result as
-    | CustomPublicationResult
-    | undefined;
-  const result =
-    workflow.stages.dedupe.status === "completed"
-      ? (workflow.stages.dedupe.result as DeduplicateScanResult)
-      : undefined;
-  return (
-    <>
-      <section className="detail-section">
-        <h3>Pipeline</h3>
-        <ol className="pipeline">
-          {(["scan", "publish", "dedupe"] as const).map((stage) => (
-            <li key={stage}>
-              <span>{label(stage)}</span>
-              <Status value={workflow.stages[stage].status} />
-            </li>
-          ))}
-        </ol>
-        {Object.entries(workflow.stages).map(([stage, state]) =>
-          state.status === "failed" && state.error ? (
-            <div key={stage} className="error-message">
-              <strong>{label(stage)} error</strong>
-              <p>{state.error}</p>
-            </div>
-          ) : null,
-        )}
-        <dl>
-          <Field name="Workflow ID">
-            <code>{workflow.id}</code>
-          </Field>
-          <Field name="Scan ID">
-            <code>{workflow.scanId ?? "—"}</code>
-          </Field>
-          <Field name="Created">{timestamp(item.createdAt)}</Field>
-          <Field name="Last workflow update">{timestamp(item.updatedAt)}</Field>
-          {!scan && (
-            <Field name="Artifact directory">
-              <code>{workflow.scanDir ?? "—"}</code>
-            </Field>
-          )}
-          <Field name="Destination">{workflow.destination}</Field>
-          <Field name="Dedupe scope">
-            {workflow.scope?.allRepositories
-              ? "All repositories"
-              : workflow.scope?.repositoryId ?? "Not bound yet"}
-          </Field>
-        </dl>
-      </section>
-      <section className="detail-section">
-        <h3>Publication</h3>
-        <Status value={workflow.stages.publish.status} />
-        <dl>
-          <Field name="Acknowledged findings">
-            {count(publication?.findingCount)}
-          </Field>
-        </dl>
-        {publication && (
-          <RecordLinks
-            ids={publication.findingIds}
-            view="findings"
-            navigate={navigate}
-            empty="Completed — 0 findings published."
-          />
-        )}
-      </section>
-      <section className="detail-section">
-        <h3>Deduplication</h3>
-        <Status value={workflow.stages.dedupe.status} />
-        {result ? (
-          <>
-            <dl>
-              <Field name="Unique findings">
-                {count(result.uniqueFindingIds.length)}
-              </Field>
-              <Field name="Accepted groups">
-                {count(result.duplicateGroups.length)}
-              </Field>
-            </dl>
-            <RecordLinks
-              ids={result.uniqueFindingIds}
-              view="findings"
-              navigate={navigate}
-              empty="Completed — 0 findings."
-            />
-            {result.duplicateGroups.map((members, index) => (
-              <div className="duplicate-set" key={index}>
-                <h4>Group {index + 1}</h4>
-                <p className="text-secondary">
-                  First member is the representative selected for this run.
-                </p>
-                <ul className="record-links">
-                  {members.map((id, memberIndex) => (
-                    <li key={id}>
-                      <button
-                        className="record-link"
-                        onClick={() => navigate("findings", id)}
-                      >
-                        {id}
-                      </button>
-                      <span className="text-secondary">
-                        {memberIndex === 0 ? " · Representative" : ""}
-                        {scan
-                          ? scan.findingIds.includes(id)
-                            ? " · This scan"
-                            : " · Existing finding"
-                          : ""}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </>
-        ) : (
-          <p className="text-secondary">
-            Results appear after review and successful group write-back. No
-            review completion estimate is available.
-          </p>
-        )}
-      </section>
-      {scan ? (
-        <ScanDetail scan={scan} navigate={navigate} />
-      ) : (
-        <section className="detail-section">
-          <h3>Local scan</h3>
-          <p className="text-secondary">
-            {workflow.scanId
-              ? "This workflow references a scan that is not in this service’s database."
-              : "No scan registered yet."}
-          </p>
-          {workflow.repositoryPath && <p>{workflow.repositoryPath}</p>}
-        </section>
-      )}
-    </>
-  );
-}
-
 function Inspector({
   detail,
   navigate,
@@ -369,16 +83,6 @@ function Inspector({
   const finding = detail.finding;
   return (
     <>
-      {detail.workflow ? (
-        <WorkflowDetail
-          workflow={detail.workflow}
-          item={detail.item}
-          scan={detail.scan}
-          navigate={navigate}
-        />
-      ) : detail.scan ? (
-        <ScanDetail scan={detail.scan} navigate={navigate} />
-      ) : null}
       {finding && (
         <>
           <section className="detail-section">
@@ -438,15 +142,6 @@ function Inspector({
             ) : null,
           )}
           <section className="detail-section">
-            <h3>Recorded scans</h3>
-            <RecordLinks
-              ids={detail.scanIds ?? []}
-              view="scans"
-              navigate={navigate}
-              empty="Imported finding — no local scan history."
-            />
-          </section>
-          <section className="detail-section">
             <h3>Duplicate groups</h3>
             <RecordLinks
               ids={(detail.groups ?? []).map((group) => group.groupId)}
@@ -496,7 +191,6 @@ function Results({
   navigate: Navigate;
   now: number;
 }) {
-  const run = view === "scans" || view === "workflows";
   return (
     <div className="table-scroll">
       <table>
@@ -505,32 +199,11 @@ function Results({
         </caption>
         <thead>
           <tr>
-            <th scope="col">
-              {view === "scans"
-                ? "Repository / scan"
-                : view === "findings"
-                  ? "Finding"
-                  : view === "groups"
-                    ? "Group"
-                    : "Workflow"}
-            </th>
-            {view !== "scans" && <th scope="col">Repository</th>}
-            {run && (
-              <>
-                <th scope="col">Stage / status</th>
-                <th scope="col">Mode</th>
-                <th scope="col">Findings</th>
-              </>
-            )}
-            {view === "workflows" && (
-              <>
-                <th scope="col">Published</th>
-                <th scope="col">Unique</th>
-              </>
-            )}
+            <th scope="col">{view === "findings" ? "Finding" : "Group"}</th>
+            <th scope="col">Repository</th>
             {view === "findings" && <th scope="col">Severity</th>}
             {view === "groups" && <th scope="col">Members</th>}
-            <th scope="col">{run ? "Started" : "Created"}</th>
+            <th scope="col">Created</th>
             <th scope="col">Last update</th>
           </tr>
         </thead>
@@ -547,34 +220,10 @@ function Results({
                 {item.id !== item.title && (
                   <code className="row-subtitle">{item.id}</code>
                 )}
-                {view === "workflows" && item.scanId && (
-                  <code className="row-subtitle">{item.scanId}</code>
-                )}
               </th>
-              {view !== "scans" && (
-                <td className="repository-cell">
-                  {item.repositoryPath ??
-                    (item.repositoryIds.join(", ") || "—")}
-                </td>
-              )}
-              {run && (
-                <>
-                  <td>
-                    <div className="cell-stack">
-                      <span>{label(item.stage!)}</span>
-                      <Status value={item.status!} />
-                    </div>
-                  </td>
-                  <td>{item.mode ?? "—"}</td>
-                  <td className="numeric">{count(item.findingCount)}</td>
-                </>
-              )}
-              {view === "workflows" && (
-                <>
-                  <td className="numeric">{count(item.publishedCount)}</td>
-                  <td className="numeric">{count(item.uniqueCount)}</td>
-                </>
-              )}
+              <td className="repository-cell">
+                {item.repositoryIds.join(", ") || "—"}
+              </td>
               {view === "findings" && (
                 <td>
                   <Badge
@@ -613,11 +262,9 @@ function Results({
 }
 
 export function App() {
-  const [view, setView] = useState<DashboardView>("workflows");
+  const [view, setView] = useState<DashboardView>("findings");
   const [query, setQuery] = useState("");
   const [repository, setRepository] = useState("");
-  const [status, setStatus] = useState("");
-  const [stage, setStage] = useState("");
   const [sort, setSort] = useState("activity");
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState("");
@@ -637,8 +284,6 @@ export function App() {
     view,
     query,
     repository,
-    status,
-    stage,
     sort,
     offset: String(offset),
   });
@@ -676,15 +321,12 @@ export function App() {
   // Keep overview/filter choices stable while a new page or detail is loading.
   const overview = saved?.data.overview;
   const now = Date.now();
-  const run = view === "scans" || view === "workflows";
   const current = views.find((v) => v.id === view)!;
   function navigate(next: DashboardView, id?: string) {
     if (next !== view) {
       setView(next);
       setQuery("");
       setRepository("");
-      setStatus("");
-      setStage("");
       setOffset(0);
     }
     setSelected(id ?? "");
@@ -694,8 +336,6 @@ export function App() {
     setOffset(0);
   }
   const counts: Record<DashboardView, number | undefined> = {
-    scans: overview ? total(overview.scans) : undefined,
-    workflows: overview ? total(overview.workflows) : undefined,
     findings: overview?.findings,
     groups: overview?.groups,
   };
@@ -732,11 +372,6 @@ export function App() {
               </Button>
             ))}
           </nav>
-          <div className="sidebar-note">
-            Local workbench state
-            <br />
-            Workflows are optional
-          </div>
         </aside>
         <main>
           <div className="page-heading">
@@ -767,30 +402,6 @@ export function App() {
           </div>
           <div className="overview" aria-label="Service overview">
             <div>
-              <span>Scans running</span>
-              <strong>
-                {count(
-                  overview?.scans["running"] ?? (overview ? 0 : undefined),
-                )}
-              </strong>
-            </div>
-            <div>
-              <span>Publishing</span>
-              <strong>
-                {count(
-                  overview?.workflows["publish"] ?? (overview ? 0 : undefined),
-                )}
-              </strong>
-            </div>
-            <div>
-              <span>Deduplicating</span>
-              <strong>
-                {count(
-                  overview?.workflows["dedupe"] ?? (overview ? 0 : undefined),
-                )}
-              </strong>
-            </div>
-            <div>
               <span>Stored findings</span>
               <strong>{count(overview?.findings)}</strong>
             </div>
@@ -799,19 +410,6 @@ export function App() {
               <strong>{count(overview?.groups)}</strong>
             </div>
           </div>
-          {overview && (
-            <p className="history-summary">
-              Scans: {overview.scans["completed"] ?? 0} completed ·{" "}
-              {overview.scans["failed"] ?? 0} failed ·{" "}
-              {overview.scans["canceled"] ?? 0} canceled
-              <span>
-                Workflows: {overview.workflows["scan"] ?? 0} scanning ·{" "}
-                {overview.workflows["completed"] ?? 0} completed ·{" "}
-                {overview.workflows["failed"] ?? 0} failed ·{" "}
-                {overview.workflows["pending"] ?? 0} pending
-              </span>
-            </p>
-          )}
           <div className="filters">
             <label className="search-field">
               <span className="sr-only">
@@ -838,43 +436,6 @@ export function App() {
                 ))}
               </select>
             </label>
-            {run && (
-              <label>
-                <span>Status</span>
-                <select
-                  value={status}
-                  onChange={(event) => filter(setStatus, event.target.value)}
-                >
-                  <option value="">All statuses</option>
-                  {[
-                    "running",
-                    "completed",
-                    "failed",
-                    view === "scans" ? "canceled" : "pending",
-                  ].map((value) => (
-                    <option key={value} value={value}>
-                      {label(value)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            {view === "workflows" && (
-              <label>
-                <span>Stage</span>
-                <select
-                  value={stage}
-                  onChange={(event) => filter(setStage, event.target.value)}
-                >
-                  <option value="">All stages</option>
-                  {["scan", "publish", "dedupe"].map((value) => (
-                    <option key={value} value={value}>
-                      {label(value)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
             <label>
               <span>Sort</span>
               <select
@@ -929,20 +490,16 @@ export function App() {
               ) : (
                 <div className="empty-state">
                   <h2>
-                    {query || repository || status || stage
+                    {query || repository
                       ? "No matching records"
                       : `No ${current.label.toLowerCase()} yet`}
                   </h2>
                   <p>
-                    {query || repository || status || stage
+                    {query || repository
                       ? "Try another search or filter."
-                      : view === "scans"
-                        ? "Scans recorded in this service’s state directory appear here. Imported findings are available in Findings, even without local scans."
-                        : view === "workflows"
-                          ? "Workflows are optional. Browse Scans, Findings, or Duplicate groups without creating one."
-                          : view === "findings"
-                            ? "Findings from local scans or API imports will appear here."
-                            : "Accepted duplicate groups will appear here after they are saved."}
+                      : view === "findings"
+                        ? "Published or imported findings will appear here."
+                        : "Accepted duplicate groups will appear here after they are saved."}
                   </p>
                 </div>
               )}
@@ -1006,8 +563,8 @@ export function App() {
             )}
           </div>
           <p className="state-note">
-            Statuses are last recorded values, not runner heartbeats. This
-            dashboard only reads the service’s configured workbench database.
+            This dashboard only reads findings and duplicate groups stored in
+            this service.
           </p>
         </main>
       </div>

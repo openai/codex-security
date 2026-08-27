@@ -10,7 +10,7 @@ const assets = new Map([
   ["/dashboard/app.css", ["app.css", "text/css; charset=utf-8"]],
 ]);
 
-/** Serve only bundled UI assets, never a path supplied by a request or scan. */
+/** Serve only bundled UI assets, never a path supplied by a request. */
 export async function serveDashboard(
   path: string,
   response: ServerResponse,
@@ -37,9 +37,9 @@ export async function serveDashboard(
 }
 
 export function dashboardQuery(parameters: URLSearchParams): DashboardQuery {
-  const view = parameters.get("view") ?? "scans";
+  const view = parameters.get("view") ?? "findings";
   const sort = parameters.get("sort") ?? "activity";
-  if (!["scans", "workflows", "findings", "groups"].includes(view))
+  if (!["findings", "groups"].includes(view))
     throw new FindingsError("invalid_request", "Unknown dashboard view.");
   if (sort !== "activity" && sort !== "newest")
     throw new FindingsError(
@@ -51,8 +51,6 @@ export function dashboardQuery(parameters: URLSearchParams): DashboardQuery {
     ...pagination(parameters),
     query: parameters.get("query") ?? "",
     repository: parameters.get("repository") ?? "",
-    status: parameters.get("status") ?? "",
-    stage: parameters.get("stage") ?? "",
     sort,
     ...(parameters.has("id") ? { id: parameters.get("id")! } : {}),
   };

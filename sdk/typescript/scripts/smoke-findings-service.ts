@@ -184,7 +184,7 @@ async function checkDashboard(): Promise<void> {
   assert.equal(response.status, 200);
   const snapshot = (await response.json()) as DashboardSnapshot;
   assert.equal(snapshot.total, findings.length);
-  assert.deepEqual(snapshot.overview.workflows, {});
+  assert.equal(snapshot.overview.findings, findings.length);
   assert.equal(snapshot.items.length, findings.length);
 }
 

@@ -59,13 +59,6 @@ body {
   font-variant-numeric: tabular-nums;
   color: var(--color-text-secondary);
 }
-.sidebar-note {
-  margin-top: auto;
-  padding: 32px 12px 0;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--color-text-secondary);
-}
 main {
   min-width: 0;
   padding: 36px 32px 24px;
@@ -84,11 +77,6 @@ h3 {
   font-size: 14px;
   font-weight: 600;
   margin: 0 0 12px;
-}
-h4 {
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 6px;
 }
 p {
   font-size: 14px;
@@ -128,7 +116,7 @@ p {
 }
 .overview {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   border-block: 1px solid var(--color-border);
   padding: 22px 0;
   gap: 18px;
@@ -146,14 +134,6 @@ p {
   font-weight: 500;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
-}
-.history-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 24px;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  margin-top: 12px;
 }
 .filters {
   display: flex;
@@ -282,11 +262,6 @@ tbody tr:hover {
 .numeric {
   font-variant-numeric: tabular-nums;
 }
-.cell-stack {
-  display: grid;
-  justify-items: start;
-  gap: 6px;
-}
 time {
   font-size: 12px;
 }
@@ -327,8 +302,7 @@ time {
   padding-left: 24px;
   overflow-wrap: anywhere;
 }
-.inspector-heading,
-.section-title {
+.inspector-heading {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -376,27 +350,6 @@ pre {
 .record-links li {
   overflow-wrap: anywhere;
 }
-.pipeline {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  list-style: none;
-  padding: 0;
-  margin: 0 0 20px;
-  gap: 10px;
-}
-.pipeline li {
-  display: grid;
-  justify-items: start;
-  gap: 8px;
-  font-size: 13px;
-  border-top: 2px solid var(--color-border);
-  padding-top: 12px;
-}
-.duplicate-set {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--color-border);
-}
 .error-message {
   background: var(--color-background-danger-soft);
   border-radius: var(--radius-md);
@@ -417,28 +370,6 @@ pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   margin-top: 14px;
-}
-progress {
-  display: block;
-  width: 100%;
-  height: 6px;
-  margin: 14px 0 8px;
-  appearance: none;
-  border: 0;
-  background: var(--color-surface-secondary);
-  border-radius: 4px;
-}
-progress::-webkit-progress-bar {
-  background: var(--color-surface-secondary);
-  border-radius: 4px;
-}
-progress::-webkit-progress-value {
-  background: var(--color-text);
-  border-radius: 4px;
-}
-progress::-moz-progress-bar {
-  background: var(--color-text);
-  border-radius: 4px;
 }
 @media (max-width: 1200px) {
   .content-layout.with-inspector {
@@ -467,24 +398,17 @@ progress::-moz-progress-bar {
     width: auto;
     flex: 1;
   }
-  .eyebrow,
-  .sidebar-note {
+  .eyebrow {
     display: none;
   }
   main {
     padding: 24px 16px;
-  }
-  .overview {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .app-header {
     padding: 16px;
   }
 }
 @media (max-width: 480px) {
-  .overview {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
   .brand {
     gap: 8px;
   }

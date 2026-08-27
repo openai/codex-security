@@ -1308,43 +1308,25 @@ uses the public OpenAI Apps SDK UI design system, follows the browser's light
 or dark preference, and polls the service every five seconds. It never starts,
 cancels, resumes, publishes, edits, or deduplicates anything.
 
-The dashboard opens on Workflows, followed by independent Scans, Findings, and
-Duplicate groups views. Workflows are optional: standalone scans remain visible,
-and a service with only imported findings can browse those findings and their
-stored groups without any local scan or workflow history. Each view supports search,
-repository filtering, sorting, pagination, and record details. Scan and workflow
-views also filter by status; workflows can filter by stage.
+The dashboard opens on Findings, followed by Duplicate groups. Both views
+support search, repository filtering, sorting, pagination, and record details.
+Findings show stored content and links to their duplicate groups. Groups link
+back to their member findings, preserving separate overlapping groups and the
+original finding records.
 
-Scans show saved phase and review-item progress, timing, scope, revision, finding
-IDs, and errors. Workflows add scan/publish/dedupe stage status, publication
-receipts, and completed dedupe results. Findings show stored content and links to
-local scan occurrences and duplicate groups. The dashboard preserves separate
-overlapping groups and original findings. It does not read arbitrary report or
-source paths from stored records.
-
-The dashboard reads **only the server's configured workbench database**, under
-the existing `CODEX_SECURITY_STATE_DIR`. When the server and scanner use that
-same state directory, standalone scans appear before completion. A Docker
-service's private `/state` volume does not automatically contain the host's
-scan history: use the same state storage for the server and local runner if you
-want their scan/workflow progress together. Publication alone sends findings,
-not remote scan or workflow telemetry. Missing local records do not prevent
-browsing imported findings or groups.
-
-Statuses are last recorded values, not process heartbeats. A quiet or stopped
-runner is not automatically declared failed. Missing counts display as unknown;
-successful empty results display zero. The UI retains the last successful data
-on a refresh failure and shows a connection warning until polling succeeds.
-It does not estimate completion times or individual dedupe-review progress.
+The dashboard reads only findings, repository associations, and duplicate groups
+stored in the service's configured database. It does not display scans or
+workflows: publication sends findings, not remote scan or workflow history. It
+does not read report or source paths from stored records. The UI retains the last
+successful data on a refresh failure and shows a connection warning until polling
+succeeds.
 
 `GET /v1/dashboard` returns a consistent read snapshot with overview counts,
 repository choices, a page of records, and optional selected-record details:
 
-- `view`: `scans` (default), `findings`, `groups`, or `workflows`.
-- `query`, `repository`: optional search text and exact repository ID (or saved
-  repository path when a scan has no repository ID).
-- `status`, `stage`: optional exact filters for scan/workflow views.
-- `sort`: `activity` (default; running scans/workflows first) or `newest`.
+- `view`: `findings` (default) or `groups`.
+- `query`, `repository`: optional search text and exact repository ID.
+- `sort`: `activity` (default; most recently updated first) or `newest`.
 - `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
 - `id`: optional exact record ID to include in `detail`; unknown IDs return
   `detail: null` without hiding the list.
