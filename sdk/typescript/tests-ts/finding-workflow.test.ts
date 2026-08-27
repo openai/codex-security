@@ -19,7 +19,11 @@ import {
 } from "../src/finding-workflow.js";
 import { publishScanToCustomInternal } from "../src/custom-publish.js";
 import { deduplicateScanInternal } from "../src/deduplication/scan.js";
-import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
+import {
+  resolvePluginPython,
+  runCodexCommand,
+  runWorkbench,
+} from "../src/runtime.js";
 import type { FindingsDocument, ScanManifest } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -79,6 +83,143 @@ async function fixture() {
     workbenchOptions,
   };
 }
+
+test("migrates workflow columns atomically without losing receipts, pending writes, or resume state", async () => {
+  const { environment, repository, scanDir, workbenchOptions } =
+    await fixture();
+  const completed = {
+    id: "migrated-completed",
+    repositoryPath: repository,
+    scanRequestDigest: "scan-request-hash",
+    scanId: "synthetic-scan",
+    scanDir,
+    artifactDigest: "artifact-hash",
+    destination: "http://synthetic.test/",
+    scope: { repositoryId: "synthetic-repository" },
+    stages: {
+      scan: { status: "completed", result: null },
+      publish: { status: "completed", result: { findingIds: [] } },
+      dedupe: { status: "completed", result: { duplicateGroups: [] } },
+    },
+  } as const;
+  const unfinished = {
+    id: "migrated-unfinished",
+    scope: { allRepositories: true },
+    stages: {
+      scan: { status: "failed", error: "Synthetic scan interruption" },
+      publish: { status: "running", error: "Synthetic earlier failure" },
+      dedupe: {
+        status: "failed",
+        error: "Synthetic lost acknowledgement",
+        result: { duplicateGroups: [["a", "b"]] },
+        pendingWrite: { groups: [["a", "b"]] },
+      },
+    },
+  } as const;
+  const pending = {
+    id: "migrated-pending",
+    stages: {
+      scan: { status: "pending" },
+      publish: { status: "pending" },
+      dedupe: { status: "pending" },
+    },
+  } as const;
+  await mkdir(environment.CODEX_SECURITY_STATE_DIR);
+  const probe = await runCodexCommand(
+    { command: workbenchOptions.python },
+    [
+      "-I",
+      "-B",
+      "-c",
+      `import json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+from workbench_schema import MIGRATIONS, apply_migrations
+db = sqlite3.connect(sys.argv[2])
+db.row_factory = sqlite3.Row
+db.execute("PRAGMA foreign_keys = ON")
+timestamp = "2026-08-01T00:00:00Z"
+apply = lambda migrations: apply_migrations(db, migrations, lambda: timestamp, lambda _: None)
+apply(tuple(m for m in MIGRATIONS if m[0] <= 36))
+states = json.load(sys.stdin)
+with db:
+    for state in states:
+        db.execute("INSERT INTO finding_workflows VALUES (?, ?, ?, ?)",
+                   (state["id"], json.dumps(state), timestamp, "2026-08-02T00:00:00Z"))
+    db.execute("CREATE TABLE synthetic_workflow_references (workflow_id TEXT REFERENCES finding_workflows(id) ON DELETE CASCADE)")
+    db.execute("INSERT INTO synthetic_workflow_references VALUES (?)", (states[0]["id"],))
+before = list(db.iterdump())
+try:
+    apply((*MIGRATIONS, (999, "synthetic failure", "INSERT INTO synthetic_missing_table VALUES (1);")))
+except sqlite3.OperationalError:
+    pass
+else:
+    raise AssertionError("Migration should fail")
+assert not db.in_transaction
+assert list(db.iterdump()) == before, "Migration must roll back schema and data together"
+apply(MIGRATIONS)
+after = list(db.iterdump())
+apply(MIGRATIONS)
+assert list(db.iterdump()) == after
+assert "state_json" not in {row["name"] for row in db.execute("PRAGMA table_info(finding_workflows)")}
+assert db.execute("SELECT COUNT(*) FROM synthetic_workflow_references").fetchone()[0] == 1
+assert list(db.execute("PRAGMA foreign_key_check")) == []
+assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+print(json.dumps([dict(row) for row in db.execute("SELECT * FROM finding_workflows ORDER BY id")]))`,
+      join(PLUGIN_ROOT, "scripts"),
+      join(environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    ],
+    environment,
+    JSON.stringify([completed, unfinished, pending]),
+  );
+  expect(probe.exitCode, probe.stderr).toBe(0);
+  const rows = JSON.parse(probe.stdout);
+  expect(rows[0]).toMatchObject({
+    id: completed.id,
+    repository_path: repository,
+    scan_request_digest: completed.scanRequestDigest,
+    scan_id: completed.scanId,
+    scan_dir: scanDir,
+    artifact_digest: completed.artifactDigest,
+    destination: completed.destination,
+    scope_repository_id: completed.scope.repositoryId,
+    scope_all_repositories: null,
+    scan_status: "completed",
+    scan_error: null,
+    publish_status: "completed",
+    publish_error: null,
+    dedupe_status: "completed",
+    dedupe_error: null,
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: "2026-08-02T00:00:00Z",
+  });
+  expect(JSON.parse(rows[0].results_json)).toEqual({
+    scan: null,
+    publish: completed.stages.publish.result,
+    dedupe: completed.stages.dedupe.result,
+  });
+  for (const state of [completed, unfinished, pending]) {
+    expect(await new FindingWorkflow(state.id, environment).get()).toEqual(
+      state,
+    );
+  }
+  const workflow = new FindingWorkflow(completed.id, environment);
+  for (const stage of ["scan", "publish", "dedupe"] as const) {
+    expect(
+      await workflow.run<unknown>(stage, async () => {
+        throw new Error("Completed work must not run again after migration");
+      }),
+    ).toEqual(completed.stages[stage].result);
+  }
+  const resumed = new FindingWorkflow(unfinished.id, environment);
+  await resumed.run("scan", async () => ({ scanId: "resumed-scan" }));
+  expect((await resumed.get())?.stages.scan).toEqual({
+    status: "completed",
+    result: { scanId: "resumed-scan" },
+  });
+  expect((await resumed.get())?.stages.dedupe).toEqual(
+    unfinished.stages.dedupe,
+  );
+});
 
 test("scan registration commits its workflow identity atomically and rolls back failed registration", async () => {
   const { root, repository, environment, workbenchOptions } = await fixture();

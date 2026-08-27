@@ -1526,7 +1526,10 @@ a different workflow ID. Use one coordinating process per workflow.
 
 Workflow metadata, stage statuses, errors, publication receipts, and results live
 in the local workbench SQLite database under `CODEX_SECURITY_STATE_DIR`, outside
-the sealed scan artifacts. Successful empty results are stored as completed
+the sealed scan artifacts. Identity, scan/artifact references, destination, scope,
+hashes, stage statuses, and errors use explicit columns; only receipts and result
+payloads use JSON. Existing workflow rows are migrated atomically in place.
+Successful empty results are stored as completed
 results, not treated as missing work. An empty scan can complete workflow
 publication with an empty receipt. Dry-run never advances a workflow stage.
 
