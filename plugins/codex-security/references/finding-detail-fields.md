@@ -4,6 +4,10 @@ For every reportable finding in `findings.json`, preserve the validated reasonin
 
 ## Writing Rules
 
+- Write the title and `summary` for the person responsible for the affected feature. Lead with who can do what, through which product action or API, and what another user would observe. Explain required access or configuration in ordinary language before naming library internals. For a library-only target, describe the caller-visible behavior; do not invent a downstream product or deployment.
+- Use `attackPath.summary` for a short reproduction narrative: required access and setup, the action or crafted input, expected behavior, and the observed or source-predicted result. Say whether it was run. Do not invent UI steps, payloads, commands, or results to fill gaps.
+- Connect the low-level failure to the product consequence in `rootCause.summary`: explain how the feature reaches the library, which check fails, and how that failure affects the request, user, or shared service. Keep broader impact conditional when isolation, deployment, or runtime behavior is unverified.
+- Describe concrete product behavior instead of abstract security labels. State each fact once in reader-facing prose; structured fields are supporting data, not a checklist of labels to repeat in the description.
 - Wrap RPC names, functions, types, fields, parameters, configuration keys, literal identifiers, and short expressions in single backticks. For example: `environment/add`, `environmentId`, `execServerUrl`, and `EnvironmentManager::upsert_environment()`.
 - Keep code out of prose. Put source snippets in `codeEvidence[].code`, then reference them from the section that explains why the snippet matters. The workspace consolidates those referenced snippets under **Root cause** so the violated invariant and its source proof stay together.
 - Root cause must be a source-backed walkthrough, not a verdict paragraph. Start with the code where user-controlled data is declared, decoded, or read; follow each meaningful call, transformation, or state transition; then show the missing control, dangerous operation, and later consumer when it affects impact.

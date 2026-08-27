@@ -150,7 +150,56 @@ describe("scan publication preparation", () => {
     expect(issue.description).toContain("**Uploaded:** 2026-06-01T10:30:00Z");
     expect(issue.description).toContain("without containment validation");
     expect(issue.description).toContain("Normalize destinations");
+    expect(
+      issue.description.indexOf("without containment validation"),
+    ).toBeLessThan(issue.description.indexOf("**Scan ID:**"));
+    expect(issue.description.indexOf("Normalize destinations")).toBeLessThan(
+      issue.description.indexOf("**Scan ID:**"),
+    );
     expect(issue.description).not.toContain("/blob/deadbeef/");
+  });
+
+  test("keeps the reproduction and validation limits ahead of scan metadata", async () => {
+    const scanDirectory = await copyExample();
+    const findingsPath = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(findingsPath);
+    const finding = findings.findings[0]!;
+    const reproduction =
+      "Import an archive containing ../escape.txt. The importer should reject it; source review shows it writing outside the selected directory. This was not run.";
+    const unrun = "No runtime reproduction was run.";
+    const attackPath = {
+      summary: reproduction,
+      limitations: [unrun, "Files must be writable by the importing process."],
+    };
+    const validation = {
+      method: "Source review",
+      summary: "The importer passes the entry name to the filesystem write.",
+      limitations: [unrun],
+      counterEvidence: ["The user must first choose to import the archive."],
+    };
+    finding.attackPath = attackPath;
+    finding.validation = validation;
+    await writeJson(findingsPath, findings);
+    await reseal(scanDirectory);
+
+    const { description } = (
+      await prepareScanPublication(scanDirectory, DESTINATION)
+    ).issues[0]!;
+
+    const metadata = description.indexOf("**Scan ID:**");
+    for (const text of [
+      finding.summary,
+      reproduction,
+      validation.summary,
+      validation.method,
+      ...validation.limitations,
+      ...validation.counterEvidence,
+      ...attackPath.limitations,
+    ]) {
+      expect(description).toContain(text);
+      expect(description.indexOf(text)).toBeLessThan(metadata);
+    }
+    expect(description.split(unrun)).toHaveLength(2);
   });
 
   test("uses the canonical scan directory beneath an aliased parent", async () => {

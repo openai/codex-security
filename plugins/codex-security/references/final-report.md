@@ -118,7 +118,7 @@ Affected lines must include the root broken control or dangerous sink line when 
 Then render these subsections under each finding:
 
 - `#### Summary`
-  - Explain why the issue matters, what the vulnerable path is, and why the current controls are insufficient.
+  - Lead with a short user-facing reproduction summary: required access, the product action or crafted input, expected behavior, and the observed or source-predicted result. State whether the sequence was run. Explain how the low-level failure reaches the product behavior; do not make the reader infer this from library names or source locations. For a library-only target, describe caller-visible behavior without inventing a deployment.
   - Wrap code identifiers, RPC names, functions, types, fields, parameters, configuration keys, and literal values in single backticks.
 - `#### Root Cause`
   - State the violated security invariant and explain exactly how the implementation breaks it.
