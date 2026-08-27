@@ -1,0 +1,37 @@
+{
+  "name": "codex-security-triage-finding-evals",
+  "private": true,
+  "description": "Promptfoo evals for the Codex Security triage-finding skill",
+  "scripts": {
+    "setup": "pnpm install --frozen-lockfile && pnpm rebuild better-sqlite3",
+    "calibration:generate": "node scripts/generate-calibration-tests.js",
+    "calibration:hydrate": "node scripts/hydrate-calibration-repos.js",
+    "sastbench:install": "node sastbench/scripts/install-sastbench.js",
+    "sastbench:hydrate": "node sastbench/scripts/hydrate-sastbench-repos.js",
+    "sastbench:prepare": "pnpm run sastbench:install && pnpm run sastbench:hydrate",
+    "test:calibration": "pnpm run test:dataset && pnpm run test:calibration-generate && pnpm run test:calibration-evidence && pnpm run test:calibration-hydrate",
+    "test:calibration-evidence": "node scripts/test-calibration-evidence.js",
+    "test:calibration-generate": "node scripts/test-generate-calibration-tests.js",
+    "test:calibration-hydrate": "node scripts/test-hydrate-calibration-repos.js",
+    "test:dataset": "node scripts/test-calibration-dataset.js",
+    "test:deterministic": "node scripts/test-app-surface-instructions.js && node scripts/test-calibration-dataset.js && node scripts/test-generate-calibration-tests.js && node scripts/test-calibration-evidence.js && node scripts/test-hydrate-calibration-repos.js && node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js",
+    "test:instructions": "node scripts/test-app-surface-instructions.js",
+    "test:sastbench": "node sastbench/scripts/test-sastbench-lib.js && node sastbench/scripts/test-install-sastbench.js && node sastbench/scripts/test-hydrate-sastbench-repos.js && node sastbench/scripts/test-sastbench-result.js && node sastbench/scripts/test-promptfoo-native-harness.js",
+    "validate": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./promptfooconfig.yaml",
+    "validate:calibration": "pnpm run calibration:generate && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo validate config -c ./promptfooconfig.calibration.yaml",
+    "validate:sastbench": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node sastbench/scripts/run-sastbench-promptfoo.js validate config -c ./sastbench/promptfooconfig.sastbench.yaml",
+    "validate:sastbench:sample": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node sastbench/scripts/run-sastbench-promptfoo.js validate config -c ./sastbench/promptfooconfig.sastbench-sample.yaml",
+    "eval": "mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.yaml -o ./artifacts/triage-finding-eval.json --no-cache --no-share",
+    "eval:smoke": "mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.yaml -o ./artifacts/triage-finding-eval-smoke.json --no-cache --no-share --filter-range 0:1",
+    "eval:calibration": "pnpm run calibration:generate && pnpm run calibration:hydrate && mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.calibration.yaml -o ./artifacts/triage-finding-calibration-eval.json --no-cache --no-share",
+    "eval:calibration:smoke": "node scripts/generate-calibration-tests.js --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable --output artifacts/calibration-smoke.yaml && node scripts/hydrate-calibration-repos.js --case oss-dompurify-ghsa-v8jm-5vwx-cfxm --variant vulnerable && mkdir -p artifacts && PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo eval -c ./promptfooconfig.calibration-smoke.yaml -o ./artifacts/triage-finding-calibration-smoke.json --no-cache --no-share",
+    "eval:sastbench": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node sastbench/scripts/run-sastbench-promptfoo.js eval -c ./sastbench/promptfooconfig.sastbench.yaml --no-cache --no-share",
+    "eval:sastbench:sample": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node sastbench/scripts/run-sastbench-promptfoo.js eval -c ./sastbench/promptfooconfig.sastbench-sample.yaml --no-cache --no-share --max-concurrency 32",
+    "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true promptfoo view"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "0.137.0",
+    "@opencode-ai/sdk": "1.14.33",
+    "promptfoo": "0.121.15"
+  }
+}
