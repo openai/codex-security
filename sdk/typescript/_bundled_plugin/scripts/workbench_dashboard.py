@@ -38,7 +38,8 @@ SELECT workflows.id, workflows.id AS title,
     CASE WHEN scans.id IS NOT NULL AND scans.status = 'complete' THEN
         (SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = scans.id) END AS findingCount,
     json_extract(results_json, '$.publish.findingCount') AS publishedCount,
-    json_array_length(json_extract(results_json, '$.dedupe.uniqueFindingIds')) AS uniqueCount
+    CASE WHEN dedupe_status = 'completed' THEN
+        json_array_length(json_extract(results_json, '$.dedupe.uniqueFindingIds')) END AS uniqueCount
 FROM (
     SELECT *, CASE WHEN scan_status != 'completed' THEN 'scan'
         WHEN publish_status != 'completed' THEN 'publish'
@@ -48,11 +49,14 @@ FROM (
 
 FINDING_RECORDS = """
 SELECT findings.id, json_extract(details_json, '$.title') AS title,
-    (SELECT json_group_array(repository_id) FROM finding_repositories
-     WHERE finding_id = findings.id) AS repositoryIds,
+    COALESCE(repositories.ids, '[]') AS repositoryIds,
     json_extract(details_json, '$.severity.level') AS severity,
     findings.created_at AS createdAt, findings.updated_at AS updatedAt
-FROM findings WHERE details_json IS NOT NULL
+FROM findings LEFT JOIN (
+    SELECT finding_id, json_group_array(repository_id) AS ids
+    FROM finding_repositories GROUP BY finding_id
+) AS repositories ON repositories.finding_id = findings.id
+WHERE details_json IS NOT NULL
 """
 
 GROUP_RECORDS = """
@@ -155,8 +159,8 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
         columns = ["id", "title", "repositoryIds"]
         if view in {"scans", "workflows"}:
             columns.extend(("scanId", "repositoryPath"))
-        clauses.append("(" + " OR ".join(f"instr(lower(COALESCE({c}, '')), ?) > 0" for c in columns) + ")")
-        values.extend([query["query"].lower()] * len(columns))
+        clauses.append("(" + " OR ".join(f"instr(lower(COALESCE({c}, '')), lower(?)) > 0" for c in columns) + ")")
+        values.extend([query["query"]] * len(columns))
     if query.get("repository"):
         clauses.append("EXISTS (SELECT 1 FROM json_each(repositoryIds) WHERE value = ?)")
         values.append(query["repository"])
@@ -176,16 +180,15 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
             f"SELECT CASE WHEN status = 'running' THEN stage ELSE status END, COUNT(*) "
             f"FROM ({WORKFLOW_RECORDS}) GROUP BY 1"
         ))
-        repositories = connection.execute("""
+        repositories = connection.execute(f"""
             SELECT id, MAX(label) AS label FROM (
                 SELECT COALESCE(target_id, target_path) AS id, target_path AS label FROM scans
                 UNION ALL
                 SELECT repository_id, COALESCE(targets.display_name, repository_id)
                 FROM finding_repositories LEFT JOIN security_targets AS targets ON targets.id = repository_id
                 UNION ALL
-                SELECT COALESCE(scope_repository_id, repository_path),
-                       COALESCE(repository_path, scope_repository_id)
-                FROM finding_workflows
+                SELECT repository.value, COALESCE(repositoryPath, repository.value)
+                FROM ({WORKFLOW_RECORDS}), json_each(repositoryIds) AS repository
             ) WHERE id IS NOT NULL GROUP BY id ORDER BY label, id
         """).fetchall()
         total = connection.execute(f"SELECT COUNT(*) FROM ({records}) {where}", values).fetchone()[0]

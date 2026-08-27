@@ -225,9 +225,10 @@ function WorkflowDetail({
   const publication = workflow.stages.publish.result as
     | CustomPublicationResult
     | undefined;
-  const result = workflow.stages.dedupe.result as
-    | DeduplicateScanResult
-    | undefined;
+  const result =
+    workflow.stages.dedupe.status === "completed"
+      ? (workflow.stages.dedupe.result as DeduplicateScanResult)
+      : undefined;
   return (
     <>
       <section className="detail-section">
@@ -648,7 +649,7 @@ export function App() {
     () =>
       pollDashboard(
         async (signal) => {
-          const response = await fetch(`/v1/dashboard?${key}`, {
+          const response = await fetch(`../v1/dashboard?${key}`, {
             signal,
             cache: "no-store",
           });
@@ -826,17 +827,20 @@ export function App() {
             </label>
             <label>
               <span>Repository</span>
+              {/* Select needs nonempty values for arrow-key navigation. */}
               <Select
                 size="lg"
-                value={repository}
+                value={`repo:${repository}`}
                 options={[
-                  { value: "", label: "All repositories" },
+                  { value: "repo:", label: "All repositories" },
                   ...(saved?.data.repositories ?? []).map((repo) => ({
-                    value: repo.id,
+                    value: `repo:${repo.id}`,
                     label: repo.label,
                   })),
                 ]}
-                onChange={(option) => filter(setRepository, option.value)}
+                onChange={(option) =>
+                  filter(setRepository, option.value.slice(5))
+                }
               />
             </label>
             {run && (
@@ -844,9 +848,9 @@ export function App() {
                 <span>Status</span>
                 <Select
                   size="lg"
-                  value={status}
+                  value={status || "all"}
                   options={[
-                    { value: "", label: "All statuses" },
+                    { value: "all", label: "All statuses" },
                     ...[
                       "running",
                       "completed",
@@ -854,7 +858,12 @@ export function App() {
                       ...(view === "scans" ? ["canceled"] : ["pending"]),
                     ].map((value) => ({ value, label: label(value) })),
                   ]}
-                  onChange={(option) => filter(setStatus, option.value)}
+                  onChange={(option) =>
+                    filter(
+                      setStatus,
+                      option.value === "all" ? "" : option.value,
+                    )
+                  }
                 />
               </label>
             )}
@@ -863,15 +872,17 @@ export function App() {
                 <span>Stage</span>
                 <Select
                   size="lg"
-                  value={stage}
+                  value={stage || "all"}
                   options={[
-                    { value: "", label: "All stages" },
+                    { value: "all", label: "All stages" },
                     ...["scan", "publish", "dedupe"].map((value) => ({
                       value,
                       label: label(value),
                     })),
                   ]}
-                  onChange={(option) => filter(setStage, option.value)}
+                  onChange={(option) =>
+                    filter(setStage, option.value === "all" ? "" : option.value)
+                  }
                 />
               </label>
             )}

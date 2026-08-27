@@ -134,6 +134,14 @@ test("dashboard works with no scans or workflows, and never calls an embedding p
       throw new Error("Read-only dashboard called embeddings");
     },
   });
+  const redirect = await fetch(`${base}/dashboard`, { redirect: "manual" });
+  expect(redirect.status).toBe(308);
+  for (const prefix of ["", "/service"]) {
+    expect(
+      new URL(redirect.headers.get("location")!, `${base}${prefix}/dashboard`)
+        .pathname,
+    ).toBe(`${prefix}/dashboard/`);
+  }
   for (const view of ["scans", "workflows", "findings", "groups"]) {
     const result = await dashboard(base, { view });
     expect(result).toMatchObject({
@@ -169,7 +177,11 @@ test("dashboard browses imported findings and overlapping groups without local r
   const first = finding(1),
     second = finding(2),
     third = finding(3);
-  await store.insert([embedded(1), embedded(2)], "repository-a");
+  first.title = "Évaluation synthétique";
+  await store.insert(
+    [{ ...embedded(1), finding: first }, embedded(2)],
+    "repository-a",
+  );
   await store.insert([embedded(3)], "repository-b");
   const groups = await store.storeDedupeGroups([
     [first.findingId, second.findingId],
@@ -291,6 +303,26 @@ print('null')`,
   expect(
     await database(environment, "print(json.dumps(list(db.iterdump())))"),
   ).toEqual(before);
+  await database(
+    environment,
+    `
+from workbench_finding_workflows import finding_workflow
+with db:
+    db.execute("INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES ('repository-a', '/synthetic/repo', 'Synthetic repo', '2026-01-01', '2026-01-01')")
+    db.execute("UPDATE scans SET target_id = 'repository-a' WHERE target_path = '/synthetic/repo'")
+finding_workflow(db, {'id': 'linked-run', 'action': 'bind', 'binding': {'repositoryPath': '/synthetic/repo', 'scanId': 'standalone'}}, '2026-01-01')
+print('null')`,
+  );
+  const linked = await dashboard(base, {
+    view: "workflows",
+    repository: "repository-a",
+    id: "linked-run",
+  });
+  expect(linked.total).toBe(1);
+  expect(
+    linked.repositories.filter((repo) => repo.label === "/synthetic/repo"),
+  ).toEqual([{ id: "repository-a", label: "/synthetic/repo" }]);
+  expect(linked.detail!.scan!.workflowIds).toEqual(["linked-run"]);
 });
 
 test("dashboard reads optional workflow stages and distinguishes empty results from unfinished work", async () => {
@@ -300,16 +332,19 @@ test("dashboard reads optional workflow stages and distinguishes empty results f
     environment,
     `
 from workbench_finding_workflows import finding_workflow
-for workflow_id in ('empty-run', 'failed-run'):
+for workflow_id in ('empty-run', 'failed-run', 'pending-write'):
     finding_workflow(db, {'id': workflow_id, 'action': 'bind', 'binding': {'scanId': 'unavailable-scan', 'destination': 'http://localhost:3000/', 'scope': {'repositoryId': 'repository-a'}}}, '2026-01-01T00:00:00Z')
     finding_workflow(db, {'id': workflow_id, 'action': 'complete', 'stage': 'scan', 'result': None}, '2026-01-01T00:00:00Z')
 finding_workflow(db, {'id': 'empty-run', 'action': 'complete', 'stage': 'publish', 'result': {'findingIds': [], 'findingCount': 0}}, '2026-01-02T00:00:00Z')
 finding_workflow(db, {'id': 'empty-run', 'action': 'complete', 'stage': 'dedupe', 'result': {'uniqueFindingIds': [], 'duplicateGroups': [], 'deduplicationStatus': 'completed'}}, '2026-01-02T00:00:00Z')
 finding_workflow(db, {'id': 'failed-run', 'action': 'fail', 'stage': 'publish', 'error': 'Synthetic publication failure'}, '2026-01-03T00:00:00Z')
+finding_workflow(db, {'id': 'pending-write', 'action': 'complete', 'stage': 'publish', 'result': {'findingIds': ['synthetic-a', 'synthetic-b'], 'findingCount': 2}}, '2026-01-03T00:00:00Z')
+finding_workflow(db, {'id': 'pending-write', 'action': 'prepare-dedupe', 'stage': 'dedupe', 'result': {'uniqueFindingIds': ['synthetic-a'], 'duplicateGroups': [['synthetic-a', 'synthetic-b']], 'deduplicationStatus': 'completed'}, 'pendingWrite': {'groups': [['synthetic-a', 'synthetic-b']]}}, '2026-01-03T00:00:00Z')
+finding_workflow(db, {'id': 'pending-write', 'action': 'fail', 'stage': 'dedupe', 'error': 'Synthetic write-back failure'}, '2026-01-03T00:00:00Z')
 print('null')`,
   );
   const result = await dashboard(base, { view: "workflows", id: "empty-run" });
-  expect(result.overview.workflows).toEqual({ completed: 1, failed: 1 });
+  expect(result.overview.workflows).toEqual({ completed: 1, failed: 2 });
   expect(result.detail!.item).toMatchObject({
     stage: "dedupe",
     status: "completed",
@@ -334,11 +369,21 @@ print('null')`,
   expect(
     (await dashboard(base, { view: "workflows", query: "unavailable-scan" }))
       .total,
-  ).toBe(2);
+  ).toBe(3);
   expect(
     (await dashboard(base, { view: "workflows", repository: "repository-a" }))
       .total,
-  ).toBe(2);
+  ).toBe(3);
+  const pending = await dashboard(base, {
+    view: "workflows",
+    id: "pending-write",
+  });
+  expect(pending.detail!.item.uniqueCount).toBeNull();
+  expect(pending.detail!.workflow!.stages.dedupe).toMatchObject({
+    status: "failed",
+    pendingWrite: { groups: [["synthetic-a", "synthetic-b"]] },
+  });
+  expect(pending.overview.groups).toBe(0);
 });
 
 async function getGroups(

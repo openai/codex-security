@@ -583,7 +583,18 @@ try {
       const response = await fetch(`${base}${path}`);
       assert.equal(response.status, 200);
       assert.ok(response.headers.get("content-type").startsWith(contentType));
-      assert.ok((await response.text()).length > 0);
+      const body = await response.text();
+      assert.ok(body.length > 0);
+      if (contentType === "text/html") {
+        const mounted = new URL("/service/dashboard/", base);
+        const assets = [...body.matchAll(/(?:href|src)="([^"]+)"/g)].map(
+          (match) => new URL(match[1], mounted).pathname,
+        );
+        assert.deepEqual(assets, [
+          "/service/dashboard/app.css",
+          "/service/dashboard/app.js",
+        ]);
+      }
     }
     assert.equal((await fetch(`${base}/dashboard/package.json`)).status, 404);
   } finally {

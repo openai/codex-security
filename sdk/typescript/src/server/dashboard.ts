@@ -5,7 +5,6 @@ import { FindingsError } from "./errors.js";
 import { pagination } from "./validation.js";
 
 const assets = new Map([
-  ["/dashboard", ["index.html", "text/html; charset=utf-8"]],
   ["/dashboard/", ["index.html", "text/html; charset=utf-8"]],
   ["/dashboard/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/dashboard/app.css", ["app.css", "text/css; charset=utf-8"]],
@@ -16,6 +15,11 @@ export async function serveDashboard(
   path: string,
   response: ServerResponse,
 ): Promise<boolean> {
+  if (path === "/dashboard") {
+    response.writeHead(308, { Location: "dashboard/" });
+    response.end();
+    return true;
+  }
   const asset = assets.get(path);
   if (!asset) return false;
   const body = await readFile(
