@@ -90,7 +90,7 @@ async function startService(): Promise<void> {
     "--volume",
     `${join(repositoryRoot, "docker/fixtures/mock-reviews.mjs")}:/test/mock-reviews.mjs:ro`,
     "--volume",
-    `${fileURLToPath(new URL("fixtures/findings-service-sqlite.py", import.meta.url))}:/test/findings-service-sqlite.py:ro`,
+    `${fileURLToPath(new URL("fixtures/findings-service-sqlite.ts", import.meta.url))}:/test/findings-service-sqlite.ts:ro`,
     "findings",
     "--import",
     "/test/mock-embeddings.mjs",
@@ -215,8 +215,9 @@ function checkCliDeduplication(): void {
   docker([
     "exec",
     container,
-    "python3",
-    "/test/findings-service-sqlite.py",
+    "node",
+    "--experimental-strip-types",
+    "/test/findings-service-sqlite.ts",
     JSON.stringify(ids),
     "--prepare-scan",
   ]);
@@ -282,8 +283,9 @@ function checkStorage(expectGroups = false): void {
   docker([
     "exec",
     container,
-    "python3",
-    "/test/findings-service-sqlite.py",
+    "node",
+    "--experimental-strip-types",
+    "/test/findings-service-sqlite.ts",
     JSON.stringify(ids),
     ...(expectGroups ? ["--expect-groups"] : []),
   ]);
