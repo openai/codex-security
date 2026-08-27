@@ -103,8 +103,8 @@ describe("TypeScript package skeleton", () => {
 
   test("pins each Node.js minimum and preserves protected and latest LTS checks", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    expect(jobs["test"]?.name).toBe(
-      "${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+    expect(jobs["test"]?.name).toContain(
+      "tests / ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
     );
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
@@ -114,7 +114,11 @@ describe("TypeScript package skeleton", () => {
         node,
       })),
     });
-    expect(jobs["windows"]?.name).toBe(
+    expect(jobs["required-test"]?.name).toContain("${{ matrix.os }} / node-22");
+    expect(jobs["required-test"]?.strategy?.matrix).toEqual({
+      os: ["ubuntu-latest", "macos-latest"],
+    });
+    expect(jobs["windows"]?.name).toContain(
       "windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
     );
     expect(jobs["windows"]?.needs).toEqual([

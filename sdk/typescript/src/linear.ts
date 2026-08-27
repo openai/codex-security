@@ -112,12 +112,24 @@ export async function importLinearIssues(options: {
       }
     }
 
-    return issues.map(({ identifier, title, url, description }) => ({
-      source: "linear",
-      id: identifier,
-      url,
-      text: `Title: ${title}\n\n${description ?? ""}`,
-    }));
+    const imports: ImportedIssue[] = [];
+    for (const issue of issues) {
+      const comments = await issue.comments({ first: 50 });
+      while (comments.pageInfo.hasNextPage) await comments.fetchNext();
+      imports.push({
+        source: "linear",
+        id: issue.identifier,
+        url: issue.url,
+        text: [
+          `Title: ${issue.title}`,
+          `<description>\n${issue.description ?? ""}\n</description>`,
+          ...comments.nodes.map(
+            ({ url, body }) => `<comment>\nURL: ${url}\n\n${body}\n</comment>`,
+          ),
+        ].join("\n\n"),
+      });
+    }
+    return imports;
   } catch (error) {
     if (error instanceof CodexSecurityError) throw error;
     if (
@@ -154,16 +166,22 @@ function linearIssueFilter(input: string | undefined): JsonObject {
   );
 }
 
-function linearIssueReference(input: string): {
+export function isLinearIssueIdentifier(input: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9_-]*-\d+$/u.test(input);
+}
+
+export function linearIssueReference(input: string): {
   id: string;
   workspace?: string;
 } {
   if (!/^https?:\/\//iu.test(input)) return { id: input };
   const url = new URL(input);
-  const match = /^\/([^/]+)\/issue\/([A-Z][A-Z0-9]*-\d+)(?:\/|$)/iu.exec(
-    url.pathname,
-  );
-  if (url.hostname !== "linear.app" || match === null) {
+  const match = /^\/([^/]+)\/issue\/([^/]+)(?:\/|$)/iu.exec(url.pathname);
+  if (
+    url.hostname !== "linear.app" ||
+    match === null ||
+    !isLinearIssueIdentifier(match[2]!)
+  ) {
     throw new CodexSecurityError("Linear issue URL is invalid.");
   }
   return { id: match[2]!, workspace: match[1]!.toLowerCase() };

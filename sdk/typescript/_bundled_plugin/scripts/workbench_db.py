@@ -21,6 +21,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 try:
     import fcntl as posix_file_lock
@@ -2499,6 +2500,8 @@ def verify_linear_publication_scan(
         raise SystemExit(
             "The selected scan directory does not match its local Codex Security scan history."
         )
+    if "seal_manifest_digest" in scan.keys():
+        require_recorded_manifest_digest(scan, recorded_directory)
 
     stored_findings = {
         row["id"]: row["finding_id"]
@@ -2518,6 +2521,52 @@ def verify_linear_publication_scan(
             "The completed scan findings do not exactly match local Codex Security scan history."
         )
     return scan
+
+
+def inspect_linear_publication(args: argparse.Namespace) -> dict[str, Any]:
+    payload, destination, findings = linear_publication_input(args, recording=False)
+    database_uri = f"file:{quote(str(database_path()), safe='')}?mode=ro"
+    with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN")
+        scan = verify_linear_publication_scan(connection, payload, findings)
+        recorded: dict[str, dict[str, str]] = {}
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
+        ).fetchone():
+            for row in connection.execute(
+                """
+                SELECT finding_id, occurrence_id, external_id, external_url
+                FROM finding_publications
+                WHERE scan_id = ? AND destination_type = ? AND team_id = ? AND project_id IS ?
+                ORDER BY created_at, external_id
+                """,
+                (
+                    scan["id"],
+                    destination["type"],
+                    destination["teamId"],
+                    destination.get("projectId"),
+                ),
+            ):
+                recorded.setdefault(
+                    row["occurrence_id"],
+                    {
+                        "findingId": row["finding_id"],
+                        "occurrenceId": row["occurrence_id"],
+                        "issueIdentifier": row["external_id"],
+                        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
+                    },
+                )
+        return {
+            "scanId": scan["id"],
+            "destination": destination,
+            "findingCount": len(findings),
+            "recorded": [
+                recorded[finding["occurrenceId"]]
+                for finding in findings
+                if finding["occurrenceId"] in recorded
+            ],
+        }
 
 
 def prepare_linear_publication(
@@ -3808,6 +3857,10 @@ def main() -> None:
         return
     if args.command == "inspect-setup":
         result = inspect_setup(args)
+        print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
+    if args.command == "inspect-linear-publication":
+        result = inspect_linear_publication(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(connect()) as connection:

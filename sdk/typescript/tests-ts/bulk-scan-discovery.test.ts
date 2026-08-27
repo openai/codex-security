@@ -71,6 +71,10 @@ class FakePrompt implements BulkScanPrompt {
     return (options.find((option) => option.value === value) ?? options[0]!)
       .value;
   }
+
+  public async checkbox<Value extends string>(): Promise<Value[]> {
+    throw new Error("unexpected checkbox prompt");
+  }
 }
 
 interface Repository {

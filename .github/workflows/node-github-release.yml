@@ -405,6 +405,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          release_workspace="$(mktemp -d)"
+          trap 'rm -rf "$release_workspace"' EXIT
+
           verify_release_tag() {
             local live_ref live_type live_object live_commit
             if ! live_ref="$(
@@ -495,8 +498,8 @@ jobs:
           )"
           if [[ -n "$existing_release" ]]; then
             asset_name="$(basename "$RELEASE_ARCHIVE")"
-            downloaded_assets="$(mktemp -d)"
-            trap 'rm -rf "$downloaded_assets"' EXIT
+            downloaded_assets="$release_workspace/downloaded-assets"
+            mkdir "$downloaded_assets"
             gh release download "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern "$asset_name" \
@@ -514,19 +517,21 @@ jobs:
                 "$downloaded_archive"
           fi
 
-          existing_notes=""
+          existing_notes_file="$release_workspace/existing-notes.md"
+          : > "$existing_notes_file"
           if [[ -n "$existing_release" ]]; then
-            existing_notes="$(
-              printf '%s\n' "$existing_release" |
-                node --input-type=module --eval '
-                  import { readFileSync } from "node:fs";
-                  const release = JSON.parse(readFileSync(0, "utf8"));
-                  if (release.body != null && typeof release.body !== "string") {
-                    throw new Error("Existing release notes must be a string.");
-                  }
-                  process.stdout.write(release.body ?? "");
-                '
-            )"
+            printf '%s\n' "$existing_release" |
+              node --input-type=module --eval '
+                import { readFileSync, writeFileSync } from "node:fs";
+                const release = JSON.parse(readFileSync(0, "utf8"));
+                if (release.body != null && typeof release.body !== "string") {
+                  throw new Error("Existing release notes must be a string.");
+                }
+                writeFileSync(
+                  process.argv[1],
+                  (release.body ?? "").replace(/(?:\r?\n)+$/u, ""),
+                );
+              ' "$existing_notes_file"
           fi
 
           notes_args=(
@@ -541,73 +546,39 @@ jobs:
           if [[ -n "$PREVIOUS_TAG" ]]; then
             notes_args+=(-f "previous_tag_name=$PREVIOUS_TAG")
           fi
-          generated_notes="$(gh api "${notes_args[@]}" --jq '.body')"
-          if [[ -z "$generated_notes" ]]; then
-            echo "Generated GitHub release notes must not be empty." >&2
-            exit 1
+          generated_notes_file="$release_workspace/generated-notes.md"
+          gh api "${notes_args[@]}" |
+            node --input-type=module --eval '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const response = JSON.parse(readFileSync(0, "utf8"));
+              if (typeof response.body !== "string") {
+                throw new Error("Generated GitHub release notes must be a string.");
+              }
+              writeFileSync(process.argv[1], response.body);
+            ' "$generated_notes_file"
+          release_note_args=()
+
+          tagged_notes_file="$release_workspace/tagged-notes.md"
+          if git show "$RELEASE_SHA:.github/release-notes.md" \
+            > "$tagged_notes_file" 2>/dev/null; then
+            release_note_args+=(
+              --tagged-notes-file "$tagged_notes_file"
+            )
           fi
 
-          summary_start="<!-- codex-security-release-summary:start -->"
-          summary_end="<!-- codex-security-release-summary:end -->"
-          release_summary=""
-          if git cat-file -e "$RELEASE_SHA:.github/release-notes.md" 2>/dev/null; then
-            release_summary="$(
-              git show "$RELEASE_SHA:.github/release-notes.md"
-            )"
-            summary_header="${release_summary%%$'\n'*}"
-            summary_body="${release_summary#*$'\n'}"
-            expected_header="<!-- release-version: $RELEASE_VERSION -->"
-            if [[ "$summary_header" != "$expected_header" ||
-                  "$summary_body" == "$release_summary" ||
-                  -z "${summary_body//[[:space:]]/}" ]]; then
-              echo "Release notes must start with $expected_header and include a reviewed summary." >&2
-              exit 1
-            fi
-          elif [[ -n "$existing_notes" ]]; then
-            release_summary="$(
-              printf '%s\n' "$existing_notes" |
-                CODEX_SECURITY_SUMMARY_START="$summary_start" \
-                CODEX_SECURITY_SUMMARY_END="$summary_end" \
-                node --input-type=module --eval '
-                  import { readFileSync } from "node:fs";
-                  const notes = readFileSync(0, "utf8");
-                  const start = process.env.CODEX_SECURITY_SUMMARY_START;
-                  const end = process.env.CODEX_SECURITY_SUMMARY_END;
-                  const startIndex = notes.indexOf(start);
-                  const endIndex = notes.indexOf(end);
-                  if (startIndex === -1 && endIndex === -1) process.exit(0);
-                  if (
-                    startIndex === -1 ||
-                    endIndex <= startIndex ||
-                    notes.indexOf(start, startIndex + start.length) !== -1 ||
-                    notes.indexOf(end, endIndex + end.length) !== -1
-                  ) {
-                    throw new Error(
-                      "Existing release summary markers are malformed.",
-                    );
-                  }
-                  const summary = notes
-                    .slice(startIndex + start.length, endIndex)
-                    .replace(/^\r?\n/u, "")
-                    .replace(/\r?\n$/u, "");
-                  if (!/\S/u.test(summary)) {
-                    throw new Error("Existing release summary is empty.");
-                  }
-                  process.stdout.write(summary);
-                '
-            )"
+          if [[ -s "$existing_notes_file" ]]; then
+            release_note_args+=(
+              --existing-notes-file "$existing_notes_file"
+            )
           fi
 
-          published_notes="$generated_notes"
-          if [[ -n "$release_summary" ]]; then
-            published_notes="$(
-              printf '%s\n%s\n%s\n\n%s' \
-                "$summary_start" \
-                "$release_summary" \
-                "$summary_end" \
-                "$generated_notes"
-            )"
-          fi
+          published_notes_file="$release_workspace/published-notes.md"
+          node sdk/typescript/scripts/release-automation.mjs \
+            compose-release-notes \
+            "$RELEASE_VERSION" \
+            "$generated_notes_file" \
+            ${release_note_args[@]+"${release_note_args[@]}"} \
+            > "$published_notes_file"
 
           if [[ -n "$existing_release" ]]; then
             latest_response="$(
@@ -639,15 +610,18 @@ jobs:
               currently_latest=true
             fi
 
-            if [[ "$existing_notes" != "$published_notes" ||
+            notes_changed=false
+            if ! cmp -s "$existing_notes_file" "$published_notes_file"; then
+              notes_changed=true
+            fi
+            if [[ "$notes_changed" == true ||
                   "$currently_latest" != "$MAKE_LATEST" ]]; then
               verify_release_tag
-              if [[ "$existing_notes" != "$published_notes" ]]; then
-                printf '%s\n' "$published_notes" |
-                  gh release edit "$RELEASE_TAG" \
-                    --repo "$GITHUB_REPOSITORY" \
-                    --latest="$MAKE_LATEST" \
-                    --notes-file -
+              if [[ "$notes_changed" == true ]]; then
+                gh release edit "$RELEASE_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --latest="$MAKE_LATEST" \
+                  --notes-file "$published_notes_file"
                 echo "Updated existing GitHub Release with reviewed and generated notes."
               else
                 gh release edit "$RELEASE_TAG" \
@@ -669,9 +643,9 @@ jobs:
             --repo "$GITHUB_REPOSITORY"
             --title "Codex Security $RELEASE_VERSION"
             --verify-tag
-            --notes-file -
+            --notes-file "$published_notes_file"
             --latest="$MAKE_LATEST"
           )
 
           verify_release_tag
-          printf '%s\n' "$published_notes" | gh release create "${release_args[@]}"
+          gh release create "${release_args[@]}"

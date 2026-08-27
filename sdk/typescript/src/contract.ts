@@ -66,6 +66,7 @@ export interface LoadedContract {
 
 type LoadContractOptions = {
   pluginRoot: string;
+  expectedScanId?: string;
   expectation?: ScanExpectation;
   workbenchValidated?: boolean;
   signal?: AbortSignal;
@@ -154,6 +155,14 @@ export async function loadContractWithScanDirectory(
   const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
   const findings = findingsPayload as FindingsDocument;
   const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
+  if (
+    options.expectedScanId !== undefined &&
+    manifest.scan.id !== options.expectedScanId
+  ) {
+    throw new ContractValidationError(
+      `Scan artifacts do not match selected scan ${options.expectedScanId}.`,
+    );
+  }
   if (
     findings.scanId !== manifest.scan.id ||
     coverage.scanId !== manifest.scan.id

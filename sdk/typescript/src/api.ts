@@ -101,6 +101,7 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
@@ -506,6 +507,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
         workingDirectory: outputDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -1126,6 +1128,7 @@ export class CodexSecurity {
         options.auth,
       );
       const thread = codex.startThread({
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy,
@@ -1200,6 +1203,7 @@ export class CodexSecurity {
                     filesTotal: scopeFileCount,
                   });
                 const validationThread = codex.startThread({
+                  threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
                   workingDirectory: join(scanDir, "artifacts"),
                   skipGitRepoCheck: true,
                   approvalPolicy,
@@ -1610,15 +1614,8 @@ export class CodexSecurity {
       } catch (error) {
         warnCleanupFailed(options, error);
       } finally {
-        // The startup lock is normally released before workbench registration and Codex
-        // execution. This fallback covers failures during runtime preparation or
-        // authentication. The release only marks itself done once the lock directory is
-        // gone, so a failure leaves an owner.json naming this still-running process;
-        // recoverStaleCredentialHomeLock then refuses to reclaim it because that pid is
-        // alive, and later scans in this process wait on a lock nothing frees. Reporting
-        // success while leaving the client in that state is worse than failing, so the
-        // failure is only downgraded to a warning when the scan already failed and that
-        // error is the one worth keeping.
+        // Release any remaining startup lock, but preserve the scan's error if both
+        // the scan and lock cleanup fail.
         try {
           await releaseCredentialHome?.();
         } catch (error) {

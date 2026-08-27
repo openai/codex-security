@@ -1,9 +1,11 @@
 # Releasing Codex Security
 
 [GitHub Releases](https://github.com/openai/codex-security/releases) is the
-canonical changelog. A release combines a short, reviewed summary with a
-categorized list of merged pull requests. The release tag and npm package use
-the same stable version: `npm-vX.Y.Z` and `@openai/codex-security@X.Y.Z`.
+canonical changelog. Under the current process, each new release combines a
+short, reviewed summary with a categorized list of merged pull requests.
+Historical releases may contain generated notes only. The release tag and npm
+package use the same stable version: `npm-vX.Y.Z` and
+`@openai/codex-security@X.Y.Z`.
 
 ## Pull request titles and categories
 
@@ -13,7 +15,8 @@ Pull request titles must follow this form:
 <type>[optional scope][!]: <description>
 ```
 
-Use a lowercase type and, when present, a lowercase scope. Start the description
+Use a lowercase type beginning with a letter and containing only letters,
+digits, and hyphens. Use a lowercase scope when present. Start the description
 with a non-whitespace character and do not leave trailing whitespace. Examples:
 
 ```text
@@ -25,14 +28,14 @@ feat(sdk)!: remove the legacy result field
 
 The title controls the generated release category:
 
-| Title                | Release category |
-| -------------------- | ---------------- |
-| Any type with `!`    | Breaking changes |
-| `feat`               | Features         |
-| `fix`                | Fixes            |
-| `docs`               | Documentation    |
-| `release`, `test`    | Excluded         |
-| Any other valid type | Other changes    |
+| Title             | Release category |
+| ----------------- | ---------------- |
+| Any type with `!` | Breaking changes |
+| `feat`            | Features         |
+| `fix`             | Fixes            |
+| `docs`            | Documentation    |
+| `release`, `test` | Excluded         |
+| Any other type    | Other changes    |
 
 Use `release` and `test` only for changes that do not affect package users. A
 maintainer can apply `skip-release-notes` to exclude another internal change.
@@ -83,8 +86,9 @@ Check the published state before announcing the release:
 - The GitHub release is stable, has the correct title, and contains exactly one
   verified package archive.
 - The newest version is marked Latest. A historical backfill is not.
-- The reviewed highlights, category headings, documentation links, and full
-  comparison link are correct.
+- For releases created under this process, the reviewed highlights, category
+  headings, documentation links, and full comparison link are correct.
+  Historical releases may have generated notes only.
 - Every merged pull request is included or has an intentional
   `skip-release-notes` label.
 
@@ -101,13 +105,16 @@ provenance again before it creates or updates the release.
 
 To repair categories on an existing release, correct the merged pull request's
 title or release label first, then rerun `node-github-release` for the tag. For
-a release that predates `.github/release-notes.md`, place any reviewed summary
-between these markers before the rerun:
+a release that predates `.github/release-notes.md`, start the existing release
+body with this marker block. Keep a blank line between the end marker and the
+generated notes:
 
 ```text
 <!-- codex-security-release-summary:start -->
 Reviewed summary
 <!-- codex-security-release-summary:end -->
+
+Generated notes
 ```
 
 The workflow preserves that marked summary and replaces the generated section.

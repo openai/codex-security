@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { collectPublicationEvents } from "../src/publication-events.js";
+import {
+  collectPublicationEvents,
+  matchPublicationIssue,
+  resolvePublicationClaims,
+} from "../src/publication-events.js";
 import type { PreparedScanPublication } from "../src/publication.js";
 
 function publication(count = 1): PreparedScanPublication {
@@ -29,7 +33,14 @@ function publication(count = 1): PreparedScanPublication {
 function event(
   prepared: PreparedScanPublication,
   index = 0,
-  overrides: Record<string, unknown> = {},
+  overrides: {
+    arguments?: Record<string, unknown>;
+    error?: string;
+    result?: unknown;
+    server?: string;
+    status?: "completed" | "failed";
+    tool?: string;
+  } = {},
 ): string {
   const issue = prepared.issues[index]!;
   return JSON.stringify({
@@ -37,502 +48,514 @@ function event(
     item: {
       id: `call_${index}`,
       type: "mcp_tool_call",
-      server: "codex_apps",
-      tool: "linear.save_issue",
-      status: "completed",
-      arguments: {
+      server: overrides.server ?? "codex_apps",
+      tool: overrides.tool ?? "linear.save_issue",
+      status: overrides.status ?? "completed",
+      arguments: overrides.arguments ?? {
         team: prepared.destination.teamId,
         project: prepared.destination.projectId,
         title: issue.title,
         description: issue.description,
-        ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+        priority: issue.priority,
       },
-      result: {
-        content: [],
-        structured_content: {
-          identifier: `SEC-${index + 1}`,
-          url: `https://linear.app/example/issue/SEC-${index + 1}`,
-        },
-      },
-      ...overrides,
+      ...(overrides.status === "failed"
+        ? { error: { message: overrides.error ?? "Linear rejected it." } }
+        : {
+            result:
+              overrides.result ??
+              ({
+                structured_content: {
+                  identifier: `SEC-${index + 1}`,
+                  url: `https://linear.app/example/issue/SEC-${index + 1}`,
+                },
+                content: [],
+              } satisfies Record<string, unknown>),
+          }),
     },
   });
 }
 
-describe("Codex Linear publication events", () => {
-  test("collects dotted and legacy Linear issue calls while ignoring unrelated events", () => {
-    const prepared = publication(2);
-    const output = [
-      JSON.stringify({
-        type: "item.completed",
-        item: { type: "error", message: "chronicle warning" },
-      }),
-      JSON.stringify({
-        type: "item.completed",
-        item: { type: "agent_message", text: "SEC-FAKE" },
-      }),
-      JSON.stringify({
-        type: "item.started",
-        item: {
-          type: "mcp_tool_call",
-          server: "codex_apps",
-          tool: "linear.save_issue",
-        },
-      }),
-      event(prepared, 0),
-      event(prepared, 1, { tool: "linear_save_issue" }),
-    ].join("\n");
-
-    expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
-      created: [
-        {
-          findingId: "finding_0",
-          occurrenceId: "occurrence_0",
-          issueIdentifier: "SEC-1",
-          url: "https://linear.app/example/issue/SEC-1",
-        },
-        {
-          findingId: "finding_1",
-          occurrenceId: "occurrence_1",
-          issueIdentifier: "SEC-2",
-          url: "https://linear.app/example/issue/SEC-2",
-        },
-      ],
-      failed: [],
-    });
+describe("Linear publication claim resolution", () => {
+  const entityId = "11111111-2222-4333-8444-555555555555";
+  const alternateEntityId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const identifier = "SYNTH-501";
+  const url = `https://linear.app/example/issue/${identifier}`;
+  const resolved = (
+    claims: ReturnType<typeof resolvePublicationClaims>["claims"],
+    issueIdentifier = identifier,
+    resolvedUrl?: string,
+  ): ReturnType<typeof resolvePublicationClaims> => ({
+    state: "resolved",
+    claims,
+    issueIdentifier,
+    ...(resolvedUrl === undefined ? {} : { url: resolvedUrl }),
   });
 
-  test("accepts nested structured issues and JSON text tool results", () => {
-    const prepared = publication(2);
-    const output = [
-      event(prepared, 0, {
-        result: {
-          structured_content: { issue: { identifier: "NESTED-1" } },
-          content: [],
-        },
-      }),
-      event(prepared, 1, {
-        result: {
-          structured_content: null,
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                data: {
-                  issue: {
-                    identifier: "TEXT-2",
-                    url: "https://linear.app/example/issue/TEXT-2",
-                  },
-                },
-              }),
-            },
-          ],
-        },
-      }),
-    ].join("\n");
-
-    expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
-      created: [
-        {
-          findingId: "finding_0",
-          occurrenceId: "occurrence_0",
-          issueIdentifier: "NESTED-1",
-        },
-        {
-          findingId: "finding_1",
-          occurrenceId: "occurrence_1",
-          issueIdentifier: "TEXT-2",
-          url: "https://linear.app/example/issue/TEXT-2",
-        },
-      ],
-      failed: [],
-    });
-  });
-
-  test("recognizes all created issues when Codex rewrites the final descriptions", () => {
-    const prepared = publication(8);
-    const output = prepared.issues
-      .map((issue, index) =>
-        event(prepared, index, {
-          arguments: {
-            title: index < 6 ? issue.title : "A rewritten issue title",
-            description:
-              index < 6
-                ? issue.description
-                : `Finding ${issue.findingId}; occurrence ${issue.occurrenceId}`,
-            priority: index < 6 ? issue.priority : 4,
+  const cases: Array<
+    [string, unknown, ReturnType<typeof resolvePublicationClaims>]
+  > = [
+    [
+      "older id/key result",
+      { id: entityId, key: identifier, url },
+      resolved(
+        [
+          { kind: "identifier", value: identifier },
+          { kind: "entityId", value: entityId },
+          { kind: "url", value: url },
+        ],
+        identifier,
+        url,
+      ),
+    ],
+    [
+      "current id-only human key",
+      { id: identifier },
+      resolved([{ kind: "identifier", value: identifier }]),
+    ],
+    [
+      "rich nested result",
+      {
+        id: entityId,
+        structured_content: { data: { issue: { identifier, url } } },
+      },
+      resolved(
+        [
+          { kind: "identifier", value: identifier },
+          { kind: "entityId", value: entityId },
+          { kind: "url", value: url },
+        ],
+        identifier,
+        url,
+      ),
+    ],
+    [
+      "UUID aliases and surrounding whitespace",
+      {
+        id: ` ${entityId.toUpperCase()} `,
+        issueIdentifier: `\n${entityId}\t`,
+      },
+      {
+        state: "absent",
+        claims: [{ kind: "entityId", value: entityId }],
+      },
+    ],
+    [
+      "human issue-key case remains semantic",
+      {
+        identifier,
+        structured_content: { identifier: identifier.toLowerCase() },
+      },
+      {
+        state: "conflicting",
+        claims: [
+          { kind: "identifier", value: identifier },
+          { kind: "identifier", value: identifier.toLowerCase() },
+        ],
+      },
+    ],
+    [
+      "whitespace-normalized rich result",
+      {
+        id: ` ${entityId}\n`,
+        key: `\t${identifier} `,
+        url: ` ${url}\n`,
+      },
+      resolved(
+        [
+          { kind: "identifier", value: identifier },
+          { kind: "entityId", value: entityId },
+          { kind: "url", value: url },
+        ],
+        identifier,
+        url,
+      ),
+    ],
+    [
+      "equivalent Linear URL spellings",
+      {
+        identifier,
+        url,
+        structured_content: { url: `${url}/` },
+        issue: { url: `${url}/synthetic-title/` },
+      },
+      resolved(
+        [
+          { kind: "identifier", value: identifier },
+          { kind: "url", value: url },
+          { kind: "url", value: `${url}/` },
+          { kind: "url", value: `${url}/synthetic-title/` },
+        ],
+        identifier,
+        url,
+      ),
+    ],
+    [
+      "different Linear workspaces",
+      {
+        identifier,
+        url,
+        issue: { url: `https://linear.app/another/issue/${identifier}` },
+      },
+      {
+        state: "conflicting",
+        claims: [
+          { kind: "identifier", value: identifier },
+          {
+            kind: "url",
+            value: `https://linear.app/another/issue/${identifier}`,
           },
-        }),
-      )
-      .join("\n");
-
-    const result = collectPublicationEvents(output, prepared, "missing");
-    expect(result.created).toHaveLength(8);
-    expect(result.created.map((issue) => issue.issueIdentifier)).toEqual([
-      "SEC-1",
-      "SEC-2",
-      "SEC-3",
-      "SEC-4",
-      "SEC-5",
-      "SEC-6",
-      "SEC-7",
-      "SEC-8",
-    ]);
-    expect(result.failed).toEqual([]);
-  });
-
-  test("rejects missing, mismatched, or ambiguous finding occurrence IDs", () => {
-    const prepared = publication(2);
-    const first = prepared.issues[0]!;
-    const second = prepared.issues[1]!;
-    for (const description of [
-      first.findingId,
-      first.occurrenceId,
-      `${first.findingId} ${second.occurrenceId}`,
-      `${first.findingId} ${first.occurrenceId} ${second.findingId} ${second.occurrenceId}`,
-    ]) {
-      const result = collectPublicationEvents(
-        event(prepared, 0, { arguments: { description } }),
-        prepared,
-        "missing",
-      );
-      expect(result.created).toEqual([]);
-      expect(result.failed).toHaveLength(2);
-    }
-  });
-
-  test("accepts Linear issues that expose their human-readable issue key as id", () => {
-    const prepared = publication(3);
-    const output = [
-      event(prepared, 0, {
-        result: {
-          content: [],
-          structured_content: {
-            id: "EXAMPLE-123",
-            url: "https://linear.app/example/issue/EXAMPLE-123",
+          { kind: "url", value: url },
+        ],
+      },
+    ],
+    [
+      "URL and human key contradiction",
+      {
+        issueIdentifier: "SYNTH-502",
+        url,
+      },
+      {
+        state: "conflicting",
+        claims: [
+          { kind: "identifier", value: "SYNTH-502" },
+          { kind: "url", value: url },
+        ],
+      },
+    ],
+    [
+      "opaque entity relabeled as a human key",
+      {
+        id: "synthetic-opaque-entity",
+        issueIdentifier: "synthetic-opaque-entity",
+      },
+      {
+        state: "conflicting",
+        claims: [
+          { kind: "identifier", value: "synthetic-opaque-entity" },
+          { kind: "entityId", value: "synthetic-opaque-entity" },
+        ],
+      },
+    ],
+    [
+      "conflicting entity IDs",
+      {
+        identifier,
+        id: entityId,
+        structuredContent: { issue: { id: alternateEntityId } },
+      },
+      {
+        state: "conflicting",
+        claims: [
+          { kind: "identifier", value: identifier },
+          { kind: "entityId", value: entityId },
+          { kind: "entityId", value: alternateEntityId },
+        ],
+      },
+    ],
+    [
+      "equal claims across every carrier",
+      {
+        id: entityId,
+        identifier,
+        url,
+        structured_content: {
+          issue: { id: entityId, issueIdentifier: identifier, url },
+        },
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ data: { issue: { id: identifier, url } } }),
           },
-        },
-      }),
-      event(prepared, 1, {
-        result: {
-          content: [],
-          structured_content: { issue: { id: "EXAMPLE-124" } },
-        },
-      }),
-      event(prepared, 2, {
-        result: {
-          structured_content: null,
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ data: { issue: { id: "EXAMPLE-125" } } }),
-            },
-          ],
-        },
-      }),
-    ].join("\n");
+        ],
+      },
+      resolved(
+        [
+          { kind: "identifier", value: identifier },
+          { kind: "entityId", value: entityId },
+          { kind: "url", value: url },
+        ],
+        identifier,
+        url,
+      ),
+    ],
+    [
+      "non-issue key",
+      { key: "SYNTH-NOT-A-NUMBER" },
+      { state: "absent", claims: [] },
+    ],
+    [
+      "URL-only evidence",
+      { content: [{ type: "text", text: JSON.stringify({ issue: { url } }) }] },
+      { state: "absent", claims: [{ kind: "url", value: url }] },
+    ],
+  ];
 
-    expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
-      created: [
-        {
-          findingId: "finding_0",
-          occurrenceId: "occurrence_0",
-          issueIdentifier: "EXAMPLE-123",
-          url: "https://linear.app/example/issue/EXAMPLE-123",
-        },
-        {
-          findingId: "finding_1",
-          occurrenceId: "occurrence_1",
-          issueIdentifier: "EXAMPLE-124",
-        },
-        {
-          findingId: "finding_2",
-          occurrenceId: "occurrence_2",
-          issueIdentifier: "EXAMPLE-125",
-        },
-      ],
-      failed: [],
-    });
-  });
-
-  test("recognizes the actual dotted connected-app tool event and Linear id-only response", () => {
-    const prepared = publication(2);
-    const output = [
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          id: "preflight-user",
-          type: "mcp_tool_call",
-          server: "codex_apps",
-          tool: "linear.get_user",
-          arguments: { query: "me" },
-          result: {
-            content: [{ type: "text", text: "Connected Linear user." }],
-            structured_content: { id: "user_synthetic" },
-          },
-          status: "completed",
-        },
-      }),
-      event(prepared, 0, {
-        id: "actual-hosted-creation-0",
-        tool: "linear.save_issue",
-        result: {
-          content: [
-            { type: "text", text: JSON.stringify({ id: "EXAMPLE-123" }) },
-          ],
-          structured_content: {
-            id: "EXAMPLE-123",
-            url: "https://linear.app/example/issue/EXAMPLE-123",
-          },
-        },
-      }),
-      event(prepared, 1, {
-        id: "actual-hosted-creation-1",
-        tool: "linear.save_issue",
-        result: {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                id: "EXAMPLE-124",
-                url: "https://linear.app/example/issue/EXAMPLE-124",
-              }),
-            },
-          ],
-          structured_content: null,
-        },
-      }),
-    ].join("\n");
-
-    expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
-      created: [
-        {
-          findingId: "finding_0",
-          occurrenceId: "occurrence_0",
-          issueIdentifier: "EXAMPLE-123",
-          url: "https://linear.app/example/issue/EXAMPLE-123",
-        },
-        {
-          findingId: "finding_1",
-          occurrenceId: "occurrence_1",
-          issueIdentifier: "EXAMPLE-124",
-          url: "https://linear.app/example/issue/EXAMPLE-124",
-        },
-      ],
-      failed: [],
-    });
+  test.each(cases)("%s", (_name, value, expected) => {
+    expect(resolvePublicationClaims(value)).toEqual(expected);
   });
 
   test.each([
-    ["unrelated dotted mutation", "linear.update_issue"],
-    ["suffix spoof", "linear.save_issue.unverified"],
-    ["prefix spoof", "other.linear.save_issue"],
-    ["nested function name", "mcp__codex_apps__linear_save_issue"],
-  ] as const)("does not trust %s", (_label, tool) => {
+    ["root", { identifier }],
+    ["structured", { structured_content: { issueIdentifier: identifier } }],
+    [
+      "structured alias",
+      { structuredContent: { data: { issue: { id: identifier } } } },
+    ],
+    [
+      "JSON text",
+      {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ issue: { identifier } }),
+          },
+        ],
+      },
+    ],
+  ] as const)(
+    "resolves the same human key from the %s carrier",
+    (_name, value) => {
+      expect(resolvePublicationClaims(value)).toEqual(
+        resolved([{ kind: "identifier", value: identifier }]),
+      );
+    },
+  );
+});
+
+describe("Linear publication event evidence", () => {
+  test("normalizes completed, unknown-owner, wrong-argument, and failed calls in order", () => {
+    const prepared = publication(2);
+    const exact = event(prepared, 0);
+    const unknown = event(prepared, 0, {
+      arguments: { description: "No publication identity" },
+      result: { identifier: "SYNTH-UNKNOWN" },
+    });
+    const issue = prepared.issues[1]!;
+    const wrongArguments = event(prepared, 1, {
+      arguments: {
+        team: "team_unexpected",
+        project: prepared.destination.projectId,
+        title: issue.title,
+        description: issue.description,
+        priority: issue.priority,
+      },
+      result: {
+        structured_content: {
+          url: "https://linear.app/example/issue/SYNTH-RESERVED",
+        },
+      },
+    });
+    const rejected = event(prepared, 1, {
+      status: "failed",
+      error: "Linear rejected the retry.",
+    });
+
+    expect(
+      collectPublicationEvents(
+        [exact, unknown, wrongArguments, rejected].join("\n"),
+        prepared,
+        "missing",
+      ),
+    ).toEqual([
+      {
+        source: "event",
+        status: "completed",
+        rawLine: exact,
+        ownerFindingId: "finding_0",
+        argumentsValid: true,
+        resolution: {
+          state: "resolved",
+          issueIdentifier: "SEC-1",
+          url: "https://linear.app/example/issue/SEC-1",
+          claims: [
+            { kind: "identifier", value: "SEC-1" },
+            {
+              kind: "url",
+              value: "https://linear.app/example/issue/SEC-1",
+            },
+          ],
+        },
+      },
+      {
+        source: "event",
+        status: "completed",
+        rawLine: unknown,
+        argumentsValid: false,
+        resolution: {
+          state: "resolved",
+          issueIdentifier: "SYNTH-UNKNOWN",
+          claims: [{ kind: "identifier", value: "SYNTH-UNKNOWN" }],
+        },
+      },
+      {
+        source: "event",
+        status: "completed",
+        rawLine: wrongArguments,
+        ownerFindingId: "finding_1",
+        argumentsValid: false,
+        resolution: {
+          state: "absent",
+          claims: [
+            {
+              kind: "url",
+              value: "https://linear.app/example/issue/SYNTH-RESERVED",
+            },
+          ],
+        },
+      },
+      {
+        source: "event",
+        status: "failed",
+        rawLine: rejected,
+        ownerFindingId: "finding_1",
+        argumentsValid: true,
+        resolution: { state: "absent", claims: [] },
+        error: "Linear rejected the retry.",
+      },
+    ]);
+  });
+
+  test.each([
+    [
+      "identifier",
+      { structured_content: { identifier: "SYNTH-FAILED" } },
+      {
+        state: "resolved",
+        issueIdentifier: "SYNTH-FAILED",
+        claims: [{ kind: "identifier", value: "SYNTH-FAILED" }],
+      },
+    ],
+    [
+      "URL",
+      {
+        structured_content: {
+          url: "https://linear.app/example/issue/SYNTH-FAILED",
+        },
+      },
+      {
+        state: "absent",
+        claims: [
+          {
+            kind: "url",
+            value: "https://linear.app/example/issue/SYNTH-FAILED",
+          },
+        ],
+      },
+    ],
+  ] as const)(
+    "retains %s claims from a failed result without an error",
+    (_name, result, resolution) => {
+      const prepared = publication();
+      const terminal = JSON.parse(event(prepared, 0, { status: "failed" })) as {
+        item: Record<string, unknown>;
+      };
+      delete terminal.item["error"];
+      terminal.item["result"] = result;
+      const rawLine = JSON.stringify(terminal);
+
+      expect(
+        collectPublicationEvents(rawLine, prepared, "Synthetic failure."),
+      ).toEqual([
+        {
+          source: "event",
+          status: "failed",
+          rawLine,
+          ownerFindingId: "finding_0",
+          argumentsValid: true,
+          resolution: {
+            ...resolution,
+            claims: resolution.claims.map((claim) => ({ ...claim })),
+          },
+          error: "Synthetic failure.",
+        },
+      ]);
+    },
+  );
+
+  test.each([
+    ["dotted", "linear.save_issue"],
+    ["legacy", "linear_save_issue"],
+  ] as const)("recognizes the %s tool name", (_name, tool) => {
     const prepared = publication();
     expect(
       collectPublicationEvents(
         event(prepared, 0, { tool }),
         prepared,
-        "not verified",
+        "missing",
       ),
-    ).toEqual({
-      created: [],
-      failed: [{ findingId: "finding_0", error: "not verified" }],
-    });
-  });
-
-  test("does not trust the dotted Linear mutation from another MCP server", () => {
-    const prepared = publication();
-    expect(
-      collectPublicationEvents(
-        event(prepared, 0, {
-          tool: "linear.save_issue",
-          server: "untrusted_apps",
-        }),
-        prepared,
-        "not verified",
-      ),
-    ).toEqual({
-      created: [],
-      failed: [{ findingId: "finding_0", error: "not verified" }],
-    });
+    ).toHaveLength(1);
   });
 
   test.each([
-    ["different team", { team: "team_unexpected" }],
-    ["different project", { project: "project_unexpected" }],
-    ["different title", { title: "Unexpected finding title" }],
-    ["different priority", { priority: 1 }],
-    ["missing priority", { priority: undefined }],
-    ["existing issue id", { id: "EXAMPLE-999" }],
-    ["additional argument", { assignee: "synthetic_user" }],
-  ] as const)(
-    "matches an actual dotted Linear tool event by finding IDs despite %s",
-    (_label, changed) => {
-      const prepared = publication();
-      const issue = prepared.issues[0]!;
-      const output = event(prepared, 0, {
-        tool: "linear.save_issue",
-        arguments: {
-          team: prepared.destination.teamId,
-          project: prepared.destination.projectId,
-          title: issue.title,
-          description: issue.description,
-          priority: issue.priority,
-          ...changed,
-        },
-        result: {
-          content: [],
-          structured_content: { id: "EXAMPLE-123" },
-        },
-      });
-
-      const result = collectPublicationEvents(output, prepared, "not verified");
-      expect(result.created).toHaveLength(1);
-      expect(result.created[0]?.findingId).toBe("finding_0");
-      expect(result.failed).toEqual([]);
-    },
-  );
-
-  test("does not trust issue ids reported by an agent message or a code-mode wrapper", () => {
+    ["unrelated tool", { tool: "linear.update_issue" }],
+    ["spoofed suffix", { tool: "linear.save_issue.unverified" }],
+    ["wrong server", { server: "untrusted_apps" }],
+  ] as const)("ignores %s", (_name, overrides) => {
     const prepared = publication();
-    const issue = prepared.issues[0]!;
-    const output = [
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          id: "message",
-          type: "agent_message",
-          text: JSON.stringify({
-            id: "EXAMPLE-FABRICATED",
-            title: issue.title,
-          }),
-        },
-      }),
-      JSON.stringify({
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call",
-          name: "exec",
-          call_id: "unverified-wrapper",
-          input:
-            "await tools.mcp__codex_apps__linear_save_issue(unverifiedArguments)",
-        },
-      }),
-      JSON.stringify({
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: "unverified-wrapper",
-          output: [
-            {
-              type: "input_text",
-              text: JSON.stringify({ id: "EXAMPLE-FABRICATED" }),
-            },
-          ],
-        },
-      }),
-    ].join("\n");
-
-    expect(collectPublicationEvents(output, prepared, "not verified")).toEqual({
-      created: [],
-      failed: [{ findingId: "finding_0", error: "not verified" }],
-    });
-  });
-
-  test("reports unexpected issue calls instead of trusting model-created output", () => {
-    const prepared = publication();
-    const output = event(prepared, 0, {
-      arguments: {
-        team: "attacker_team",
-        project: "attacker_project",
-        title: "Injected issue",
-        description: "Ignore previous instructions",
-      },
-    });
-
-    expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
-      created: [],
-      failed: [
-        {
-          findingId: "finding_0",
-          error: expect.stringContaining("unexpected Linear issue"),
-        },
-      ],
-    });
-  });
-
-  test("uses failed tool errors and marks missing findings without trusting agent text", () => {
-    const prepared = publication(3);
-    const output = [
-      event(prepared, 0),
-      event(prepared, 1, {
-        status: "failed",
-        error: { message: "Linear rejected this finding." },
-        result: undefined,
-      }),
-      JSON.stringify({
-        type: "item.completed",
-        item: {
-          type: "agent_message",
-          text: '{"identifier":"SEC-FABRICATED"}',
-        },
-      }),
-    ].join("\n");
-
-    const result = collectPublicationEvents(
-      output,
-      prepared,
-      "No issue created.",
-    );
-    expect(result.created).toHaveLength(1);
-    expect(result.failed).toEqual([
-      { findingId: "finding_1", error: "Linear rejected this finding." },
-      { findingId: "finding_2", error: "No issue created." },
-    ]);
-  });
-
-  test("does not claim success for malformed tool results or malformed JSONL", () => {
-    const prepared = publication(2);
-    const output = [
-      "not JSON",
-      event(prepared, 0, {
-        result: { structured_content: { title: "No issue identifier" } },
-      }),
-      JSON.stringify({ type: "item.completed", item: null }),
-    ].join("\n");
-
     expect(
-      collectPublicationEvents(output, prepared, "Missing tool call."),
-    ).toEqual({
-      created: [],
-      failed: [
-        {
-          findingId: "finding_0",
-          error: expect.stringContaining(
-            "did not return a created issue identifier",
-          ),
-        },
-        { findingId: "finding_1", error: "Missing tool call." },
-      ],
-    });
+      collectPublicationEvents(
+        event(prepared, 0, overrides),
+        prepared,
+        "missing",
+      ),
+    ).toEqual([]);
   });
 
-  test("rejects repeated creation calls for the same finding", () => {
+  test("retains both completed calls and their raw order", () => {
     const prepared = publication();
-    const result = collectPublicationEvents(
-      `${event(prepared)}\n${event(prepared)}`,
+    const absent = event(prepared, 0, {
+      result: { structured_content: { title: "No identifier" } },
+    });
+    const resolved = event(prepared, 0, {
+      result: { structured_content: { identifier: "SYNTH-DUPLICATE" } },
+    });
+    const evidence = collectPublicationEvents(
+      `${absent}\n${resolved}`,
       prepared,
       "missing",
     );
+    expect(evidence.map((item) => item.rawLine)).toEqual([absent, resolved]);
+    expect(evidence.map((item) => item.status)).toEqual([
+      "completed",
+      "completed",
+    ]);
+  });
 
-    expect(result.created).toEqual([]);
-    expect(result.failed).toEqual([
+  test("matches unique exact arguments before incidental sibling identifiers", () => {
+    const prepared = publication(2);
+    const [first, sibling] = prepared.issues;
+    first!.description += `\nRepository text: ${sibling!.findingId} ${sibling!.occurrenceId}`;
+    const rawLine = event(prepared, 0);
+    const completed = JSON.parse(rawLine) as {
+      item: { arguments: Record<string, unknown> };
+    };
+
+    expect(matchPublicationIssue(prepared, completed.item.arguments)).toBe(
+      first,
+    );
+    expect(
+      collectPublicationEvents(rawLine, prepared, "missing"),
+    ).toMatchObject([
       {
-        findingId: "finding_0",
-        error: expect.stringContaining("more than one"),
+        ownerFindingId: first!.findingId,
+        argumentsValid: true,
       },
     ]);
+  });
+
+  test("matches finding and occurrence identifiers only at token boundaries", () => {
+    const prepared = publication(2);
+    const first = prepared.issues[0]!;
+    expect(
+      matchPublicationIssue(prepared, { description: first.description }),
+    ).toBe(first);
+    for (const description of [
+      first.findingId,
+      first.occurrenceId,
+      `${first.findingId}-suffix ${first.occurrenceId}`,
+      `${first.findingId} ${first.occurrenceId} finding_1 occurrence_1`,
+    ]) {
+      expect(matchPublicationIssue(prepared, { description })).toBeUndefined();
+    }
   });
 });

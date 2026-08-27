@@ -63,8 +63,15 @@ export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
-export { publishScan } from "./publish.js";
+export { checkScanPublication, publishScan } from "./publish.js";
+export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
+  GitHubCodeScanningImportOptions,
+  ImportedGitHubCodeScanningAlert,
+} from "./github.js";
+export type {
+  CheckScanPublicationOptions,
+  CheckScanPublicationResult,
   PublishScanOptions,
   PublishScanProgress,
   PublishScanResult,
