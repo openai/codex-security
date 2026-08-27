@@ -74,15 +74,6 @@ for (const directory of [...packages].sort()) {
   const manifest = JSON.parse(
     await readFile(join(path, "package.json"), "utf8"),
   );
-  if (manifest.name === "react-remove-scroll-bar") {
-    notices.push(
-      await readFile(
-        join(root, "dashboard/licenses/react-remove-scroll-bar.txt"),
-        "utf8",
-      ),
-    );
-    continue;
-  }
   const license = (await readdir(path)).find((name) =>
     /^licen[sc]e(?:\.[^.]+)?$/i.test(name),
   );

@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Badge } from "@openai/apps-sdk-ui/components/Badge";
 import { Button } from "@openai/apps-sdk-ui/components/Button";
 import { Input } from "@openai/apps-sdk-ui/components/Input";
-import { Select } from "@openai/apps-sdk-ui/components/Select";
 import type {
   DashboardDetail,
   DashboardItem,
@@ -827,76 +826,64 @@ export function App() {
             </label>
             <label>
               <span>Repository</span>
-              {/* Select needs nonempty values for arrow-key navigation. */}
-              <Select
-                size="lg"
-                value={`repo:${repository}`}
-                options={[
-                  { value: "repo:", label: "All repositories" },
-                  ...(saved?.data.repositories ?? []).map((repo) => ({
-                    value: `repo:${repo.id}`,
-                    label: repo.label,
-                  })),
-                ]}
-                onChange={(option) =>
-                  filter(setRepository, option.value.slice(5))
-                }
-              />
+              <select
+                value={repository}
+                onChange={(event) => filter(setRepository, event.target.value)}
+              >
+                <option value="">All repositories</option>
+                {(saved?.data.repositories ?? []).map((repo) => (
+                  <option key={repo.id} value={repo.id}>
+                    {repo.label}
+                  </option>
+                ))}
+              </select>
             </label>
             {run && (
               <label>
                 <span>Status</span>
-                <Select
-                  size="lg"
-                  value={status || "all"}
-                  options={[
-                    { value: "all", label: "All statuses" },
-                    ...[
-                      "running",
-                      "completed",
-                      "failed",
-                      ...(view === "scans" ? ["canceled"] : ["pending"]),
-                    ].map((value) => ({ value, label: label(value) })),
-                  ]}
-                  onChange={(option) =>
-                    filter(
-                      setStatus,
-                      option.value === "all" ? "" : option.value,
-                    )
-                  }
-                />
+                <select
+                  value={status}
+                  onChange={(event) => filter(setStatus, event.target.value)}
+                >
+                  <option value="">All statuses</option>
+                  {[
+                    "running",
+                    "completed",
+                    "failed",
+                    view === "scans" ? "canceled" : "pending",
+                  ].map((value) => (
+                    <option key={value} value={value}>
+                      {label(value)}
+                    </option>
+                  ))}
+                </select>
               </label>
             )}
             {view === "workflows" && (
               <label>
                 <span>Stage</span>
-                <Select
-                  size="lg"
-                  value={stage || "all"}
-                  options={[
-                    { value: "all", label: "All stages" },
-                    ...["scan", "publish", "dedupe"].map((value) => ({
-                      value,
-                      label: label(value),
-                    })),
-                  ]}
-                  onChange={(option) =>
-                    filter(setStage, option.value === "all" ? "" : option.value)
-                  }
-                />
+                <select
+                  value={stage}
+                  onChange={(event) => filter(setStage, event.target.value)}
+                >
+                  <option value="">All stages</option>
+                  {["scan", "publish", "dedupe"].map((value) => (
+                    <option key={value} value={value}>
+                      {label(value)}
+                    </option>
+                  ))}
+                </select>
               </label>
             )}
             <label>
               <span>Sort</span>
-              <Select
-                size="lg"
+              <select
                 value={sort}
-                options={[
-                  { value: "activity", label: "Recent activity" },
-                  { value: "newest", label: "Newest first" },
-                ]}
-                onChange={(option) => filter(setSort, option.value)}
-              />
+                onChange={(event) => filter(setSort, event.target.value)}
+              >
+                <option value="activity">Recent activity</option>
+                <option value="newest">Newest first</option>
+              </select>
             </label>
           </div>
           {failure && (
