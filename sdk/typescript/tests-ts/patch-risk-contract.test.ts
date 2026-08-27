@@ -135,7 +135,7 @@ function assessment(): Assessment {
 function validateText(input: string, cwd = PLUGIN_ROOT) {
   expect(python).toBeDefined();
   expect(python).not.toBeNull();
-  return spawnSync(python!, ["-I", "-S", validatorPath, "-"], {
+  return spawnSync(python!, ["-I", "-B", "-S", validatorPath, "-"], {
     cwd,
     encoding: "utf8",
     input,
@@ -157,7 +157,7 @@ function validateWithSharedSchema(payload: Assessment) {
   ].join("\n");
   return spawnSync(
     python!,
-    ["-I", "-S", "-c", program, join(PLUGIN_ROOT, "scripts"), schemaPath],
+    ["-I", "-B", "-S", "-c", program, join(PLUGIN_ROOT, "scripts"), schemaPath],
     { encoding: "utf8", input: JSON.stringify(payload) },
   );
 }
