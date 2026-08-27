@@ -30,7 +30,13 @@ const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 const pluginContract = JSON.parse(
-  await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+  await readFile(
+    new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
 );
 
 async function resolveArchive() {

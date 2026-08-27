@@ -18,7 +18,7 @@ pnpm run test:package
 ```
 
 The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
-the ignored `_bundled_plugin` runtime payload from `plugin-files.json` during
+the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
 `prepack`, including the MCP runtime built from `mcp-app`; do not edit generated
 files there. Run `pnpm run build:plugin` when you need to inspect the staged
 payload locally. `plugins/codex-security` contains authored source and assets,
