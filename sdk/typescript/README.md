@@ -1308,9 +1308,9 @@ uses the public OpenAI Apps SDK UI design system, follows the browser's light
 or dark preference, and polls the service every five seconds. It never starts,
 cancels, resumes, publishes, edits, or deduplicates anything.
 
-The dashboard has independent Scans, Findings, Duplicate groups, and Workflows
-views. Workflows are optional: standalone scans remain visible, and a service
-with only imported findings can browse those findings and their stored groups
+The dashboard opens on Workflows, followed by independent Scans, Findings, and
+Duplicate groups views. Workflows are optional: standalone scans remain visible,
+and a service with only imported findings can browse those findings and their stored groups
 without any local scan or workflow history. Each view supports search,
 repository filtering, sorting, pagination, and record details. Scan and workflow
 views also filter by status; workflows can filter by stage.

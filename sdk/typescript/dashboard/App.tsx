@@ -17,6 +17,11 @@ import { pollDashboard } from "./polling.js";
 
 const views: { id: DashboardView; label: string; description: string }[] = [
   {
+    id: "workflows",
+    label: "Workflows",
+    description: "Optional scan → publish → dedupe workflows.",
+  },
+  {
     id: "scans",
     label: "Scans",
     description: "Scan activity and history, with or without a workflow.",
@@ -31,11 +36,6 @@ const views: { id: DashboardView; label: string; description: string }[] = [
     label: "Duplicate groups",
     description:
       "Reviewed duplicate relationships. Overlapping groups stay separate.",
-  },
-  {
-    id: "workflows",
-    label: "Workflows",
-    description: "Optional scan → publish → dedupe workflows.",
   },
 ];
 const labels: Record<string, string> = {
@@ -623,7 +623,7 @@ function Results({
 }
 
 export function App() {
-  const [view, setView] = useState<DashboardView>("scans");
+  const [view, setView] = useState<DashboardView>("workflows");
   const [query, setQuery] = useState("");
   const [repository, setRepository] = useState("");
   const [status, setStatus] = useState("");
