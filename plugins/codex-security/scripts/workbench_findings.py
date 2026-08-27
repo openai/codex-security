@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_finding_index import upsert_finding
 
 
@@ -73,3 +77,7 @@ def list_stored_findings(
         "total": total,
         "nextOffset": next_offset if next_offset < total else None,
     }
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
