@@ -35,13 +35,13 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
             "SELECT finding_id FROM finding_dedupe_group_members ORDER BY finding_id"
         ).fetchall()
         assert [row[0] for row in members] == sorted(imported_ids[:3])
-        workflows = db.execute("SELECT state_json FROM finding_workflows").fetchall()
+        workflows = db.execute("SELECT dedupe_status, results_json FROM finding_workflows").fetchall()
         assert len(workflows) == 2
-        for (state_json,) in workflows:
-            stage = json.loads(state_json)["stages"]["dedupe"]
-            assert stage["status"] == "completed"
-            assert stage["result"]["duplicateGroups"] == [imported_ids[:3]]
-            assert "pendingWrite" not in stage
+        for status, results_json in workflows:
+            results = json.loads(results_json)
+            assert status == "completed"
+            assert results["dedupe"]["duplicateGroups"] == [imported_ids[:3]]
+            assert "dedupePendingWrite" not in results
         reviews = db.execute("SELECT binding_json, result_json FROM finding_workflow_reviews").fetchall()
         models = set()
         decisions = set()

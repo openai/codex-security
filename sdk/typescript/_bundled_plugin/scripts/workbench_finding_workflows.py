@@ -10,29 +10,77 @@ from typing import Any
 
 from workbench_target import directory_content_digest, git_output, git_revision
 
+WORKFLOW_BINDINGS = {
+    "repositoryPath": "repository_path",
+    "scanRequestDigest": "scan_request_digest",
+    "scanId": "scan_id",
+    "scanDir": "scan_dir",
+    "artifactDigest": "artifact_digest",
+    "destination": "destination",
+}
+WORKFLOW_STAGES = ("scan", "publish", "dedupe")
+
 
 def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT state_json FROM finding_workflows WHERE id = ?", (workflow_id,)
+        "SELECT * FROM finding_workflows WHERE id = ?", (workflow_id,)
     ).fetchone()
-    return json.loads(row["state_json"]) if row is not None else None
+    if row is None:
+        return None
+    state = {"id": row["id"], "stages": {}}
+    for field, column in WORKFLOW_BINDINGS.items():
+        if row[column] is not None:
+            state[field] = row[column]
+    if row["scope_repository_id"] is not None:
+        state["scope"] = {"repositoryId": row["scope_repository_id"]}
+    elif row["scope_all_repositories"] is not None:
+        state["scope"] = {"allRepositories": bool(row["scope_all_repositories"])}
+    results = json.loads(row["results_json"])
+    for stage in WORKFLOW_STAGES:
+        current = {"status": row[f"{stage}_status"]}
+        if row[f"{stage}_error"] is not None:
+            current["error"] = row[f"{stage}_error"]
+        if stage in results:
+            current["result"] = results[stage]
+        state["stages"][stage] = current
+    if "dedupePendingWrite" in results:
+        state["stages"]["dedupe"]["pendingWrite"] = results["dedupePendingWrite"]
+    return state
 
 
 def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timestamp: str) -> None:
+    values = {"id": state["id"]}
+    values.update({column: state.get(field) for field, column in WORKFLOW_BINDINGS.items()})
+    scope = state.get("scope", {})
+    values.update(
+        scope_repository_id=scope.get("repositoryId"),
+        scope_all_repositories=scope.get("allRepositories"),
+    )
+    results = {}
+    for stage in WORKFLOW_STAGES:
+        current = state["stages"][stage]
+        values[f"{stage}_status"] = current["status"]
+        values[f"{stage}_error"] = current.get("error")
+        if "result" in current:
+            results[stage] = current["result"]
+    if "pendingWrite" in state["stages"]["dedupe"]:
+        results["dedupePendingWrite"] = state["stages"]["dedupe"]["pendingWrite"]
+    values.update(
+        results_json=json.dumps(results, allow_nan=False), created_at=timestamp, updated_at=timestamp
+    )
+    updates = ", ".join(
+        f"{column} = excluded.{column}" for column in values if column not in {"id", "created_at"}
+    )
     connection.execute(
-        """INSERT INTO finding_workflows (id, state_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
-        state_json = excluded.state_json, updated_at = excluded.updated_at""",
-        (state["id"], json.dumps(state, allow_nan=False), timestamp, timestamp),
+        f"INSERT INTO finding_workflows ({', '.join(values)}) "
+        f"VALUES ({', '.join('?' for _ in values)}) ON CONFLICT(id) DO UPDATE SET {updates}",
+        tuple(values.values()),
     )
 
 
 def bind_workflow(state: dict[str, Any], binding: dict[str, Any]) -> None:
     for field, value in binding.items():
-        if field not in {
-            "repositoryPath", "scanRequestDigest", "scanId", "scanDir",
-            "artifactDigest", "destination", "scope",
-        }:
+        if field not in WORKFLOW_BINDINGS and field != "scope":
             raise SystemExit("Unknown workflow binding.")
         if field in state and state[field] != value:
             raise SystemExit(
@@ -99,7 +147,7 @@ def finding_workflow(
         if state is None:
             state = {
                 "id": workflow_id,
-                "stages": {stage: {"status": "pending"} for stage in ("scan", "publish", "dedupe")},
+                "stages": {stage: {"status": "pending"} for stage in WORKFLOW_STAGES},
             }
         bind_workflow(state, payload.get("binding", {}))
         action = payload["action"]

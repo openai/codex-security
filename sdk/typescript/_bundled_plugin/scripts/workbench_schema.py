@@ -1,6 +1,7 @@
 """SQLite schema history for the Codex Security workbench."""
 
 import argparse
+import json
 import sqlite3
 from collections.abc import Callable
 
@@ -784,7 +785,55 @@ MIGRATIONS = (
         );
         """,
     ),
+    (
+        38,
+        "store findings workflow metadata in columns",
+        """
+        ALTER TABLE finding_workflows RENAME COLUMN state_json TO results_json;
+        ALTER TABLE finding_workflows ADD COLUMN repository_path TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN scan_request_digest TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN scan_id TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN scan_dir TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN artifact_digest TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN destination TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN scope_repository_id TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN scope_all_repositories INTEGER;
+        ALTER TABLE finding_workflows ADD COLUMN scan_status TEXT NOT NULL DEFAULT 'pending';
+        ALTER TABLE finding_workflows ADD COLUMN scan_error TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'pending';
+        ALTER TABLE finding_workflows ADD COLUMN publish_error TEXT;
+        ALTER TABLE finding_workflows ADD COLUMN dedupe_status TEXT NOT NULL DEFAULT 'pending';
+        ALTER TABLE finding_workflows ADD COLUMN dedupe_error TEXT;
+        """,
+    ),
 )
+
+
+def migrate_finding_workflow_columns(connection: sqlite3.Connection) -> None:
+    # Rename/backfill in place so existing checkpoint foreign keys and rows survive.
+    for row in connection.execute("SELECT id, results_json FROM finding_workflows").fetchall():
+        state = json.loads(row["results_json"])
+        scope = state.get("scope", {})
+        stages = state["stages"]
+        results = {stage: value["result"] for stage, value in stages.items() if "result" in value}
+        if "pendingWrite" in stages["dedupe"]:
+            results["dedupePendingWrite"] = stages["dedupe"]["pendingWrite"]
+        connection.execute(
+            """UPDATE finding_workflows SET
+            repository_path = ?, scan_request_digest = ?, scan_id = ?, scan_dir = ?,
+            artifact_digest = ?, destination = ?, scope_repository_id = ?, scope_all_repositories = ?,
+            scan_status = ?, scan_error = ?, publish_status = ?, publish_error = ?,
+            dedupe_status = ?, dedupe_error = ?, results_json = ? WHERE id = ?""",
+            (
+                state.get("repositoryPath"), state.get("scanRequestDigest"),
+                state.get("scanId"), state.get("scanDir"), state.get("artifactDigest"),
+                state.get("destination"), scope.get("repositoryId"), scope.get("allRepositories"),
+                stages["scan"]["status"], stages["scan"].get("error"),
+                stages["publish"]["status"], stages["publish"].get("error"),
+                stages["dedupe"]["status"], stages["dedupe"].get("error"),
+                json.dumps(results, allow_nan=False), row["id"],
+            ),
+        )
 
 
 def apply_migrations(
@@ -867,6 +916,8 @@ def apply_migrations(
             else:
                 for statement in sql_statements(sql):
                     connection.execute(statement)
+                if version == 38:
+                    migrate_finding_workflow_columns(connection)
             connection.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (version, name, now()),
