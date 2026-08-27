@@ -1429,8 +1429,7 @@ preview's implicit all-repository behavior.
 Both `--scan` and `--findings-url` are required, with no implicit scan or service
 URL. As with `publish scan --scan`, the selector accepts a full ID, unique
 prefix, or `latest` for the current repository. The saved scan must be complete
-and its sealed artifacts must be available. This command replaces the preview
-`POST /v1/bulk/findings/dedupe` route; that route is no longer available.
+and its sealed artifacts must be available.
 
 ```typescript
 import { deduplicateScan } from "@openai/codex-security";
