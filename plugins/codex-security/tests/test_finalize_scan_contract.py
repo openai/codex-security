@@ -1670,7 +1670,13 @@ The extraction root is not enforced.
         def open_read_fd(scan_dir: Path, relative_path: str, _context: str) -> int:
             return os.open(scan_dir / relative_path, os.O_RDONLY)
 
-        def atomic_write(scan_dir: Path, relative_path: str, payload: bytes) -> None:
+        def atomic_write(
+            scan_dir: Path,
+            relative_path: str,
+            payload: bytes,
+            *,
+            expected_root_identity: tuple[int, int] | None = None,
+        ) -> None:
             path = scan_dir / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)

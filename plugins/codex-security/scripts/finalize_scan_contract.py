@@ -320,7 +320,7 @@ _WINDOWS_SCAN_LOCAL_FILES: Any | None = None
 
 
 def _windows_scan_local_files() -> Any:
-    """Load the Win32 backend only on runtimes that need it."""
+    """Load the Win32 backend and shared stream comparison lazily."""
 
     global _WINDOWS_SCAN_LOCAL_FILES
     if _WINDOWS_SCAN_LOCAL_FILES is None:
@@ -334,22 +334,54 @@ def _windows_scan_local_files() -> Any:
     return _WINDOWS_SCAN_LOCAL_FILES
 
 
-def _open_verified_scan_directory(scan_dir: Path) -> int:
+def _open_verified_scan_directory(
+    scan_dir: Path, expected_root_identity: tuple[int, int] | None = None
+) -> int:
     scan_dir = scan_dir.absolute()
     try:
         expected = scan_dir.lstat()
+        observed_identity = (expected.st_dev, expected.st_ino)
+        if (
+            expected_root_identity is not None
+            and observed_identity != expected_root_identity
+        ):
+            raise ContractError("scan directory: changed after artifact restoration setup")
         canonical = _require_scan_directory(scan_dir)
         descriptor = os.open(
             canonical,
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError as exc:
-        raise ContractError("scan directory: expected an existing non-symlink directory") from exc
+        raise ContractError(
+            "scan directory: expected an existing non-symlink directory"
+        ) from exc
     opened = os.fstat(descriptor)
-    if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+    opened_identity = (opened.st_dev, opened.st_ino)
+    if opened_identity != observed_identity or (
+        expected_root_identity is not None
+        and opened_identity != expected_root_identity
+    ):
         os.close(descriptor)
         raise ContractError("scan directory: changed while it was being opened")
     return descriptor
+
+
+def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
+    """Return a canonical scan root and its identity from a held handle."""
+
+    scan_dir = _require_scan_directory(scan_dir)
+    if not _descriptor_relative_writes_available():
+        if not _is_windows():
+            raise ContractError(
+                "scan-local output requires descriptor-relative file operations"
+            )
+        return _windows_scan_local_files().scan_root_identity(scan_dir)
+    descriptor = _open_verified_scan_directory(scan_dir)
+    try:
+        metadata = os.fstat(descriptor)
+        return scan_dir, (metadata.st_dev, metadata.st_ino)
+    finally:
+        os.close(descriptor)
 
 
 def _open_scan_local_directory(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
@@ -500,7 +532,12 @@ def _sha256_scan_local_file(scan_dir: Path, relative_path: str, context: str) ->
 
 
 def write_scan_local_bytes(
-    scan_dir: Path, relative_path: str, payload: bytes, *, external_name: bool = False
+    scan_dir: Path,
+    relative_path: str,
+    payload: bytes,
+    *,
+    external_name: bool = False,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> None:
     scan_dir = _require_scan_directory(scan_dir)
     if external_name:
@@ -513,7 +550,12 @@ def write_scan_local_bytes(
         if not _is_windows():
             raise ContractError("scan-local output requires descriptor-relative file operations")
         try:
-            _windows_scan_local_files().atomic_write(scan_dir, relative_path, payload)
+            _windows_scan_local_files().atomic_write(
+                scan_dir,
+                relative_path,
+                payload,
+                expected_root_identity=expected_root_identity,
+            )
         except OSError as exc:
             raise ContractError(f"{relative_path}: {exc}") from exc
         return
@@ -521,7 +563,7 @@ def write_scan_local_bytes(
     parent_fd: int | None = None
     temp_name: str | None = None
     try:
-        root_fd = _open_verified_scan_directory(scan_dir)
+        root_fd = _open_verified_scan_directory(scan_dir, expected_root_identity)
         parts = PurePosixPath(relative_path).parts
         try:
             parent_fd = _open_scan_local_directory(root_fd, parts[:-1], create=True)
@@ -529,6 +571,9 @@ def write_scan_local_bytes(
             raise ContractError(
                 f"{relative_path}: expected a path inside the scan directory"
             ) from exc
+        # The held descriptor is the authority for the validated parent. A
+        # concurrent rename cannot redirect later operations through a
+        # replacement path or link.
         try:
             metadata = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -536,6 +581,47 @@ def write_scan_local_bytes(
         else:
             if not stat.S_ISREG(metadata.st_mode):
                 raise ContractError(f"{relative_path}: expected a regular non-symlink file")
+            try:
+                existing_fd = os.open(
+                    parts[-1],
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                if exc.errno not in {errno.ENOENT, errno.EACCES, errno.EPERM}:
+                    raise
+            else:
+                try:
+                    opened = os.fstat(existing_fd)
+                    if not stat.S_ISREG(opened.st_mode):
+                        raise ContractError(
+                            f"{relative_path}: expected a regular non-symlink file"
+                        )
+                    if (opened.st_dev, opened.st_ino) != (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ):
+                        raise ContractError(
+                            f"{relative_path}: changed while it was being opened"
+                        )
+                    if (
+                        expected_root_identity is not None
+                        and opened.st_size == len(payload)
+                    ):
+                        try:
+                            with os.fdopen(existing_fd, "rb") as handle:
+                                existing_fd = -1
+                                if _windows_scan_local_files().stream_matches_payload(
+                                    handle, payload
+                                ):
+                                    return
+                        except OSError:
+                            pass
+                finally:
+                    if existing_fd >= 0:
+                        os.close(existing_fd)
         temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
         temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd)
         with os.fdopen(temp_fd, "wb") as handle:

@@ -11,8 +11,8 @@ already-validated ancestor from being renamed or replaced during a read,
 write, or delete.  Writes rename the exact temporary-file handle into place so
 an attacker cannot substitute another file at the temporary name.
 
-Importing this module is safe on non-Windows hosts.  Its public operations
-raise ``WindowsScanLocalFileError`` when called anywhere other than Windows.
+Importing this module and comparing streams work on every platform. Filesystem
+operations raise ``WindowsScanLocalFileError`` outside Windows.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import secrets
 from collections.abc import Iterator
 from ctypes import wintypes
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 _msvcrt = importlib.import_module("msvcrt") if os.name == "nt" else None
 
@@ -63,11 +64,15 @@ _FILE_TYPE_DISK = 0x0001
 _FILE_NAME_OPENED = 0x00000008
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_PATH_NOT_FOUND = 3
+_ERROR_ACCESS_DENIED = 5
+_ERROR_SHARING_VIOLATION = 32
+_ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
 _ERROR_ALREADY_EXISTS = 183
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_MAX_COMPARE_CHUNK = 64 * 1024
 _MAX_WRITE_CHUNK = 1024 * 1024
 
 _INVALID_COMPONENT_CHARACTERS = frozenset('<>:"|?*')
@@ -398,12 +403,20 @@ def _locked_parent(
     relative_path: str,
     *,
     create: bool,
+    expected_root_identity: tuple[int, int] | None = None,
 ) -> Iterator[tuple[Path, str]]:
     """Hold non-deletable handles for every directory in the absolute target path."""
 
     _require_windows()
     parts = _validated_parts(relative_path)
-    root_path, expected_root_identity = _canonical_scan_directory(scan_dir)
+    root_path, observed_root_identity = _canonical_scan_directory(scan_dir)
+    if (
+        expected_root_identity is not None
+        and observed_root_identity != expected_root_identity
+    ):
+        raise _invalid_path(
+            scan_dir, "scan directory changed after artifact restoration setup"
+        )
     handles: list[_OwnedHandle] = []
     try:
         # Absolute-path Win32 calls remain safe only while every ancestor is
@@ -414,8 +427,14 @@ def _locked_parent(
             assert directory_handle is not None
             handles.append(directory_handle)
         current_root = root_path.lstat()
-        if (current_root.st_dev, current_root.st_ino) != expected_root_identity:
-            raise _invalid_path(scan_dir, "scan directory changed while it was being opened")
+        current_root_identity = (current_root.st_dev, current_root.st_ino)
+        if current_root_identity != observed_root_identity or (
+            expected_root_identity is not None
+            and current_root_identity != expected_root_identity
+        ):
+            raise _invalid_path(
+                scan_dir, "scan directory changed while it was being opened"
+            )
         current_path = root_path
         for component in parts[:-1]:
             current_path /= component
@@ -429,6 +448,14 @@ def _locked_parent(
     finally:
         for handle in reversed(handles):
             handle.close()
+
+
+def scan_root_identity(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
+    """Return a canonical scan root and its identity while holding it fixed."""
+
+    with _locked_parent(scan_dir, ".identity", create=False) as (root_path, _):
+        metadata = root_path.lstat()
+        return root_path, (metadata.st_dev, metadata.st_ino)
 
 
 def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
@@ -463,6 +490,16 @@ def open_read_fd(scan_dir: Path, relative_path: str, context: str) -> int:
             f"{context}: {exc.strerror}",
             exc.filename,
         ) from exc
+
+
+def stream_matches_payload(stream: BinaryIO, payload: bytes) -> bool:
+    offset = 0
+    while offset < len(payload):
+        chunk = stream.read(min(_MAX_COMPARE_CHUNK, len(payload) - offset))
+        if not chunk or chunk != payload[offset : offset + len(chunk)]:
+            return False
+        offset += len(chunk)
+    return stream.read(1) == b""
 
 
 def _write_all(handle: int, payload: bytes) -> None:
@@ -532,12 +569,69 @@ def _validate_existing_output(path: Path) -> None:
         _verify_regular_file(handle.value, path)
 
 
-def atomic_write(scan_dir: Path, relative_path: str, payload: bytes) -> None:
+def _existing_output_matches(path: Path, payload: bytes) -> bool:
+    try:
+        handle = _create_file(
+            path,
+            access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
+            # Deny write and delete sharing while comparing the opened contents.
+            share=_FILE_SHARE_READ,
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+            missing_ok=True,
+        )
+    except WindowsScanLocalFileError as exc:
+        if exc.errno in {
+            _ERROR_ACCESS_DENIED,
+            _ERROR_SHARING_VIOLATION,
+            _ERROR_LOCK_VIOLATION,
+        }:
+            return False
+        raise
+    if handle is None:
+        return False
+    with handle:
+        assert handle.value is not None
+        _verify_regular_file(handle.value, path)
+        raw_handle = handle.detach()
+        try:
+            assert _msvcrt is not None
+            descriptor = _msvcrt.open_osfhandle(
+                raw_handle, os.O_RDONLY | os.O_BINARY
+            )
+        except BaseException:
+            _close_handle(raw_handle)
+            raise
+        try:
+            with os.fdopen(descriptor, "rb") as stream:
+                if os.fstat(stream.fileno()).st_size != len(payload):
+                    return False
+                return stream_matches_payload(stream, payload)
+        except OSError:
+            return False
+
+
+def atomic_write(
+    scan_dir: Path,
+    relative_path: str,
+    payload: bytes,
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> None:
     """Atomically replace a scan-local regular file with ``payload``."""
 
-    with _locked_parent(scan_dir, relative_path, create=True) as (parent_path, leaf_name):
+    with _locked_parent(
+        scan_dir,
+        relative_path,
+        create=True,
+        expected_root_identity=expected_root_identity,
+    ) as (parent_path, leaf_name):
         destination_path = parent_path / leaf_name
         _validate_existing_output(destination_path)
+        if expected_root_identity is not None and _existing_output_matches(
+            destination_path, payload
+        ):
+            return
 
         temp_handle: _OwnedHandle | None = None
         temp_path: Path | None = None

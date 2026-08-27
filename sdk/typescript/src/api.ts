@@ -6,7 +6,6 @@ import {
   mkdir,
   readFile,
   realpath,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -57,6 +56,7 @@ import {
 } from "./cost.js";
 import {
   loadContract,
+  readScanFile,
   requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
@@ -118,6 +118,7 @@ import {
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
   planOutputArchive,
+  prepareScanArtifactRestorer,
   prepareOutputDir,
   preparePersistentOutputRoot,
   requireModelSafeOutputDir,
@@ -130,6 +131,7 @@ import {
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
+  type ScanArtifactRestorer,
   type WorkbenchCommandOptions,
   validateOutputDir,
 } from "./runtime.js";
@@ -368,6 +370,7 @@ interface ClientDependencies {
   ) => Promise<PreparedRuntime>;
   resolvePluginPython?: typeof resolvePluginPython;
   prepareOutputDir?: typeof prepareOutputDir;
+  prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
@@ -642,6 +645,9 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    const prepareArtifactRestorer =
+      this.#dependencies.prepareScanArtifactRestorer ??
+      prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
     try {
       const checkOpen = (): void => {
@@ -1359,13 +1365,15 @@ export class CodexSecurity {
             ]),
           ].map(async (name) => ({
             name,
-            contents: await readFile(
-              await requireScanFile(scanDir, name, name, signal),
-              { signal },
-            ),
+            contents: await readScanFile(scanDir, name, name, signal),
           })),
         );
+        let artifactRestorer: ScanArtifactRestorer | null = null;
         try {
+          artifactRestorer = await prepareArtifactRestorer(
+            workbenchOptions,
+            scanDir,
+          );
           await runScanEvents({
             thread,
             events: (await followUp()).events,
@@ -1381,28 +1389,20 @@ export class CodexSecurity {
           checkOpen();
         } catch (error) {
           if (signal.aborted || this.#closed) throw error;
-          for (const artifact of completedArtifacts) {
-            const path = join(scanDir, artifact.name);
-            const current = await readFile(path, { signal }).catch(
-              (readError: NodeJS.ErrnoException) => {
-                if (readError.code !== "ENOENT") throw readError;
-                return null;
-              },
-            );
-            if (current?.equals(artifact.contents)) continue;
-            const temporary = join(
-              dirname(path),
-              `.${randomUUID()}.${basename(path)}.restore`,
-            );
-            try {
-              await writeFile(temporary, artifact.contents, {
-                flag: "wx",
-                mode: 0o600,
-                signal,
-              });
-              await rename(temporary, path);
-            } finally {
-              await rm(temporary, { force: true });
+          if (artifactRestorer !== null) {
+            for (const artifact of completedArtifacts) {
+              try {
+                await artifactRestorer.restore(
+                  artifact.name,
+                  artifact.contents,
+                );
+              } catch (cause) {
+                if (signal.aborted || this.#closed) throw cause;
+                throw new OutputDirectoryError(
+                  "Cannot restore an artifact outside the scan directory.",
+                  { cause },
+                );
+              }
             }
           }
           await collectResult(

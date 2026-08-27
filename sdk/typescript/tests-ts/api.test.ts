@@ -3753,75 +3753,92 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("warns about post-scan failures without failing a completed scan", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const commands: Array<readonly string[]> = [];
-    const warnings: string[] = [];
-    let turns = 0;
+  test.each([
+    ["the follow-up turn", false, "Could not draft fixes."],
+    ["artifact restoration setup", true, "restoration setup failed"],
+  ] as const)(
+    "warns when %s fails without failing a completed scan",
+    async (_scenario, setupFails, failureMessage) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const commands: Array<readonly string[]> = [];
+      const warnings: string[] = [];
+      let turns = 0;
 
-    const client = new TestClient(
-      {},
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
-          commands.push(args);
-          return mockWorkbench(args, input);
-        },
-        createCodex: () => ({
-          startThread: () => ({
-            id: "thread-1",
-            async runStreamed() {
-              turns += 1;
-              if (turns === 1) {
-                await copyCompletedScan(root);
-                return { events: completedEvents() };
+      const client = new TestClient(
+        {},
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          ...(setupFails
+            ? {
+                prepareScanArtifactRestorer: async () => {
+                  throw new Error(failureMessage);
+                },
               }
-              async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-                yield {
-                  type: "turn.failed",
-                  error: { message: "Could not draft fixes." },
-                };
-              }
-              return { events: failedEvents() };
-            },
+            : {}),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> => {
+            commands.push(args);
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: "thread-1",
+              async runStreamed() {
+                turns += 1;
+                if (turns === 1) {
+                  await copyCompletedScan(root);
+                  return { events: completedEvents() };
+                }
+                if (setupFails) {
+                  throw new Error("post-scan turn started after setup failed");
+                }
+                async function* failedEvents(): AsyncGenerator<ThreadEvent> {
+                  yield {
+                    type: "turn.failed",
+                    error: { message: "Could not draft fixes." },
+                  };
+                }
+                return { events: failedEvents() };
+              },
+            }),
           }),
-        }),
-      },
-    );
+        },
+      );
 
-    await expect(
-      client.run(repository, {
-        postScanPrompt: "Draft confirmed fixes.",
-        onWarning: (warning) => warnings.push(warning),
-      }),
-    ).resolves.toMatchObject({ scanDir });
-    expect(warnings).toEqual([
-      "Could not run post-scan instructions: Could not draft fixes.",
-    ]);
-    expect(commands.map((command) => command[0])).toEqual([
-      "register-cli-scan",
-      "get-scan-feedback",
-      "set-scan-thread",
-      "prepare-scan-completion",
-      "complete-scan",
-      "list-global-findings",
-    ]);
-    await client.close();
-  });
+      await expect(
+        client.run(repository, {
+          postScanPrompt: "Draft confirmed fixes.",
+          onWarning: (warning) => warnings.push(warning),
+        }),
+      ).resolves.toMatchObject({ scanDir });
+      expect(warnings).toEqual([
+        `Could not run post-scan instructions: ${failureMessage}`,
+      ]);
+      expect(turns).toBe(setupFails ? 1 : 2);
+      expect(commands.map((command) => command[0])).toEqual([
+        "register-cli-scan",
+        "get-scan-feedback",
+        "set-scan-thread",
+        "prepare-scan-completion",
+        "complete-scan",
+        "list-global-findings",
+      ]);
+      await client.close();
+    },
+  );
 
   test.each([
     ["partial coverage", "partial", false],
