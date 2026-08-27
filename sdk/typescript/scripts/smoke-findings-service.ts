@@ -123,7 +123,7 @@ async function startService(): Promise<void> {
     "--volume",
     `${join(repositoryRoot, "docker/fixtures/mock-embeddings.mjs")}:/test/mock-embeddings.mjs:ro`,
     "--volume",
-    `${fileURLToPath(new URL("fixtures/findings-service-sqlite.py", import.meta.url))}:/test/findings-service-sqlite.py:ro`,
+    `${fileURLToPath(new URL("fixtures/findings-service-sqlite.ts", import.meta.url))}:/test/findings-service-sqlite.ts:ro`,
     "findings",
   ]);
   base = `http://${docker(["port", container, "3000/tcp"])}`;
@@ -235,8 +235,9 @@ function checkStorage(): void {
   docker([
     "exec",
     container,
-    "python3",
-    "/test/findings-service-sqlite.py",
+    "node",
+    "--experimental-strip-types",
+    "/test/findings-service-sqlite.ts",
     JSON.stringify(ids),
   ]);
 }
@@ -318,11 +319,12 @@ try {
   docker([
     ...runner,
     "--entrypoint",
-    "python3",
+    "node",
     "--volume",
-    `${fileURLToPath(new URL("fixtures/prepare-runner-scan.py", import.meta.url))}:/test/prepare-runner-scan.py:ro`,
+    `${fileURLToPath(new URL("fixtures/prepare-runner-scan.ts", import.meta.url))}:/test/prepare-runner-scan.ts:ro`,
     "codex-security",
-    "/test/prepare-runner-scan.py",
+    "--experimental-strip-types",
+    "/test/prepare-runner-scan.ts",
   ]);
   assert.equal(
     docker(
