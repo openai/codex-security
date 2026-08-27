@@ -349,6 +349,75 @@ try {
   assert.deepEqual(progressedCoverage.openQuestions ?? [], []);
   assert.equal(progressedCoverage.completeness, "complete");
 
+  const renamedProgressRoot = path.join(root, "renamed-coverage-progress-worker");
+  await mkdir(renamedProgressRoot);
+  const renamedProgressContext = { ...workerContext, root: renamedProgressRoot };
+  const staleSurfaces = [
+    {
+      label: "ZIP entry candidate awaiting validation",
+      disposition: "needs_follow_up",
+      notes: "The archive candidate still needs validation.",
+    },
+    {
+      id: "surface-legacy-archive",
+      label: "Original archive extraction surface",
+      disposition: "needs_follow_up",
+      notes: "The archive candidate still needs validation.",
+    },
+  ];
+  const resolvedCoverage = {
+    ...coverage,
+    surfaces: [{
+      label: "Validated archive path traversal",
+      disposition: "reported",
+      notes: "The archive candidate was validated.",
+    }],
+  };
+  await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
+    ...workerInput,
+    complete: false,
+    findings: [],
+    coverage: {
+      ...coverage,
+      completeness: "partial",
+      surfaces: staleSurfaces,
+      deferred: [{
+        candidateId: finding.provenance.candidateId,
+        reason: "Archive path traversal validation is pending.",
+      }],
+    },
+  });
+  await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
+    ...workerInput,
+    complete: false,
+    coverage: resolvedCoverage,
+  });
+  const resolvedProgress = JSON.parse(
+    await readFile(path.join(renamedProgressRoot, "result.json"), "utf8"),
+  );
+  assert.deepEqual(resolvedProgress.coverage.surfaces, resolvedCoverage.surfaces);
+  assert.equal(resolvedProgress.coverage.completeness, "complete");
+
+  await saveScanDraftCheckpoint(renamedProgressContext, {
+    ...workerInput,
+    complete: false,
+    coverage: {
+      ...resolvedCoverage,
+      completeness: "partial",
+      surfaces: [...resolvedCoverage.surfaces, ...staleSurfaces],
+    },
+  }, false);
+  await recordCodexSecurityWorkerScanDraft(renamedProgressContext, {
+    ...workerInput,
+    complete: true,
+    coverage: resolvedCoverage,
+  });
+  const finalProgress = JSON.parse(
+    await readFile(path.join(renamedProgressRoot, "result.json"), "utf8"),
+  );
+  assert.deepEqual(finalProgress.coverage.surfaces, resolvedCoverage.surfaces);
+  assert.equal(finalProgress.coverage.completeness, "complete");
+
   const anchorRoot = path.join(root, "anchor-is-not-candidate-worker");
   await mkdir(anchorRoot);
   const anchorContext = { ...workerContext, root: anchorRoot };

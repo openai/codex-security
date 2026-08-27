@@ -325,6 +325,25 @@ async function preserveScanDraft(
     result.threatModel = structuredClone(retainedThreatModel);
   }
 
+  const resolvedCandidateIds = new Set([
+    ...result.findings.map(findingCandidateId),
+    ...(result.coverage.surfaces as JsonObject[])
+      .filter((surface) => (
+        surface.disposition === "rejected" || surface.disposition === "not_applicable"
+      ))
+      .map((surface) => surface.candidateId),
+  ].filter((value): value is string => typeof value === "string"));
+  const resolvedFollowUpSurfaces = sources.flatMap((source) => {
+    const pending = source.coverage.deferred as JsonObject[];
+    if (pending.length === 0 || pending.some((item) => {
+      const candidateId = item.candidateId ?? item.id;
+      return typeof candidateId !== "string" || !resolvedCandidateIds.has(candidateId);
+    })) return [];
+    return (source.coverage.surfaces as JsonObject[]).filter(
+      (surface) => surface.disposition === "needs_follow_up",
+    );
+  });
+
   for (const source of sources) {
     const deferred = result.coverage.deferred as JsonObject[];
     const dispositions = (result.coverage.surfaces as JsonObject[]).filter((surface) => (
@@ -389,6 +408,10 @@ async function preserveScanDraft(
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId))
           && !coverageEntryPresent(result.coverage.surfaces as unknown[], surface)
+          && !(
+            surface.disposition === "needs_follow_up"
+            && coverageEntryPresent(resolvedFollowUpSurfaces, surface)
+          )
         );
       }),
       openQuestions: result.complete === false
