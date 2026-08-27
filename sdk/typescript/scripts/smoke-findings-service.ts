@@ -15,7 +15,7 @@ let base: string;
 const document: FindingsDocument = JSON.parse(
   await readFile(
     new URL(
-      "../_bundled_plugin/examples/completed-scan/findings.json",
+      "../../../plugins/codex-security/examples/completed-scan/findings.json",
       import.meta.url,
     ),
     "utf8",
