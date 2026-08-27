@@ -255,12 +255,12 @@ describe("saved scan logs", () => {
       [
         "sibling-directory",
         join(artifacts, "deep_discovery", "output"),
-        "2026-08-11T12:03:00.000Z",
+        "2026-08-11T12:01:00.000Z",
       ],
       [
         "nested-scan",
         join(scanDirectory, "nested", "artifacts"),
-        "2026-08-11T12:03:00.000Z",
+        "2026-08-11T12:01:00.000Z",
       ],
     ] as const) {
       await writeSession(

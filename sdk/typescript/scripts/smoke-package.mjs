@@ -30,7 +30,13 @@ const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 const pluginContract = JSON.parse(
-  await readFile(new URL("../plugin-files.json", import.meta.url), "utf8"),
+  await readFile(
+    new URL(
+      "../../../plugins/codex-security/plugin-files.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
 );
 
 async function resolveArchive() {
@@ -203,6 +209,50 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     "The installed plugin must propagate the bundled Codex path into nested workers.",
   );
 
+  const pluginRoot = join(installedRoot, "_bundled_plugin");
+  const mcpLauncher = join(pluginRoot, "scripts", "launch_codex_security_mcp");
+  const windows = process.platform === "win32";
+  const initialized = spawnSync(
+    windows
+      ? process.env.ComSpec ??
+          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+      : mcpLauncher,
+    windows
+      ? ["/d", "/s", "/c", "call", `${mcpLauncher}.cmd`, "--stdio"]
+      : ["--stdio"],
+    {
+      cwd: pluginRoot,
+      encoding: "utf8",
+      env: { ...workerEnvironment, CODEX_MCP_NODE_PATH: process.execPath },
+      input: `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: {
+            name: "codex-security-package-smoke",
+            version: "0.1.0",
+          },
+        },
+      })}\n`,
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  if (initialized.error !== undefined) {
+    throw new Error("Installed MCP launcher did not start.", {
+      cause: initialized.error,
+    });
+  }
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.equal(
+    JSON.parse(initialized.stdout.trim()).result.serverInfo.name,
+    "codex-security",
+    "The installed MCP launcher must initialize the bundled security server.",
+  );
+
   const globalCodex = spawnSync("codex", ["--version"], {
     cwd: consumer,
     encoding: "utf8",
@@ -242,6 +292,7 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     });
     const { events } = await codex
       .startThread({
+        threadSource: "security_scan",
         workingDirectory: workerHome,
         skipGitRepoCheck: true,
         sandboxMode: "read-only",
@@ -320,6 +371,8 @@ try {
       "--no-audit",
       "--no-fund",
       archive,
+      `typescript@${packageManifest.devDependencies.typescript}`,
+      `@types/node@${packageManifest.devDependencies["@types/node"]}`,
     ],
     { cwd: consumer },
   );
@@ -346,7 +399,30 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); for (const name of ["CodexSecurity", "publishScan", "checkScanPublication"]) if (typeof sdk[name] !== "function") throw new Error("The installed package does not export " + name + ".");`,
+    ],
+    { cwd: consumer },
+  );
+
+  await cp(
+    join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
+    join(consumer, "consumer.ts"),
+  );
+  run(
+    process.execPath,
+    [
+      join(consumer, "node_modules", "typescript", "bin", "tsc"),
+      "--strict",
+      "--noEmit",
+      "--target",
+      "ES2022",
+      "--lib",
+      "ESNext",
+      "--module",
+      "NodeNext",
+      "--types",
+      "node",
+      "consumer.ts",
     ],
     { cwd: consumer },
   );
@@ -445,6 +521,43 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
+  assert.match(
+    run(process.execPath, [launcher, "publish", "scan", "--help"], {
+      cwd: consumer,
+      capture: true,
+    }),
+    /--skip-existing/u,
+  );
+  const missingHistory = spawnSync(
+    process.execPath,
+    [
+      launcher,
+      "publish",
+      "check",
+      publicationScan,
+      "--to",
+      "linear",
+      "--linear-team",
+      "team-example",
+      "--json",
+    ],
+    {
+      cwd: consumer,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_SECURITY_LINEAR_API_KEY: "",
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+      },
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  assert.equal(missingHistory.status, 2, missingHistory.stderr);
+  assert.match(missingHistory.stderr, /scan-history database does not exist/u);
+  await assert.rejects(stat(join(consumer, "publication-state")), {
+    code: "ENOENT",
+  });
 
   const networkGuard = join(consumer, "reject-publication-network.cjs");
   await writeFile(
@@ -493,10 +606,20 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "credential-lock.mjs"),
+      pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
+      join(consumer, "credential-lock-state"),
+    ],
+    { cwd: consumer },
+  );
+
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

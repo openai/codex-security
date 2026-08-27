@@ -1,8 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { CodexOptions } from "@openai/codex-sdk";
+import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CodexSecurity } from "../src/index.js";
+import { mockWorkbench } from "./support/api-client.js";
 import {
   completedEvents,
   createApiTestFixtures,
@@ -16,33 +17,14 @@ const InternalCodexSecurity = CodexSecurity as unknown as new (
   runtimeOptions?: { surface: "cli" | "sdk" },
 ) => CodexSecurity;
 
-afterEach(async () => {
-  await fixtures.cleanup();
-});
-
-function mockWorkbench(args: readonly string[]) {
-  if (args[0] === "register-cli-scan") {
-    return {
-      scanId: "scan_example_001",
-      targetId: "target_sha256_example",
-      targetRevision: "deadbeef",
-      scanDir: args[args.indexOf("--scan-dir") + 1],
-      contract: { target: { allowedKinds: ["git_revision"] } },
-    };
-  }
-  if (args[0] === "get-scan-feedback") {
-    return {
-      scanId: "scan_example_001",
-      targetId: "target_sha256_example",
-      falsePositives: [],
-    };
-  }
-  return {};
-}
+afterEach(fixtures.cleanup);
 
 async function scanResponseSurface(runtimeOptions?: {
   surface: "cli" | "sdk";
-}): Promise<string | undefined> {
+}): Promise<{
+  surface: string | undefined;
+  threadSource: string | undefined;
+}> {
   const root = await fixtures.temporaryDirectory();
   const repository = join(root, "repository");
   const codexHome = join(root, "codex-home");
@@ -51,6 +33,7 @@ async function scanResponseSurface(runtimeOptions?: {
   await mkdir(codexHome);
   await mkdir(scanDir, { mode: 0o700 });
   let codexOptions: CodexOptions | null = null;
+  let threadOptions: ThreadOptions | null = null;
 
   const client = new InternalCodexSecurity(
     {},
@@ -60,18 +43,24 @@ async function scanResponseSurface(runtimeOptions?: {
       resolvePluginPython: async () => "/managed/python",
       prepareOutputDir: async () => scanDir,
       repositoryRevision: async () => "deadbeef",
-      runWorkbench: async (_options: unknown, args: readonly string[]) =>
-        mockWorkbench(args),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ) => mockWorkbench(args, input),
       createCodex: (options: CodexOptions) => {
         codexOptions = options;
         return {
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              await fixtures.copyCompletedScan(root);
-              return { events: completedEvents() };
-            },
-          }),
+          startThread: (options: ThreadOptions) => {
+            threadOptions = options;
+            return {
+              id: null,
+              async runStreamed() {
+                await fixtures.copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            };
+          },
         };
       },
     },
@@ -80,21 +69,28 @@ async function scanResponseSurface(runtimeOptions?: {
 
   await client.run(repository);
   await client.close();
-  return (
-    (codexOptions as CodexOptions | null)?.config?.[
-      "responses_api_metadata"
-    ] as Record<string, string> | undefined
-  )?.["codex_security_surface"];
+  return {
+    surface: (
+      (codexOptions as CodexOptions | null)?.config?.[
+        "responses_api_metadata"
+      ] as Record<string, string> | undefined
+    )?.["codex_security_surface"],
+    threadSource: (threadOptions as ThreadOptions | null)?.threadSource,
+  };
 }
 
 describe("CodexSecurity Responses metadata", () => {
   test("SDK runtime scans use sdk metadata", async () => {
-    expect(await scanResponseSurface()).toBe("sdk");
+    expect(await scanResponseSurface()).toEqual({
+      surface: "sdk",
+      threadSource: "security_scan",
+    });
   });
 
   test("CLI runtime scans use cli metadata instead of sdk metadata", async () => {
-    const surface = await scanResponseSurface({ surface: "cli" });
-    expect(surface).toBe("cli");
-    expect(surface).not.toBe("sdk");
+    expect(await scanResponseSurface({ surface: "cli" })).toEqual({
+      surface: "cli",
+      threadSource: "security_scan",
+    });
   });
 });

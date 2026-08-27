@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
+import { regularTarListingLines } from "./package-tar-listing.mjs";
 
 const PACKAGE_SMOKE_PROCESS_TIMEOUT_MS =
   packageSmokeTimeouts().processTimeoutMs;
@@ -13,7 +14,10 @@ const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
 const [
   archive,
-  contractPath = new URL("../plugin-files.json", import.meta.url),
+  contractPath = new URL(
+    "../../../plugins/codex-security/plugin-files.json",
+    import.meta.url,
+  ),
 ] = args;
 if (archive === undefined || args.length > 2) {
   throw new Error(
@@ -164,15 +168,24 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "cloud-publish",
+    "codex-prompt",
+    "component-plan",
+    "component-scan",
     "config",
     "contract",
     "cost",
+    "cost-model",
+    "custom-validation",
+    "custom-validation-prompt",
     "errors",
+    "github",
     "index",
     "knowledge-base",
     "linear",
     "models",
     "multiscan",
+    "patch-tui",
     "publication",
     "publication-events",
     "publication-store",
@@ -184,9 +197,17 @@ const distFiles = new Set(
     "scan-dashboard",
     "scan-history-renderer",
     "scan-logs",
+    "scan-sessions",
+    "server/index",
+    "server/routes",
+    "server/server",
+    "server/sqlite-store",
+    "server/storage",
     "targets",
+    "thread-source",
     "trusted-executable",
     "version",
+    "windows-path",
     "worker-progress",
   ].flatMap((module) =>
     ["js", "js.map", "d.ts", "d.ts.map"].map(
@@ -204,6 +225,7 @@ for (const file of files) {
     ? normalized === "package" ||
       normalized === "package/bin" ||
       normalized === "package/dist" ||
+      normalized === "package/dist/server" ||
       pluginDirectories.has(normalized)
     : allowedRoot.has(normalized) ||
       distFiles.has(normalized) ||
@@ -214,12 +236,7 @@ for (const file of files) {
 }
 
 const listing = tar(["-tvzf", archive], "utf8");
-if (/^[^d-]/mu.test(listing)) {
-  throw new Error(
-    "npm tarball contains a non-regular entry (symbolic or hard link, device, or pipe).",
-  );
-}
-const listingLines = listing.split(/\r?\n/u).filter(Boolean);
+const listingLines = regularTarListingLines(listing);
 if (
   listingLines.length !== entries.length ||
   listingLines.some(
@@ -228,13 +245,15 @@ if (
 ) {
   throw new Error("npm tarball contains an invalid tar entry.");
 }
-const launcherPermissions =
-  listingLines[entries.indexOf("package/bin/codex-security.mjs")]?.split(
-    /\s/u,
-    1,
-  )[0] ?? "";
-if ([3, 6, 9].some((index) => launcherPermissions[index] !== "x")) {
-  throw new Error("npm package CLI launcher is not executable.");
+for (const [path, name] of [
+  ["package/bin/codex-security.mjs", "CLI"],
+  ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
+]) {
+  const permissions =
+    listingLines[entries.indexOf(path)]?.split(/\s/u, 1)[0] ?? "";
+  if ([3, 6, 9].some((index) => permissions[index] !== "x")) {
+    throw new Error(`npm package ${name} launcher is not executable.`);
+  }
 }
 const packageJson = JSON.parse(
   archiveFile("package/package.json").toString("utf8"),

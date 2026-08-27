@@ -10,7 +10,9 @@ on:
       - Dockerfile.dockerignore
       - compose.yaml
       - compose.apparmor.yaml
+      - compose.findings.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   pull_request:
     paths:
@@ -20,7 +22,9 @@ on:
       - Dockerfile.dockerignore
       - compose.yaml
       - compose.apparmor.yaml
+      - compose.findings.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   workflow_dispatch:
 
@@ -98,6 +102,60 @@ jobs:
           docker run --rm codex-security:ci --version
           docker run --rm codex-security:ci bulk-scan --help
           docker run --rm codex-security:ci info --json
+
+      - name: Verify findings service and persistent SQLite storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose=(docker compose -p findings-ci -f compose.findings.yaml)
+          trap '"${compose[@]}" logs; "${compose[@]}" down --volumes' EXIT
+          "${compose[@]}" up --build --detach
+          check_routes() {
+            "${compose[@]}" exec -T findings node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import { setTimeout } from "node:timers/promises";
+          const base = "http://127.0.0.1:3000";
+          for (let attempt = 0; ; attempt++) {
+            try {
+              await fetch(`${base}/v1/findings`, { signal: AbortSignal.timeout(1000) });
+              break;
+            } catch (error) {
+              if (attempt === 100) throw error;
+              await setTimeout(100);
+            }
+          }
+          for (const [method, path] of [
+            ["GET", "/v1/findings?limit=50&offset=0"],
+            ["POST", "/v1/bulk/findings"],
+          ]) {
+            const response = await fetch(`${base}${path}`, {
+              method,
+              ...(method === "POST" ? { body: '{"findings":[]}' } : {}),
+            });
+            assert.equal(response.status, 501);
+            assert.deepEqual(await response.json(), { error: "not_implemented" });
+          }
+          JS
+          }
+          check_routes
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/v1/findings)" = 501
+          "${compose[@]}" exec -T findings python3 - <<'PY'
+          import sqlite3
+          with sqlite3.connect("/state/workbench.sqlite3") as db:
+              assert db.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] > 0
+              assert db.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0
+              db.execute("INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", ("example-finding", "example-fingerprint", "example-rule", "example-anchor", "2026-01-01", "2026-01-01"))
+          PY
+          "${compose[@]}" stop --timeout 10
+          container_id=$("${compose[@]}" ps --all --quiet findings)
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$container_id")" = 0
+          "${compose[@]}" up --detach --force-recreate
+          check_routes
+          "${compose[@]}" exec -T findings python3 - <<'PY'
+          import sqlite3
+          with sqlite3.connect("/state/workbench.sqlite3") as db:
+              assert db.execute("SELECT id FROM findings").fetchall() == [("example-finding",)]
+          PY
 
       - name: Validate hardened customer Compose configuration
         env:

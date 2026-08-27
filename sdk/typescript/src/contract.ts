@@ -20,6 +20,7 @@ import {
   requireSecureOutputAncestry,
 } from "./runtime.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
+import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 const DOCUMENTS = {
   "scan-manifest.json": "scan-manifest.schema.json",
@@ -63,15 +64,25 @@ export interface LoadedContract {
   coverage: CoverageDocument;
 }
 
+type LoadContractOptions = {
+  pluginRoot: string;
+  expectedScanId?: string;
+  expectation?: ScanExpectation;
+  workbenchValidated?: boolean;
+  signal?: AbortSignal;
+};
+
 export async function loadContract(
   scanDirectory: string,
-  options: {
-    pluginRoot: string;
-    expectation?: ScanExpectation;
-    workbenchValidated?: boolean;
-    signal?: AbortSignal;
-  },
+  options: LoadContractOptions,
 ): Promise<LoadedContract> {
+  return (await loadContractWithScanDirectory(scanDirectory, options)).contract;
+}
+
+export async function loadContractWithScanDirectory(
+  scanDirectory: string,
+  options: LoadContractOptions,
+): Promise<{ contract: LoadedContract; scanDirectory: string }> {
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
@@ -99,6 +110,7 @@ export async function loadContract(
     ),
   };
   throwIfAborted(options.signal);
+  let findingsPayload: unknown = payloads["findings.json"];
 
   const ajv = createValidator();
   for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
@@ -112,7 +124,10 @@ export async function loadContract(
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
     }
-    const payload = payloads[filename as keyof typeof payloads];
+    let payload: unknown =
+      filename === "findings.json"
+        ? findingsPayload
+        : payloads[filename as keyof typeof payloads];
     let valid: boolean;
     try {
       const result = validate(payload);
@@ -120,17 +135,34 @@ export async function loadContract(
         throw new Error("asynchronous JSON Schema validation is unsupported");
       }
       valid = result;
+      if (!valid && filename === "findings.json") {
+        payload = legacySealedFindingsForValidation(payload);
+        const compatibleResult = validate(payload);
+        if (typeof compatibleResult !== "boolean") {
+          throw new Error("asynchronous JSON Schema validation is unsupported");
+        }
+        valid = compatibleResult;
+      }
     } catch {
       throw new ContractValidationError(`${schemaName}: invalid JSON Schema.`);
     }
     if (!valid) {
       throw schemaError(filename, validate.errors ?? []);
     }
+    if (filename === "findings.json") findingsPayload = payload;
     throwIfAborted(options.signal);
   }
   const manifest = payloads["scan-manifest.json"] as unknown as ScanManifest;
-  const findings = payloads["findings.json"] as unknown as FindingsDocument;
+  const findings = findingsPayload as FindingsDocument;
   const coverage = payloads["coverage.json"] as unknown as CoverageDocument;
+  if (
+    options.expectedScanId !== undefined &&
+    manifest.scan.id !== options.expectedScanId
+  ) {
+    throw new ContractValidationError(
+      `Scan artifacts do not match selected scan ${options.expectedScanId}.`,
+    );
+  }
   if (
     findings.scanId !== manifest.scan.id ||
     coverage.scanId !== manifest.scan.id
@@ -170,7 +202,221 @@ export async function loadContract(
     );
   }
   await verifyScanRoot(scanRoot, options.signal);
-  return { manifest, findings, coverage };
+  return {
+    contract: { manifest, findings, coverage },
+    scanDirectory: scanRoot.path,
+  };
+}
+
+export async function requireCanonicalScanDirectory(
+  scanDirectory: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (await requireScanRoot(scanDirectory, signal)).path;
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function legacySealedFindingsForValidation(payload: unknown): unknown {
+  const compatible = structuredClone(payload);
+  if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
+    return compatible;
+  }
+  for (const finding of compatible["findings"]) {
+    if (!isJsonRecord(finding)) continue;
+    const legacyEvidence = finding["code_evidence"];
+    if (Array.isArray(legacyEvidence)) {
+      const compatibleEvidence: JsonRecord[] = [];
+      for (const evidence of legacyEvidence) {
+        if (!isJsonRecord(evidence)) continue;
+        const id = evidence["id"];
+        const code = evidence["code"];
+        if (
+          typeof id !== "string" ||
+          id.length === 0 ||
+          typeof code !== "string" ||
+          code.length === 0
+        ) {
+          continue;
+        }
+        compatibleEvidence.push(evidence);
+      }
+      finding["code_evidence"] = compatibleEvidence;
+    } else if ("code_evidence" in finding && legacyEvidence !== null) {
+      delete finding["code_evidence"];
+    }
+
+    for (const [sectionName, listFields] of [
+      ["root_cause", ["evidenceRefs", "evidence_refs"]],
+      [
+        "validation",
+        [
+          "assertions",
+          "counterEvidence",
+          "evidenceRefs",
+          "evidence_refs",
+          "limitations",
+        ],
+      ],
+      [
+        "attackPath",
+        [
+          "assumptions",
+          "blindspots",
+          "controls",
+          "evidenceRefs",
+          "evidence_refs",
+          "limitations",
+          "preconditions",
+          "steps",
+        ],
+      ],
+    ] satisfies Array<[string, string[]]>) {
+      const section = finding[sectionName];
+      if (!isJsonRecord(section)) continue;
+      normalizeLegacyStringLists(section, listFields);
+    }
+
+    const legacyRootCause = finding["root_cause"];
+    if (isJsonRecord(legacyRootCause)) {
+      removeUnsupportedLegacyStrings(legacyRootCause, [
+        "summary",
+        "code",
+        "language",
+      ]);
+    } else if (
+      "root_cause" in finding &&
+      legacyRootCause !== null &&
+      typeof legacyRootCause !== "string"
+    ) {
+      delete finding["root_cause"];
+    }
+
+    const validation = finding["validation"];
+    if (isJsonRecord(validation)) {
+      normalizeLegacyStringOrList(validation, "evidence");
+      removeUnsupportedLegacyStrings(validation, ["method", "summary"]);
+      removeUnsupportedLegacyNullableStrings(validation, [
+        "status",
+        "disposition",
+        "result",
+      ]);
+    }
+
+    const attackPath = finding["attackPath"];
+    if (!isJsonRecord(attackPath)) continue;
+    removeUnsupportedLegacyStrings(attackPath, ["summary"]);
+    for (const field of ["dataFlow", "data_flow", "dataflow", "reachability"]) {
+      const detail = attackPath[field];
+      if (detail === null) {
+        delete attackPath[field];
+        continue;
+      }
+      if (typeof detail === "string") {
+        if (detail.length === 0) delete attackPath[field];
+        continue;
+      }
+      if (!isJsonRecord(detail)) {
+        if (field in attackPath) delete attackPath[field];
+        continue;
+      }
+      removeUnsupportedLegacyStrings(detail, [
+        "summary",
+        "source",
+        "sink",
+        "outcome",
+        ...(field === "reachability" ? ["attacker", "entrypoint"] : []),
+      ]);
+      normalizeLegacyStringLists(detail, [
+        "evidenceRefs",
+        "evidence_refs",
+        "transformations",
+        ...(field === "reachability" ? ["preconditions"] : []),
+      ]);
+    }
+    for (const field of ["impact", "likelihood"]) {
+      const detail = attackPath[field];
+      if (isJsonRecord(detail)) {
+        removeUnsupportedLegacyStrings(detail, ["level", "rationale", "why"]);
+      } else if (
+        detail !== undefined &&
+        detail !== null &&
+        (typeof detail !== "string" || detail.length === 0)
+      ) {
+        delete attackPath[field];
+      }
+    }
+  }
+  return compatible;
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeLegacyStringLists(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (!(field in section)) continue;
+    const value = section[field];
+    if (Array.isArray(value)) {
+      section[field] = value.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+      );
+    } else if (typeof value === "string" && value.length > 0) {
+      section[field] = [value];
+    } else {
+      delete section[field];
+    }
+  }
+}
+
+function normalizeLegacyStringOrList(section: JsonRecord, field: string): void {
+  if (!(field in section)) return;
+  const value = section[field];
+  if (typeof value === "string") {
+    if (value.length === 0) delete section[field];
+    return;
+  }
+  if (!Array.isArray(value)) {
+    delete section[field];
+    return;
+  }
+  const normalized = value.filter(
+    (item): item is string => typeof item === "string" && item.length > 0,
+  );
+  section[field] = normalized;
+}
+
+function removeUnsupportedLegacyStrings(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (
+      field in section &&
+      (typeof section[field] !== "string" || section[field].length === 0)
+    ) {
+      delete section[field];
+    }
+  }
+}
+
+function removeUnsupportedLegacyNullableStrings(
+  section: JsonRecord,
+  fields: string[],
+): void {
+  for (const field of fields) {
+    if (
+      field in section &&
+      section[field] !== null &&
+      (typeof section[field] !== "string" || section[field].length === 0)
+    ) {
+      delete section[field];
+    }
+  }
 }
 
 function validateCanonicalContract(
@@ -291,6 +537,25 @@ export async function requireScanFile(
   ).path;
 }
 
+export async function readScanFile(
+  scanDirectory: string,
+  relativePath: string,
+  context: string,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const file = await openCheckedScanFile(
+    scanDirectory,
+    relativePath,
+    context,
+    signal,
+  );
+  try {
+    return await file.readFile({ signal });
+  } finally {
+    await file.close();
+  }
+}
+
 async function requireCheckedScanFile(
   scanDirectory: string,
   relativePath: string,
@@ -301,7 +566,7 @@ async function requireCheckedScanFile(
   const checkedRoot = await requireScanRoot(scanDirectory, signal);
   const scanDir = checkedRoot.path;
   throwIfAborted(signal);
-  const safePath = safeRelativePath(relativePath, context);
+  const safePath = portableRelativePath(relativePath, context);
   const parts = safePath.split("/");
   let current = scanDir;
   try {
@@ -376,16 +641,19 @@ async function validateSeal(
   }
 
   const artifactPaths = new Set<string>();
+  const artifactCollisionKeys = new Set<string>();
   for (const [index, artifact] of scan.artifacts.entries()) {
     throwIfAborted(signal);
     const context = `manifest.scan.artifacts[${index}]`;
-    const normalized = safeRelativePath(artifact.path, `${context}.path`);
-    if (artifactPaths.has(normalized)) {
+    const normalized = portableRelativePath(artifact.path, `${context}.path`);
+    const collisionKey = normalized.toLowerCase();
+    if (artifactCollisionKeys.has(collisionKey)) {
       throw new ContractValidationError(
         `${context}.path: duplicate artifact path.`,
       );
     }
     artifactPaths.add(normalized);
+    artifactCollisionKeys.add(collisionKey);
     const digest =
       documentDigests.get(normalized) ??
       (await sha256ScanFile(
@@ -405,7 +673,7 @@ async function validateSeal(
   for (const surface of coverage.surfaces) {
     for (const receipt of surface.receiptRefs) {
       throwIfAborted(signal);
-      const normalized = safeRelativePath(receipt, "coverage receipt");
+      const normalized = portableRelativePath(receipt, "coverage receipt");
       if (!normalized.startsWith("artifacts/")) {
         throw new ContractValidationError(
           `Coverage receipt must be under artifacts/: ${receipt}`,
@@ -609,15 +877,14 @@ async function verifyScanRoot(
 function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
-    value.length === 0 ||
+    value.trim().length === 0 ||
     !isWellFormedUnicode(value) ||
     value === "." ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
     value.includes("\\") ||
-    value.includes("\0") ||
-    parts.some((part) => part.includes(":"))
+    /[\u0000-\u001f]/u.test(value)
   ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
@@ -629,6 +896,16 @@ function safeRelativePath(value: string, context: string): string {
     normalized.startsWith("../") ||
     isAbsolute(normalized)
   ) {
+    throw new ContractValidationError(
+      `${context}: expected a safe scan-relative POSIX path.`,
+    );
+  }
+  return normalized;
+}
+
+function portableRelativePath(value: string, context: string): string {
+  const normalized = safeRelativePath(value, context);
+  if (value.split("/").some(isWindowsUnsafePathComponent)) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
     );

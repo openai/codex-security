@@ -1,0 +1,877 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-security://schemas/tools/scan-draft.schema.json",
+  "title": "Codex Security semantic scan draft",
+  "$defs": {
+    "text": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/nonEmptyText"
+    },
+    "textList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/text"
+      }
+    },
+    "scanId": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/scanId"
+    },
+    "handoffClaimToken": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|recovery_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+    },
+    "repositoryPath": {
+      "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/repositoryPath"
+    },
+    "location": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repositoryPath"
+        },
+        "startLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "role": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "path",
+        "startLine"
+      ],
+      "additionalProperties": true
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "anchor": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        },
+        "instance": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        }
+      },
+      "required": [
+        "anchor"
+      ],
+      "additionalProperties": true
+    },
+    "severity": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "informational"
+          ]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "scoringSystem": {
+          "$ref": "#/$defs/text"
+        },
+        "vector": {
+          "$ref": "#/$defs/text"
+        },
+        "rationale": {
+          "$ref": "#/$defs/text"
+        },
+        "changeConditions": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "level"
+      ],
+      "additionalProperties": true
+    },
+    "confidence": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "rationale": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "level",
+        "rationale"
+      ],
+      "additionalProperties": true
+    },
+    "taxonomy": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/text",
+          "description": "The actual primary broken security control, not a CWE identifier."
+        },
+        "cwe": {
+          "$ref": "#/$defs/textList",
+          "description": "Copy the reviewed candidate's exact cwe_ids array. Use an empty array when no CWE is established; do not invent one."
+        }
+      },
+      "required": [
+        "category",
+        "cwe"
+      ],
+      "additionalProperties": true
+    },
+    "codeEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        },
+        "label": {
+          "$ref": "#/$defs/text"
+        },
+        "path": {
+          "$ref": "#/$defs/repositoryPath"
+        },
+        "startLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "language": {
+          "$ref": "#/$defs/text"
+        },
+        "role": {
+          "$ref": "#/$defs/text"
+        },
+        "code": {
+          "$ref": "#/$defs/text",
+          "description": "The genuine, nonempty source snippet at this evidence location."
+        },
+        "explanation": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "path",
+        "startLine",
+        "code",
+        "explanation"
+      ],
+      "additionalProperties": true
+    },
+    "legacyCodeEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/text"
+        },
+        "code": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "id",
+        "code"
+      ],
+      "additionalProperties": true
+    },
+    "findingAssessment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/text"
+            },
+            "rationale": {
+              "$ref": "#/$defs/text"
+            },
+            "why": {
+              "$ref": "#/$defs/text"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "textOrSummary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/text"
+            },
+            "source": {
+              "$ref": "#/$defs/text"
+            },
+            "sink": {
+              "$ref": "#/$defs/text"
+            },
+            "outcome": {
+              "$ref": "#/$defs/text"
+            },
+            "transformations": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidenceRefs": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidence_refs": {
+              "$ref": "#/$defs/textList"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "findingReachability": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/text"
+            },
+            "attacker": {
+              "$ref": "#/$defs/text"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/text"
+            },
+            "source": {
+              "$ref": "#/$defs/text"
+            },
+            "sink": {
+              "$ref": "#/$defs/text"
+            },
+            "outcome": {
+              "$ref": "#/$defs/text"
+            },
+            "preconditions": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidenceRefs": {
+              "$ref": "#/$defs/textList"
+            },
+            "evidence_refs": {
+              "$ref": "#/$defs/textList"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "findingValidation": {
+      "type": "object",
+      "properties": {
+        "assertions": {
+          "$ref": "#/$defs/textList"
+        },
+        "counterEvidence": {
+          "$ref": "#/$defs/textList"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "$ref": "#/$defs/textList"
+            }
+          ]
+        },
+        "evidenceRefs": {
+          "$ref": "#/$defs/textList"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/textList"
+        },
+        "limitations": {
+          "$ref": "#/$defs/textList"
+        },
+        "method": {
+          "$ref": "#/$defs/text"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/text"
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "findingAttackPath": {
+      "type": "object",
+      "properties": {
+        "assumptions": {
+          "$ref": "#/$defs/textList"
+        },
+        "blindspots": {
+          "$ref": "#/$defs/textList"
+        },
+        "controls": {
+          "$ref": "#/$defs/textList"
+        },
+        "dataFlow": {
+          "$ref": "#/$defs/textOrSummary"
+        },
+        "data_flow": {
+          "$ref": "#/$defs/textOrSummary"
+        },
+        "dataflow": {
+          "$ref": "#/$defs/textOrSummary"
+        },
+        "evidenceRefs": {
+          "$ref": "#/$defs/textList"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/textList"
+        },
+        "impact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/findingAssessment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "likelihood": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/findingAssessment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limitations": {
+          "$ref": "#/$defs/textList"
+        },
+        "preconditions": {
+          "$ref": "#/$defs/textList"
+        },
+        "reachability": {
+          "$ref": "#/$defs/findingReachability"
+        },
+        "steps": {
+          "$ref": "#/$defs/textList"
+        },
+        "summary": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "additionalProperties": true
+    },
+    "finding": {
+      "type": "object",
+      "properties": {
+        "findingId": false,
+        "occurrenceId": false,
+        "fingerprints": false,
+        "ruleId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$",
+          "description": "A stable lowercase vulnerability-family slug, such as prototype-pollution.json-patch; a CWE is taxonomy, not a rule ID."
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "summary": {
+          "$ref": "#/$defs/text"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "taxonomy": {
+          "$ref": "#/$defs/taxonomy"
+        },
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/location"
+          }
+        },
+        "writeup": {
+          "type": "object",
+          "properties": {
+            "reportPath": {
+              "type": "string",
+              "pattern": "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"
+            }
+          },
+          "required": [
+            "reportPath"
+          ],
+          "additionalProperties": true
+        },
+        "codeEvidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/codeEvidence"
+          }
+        },
+        "code_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/legacyCodeEvidence"
+          }
+        },
+        "rootCause": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "$ref": "#/$defs/text"
+                },
+                "code": {
+                  "$ref": "#/$defs/text"
+                },
+                "language": {
+                  "$ref": "#/$defs/text"
+                },
+                "evidenceRefs": {
+                  "$ref": "#/$defs/textList"
+                }
+              },
+              "required": [
+                "summary"
+              ],
+              "additionalProperties": true
+            }
+          ]
+        },
+        "root_cause": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "$ref": "#/$defs/text"
+                },
+                "code": {
+                  "$ref": "#/$defs/text"
+                },
+                "language": {
+                  "$ref": "#/$defs/text"
+                },
+                "evidenceRefs": {
+                  "$ref": "#/$defs/textList"
+                },
+                "evidence_refs": {
+                  "$ref": "#/$defs/textList"
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
+        "remediation": {
+          "$ref": "#/$defs/text"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/findingValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attackPath": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/findingAttackPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remediationTests": {
+          "$ref": "#/$defs/textList"
+        },
+        "preventiveControls": {
+          "$ref": "#/$defs/textList"
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "sourceFindingIds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/text" },
+              "uniqueItems": true,
+              "description": "Host-provided source finding references represented by this Deep reduction. Preserve every assigned reference exactly once."
+            },
+            "sourceFindings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "$ref": "#/$defs/text" },
+                  "finding": { "type": "object", "additionalProperties": true }
+                },
+                "required": ["id", "finding"],
+                "additionalProperties": false
+              },
+              "description": "Original source payloads retained by the host for lossless semantic merges."
+            },
+            "source": {
+              "$ref": "#/$defs/text",
+              "description": "The actual finding producer. Use local_plugin only for a finding discovered by this plugin."
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "additionalProperties": true
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "ruleId",
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "taxonomy",
+        "locations",
+        "remediation",
+        "provenance"
+      ],
+      "additionalProperties": true
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "includePaths": false,
+        "excludePaths": false,
+        "summary": {
+          "$ref": "#/$defs/text"
+        },
+        "artifactsReviewed": {
+          "$ref": "#/$defs/textList"
+        },
+        "runtimeStatus": {
+          "$ref": "#/$defs/text"
+        },
+        "validationMode": {
+          "$ref": "#/$defs/text"
+        },
+        "context": {
+          "$ref": "#/$defs/text"
+        },
+        "limitations": {
+          "$ref": "#/$defs/textList"
+        }
+      },
+      "additionalProperties": true
+    },
+    "threatModel": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "$ref": "#/$defs/text"
+        },
+        "assets": {
+          "$ref": "#/$defs/textList"
+        },
+        "trustBoundaries": {
+          "$ref": "#/$defs/textList"
+        },
+        "attackerCapabilities": {
+          "$ref": "#/$defs/textList"
+        },
+        "securityObjectives": {
+          "$ref": "#/$defs/textList"
+        },
+        "assumptions": {
+          "$ref": "#/$defs/textList"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "additionalProperties": true
+    },
+    "surface": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        },
+        "label": {
+          "$ref": "#/$defs/text",
+          "description": "The meaningful name of the reviewed security surface."
+        },
+        "disposition": {
+          "description": "The evidence-supported review result for this surface.",
+          "enum": [
+            "reported",
+            "no_issue_found",
+            "rejected",
+            "not_applicable",
+            "needs_follow_up"
+          ]
+        },
+        "receiptRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$"
+          }
+        },
+        "riskArea": {
+          "$ref": "#/$defs/text"
+        },
+        "notes": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "label",
+        "disposition"
+      ],
+      "additionalProperties": true
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "documentType": false,
+        "schemaVersion": false,
+        "scanId": false,
+        "mode": false,
+        "includePaths": false,
+        "excludePaths": false,
+        "receiptRefs": false,
+        "completeness": {
+          "description": "Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains.",
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ]
+        },
+        "inventoryStrategy": false,
+        "surfaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/surface"
+          }
+        },
+        "explicitExclusions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pattern": {
+                "$ref": "#/$defs/text"
+              },
+              "reason": {
+                "$ref": "#/$defs/text"
+              }
+            },
+            "required": [
+              "pattern",
+              "reason"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "deferred": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/text"
+              },
+              "candidateId": {
+                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+              },
+              "reason": {
+                "$ref": "#/$defs/text"
+              },
+              "paths": {
+                "$ref": "#/$defs/textList"
+              },
+              "surfaceIds": {
+                "$ref": "#/$defs/textList"
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "openQuestions": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/text"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "followUpPrompt": {
+                    "$ref": "#/$defs/text"
+                  }
+                },
+                "required": [
+                  "question"
+                ],
+                "additionalProperties": true
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "completeness",
+        "surfaces",
+        "explicitExclusions",
+        "deferred"
+      ],
+      "additionalProperties": true
+    },
+    "scanDraftInput": {
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean",
+          "description": "Set false to save progress without declaring this worker or parent audit finished. Omit or set true only for the terminal result. Put provisional candidates in coverage.deferred, not findings."
+        },
+        "scanId": {
+          "$ref": "#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "#/$defs/handoffClaimToken"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "threatModel": {
+          "$ref": "#/$defs/threatModel"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        }
+      },
+      "required": [
+        "scanId",
+        "findings",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "completedScanInput": {
+      "type": "object",
+      "properties": {
+        "scanId": {
+          "$ref": "#/$defs/scanId"
+        },
+        "handoffClaimToken": {
+          "$ref": "#/$defs/handoffClaimToken"
+        }
+      },
+      "required": [
+        "scanId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$ref": "#/$defs/scanDraftInput"
+}

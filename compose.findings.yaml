@@ -1,0 +1,14 @@
+services:
+  findings:
+    build:
+      context: .
+      target: findings-service
+    init: true
+    env_file: docker/findings.env
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - findings-state:/state
+
+volumes:
+  findings-state:

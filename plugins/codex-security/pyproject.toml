@@ -1,0 +1,22 @@
+[project]
+name = "codex-security"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+test = [
+    "jsonschema[format-nongpl]==4.26.0",
+    "packaging==26.3",
+    "pytest==9.0.3",
+    "PyYAML==6.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = []
+
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
