@@ -76,7 +76,7 @@ function docker(args: string[], { check = true } = {}): string {
   return result.stdout?.trim() ?? "";
 }
 
-async function startService(mockEmbeddings = true): Promise<void> {
+async function startService(): Promise<void> {
   docker([
     ...compose,
     "run",
@@ -87,6 +87,8 @@ async function startService(mockEmbeddings = true): Promise<void> {
     container,
     "--env",
     "OPENAI_API_KEY=synthetic-container-key",
+    "--env",
+    "NODE_OPTIONS=--import=/test/mock-embeddings.mjs",
     "--volume",
     `${join(repositoryRoot, "docker/fixtures/mock-embeddings.mjs")}:/test/mock-embeddings.mjs:ro`,
     "--volume",
@@ -94,9 +96,6 @@ async function startService(mockEmbeddings = true): Promise<void> {
     "--volume",
     `${fileURLToPath(new URL("fixtures/findings-service-sqlite.py", import.meta.url))}:/test/findings-service-sqlite.py:ro`,
     "findings",
-    ...(mockEmbeddings
-      ? ["--import", "/test/mock-embeddings.mjs", "dist/server/index.js"]
-      : []),
   ]);
   base = `http://${docker(["port", container, "3000/tcp"])}`;
   for (let attempt = 0; ; attempt++) {
@@ -170,6 +169,8 @@ function checkCliDeduplication(): void {
     const actual: unknown = JSON.parse(
       docker([
         "exec",
+        "--env",
+        "NODE_OPTIONS=",
         container,
         "node",
         "--import",
@@ -269,10 +270,6 @@ let passed = false;
 try {
   if (!process.argv[2])
     docker(["build", "--target", "findings-service", "--tag", image, "."]);
-  // Verify the image's default CMD before overriding it for synthetic API calls.
-  await startService(false);
-  stopService();
-  docker(["rm", container]);
   await startService();
   await checkInsertions();
   await checkCandidates();
