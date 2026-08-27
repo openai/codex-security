@@ -1297,15 +1297,14 @@ and bulk-scan Compose configuration are unchanged.
 
 This first stage only initializes storage and serves mocked endpoints:
 
-| Method | Path                       | Current behavior                  |
-| ------ | -------------------------- | --------------------------------- |
-| `GET`  | `/v1/findings`             | Log the route and return HTTP 501 |
-| `POST` | `/v1/bulk/findings`        | Log the route and return HTTP 501 |
-| `POST` | `/v1/bulk/findings/dedupe` | Log the route and return HTTP 501 |
+| Method | Path                | Current behavior                  |
+| ------ | ------------------- | --------------------------------- |
+| `GET`  | `/v1/findings`      | Log the route and return HTTP 501 |
+| `POST` | `/v1/bulk/findings` | Log the route and return HTTP 501 |
 
 Each stub returns `{"error":"not_implemented"}`; unknown routes return HTTP 404
 with `{"error":"not_found"}`. Request bodies are not processed or logged. No
-findings, embeddings, or deduplication results are written by these endpoints.
+findings or embeddings are written by these endpoints.
 
 Storage initializes before the server listens. The SQLite adapter reuses the
 bundled workbench's schema and migrations at
@@ -1342,11 +1341,9 @@ unused provider abstractions.
 
 The next stage will persist the existing `Finding` model and embeddings in
 SQLite, return IDs from bulk insertion, and list findings with pagination
-defaulting to 50. Bulk insert with deduplication will call a stub workflow
-service and return unique IDs plus duplicate groups. The third stage will
-implement candidate retrieval, screening, independent pair review, and
-whole-group review for groups larger than two. None of those operations are
-implemented in this preview.
+defaulting to 50. A later stage will add candidate retrieval to the API and run
+screening, independent pair review, and whole-group review locally through the
+SDK and CLI. None of those operations are implemented in this preview.
 
 ## Containerized bulk scans
 

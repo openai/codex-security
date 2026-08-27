@@ -125,7 +125,6 @@ jobs:
           for (const [method, path] of [
             ["GET", "/v1/findings?limit=50&offset=0"],
             ["POST", "/v1/bulk/findings"],
-            ["POST", "/v1/bulk/findings/dedupe"],
           ]) {
             const response = await fetch(`${base}${path}`, {
               method,

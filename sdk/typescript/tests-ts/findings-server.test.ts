@@ -23,7 +23,7 @@ afterEach(async () => {
   }
 });
 
-test("serves only the three mock routes after storage is initialized", async () => {
+test("serves only the two mock routes after storage is initialized", async () => {
   let initialized = false;
   const server = await startFindingsServer({
     host: "127.0.0.1",
@@ -45,7 +45,6 @@ test("serves only the three mock routes after storage is initialized", async () 
     for (const [method, path] of [
       ["GET", "/v1/findings?limit=50&offset=0"],
       ["POST", "/v1/bulk/findings"],
-      ["POST", "/v1/bulk/findings/dedupe"],
     ] as const) {
       const response = await fetch(`${base}${path}`, {
         method,
@@ -58,13 +57,13 @@ test("serves only the three mock routes after storage is initialized", async () 
     expect(log.mock.calls).toEqual([
       ["GET /v1/findings"],
       ["POST /v1/bulk/findings"],
-      ["POST /v1/bulk/findings/dedupe"],
     ]);
 
     for (const [method, path] of [
       ["GET", "/unknown"],
       ["POST", "/v1/findings"],
       ["GET", "/v1/bulk/findings"],
+      ["POST", "/v1/bulk/findings/dedupe"],
     ]) {
       const response = await fetch(`${base}${path}`, { method });
       expect(response.status).toBe(404);

@@ -11,7 +11,6 @@ export function handleFindingsRequest(
   switch (route) {
     case "GET /v1/findings":
     case "POST /v1/bulk/findings":
-    case "POST /v1/bulk/findings/dedupe":
       console.log(route);
       response.writeHead(501, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: "not_implemented" }));
