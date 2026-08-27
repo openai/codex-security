@@ -6,7 +6,8 @@
     "dashboard/**/*.tsx",
     "tests-ts/**/*.ts",
     "scripts/smoke-findings-service.ts",
-    "scripts/fixtures/findings-service-sqlite.ts"
+    "scripts/fixtures/findings-service-sqlite.ts",
+    "scripts/fixtures/prepare-runner-scan.ts"
   ],
   "exclude": ["dist", "node_modules", "tests-ts/package.test.ts"],
   "compilerOptions": {

@@ -912,23 +912,38 @@ cancel active scans.
 
 ## Findings service (preview)
 
+The findings API is distributed separately from the scanner as
+`ghcr.io/openai/codex-security-findings`, for Linux `amd64` and `arm64`.
+Once a release is published, it can be pulled without a GitHub login. See
+[container release setup](../../docker/README.md) for the required maintainer
+setup and publication process.
+
 From the repository root, copy the example if you do not already have a `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` in `.env`, then build and start the findings API:
+Set `OPENAI_API_KEY` in `.env`, then pull and start the findings API:
 
 ```bash
-docker compose -f compose.findings.yaml up --build -d
+docker compose -f compose.findings.yaml pull
+docker compose -f compose.findings.yaml up --no-build -d
 curl -i http://127.0.0.1:3000/v1/findings
 ```
 
-The `findings-service` Docker target starts the compiled SDK server used by the
-packaged `start:server` script, without invoking the CLI. Docker runs Node
-directly so stop signals reach the server. The existing default Docker target
-and bulk-scan Compose configuration are unchanged.
+You can deploy with just `compose.findings.yaml` and a private `.env`; no source
+checkout or Node.js installation is required. `CODEX_SECURITY_FINDINGS_IMAGE`
+defaults to `ghcr.io/openai/codex-security-findings:latest`. Set it to a published
+version, `sha-<commit>` tag, or digest for repeatable deployments.
+
+To build from a source checkout instead:
+
+```bash
+docker build --target findings-service -t codex-security-findings:local .
+export CODEX_SECURITY_FINDINGS_IMAGE=codex-security-findings:local
+docker compose -f compose.findings.yaml up --no-build -d
+```
 
 ### Read-only dashboard
 
@@ -1344,16 +1359,44 @@ use the same finding upsert operation. Changing a stored document invalidates
 its old embedding so later matching cannot use a stale vector. Historical
 findings are not automatically embedded; submit them to a bulk endpoint first.
 
-The `findings-state` named volume
-persists that database across container restarts. Stop the service with
+The `findings-state` named volume persists `/state`, including the database,
+across container replacements. Keep the same Compose project name to reuse it.
+The image runs as UID/GID `10001:10001`; a bind mount must be writable by that
+UID/GID if used instead of the named volume.
+
+Stop the service with
 `docker compose -f compose.findings.yaml down`; add `--volumes` only when you
 intend to delete the stored data.
 
-`docker/findings.env` contains non-secret container defaults: `HOST=0.0.0.0`,
-`PORT=3000`, and `CODEX_SECURITY_STATE_DIR=/state`. Compose publishes the port
-only on the host's loopback interface. There is no API authentication in this
-preview. Do not expose it to an untrusted network; use an authenticated proxy
-before sharing access.
+The image defaults to `HOST=0.0.0.0`, `PORT=3000`, and
+`CODEX_SECURITY_STATE_DIR=/state`. Keep port and volume mappings aligned if
+changing these settings. Compose binds only to host loopback; the API has no
+authentication. Use an authenticated TLS proxy before sharing access. Finding
+JSON is sent to `api.openai.com` over HTTPS for embeddings; the database and
+generated embeddings stay in the local volume.
+
+### Upgrades and backups
+
+Read the release notes and stop the service before backing up the entire
+`/state` directory. For the published-image Compose configuration:
+
+```bash
+docker compose -f compose.findings.yaml stop findings
+mkdir -p backups
+chmod 700 backups
+docker compose -f compose.findings.yaml run --rm --no-deps --user 0:0 \
+  --entrypoint tar -T findings -C /state -czf - . > backups/findings-state.tgz
+chmod 600 backups/findings-state.tgz
+```
+
+Keep backups separately; this command overwrites an existing backup of the same
+name. Set `CODEX_SECURITY_FINDINGS_IMAGE` to the new version or digest and repeat
+the pull/start commands above, retaining the volume. Startup applies SQLite
+migrations automatically. To roll back, stop the service, restore the pre-upgrade
+backup, and select the previous image digest; an older image may not support the
+migrated database.
+
+### Running without Docker
 
 To run locally, use Node.js and Python 3 as described in the prerequisites.
 Export the API key in your shell; the server does not load `.env` automatically.

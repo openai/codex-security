@@ -46,10 +46,15 @@ await security.close();
 
 Use the included Docker Compose configuration for scans of many repositories. See the [container quick start](sdk/typescript/README.md#containerized-bulk-scans) for more detail.
 
+For individual CLI stages with durable state and access to a separately deployed
+findings service, use the same scanner image with the
+[workflow runner Compose example](docker/README.md#workflow-runner).
+
 ## Findings service (preview)
 
 The [findings service](sdk/typescript/README.md#findings-service-preview) runs
-from the SDK in Docker, stores findings and embeddings in SQLite, and lists
+from the separate `ghcr.io/openai/codex-security-findings` image (or a local
+source build), stores findings and embeddings in SQLite, and lists
 findings with pagination. Its read-only dashboard at `/dashboard` refreshes every
 five seconds and shows stored findings and duplicate groups from the service's
 database. It also returns potential duplicates by embedding similarity within a
