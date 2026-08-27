@@ -1467,16 +1467,74 @@ def _schema_type_matches(value: Any, expected: str) -> bool:
     }[expected]
 
 
-def _validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> None:
+def _schema_values_equal(left: Any, right: Any) -> bool:
+    if (
+        isinstance(left, (int, float))
+        and not isinstance(left, bool)
+        and isinstance(right, (int, float))
+        and not isinstance(right, bool)
+    ):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _schema_values_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _schema_values_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return left == right
+
+
+def _resolve_schema_reference(
+    root_schema: dict[str, Any], reference: str, context: str
+) -> dict[str, Any]:
+    if reference == "#":
+        return root_schema
+    if not reference.startswith("#/"):
+        raise ContractError(f"{context}: unsupported schema reference {reference!r}")
+    target: Any = root_schema
+    for raw_part in reference[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(target, dict) or part not in target:
+            raise ContractError(f"{context}: unresolved schema reference {reference!r}")
+        target = target[part]
+    if not isinstance(target, dict):
+        raise ContractError(f"{context}: schema reference {reference!r} is not an object")
+    return target
+
+
+def _validate_schema_node(
+    value: Any,
+    schema: dict[str, Any],
+    context: str,
+    root_schema: dict[str, Any] | None = None,
+) -> None:
+    root_schema = schema if root_schema is None else root_schema
+    reference = schema.get("$ref")
+    if reference is not None:
+        if not isinstance(reference, str):
+            raise ContractError(f"{context}: schema reference must be a string")
+        _validate_schema_node(
+            value,
+            _resolve_schema_reference(root_schema, reference, context),
+            context,
+            root_schema,
+        )
     expected = schema.get("type")
     if isinstance(expected, list):
         if not any(_schema_type_matches(value, item) for item in expected):
             raise ContractError(f"{context}: does not match schema type {expected}")
     elif isinstance(expected, str) and not _schema_type_matches(value, expected):
         raise ContractError(f"{context}: expected schema type {expected}")
-    if "const" in schema and value != schema["const"]:
+    if "const" in schema and not _schema_values_equal(value, schema["const"]):
         raise ContractError(f"{context}: expected {schema['const']!r}")
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not any(
+        _schema_values_equal(value, candidate) for candidate in schema["enum"]
+    ):
         raise ContractError(f"{context}: unsupported value {value!r}")
     if isinstance(value, str):
         if schema.get("minLength", 0) and len(value) < schema["minLength"]:
@@ -1493,12 +1551,21 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> N
     if isinstance(value, list):
         if "minItems" in schema and len(value) < schema["minItems"]:
             raise ContractError(f"{context}: array has too few items")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            raise ContractError(f"{context}: array has too many items")
+        if schema.get("uniqueItems") is True:
+            for index, item in enumerate(value):
+                if any(
+                    _schema_values_equal(item, candidate)
+                    for candidate in value[:index]
+                ):
+                    raise ContractError(f"{context}: array items must be unique")
         contains = schema.get("contains")
         if isinstance(contains, dict):
             matches = 0
             for item in value:
                 try:
-                    _validate_schema_node(item, contains, context)
+                    _validate_schema_node(item, contains, context, root_schema)
                 except ContractError:
                     pass
                 else:
@@ -1510,35 +1577,49 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> N
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
-                _validate_schema_node(item, item_schema, f"{context}[{index}]")
+                _validate_schema_node(
+                    item, item_schema, f"{context}[{index}]", root_schema
+                )
     if isinstance(value, dict):
         for item_schema in schema.get("allOf", []):
-            _validate_schema_node(value, item_schema, context)
+            _validate_schema_node(value, item_schema, context, root_schema)
         condition = schema.get("if")
         if isinstance(condition, dict):
             try:
-                _validate_schema_node(value, condition, context)
+                _validate_schema_node(value, condition, context, root_schema)
             except ContractError:
                 pass
             else:
                 then_schema = schema.get("then")
                 if isinstance(then_schema, dict):
-                    _validate_schema_node(value, then_schema, context)
+                    _validate_schema_node(value, then_schema, context, root_schema)
         for key in schema.get("required", []):
             if key not in value:
                 raise ContractError(f"{context}.{key}: missing required schema property")
+        if "minProperties" in schema and len(value) < schema["minProperties"]:
+            raise ContractError(f"{context}: object has too few properties")
         properties = schema.get("properties", {})
+        additional_properties = schema.get("additionalProperties", True)
         for key, item in value.items():
             item_schema = properties.get(key)
             if isinstance(item_schema, dict):
-                _validate_schema_node(item, item_schema, f"{context}.{key}")
-            elif schema.get("additionalProperties") is False:
+                _validate_schema_node(
+                    item, item_schema, f"{context}.{key}", root_schema
+                )
+            elif additional_properties is False:
                 raise ContractError(f"{context}.{key}: unexpected schema property")
+            elif isinstance(additional_properties, dict):
+                _validate_schema_node(
+                    item,
+                    additional_properties,
+                    f"{context}.{key}",
+                    root_schema,
+                )
 
 
 def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     schema = _read_json(schema_path)
-    _validate_schema_node(payload, schema, schema_path.stem)
+    _validate_schema_node(payload, schema, schema_path.stem, schema)
 
 
 def _filter_unknown_legacy_evidence_refs(

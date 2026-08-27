@@ -146,6 +146,22 @@ function validate(payload: Assessment) {
   return validateText(JSON.stringify(payload));
 }
 
+function validateWithSharedSchema(payload: Assessment) {
+  expect(python).toBeDefined();
+  expect(python).not.toBeNull();
+  const program = [
+    "import json, pathlib, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "import finalize_scan_contract as finalizer",
+    "finalizer.validate_against_schema(json.load(sys.stdin), pathlib.Path(sys.argv[2]))",
+  ].join("\n");
+  return spawnSync(
+    python!,
+    ["-I", "-S", "-c", program, join(PLUGIN_ROOT, "scripts"), schemaPath],
+    { encoding: "utf8", input: JSON.stringify(payload) },
+  );
+}
+
 describe("patch risk assessment contract", () => {
   test("resolves the validator from the installed skill", async () => {
     const outside = await mkdtemp(join(tmpdir(), "patch-risk-contract-"));
@@ -173,6 +189,57 @@ describe("patch risk assessment contract", () => {
     const rawWorktree = assessment();
     rawWorktree.patch.sourceType = "raw_worktree";
     expect(validateSchema(rawWorktree)).toBe(false);
+  });
+
+  test("enforces the patch-risk schema through the shared validator", () => {
+    const valid = validateWithSharedSchema(assessment());
+    expect(valid.status, valid.stderr).toBe(0);
+
+    const duplicateChangedFiles = assessment();
+    duplicateChangedFiles.patch.changedFiles = [
+      "src/request.ts",
+      "src/request.ts",
+    ];
+    expect(validateWithSharedSchema(duplicateChangedFiles).status).not.toBe(0);
+
+    const emptyRationale = assessment();
+    emptyRationale.impact.rationale = "";
+    expect(validateWithSharedSchema(emptyRationale).status).not.toBe(0);
+
+    const duplicateItems = assessment();
+    duplicateItems.autoMergeExclusions = ["migration", "migration"];
+    expect(validateWithSharedSchema(duplicateItems).status).not.toBe(0);
+
+    const tooManyEvidenceSteps = assessment();
+    tooManyEvidenceSteps.evidencePlan = Array.from(
+      { length: 4 },
+      (_, index) => ({
+        question: `Question ${index}`,
+        action: "Inspect the corresponding evidence.",
+        outcomes: { supported: "merge", contradicted: "revise" },
+      }),
+    );
+    expect(validateWithSharedSchema(tooManyEvidenceSteps).status).not.toBe(0);
+
+    const incompleteOutcomes = assessment();
+    incompleteOutcomes.evidencePlan = [
+      {
+        question: "Is the boundary protected?",
+        action: "Inspect the corresponding evidence.",
+        outcomes: { supported: "merge" },
+      },
+    ];
+    expect(validateWithSharedSchema(incompleteOutcomes).status).not.toBe(0);
+
+    const emptyOutcome = assessment();
+    emptyOutcome.evidencePlan = [
+      {
+        question: "Is the boundary protected?",
+        action: "Inspect the corresponding evidence.",
+        outcomes: { supported: "", contradicted: "revise" },
+      },
+    ];
+    expect(validateWithSharedSchema(emptyOutcome).status).not.toBe(0);
   });
 
   test("enforces the published schema without site packages", async () => {
