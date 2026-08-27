@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ValidateFunction } from "ajv";
 import { FindingsError } from "./errors.js";
+import { dashboardQuery, serveDashboard } from "./dashboard.js";
 import type { FindingsService } from "./findings-service.js";
 import {
   findingSearchScope,
@@ -18,6 +19,20 @@ export async function handleFindingsRequest(
   try {
     const url = new URL(request.url ?? "/", "http://localhost");
     const route = `${request.method} ${url.pathname}`;
+    if (
+      request.method === "GET" &&
+      (await serveDashboard(url.pathname, response))
+    )
+      return;
+    if (route === "GET /v1/dashboard") {
+      response.setHeader("Cache-Control", "no-store");
+      json(
+        response,
+        200,
+        await service.dashboard(dashboardQuery(url.searchParams)),
+      );
+      return;
+    }
     if (route === "GET /v1/findings") {
       console.log(route);
       json(response, 200, await service.list(pagination(url.searchParams)));

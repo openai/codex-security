@@ -62,6 +62,24 @@ try {
       ["synthetic-other", importedIds[3]!],
     ].sort(),
   );
+
+  if (process.argv.includes("--expect-groups")) {
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM finding_dedupe_groups").get()![
+        "count"
+      ],
+      1,
+    );
+    const members = db
+      .prepare(
+        "SELECT finding_id FROM finding_dedupe_group_members ORDER BY finding_id",
+      )
+      .all();
+    assert.deepEqual(
+      members.map((row) => row["finding_id"]),
+      importedIds.slice(0, 3).sort(),
+    );
+  }
 } finally {
   db.close();
 }

@@ -8,7 +8,29 @@ export type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 export interface SavedScanDependencies {
   currentDirectory(): string;
-  runWorkbench(args: readonly string[]): Promise<JsonObject>;
+  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
+}
+
+export async function resolveWorkflowScan(
+  workflowId: string,
+  dependencies: SavedScanDependencies,
+): Promise<{ scanId: string; scanDir: string }> {
+  const context = await dependencies.runWorkbench(
+    ["finding-workflow"],
+    JSON.stringify({ id: workflowId, action: "get" }),
+  );
+  const workflow = context["workflow"];
+  if (
+    workflow === undefined ||
+    !isJsonObject(workflow) ||
+    typeof workflow["scanId"] !== "string" ||
+    typeof workflow["scanDir"] !== "string"
+  ) {
+    throw new CodexSecurityError(
+      `Workflow ${workflowId} has no saved scan. Start it with scan --workflow-id ${workflowId}.`,
+    );
+  }
+  return { scanId: workflow["scanId"], scanDir: workflow["scanDir"] };
 }
 
 export async function resolveCompletedScan(

@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import type { DeduplicateScanResult } from "../src/deduplication/scan.js";
 import type { FindingsPage } from "../src/server/storage.js";
+import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
+import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const container = `findings-ci-${process.pid}`;
@@ -142,6 +144,25 @@ async function startService(): Promise<void> {
   }
 }
 
+async function checkDashboard(): Promise<void> {
+  for (const [path, type] of [
+    ["/dashboard", "text/html"],
+    ["/dashboard/app.js", "text/javascript"],
+    ["/dashboard/app.css", "text/css"],
+  ]) {
+    const response = await fetch(`${base}${path}`);
+    assert.equal(response.status, 200);
+    assert.ok(response.headers.get("content-type")?.startsWith(type!));
+    assert.ok((await response.text()).length > 0);
+  }
+  const response = await fetch(`${base}/v1/dashboard?view=findings`);
+  assert.equal(response.status, 200);
+  const snapshot = (await response.json()) as DashboardSnapshot;
+  assert.equal(snapshot.total, findings.length);
+  assert.equal(snapshot.overview.findings, findings.length);
+  assert.equal(snapshot.items.length, findings.length);
+}
+
 async function checkInsertions(): Promise<void> {
   for (const [repository, batch] of [
     [repositoryId, findings.slice(0, 3)],
@@ -181,25 +202,26 @@ async function checkCandidates(): Promise<void> {
   }
 }
 
-function checkCliDeduplication(): void {
+async function checkCliDeduplication(): Promise<void> {
   for (const allRepositories of [false, true]) {
-    const actual: unknown = JSON.parse(
-      docker([
-        ...runner,
-        "--env",
-        "NODE_OPTIONS=--import=/test/mock-reviews.mjs",
-        "--volume",
-        `${join(repositoryRoot, "docker/fixtures/mock-reviews.mjs")}:/test/mock-reviews.mjs:ro`,
-        "codex-security",
-        "dedupe",
-        "--scan",
-        manifest.scan.id,
-        "--findings-url",
-        "http://findings:3000",
-        "--json",
-        ...(allRepositories ? ["--all-repositories"] : []),
-      ]),
-    );
+    const command = [
+      ...runner,
+      "--env",
+      "NODE_OPTIONS=--import=/test/mock-reviews.mjs",
+      "--volume",
+      `${join(repositoryRoot, "docker/fixtures/mock-reviews.mjs")}:/test/mock-reviews.mjs:ro`,
+      "codex-security",
+      "dedupe",
+      "--scan",
+      manifest.scan.id,
+      "--workflow-id",
+      allRepositories ? "smoke-all" : "smoke-repository",
+      "--findings-url",
+      "http://findings:3000",
+      "--json",
+      ...(allRepositories ? ["--all-repositories"] : []),
+    ];
+    const actual: unknown = JSON.parse(docker(command));
     const expected: DeduplicateScanResult = {
       scanId: manifest.scan.id,
       uniqueFindingIds: [ids[0]!],
@@ -207,7 +229,15 @@ function checkCliDeduplication(): void {
       deduplicationStatus: "completed",
     };
     assert.deepEqual(actual, expected);
+    const callsPath = join(
+      runnerRoot,
+      "results/.codex-security-state/review-calls.jsonl",
+    );
+    const calls = await readFile(callsPath, "utf8");
+    assert.deepEqual(JSON.parse(docker(command)), expected);
+    assert.equal(await readFile(callsPath, "utf8"), calls);
   }
+  findings[0] = example!;
 }
 
 async function checkPages(): Promise<void> {
@@ -227,7 +257,7 @@ async function checkPages(): Promise<void> {
   }
 }
 
-function checkStorage(): void {
+function checkStorage(expectGroups = false): void {
   docker([
     "exec",
     container,
@@ -235,7 +265,40 @@ function checkStorage(): void {
     "--experimental-strip-types",
     "/test/findings-service-sqlite.ts",
     JSON.stringify(ids),
+    ...(expectGroups ? ["--expect-groups"] : []),
   ]);
+}
+
+function checkWorkflowStorage(): void {
+  docker([
+    ...runner,
+    "--entrypoint",
+    "node",
+    "--volume",
+    `${fileURLToPath(new URL("fixtures/prepare-runner-scan.ts", import.meta.url))}:/test/prepare-runner-scan.ts:ro`,
+    "codex-security",
+    "--experimental-strip-types",
+    "/test/prepare-runner-scan.ts",
+    "--check-workflows",
+    JSON.stringify(ids),
+  ]);
+}
+
+async function checkStoredGroups(): Promise<FindingDedupeGroup[]> {
+  let stored: FindingDedupeGroup[] = [];
+  for (const [index, id] of ids.entries()) {
+    const response = await fetch(`${base}/v1/finding/${id}/dedupe-groups`);
+    assert.equal(response.status, 200);
+    const groups = (await response.json()) as FindingDedupeGroup[];
+    if (index === 0) {
+      assert.equal(groups.length, 1, "Repeated dedupe must reuse the group");
+      assert.deepEqual(groups[0]!.findingIds, ids.slice(0, 3).sort());
+      stored = groups;
+    } else {
+      assert.deepEqual(groups, index < 3 ? stored : []);
+    }
+  }
+  return stored;
 }
 
 async function checkReviews(): Promise<void> {
@@ -335,18 +398,25 @@ try {
     "",
   );
   await checkInsertions();
+  await checkDashboard();
   await checkCandidates();
   await checkPages();
   checkStorage();
-  checkCliDeduplication();
+  await checkCliDeduplication();
+  checkStorage(true);
+  checkWorkflowStorage();
+  const storedGroups = await checkStoredGroups();
   await checkReviews();
   stopService();
   docker(["rm", container]);
   await startService();
-  checkStorage();
+  checkStorage(true);
+  assert.deepEqual(await checkStoredGroups(), storedGroups);
+  await checkDashboard();
   await checkPages();
   await checkCandidates();
-  checkCliDeduplication();
+  await checkCliDeduplication();
+  checkWorkflowStorage();
   await checkReviews();
   stopService();
   assert.equal(

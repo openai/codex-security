@@ -81,7 +81,9 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
+from workbench_dashboard import dashboard
 from workbench_finding_index import index_findings
+from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_findings import (
     find_potential_duplicates,
     list_dedupe_groups,
@@ -1658,10 +1660,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
 
     user_context = None
+    workflow_id = None
     if args.registration_json_stdin:
         registration = json.load(sys.stdin)
         recipe_json = json.dumps(registration["recipe"], ensure_ascii=False, separators=(",", ":"))
         user_context = registration.get("userContext")
+        workflow_id = registration.get("workflowId")
     else:
         recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
     recipe = parse_scan_recipe(recipe_json, repository)
@@ -1757,6 +1761,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 scan_id,
             ),
         )
+        if workflow_id is not None:
+            register_workflow_scan(connection, workflow_id, scan_id, str(scan_dir), timestamp)
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -4031,6 +4037,10 @@ def main() -> None:
             result = export_findings(connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
+        elif args.command == "finding-workflow":
+            result = finding_workflow(connection, json.load(sys.stdin), now())
+        elif args.command == "dashboard":
+            result = dashboard(connection, json.load(sys.stdin))
         elif args.command == "store-findings":
             payload = json.load(sys.stdin)
             result = store_findings(connection, payload["entries"], now(), payload.get("repositoryId"))

@@ -1,4 +1,5 @@
 import type { Finding } from "../models.js";
+import type { DashboardQuery } from "./dashboard-types.js";
 import type { FindingSearchScope } from "../finding-retrieval.js";
 import type { FindingEmbedder } from "./embeddings.js";
 import type { FindingsPage, FindingsStore } from "./storage.js";
@@ -37,5 +38,9 @@ export class FindingsService {
 
   async list(page: { limit: number; offset: number }): Promise<FindingsPage> {
     return await this.store.list(page);
+  }
+
+  async dashboard(query: DashboardQuery) {
+    return await this.store.dashboard(query);
   }
 }

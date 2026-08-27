@@ -6,13 +6,20 @@ import {
   mkdir,
   readFile,
   realpath,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -57,6 +64,7 @@ import {
 } from "./cost.js";
 import {
   loadContract,
+  readScanFile,
   requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
@@ -83,10 +91,12 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
+import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
   ScanResult,
   type RepositoryFinding,
   type TurnResultMetadata,
+  type ScanResultOptions,
 } from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
@@ -106,6 +116,7 @@ import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
+  bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
@@ -118,6 +129,7 @@ import {
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
   planOutputArchive,
+  prepareScanArtifactRestorer,
   prepareOutputDir,
   preparePersistentOutputRoot,
   requireModelSafeOutputDir,
@@ -130,6 +142,7 @@ import {
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
+  type ScanArtifactRestorer,
   type WorkbenchCommandOptions,
   validateOutputDir,
 } from "./runtime.js";
@@ -207,6 +220,8 @@ export interface DeepScanOptions {
 }
 
 export interface ScanOptions extends DeepScanOptions {
+  /** Opt into a durable scan -> custom publication -> dedupe workflow. */
+  workflowId?: string;
   auth?: ScanAuthMode;
   /** Stable, privacy-preserving end-user ID for this scan's model requests. */
   safetyIdentifier?: string;
@@ -368,6 +383,7 @@ interface ClientDependencies {
   ) => Promise<PreparedRuntime>;
   resolvePluginPython?: typeof resolvePluginPython;
   prepareOutputDir?: typeof prepareOutputDir;
+  prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
   runWorkbench?: typeof runWorkbench;
@@ -433,8 +449,113 @@ export class CodexSecurity {
     options: ScanOptions = {},
   ): Promise<ScanResult> {
     return await this.#trackOperation(() =>
-      this.#run(repository, { ...options }),
+      options.workflowId === undefined
+        ? this.#run(repository, { ...options })
+        : this.#runWorkflow(repository, { ...options }, options.workflowId),
     );
+  }
+
+  async #runWorkflow(
+    repository: string,
+    options: ScanOptions,
+    workflowId: string,
+  ): Promise<ScanResult> {
+    this.#requireOpen();
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    const local = await this.#validateLocalInputs(
+      repository,
+      { ...options, outputDir: undefined, archiveExisting: false },
+      signal,
+    );
+    const workflow = new FindingWorkflow(
+      workflowId,
+      this.#dependencies.environment,
+      this.#dependencies.runWorkbench,
+      this.config.pythonPath,
+    );
+    if (options.outputDir !== undefined)
+      await workflow.protectArtifacts(options.outputDir);
+    const state = await workflow.bind({
+      repositoryPath: local.repository,
+      scanRequestDigest: workflowDigest({
+        config: this.config,
+        options: {
+          ...options,
+          target: options.target ?? "repository",
+          mode: options.mode ?? "standard",
+          outputDir:
+            options.outputDir === undefined
+              ? undefined
+              : resolve(expandHome(options.outputDir)),
+          workflowId: undefined,
+          signal: undefined,
+          auth: undefined,
+          archiveExisting: undefined,
+        },
+      }),
+    });
+    type ScanMetadata = Pick<
+      ScanResultOptions,
+      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+    >;
+    if (state.scanId && state.scanDir) {
+      await workflow.protectArtifacts(state.scanDir);
+      let metadata = state.stages.scan.result as ScanMetadata | undefined;
+      let completed = state.stages.scan.status === "completed";
+      if (!completed) {
+        const scan = await workflow.registeredScan(state.scanId);
+        completed =
+          (scan["progress"] as JsonObject | undefined)?.["status"] ===
+          "complete";
+        if (completed)
+          metadata = {
+            threadId: (scan["continuationThreadId"] as string) ?? "",
+            turnResult: { status: "completed" },
+          };
+      }
+      if (completed) {
+        const contract = await loadContract(state.scanDir, {
+          pluginRoot: await bundledPluginRoot(),
+          expectedScanId: state.scanId,
+          signal,
+        });
+        await workflow.bind({ artifactDigest: workflowDigest(contract) });
+        metadata ??= { threadId: "", turnResult: { status: "completed" } };
+        await workflow.complete("scan", metadata);
+        return new ScanResult({
+          ...contract,
+          scanDir: state.scanDir,
+          ...metadata,
+        });
+      }
+    }
+    await workflow.begin("scan");
+    try {
+      const result = await this.#run(repository, options);
+      await workflow.protectArtifacts(result.scanDir);
+      await workflow.bind({
+        scanId: result.manifest.scan.id,
+        scanDir: result.scanDir,
+        artifactDigest: workflowDigest({
+          manifest: result.manifest,
+          findings: result.findings,
+          coverage: result.coverage,
+        }),
+      });
+      await workflow.complete("scan", {
+        threadId: result.threadId,
+        turnResult: result.turnResult,
+        sarifPath: result.sarifPath,
+        repositoryFindings: result.repositoryFindings,
+      } satisfies ScanMetadata);
+      return result;
+    } catch (error) {
+      await workflow.fail("scan", error);
+      throw error;
+    }
   }
 
   public async validate(options: ValidationOptions): Promise<ValidationResult> {
@@ -642,6 +763,9 @@ export class CodexSecurity {
       id: string;
       options: WorkbenchCommandOptions;
     } | null = null;
+    const prepareArtifactRestorer =
+      this.#dependencies.prepareScanArtifactRestorer ??
+      prepareScanArtifactRestorer;
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
     try {
       const checkOpen = (): void => {
@@ -943,7 +1067,13 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        JSON.stringify({ recipe, userContext: options.scanPrompt }),
+        JSON.stringify({
+          recipe,
+          userContext: options.scanPrompt,
+          ...(options.workflowId === undefined
+            ? {}
+            : { workflowId: options.workflowId }),
+        }),
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
@@ -1359,13 +1489,15 @@ export class CodexSecurity {
             ]),
           ].map(async (name) => ({
             name,
-            contents: await readFile(
-              await requireScanFile(scanDir, name, name, signal),
-              { signal },
-            ),
+            contents: await readScanFile(scanDir, name, name, signal),
           })),
         );
+        let artifactRestorer: ScanArtifactRestorer | null = null;
         try {
+          artifactRestorer = await prepareArtifactRestorer(
+            workbenchOptions,
+            scanDir,
+          );
           await runScanEvents({
             thread,
             events: (await followUp()).events,
@@ -1381,28 +1513,20 @@ export class CodexSecurity {
           checkOpen();
         } catch (error) {
           if (signal.aborted || this.#closed) throw error;
-          for (const artifact of completedArtifacts) {
-            const path = join(scanDir, artifact.name);
-            const current = await readFile(path, { signal }).catch(
-              (readError: NodeJS.ErrnoException) => {
-                if (readError.code !== "ENOENT") throw readError;
-                return null;
-              },
-            );
-            if (current?.equals(artifact.contents)) continue;
-            const temporary = join(
-              dirname(path),
-              `.${randomUUID()}.${basename(path)}.restore`,
-            );
-            try {
-              await writeFile(temporary, artifact.contents, {
-                flag: "wx",
-                mode: 0o600,
-                signal,
-              });
-              await rename(temporary, path);
-            } finally {
-              await rm(temporary, { force: true });
+          if (artifactRestorer !== null) {
+            for (const artifact of completedArtifacts) {
+              try {
+                await artifactRestorer.restore(
+                  artifact.name,
+                  artifact.contents,
+                );
+              } catch (cause) {
+                if (signal.aborted || this.#closed) throw cause;
+                throw new OutputDirectoryError(
+                  "Cannot restore an artifact outside the scan directory.",
+                  { cause },
+                );
+              }
             }
           }
           await collectResult(
