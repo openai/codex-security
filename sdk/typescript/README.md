@@ -930,6 +930,47 @@ packaged `start:server` script, without invoking the CLI. Docker runs Node
 directly so stop signals reach the server. The existing default Docker target
 and bulk-scan Compose configuration are unchanged.
 
+### Read-only dashboard
+
+Open `http://localhost:3000/dashboard` on the running findings service. The UI
+uses the public OpenAI Apps SDK UI design system, follows the browser's light
+or dark preference, and polls the service every five seconds. It never starts,
+cancels, resumes, publishes, edits, or deduplicates anything.
+
+The dashboard opens on Findings, followed by Duplicate groups. Both views
+support search, repository filtering, sorting, pagination, and record details.
+Findings show stored content and links to their duplicate groups. Groups link
+back to their member findings, preserving separate overlapping groups and the
+original finding records.
+
+The dashboard reads only findings, repository associations, and duplicate groups
+stored in the service's configured database. It does not display scans or
+workflows: publication sends findings, not remote scan or workflow history. It
+does not read report or source paths from stored records. The UI retains the last
+successful data on a refresh failure and shows a connection warning until polling
+succeeds.
+
+`GET /v1/dashboard` returns a consistent read snapshot with overview counts,
+repository choices, a page of records, and optional selected-record details:
+
+- `view`: `findings` (default) or `groups`.
+- `query`, `repository`: optional search text and exact repository ID.
+- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
+- `id`: optional exact record ID to include in `detail`; unknown IDs return
+  `detail: null` without hiding the list.
+
+Overview counts are service-wide, not filtered page totals. Responses and UI
+assets are served by the same Node process; no separate frontend server, CDN,
+model credentials, or new CLI flags are needed to view the dashboard. Compiled
+HTML, JavaScript, and CSS are included in the npm package and container. Frontend
+source, build tools, and tests are not shipped as runtime dependencies.
+
+The existing preview access boundary is unchanged. The dashboard contains
+sensitive finding content: keep the service on a trusted local endpoint or behind
+an authenticated proxy. It does not add authentication or broaden the default
+network binding.
+
 ### API
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
@@ -938,10 +979,21 @@ A complete exported `findings.json` document is also accepted; only its
 `findings` array is imported. No files or source paths referenced by the
 findings are opened. Only the supplied JSON is processed.
 
-| Method | Path                             | Response                                                       |
-| ------ | -------------------------------- | -------------------------------------------------------------- |
-| `POST` | `/v1/bulk/findings`              | HTTP 201 with an array of stored finding IDs, in request order |
-| `GET`  | `/v1/findings?limit=50&offset=0` | HTTP 200 with a page of complete findings                      |
+Include `repositoryId` alongside `findings` to associate every imported finding
+with a repository. For SDK/CLI scans, use `scan.target.targetId` from the sealed
+`scan-manifest.json`. IDs are matched exactly; the service does not infer a
+repository from titles, paths, or URLs. Reimports add associations without
+removing earlier ones, so a finding can belong to more than one repository.
+Imports without this metadata remain accepted, but unassociated findings are
+only available to explicit all-repository retrieval until imported with an ID.
+
+| Method | Path                                    | Response                                                                            |
+| ------ | --------------------------------------- | ----------------------------------------------------------------------------------- |
+| `POST` | `/v1/bulk/findings`                     | HTTP 201 with an array of stored finding IDs, in request order                      |
+| `GET`  | `/v1/findings?limit=50&offset=0`        | HTTP 200 with a page of complete findings                                           |
+| `GET`  | `/v1/finding/{id}/potential-duplicates` | HTTP 200 with the stored finding and up to 50 potential duplicates, without vectors |
+| `POST` | `/v1/dedupe-groups`                     | HTTP 201 with the persisted duplicate groups                                        |
+| `GET`  | `/v1/finding/{id}/dedupe-groups`        | HTTP 200 with every stored group containing this finding                            |
 
 Bulk insertion generates embeddings and then writes the findings and vectors
 in one SQLite transaction. If embedding generation fails or a finding identity
@@ -951,17 +1003,287 @@ do not create extra rows. An existing ID's fingerprint, rule, and identity
 anchor/instance cannot be replaced. Repeated IDs in one request are applied in order,
 with the last supplied record retained. Stored scan occurrences are unchanged.
 
-For example, with the API key configured before starting Compose:
+For example, add `repositoryId` to a copy of an exported findings document
+saved as `findings-import.json` (leave the sealed scan artifacts unchanged),
+then import it with the API key configured before starting Compose:
 
 ```bash
 curl http://127.0.0.1:3000/v1/bulk/findings \
   -H 'Content-Type: application/json' \
-  --data-binary @plugins/codex-security/examples/completed-scan/findings.json
+  --data-binary @findings-import.json
 ```
 
 ```json
 ["csf_852f90d6e1177502ff113d4a"]
 ```
+
+The potential-duplicates response contains `finding` (the complete stored
+anchor) and `potentialDuplicates` (an array of complete `Finding` records).
+Neither includes embedding vectors. The anchor is not repeated in the array.
+Specify one scope explicitly on the request:
+
+```text
+GET /v1/finding/{id}/potential-duplicates?repositoryId=target_sha256_example
+GET /v1/finding/{id}/potential-duplicates?allRepositories=true
+```
+
+Repository scope requires the anchor and each candidate to be associated with
+that repository. All-repository scope includes tagged and untagged findings.
+Omitting scope or combining a repository with `allRepositories=true` returns
+HTTP 400. Scope selects candidates; it is not an authorization boundary.
+
+Candidates have cosine similarity at least 0.55 and the same embedding model
+and dimensions as the anchor. They are ordered by descending similarity, with
+ties resolved by insertion time and finding ID, and limited to 50. Each request
+reads a current snapshot; separate requests do not share a database snapshot.
+SQLite first filters repository associations, reads only IDs and embedding
+vectors (plus the anchor's model), and performs exact cosine ranking. It then
+loads complete documents only for the anchor and the selected top 50 candidates,
+all within the same read transaction.
+The API does not run Codex or decide whether candidates are duplicates.
+
+### Publishing to a custom findings service
+
+Publish a completed scan directly from the local CLI to the Docker service:
+
+```bash
+codex-security publish scan --scan SCAN_ID --to custom \
+  --findings-url http://localhost:3000 --json
+```
+
+`--findings-url` is required for `--to custom`, with no default. It is the
+service base URL, including `http://` or `https://`; the client appends
+`/v1/bulk/findings`, preserving any base path. A different endpoint must
+implement that API and return the stored finding IDs. The command sends the
+complete sealed findings and their manifest's `scan.target.targetId` as
+`repositoryId`, without changing scan artifacts or forwarding model credentials.
+The service creates embeddings and commits the batch before acknowledging it.
+
+The existing saved-scan selector, external `--scan-dir`, and interactive picker
+work with custom publication. Custom publication accepts one scan, not CSV
+input or Linear options. Add `--dry-run` to validate and preview the payload
+without making an HTTP request. Existing Linear and Cloud destinations are
+unchanged. Upload failures and incomplete receipts fail the command; uploads
+are not automatically retried because a lost response may have been committed.
+
+```typescript
+import { publishScanToCustom } from "@openai/codex-security";
+
+const receipt = await publishScanToCustom("/path/to/completed-scan", {
+  findingsUrl: "http://localhost:3000",
+  // dryRun: true,
+  // signal: controller.signal,
+});
+console.log(receipt.repositoryId, receipt.findingIds);
+```
+
+### Deduplication from the SDK and CLI
+
+Publish the scan with `--to custom` (or import it through the bulk API with its
+`repositoryId`) before deduplicating. The
+workflow reads a completed saved scan, queries candidates by finding ID, and
+runs Luna and Sol in the calling SDK/CLI process. Once all reviews succeed,
+it posts accepted groups to the service. It does not re-upload findings or
+change scan artifacts.
+
+```bash
+codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
+```
+
+The default scope is the saved scan's repository, identified by
+`scan.target.targetId` in its manifest. Add `--all-repositories` to search the
+entire stored corpus explicitly; the flag defaults to false. The SDK has the
+equivalent optional `allRepositories: true` setting. This narrows the previous
+preview's implicit all-repository behavior.
+
+Both `--scan` and `--findings-url` are required, with no implicit scan or service
+URL. As with `publish scan --scan`, the selector accepts a full ID, unique
+prefix, or `latest` for the current repository. The saved scan must be complete
+and its sealed artifacts must be available.
+
+```typescript
+import { deduplicateScan } from "@openai/codex-security";
+
+const result = await deduplicateScan("scan_example_001", {
+  findingsUrl: "http://127.0.0.1:3000",
+  // allRepositories: true, // Omit to search only this scan's repository.
+  // signal: controller.signal,
+});
+console.log(result.duplicateGroups);
+```
+
+The CLI and SDK return the same result:
+
+```json
+{
+  "scanId": "scan_example_001",
+  "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
+  "duplicateGroups": [],
+  "deduplicationStatus": "completed"
+}
+```
+
+`uniqueFindingIds` contains one representative for each selected finding after
+accepted duplicate groups are collapsed. A representative can be an existing
+stored finding outside the scan. Each `duplicateGroups` entry contains all
+members of an accepted group, with its canonical finding first. The canonical
+has the highest reported severity; ties use finding ID. Results do not delete,
+merge, or change stored finding documents. Accepted groups are saved as durable
+associations in the service before `deduplicationStatus` becomes `completed`.
+
+### Stored duplicate groups
+
+`POST /v1/dedupe-groups` accepts a batch of explicitly reviewed member sets:
+
+```json
+{
+  "groups": [
+    ["csf_000000000000000000000001", "csf_000000000000000000000002"],
+    ["csf_000000000000000000000002", "csf_000000000000000000000003"]
+  ]
+}
+```
+
+Each group must contain at least two distinct, existing finding IDs. The entire
+batch is committed in one transaction; a missing finding returns HTTP 409 and
+writes none of the batch. A response contains `groupId`, `findingIds`, and
+`createdAt` for each group. Group identity depends on membership, not member
+order, so submitting the same set again returns its original ID and timestamp.
+
+SQLite stores groups in `finding_dedupe_groups` and memberships in
+`finding_dedupe_group_members`. A finding may belong to multiple groups:
+`[A, B]`, `[B, C]`, and `[C, A]` are three separate reviewed sets. Overlapping
+groups are not automatically united or promoted into an unreviewed larger
+group. Stored members are sorted by ID; their order does not designate a
+canonical. The CLI result retains its existing canonical-first ordering.
+
+`GET /v1/finding/{id}/dedupe-groups` returns every group containing that finding,
+including each group's full membership, or `[]` if it has no groups. These
+associations do not rewrite original findings, fingerprints, scan artifacts,
+embeddings, or external tickets. They do not require an embedding API key or
+trigger model calls. Review-generated merged findings remain review outputs;
+they do not replace stored documents.
+
+### Resuming a local findings workflow
+
+Add `--workflow-id` to opt into durable state shared by `scan`, `publish scan
+--to custom`, and `dedupe`. The SDK equivalents are the optional `workflowId`
+fields on `ScanOptions`, `PublishScanToCustomOptions`, and `DeduplicateScanOptions`.
+Without a workflow ID, existing command behavior and output shapes are unchanged.
+
+```bash
+codex-security scan /path/to/repository --workflow-id run-001
+codex-security publish scan --workflow-id run-001 --to custom --findings-url http://localhost:3000
+codex-security dedupe --workflow-id run-001 --findings-url http://localhost:3000 --json
+```
+
+Repeat this sequence with the same ID after a process stops. Completed scans and
+acknowledged publications are reused; unfinished stages run again. If the scan
+completed before the workflow recorded its receipt, recovery verifies the saved
+scan and its sealed artifacts instead of scanning again. Scan IDs and artifact
+locations are recorded in the scan-registration transaction. This resumes between
+completed steps; it does not resume individual model turns inside an unfinished
+scan. Existing output-directory and archive safeguards still apply to scan retries.
+
+Publication and dedupe can use the workflow ID in place of `--scan`; an explicit
+scan selector must identify that same scan. A workflow can also begin at custom
+publication of a completed scan. Dedupe still requires local scan history to locate
+the approved source checkout. For a workflow, dedupe first completes publication
+if its receipt is missing. `--all-repositories` retains its existing default of
+false. Changing a workflow's scan, destination, or bound scope is an error: choose
+a different workflow ID. Use one coordinating process per workflow.
+
+Workflow metadata, stage statuses, errors, publication receipts, and results live
+in the local workbench SQLite database under `CODEX_SECURITY_STATE_DIR`, outside
+the sealed scan artifacts. Identity, scan/artifact references, destination, scope,
+hashes, stage statuses, and errors use explicit columns; only receipts and result
+payloads use JSON. Review source, scope, model settings, and contract/hash bindings
+also use columns; review results remain JSON. Existing workflows and checkpoints
+are migrated atomically in place without changing their review keys.
+Successful empty results are stored as completed
+results, not treated as missing work. An empty scan can complete workflow
+publication with an empty receipt. Dry-run never advances a workflow stage.
+
+A completed `dedupe --workflow-id` returns its saved result without repeating
+reviews or group writes. A publication whose acknowledgement was lost is retried
+using the service's existing idempotent upsert.
+
+Each validated screening and pair review is checkpointed locally,
+including DISTINCT decisions. Every SAME checkpoint retains its required
+`canonicalFindingId` and generated `mergedFinding`. The merged record must satisfy
+the Finding schema and preserve the canonical finding ID. Validation still happens
+through `review_validator.submit_decisions`; invalid submissions are corrected in
+the same review conversation, and invalid or unfinished reviews are not cached.
+
+Checkpoints bind to the exact original records and ordering, approved source path,
+Git revision and current file contents (including ignored files), repository scope,
+model and reasoning settings, Codex configuration and version, and prompt/contract version. Changed
+inputs cause a new review rather than reusing a decision. Source changes during
+review stop that attempt before group writes; restart with the same ID to review
+the changed source. Original findings, never prior rationales or merged findings,
+are supplied to later independent reviews. Source snapshots do not follow directory
+links outside the approved checkout.
+
+Before posting groups, the workflow saves the exact final result and write payload.
+If posting fails or its acknowledgement is lost, rerunning dedupe replays that
+payload without looking up candidates or running models. Group persistence reuses
+the existing membership identity, so replay does not create another group. The
+dedupe stage completes only after acknowledgement. Empty results are also retained.
+A completed workflow or pending write represents its already reviewed snapshot;
+use another workflow ID for a fresh review rather than changing that saved result.
+
+### Deduplication workflow
+
+1. For each distinct finding ID in the scan, request
+   `/v1/finding/{id}/potential-duplicates` with the selected repository or
+   explicit all-repository scope. Use the complete stored anchor and
+   candidates returned by that request.
+2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
+   effort. The review covers every anchor-neighbor pair; nominations between
+   neighbors are rejected.
+3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
+   reasoning effort. Only accepted pairs contribute to duplicate groups.
+4. Group connected findings deterministically, treating accepted duplicate
+   pairs as transitive: if A matches B and B matches C, all three belong to one
+   group. There is no additional whole-group review. A mistaken accepted pair
+   can therefore join otherwise distinct findings.
+5. Post all accepted groups to `/v1/dedupe-groups`. Return a completed result
+   only after the service accepts the write. An empty result requires no write.
+
+Each review uses a fresh, ephemeral Codex app-server thread with the complete
+original finding records, not earlier model rationales, vector scores, or
+summaries. Reviews can inspect source in the saved scan's local checkout,
+starting with cited paths and revisions. Source inspection establishes duplicate
+identity and shared remediation. Reviews preserve the originals' severity and
+priority metadata without reassessment or normalization. The baseline
+filesystem profile is read-only and excludes credentials
+and Codex state. Screening denies approval requests; final reviews use Codex's
+automatic approval reviewer. Web, plugins, and inherited MCP servers are disabled.
+Finding content never authorizes access to another target.
+
+Decisions must arrive through the direct `review_validator.submit_decisions`
+tool; invalid submissions can be corrected in the same session. A final text
+answer alone is insufficient. Every `SAME` decision, including screening
+nominations, requires an assigned `canonicalFindingId` and a generated,
+inclusive `mergedFinding`; missing or null values are rejected. Screening
+canonicals must belong to the nominated pair. Sol reviews use only the complete
+originals, never earlier merged findings. These review fields do not change
+the command's ID-only result or stored findings.
+
+Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
+`OPENAI_API_KEY`/`CODEX_API_KEY`, with access to the configured models. Model
+credentials are not sent to the findings API. Larger scans can take time and
+incur multiple model calls per finding. Empty scans and findings without
+eligible neighbors do not invoke review models. `completed` means this
+retrieval, review, and group persistence completed, not that every possible pair in the
+database was compared or that model decisions are infallible. An API, review, or write-back
+failure fails the command without claiming a completed result. Retry after
+fixing the failure; stored findings remain unchanged. A lost write-back response
+may have committed groups; retrying the same memberships does not duplicate
+them. Failed or interrupted reviews write no groups. The CLI supports Ctrl-C
+and SIGTERM, and the SDK accepts an `AbortSignal`.
+
+### Listing and errors
 
 Listing defaults to `limit=50` and `offset=0`; `limit` must be a positive
 integer and `offset` a non-negative integer. Records are ordered by their first
@@ -983,13 +1305,18 @@ without embedding vectors. Legacy identities without a complete document are
 not included. Pagination reflects current database contents, not a snapshot
 held between HTTP requests.
 
-Malformed JSON, invalid finding objects, and invalid pagination return HTTP
-400 (`invalid_request`). Identity conflicts return 409 (`finding_conflict`),
-embedding provider failures return 502 (`embedding_failed`), and missing
-embedding credentials return 503 (`embedding_unavailable`). Unknown routes
-return 404 (`not_found`); unexpected server failures return 500
-(`internal_error`). Errors have an `error` code and, for expected failures, a
-`message`. Request bodies and embedding provider error bodies are not logged.
+Malformed JSON, invalid finding objects, repository metadata, groups, scopes, and pagination return HTTP
+400 (`invalid_request`). Identity conflicts or missing dedupe group members return 409 (`finding_conflict`),
+embedding provider failures or unusable vectors return 502 (`embedding_failed`),
+and missing embedding credentials return 503 (`embedding_unavailable`). A
+potential-duplicates query without a current embedding returns 404
+(`finding_not_indexed`), including findings outside the requested repository or
+whose embedding was invalidated by an update; import the finding with the
+matching `repositoryId` before retrying. This is an error, not an
+empty candidate list. Unknown routes return 404 (`not_found`); unexpected
+server failures return 500 (`internal_error`). Errors have an `error` code and,
+for expected failures, a `message`. Request bodies and provider error bodies
+are not logged.
 
 ### Embeddings and storage
 
@@ -1048,9 +1375,22 @@ separately under `src/server/`. `FindingsService` receives a `FindingEmbedder`
 whose `embed(findings)` method returns one `{ model, vector }` per finding in
 input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
 and vector normalization; it does not access storage. The `FindingsStore`
-interface separately stores findings and vectors without exposing SQL or
-workbench details to the service. The server entrypoint selects the concrete
+interface stores findings and vectors and exposes
+`findPotentialDuplicates(findingId, scope)`. Repository filtering, vector ranking,
+and fetching selected documents stay inside the store implementation; replacing
+SQLite with an indexed store does not change the service or SDK/CLI. Repository
+associations are stored separately from finding documents, with an append-only
+migration that also imports known associations from stored scan occurrences.
+New scan findings retain their target associations when indexed locally.
+The server entrypoint selects the concrete
 embedder and store, so either can be replaced independently.
+The local workflow lives under `src/deduplication/`. `FindingDeduplicator`
+receives a candidate API client and a `DeduplicationReviewer`, keeping grouping
+separate from HTTP and model transport. `CodexDeduplicationReviewer` owns prompts
+and result validation; `CodexReviewRunner` owns app-server sessions and cleanup.
+`deduplicateScan` validates saved scan artifacts before running the workflow.
+The SDK reuses the existing Codex runtime and credentials without additional
+runtime dependencies.
 
 ## Containerized bulk scans
 

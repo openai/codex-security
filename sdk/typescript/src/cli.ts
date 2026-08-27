@@ -61,6 +61,13 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { publishScanToCustom } from "./custom-publish.js";
+import { deduplicateScanInternal } from "./deduplication/scan.js";
+import {
+  resolveCompletedScan,
+  resolveWorkflowScan,
+  type SavedScan,
+} from "./saved-scan.js";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -198,7 +205,6 @@ type Writable = Pick<NodeJS.WriteStream, "write"> & {
 };
 type SignalName = "SIGINT" | "SIGTERM";
 type FailureSeverity = Exclude<SeverityLevel, "informational">;
-type SavedScan = JsonObject & { scanId: string; scanDir: string };
 
 const REPORTABLE_SEVERITIES: readonly FailureSeverity[] = [
   "critical",
@@ -233,6 +239,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
   sarif: "results.sarif",
 } as const;
 const VALUE_OPTIONS = new Set([
+  "--workflow-id",
   "--auth",
   "--safety-identifier",
   "--path",
@@ -283,6 +290,7 @@ const VALUE_OPTIONS = new Set([
   "--scan-root",
   "--reason",
   "--to",
+  "--findings-url",
   "--linear-team",
   "--linear-api-key",
   "--project",
@@ -962,6 +970,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  workflowId?: string;
   auth?: ScanAuthMode;
   safetyIdentifier?: string;
   verbose?: boolean;
@@ -1118,8 +1127,10 @@ interface CliDependencies {
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
+  deduplicateScan?: typeof deduplicateScanInternal;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
+  publishScanToCustom?: typeof publishScanToCustom;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -2071,25 +2082,41 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: PUBLICATION_DESTINATION_OPTIONS.extend({
+      workflowId: optionValue("--workflow-id")
+        .optional()
+        .describe(
+          "Resume the named local scan, custom publication, and dedupe workflow.",
+        ),
       scan: z
         .array(optionValue("--scan"))
         .default([])
         .describe(
-          "Saved scan ID, unique prefix, or latest; repeat for multiple scans (Linear accepts one).",
+          "Saved scan ID, unique prefix, or latest; Linear and custom accept one scan.",
         ),
       scanDir: z
         .array(optionValue("--scan-dir"))
         .default([])
         .describe(
-          "External completed scan directory; repeat for multiple scans (Linear accepts one).",
+          "External completed scan directory; Linear and custom accept one scan.",
         ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
         .string()
-        .refine((value) => value === "linear" || value === "cloud", {
-          message: "Unsupported publication destination. Use --to linear.",
-        })
-        .describe("Publication destination (linear)."),
+        .refine(
+          (value) =>
+            value === "linear" || value === "cloud" || value === "custom",
+          {
+            message:
+              "Unsupported publication destination. Use --to linear or --to custom.",
+          },
+        )
+        .describe("Publication destination (linear or custom)."),
+      findingsUrl: optionValue("--findings-url")
+        .url()
+        .optional()
+        .describe(
+          "Findings API base URL; required with --to custom (for example http://localhost:3000).",
+        ),
       dryRun: z
         .boolean()
         .default(false)
@@ -2210,7 +2237,7 @@ export async function main(
           );
         }
         if (
-          options.to === "cloud" &&
+          options.to !== "linear" &&
           (options.skipExisting ||
             [
               options.linearTeam,
@@ -2221,7 +2248,22 @@ export async function main(
             ].some((value) => value !== undefined))
         ) {
           throw new CodexSecurityError(
-            "Cloud publication cannot be combined with Linear options.",
+            `${options.to === "cloud" ? "Cloud" : "Custom"} publication cannot be combined with Linear options.`,
+          );
+        }
+        if (options.to === "custom" && options.findingsUrl === undefined) {
+          throw new CodexSecurityError(
+            "Custom publication requires --findings-url, for example http://localhost:3000.",
+          );
+        }
+        if (options.to !== "custom" && options.findingsUrl !== undefined) {
+          throw new CodexSecurityError(
+            "--findings-url is only supported with --to custom.",
+          );
+        }
+        if (options.workflowId !== undefined && options.to !== "custom") {
+          throw new CodexSecurityError(
+            "--workflow-id is only supported with --to custom.",
           );
         }
         const destination =
@@ -2231,7 +2273,7 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
-        if (options.to === "cloud") {
+        if (options.to !== "linear") {
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
@@ -2250,10 +2292,15 @@ export async function main(
           directories.map((scanDir) => ({ scanDir }));
         for (const requestedId of new Set(options.scan)) {
           controller.signal.throwIfAborted();
-          const scan = await resolvePublicationScan(requestedId, dependencies);
+          const scan = await resolveCompletedScan(requestedId, dependencies);
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
             selectedScans.push(scan);
           }
+        }
+        if (options.workflowId !== undefined && selectedScans.length === 0) {
+          selectedScans.push(
+            await resolveWorkflowScan(options.workflowId, dependencies),
+          );
         }
         let scanDir = selectedScans[0]?.scanDir;
         let publicationRepository =
@@ -2520,6 +2567,24 @@ export async function main(
           return { ...result };
         }
 
+        if (options.to === "custom") {
+          const result = await (
+            dependencies.publishScanToCustom ?? publishScanToCustom
+          )(resolveCliPath(currentDirectory, scanDir), {
+            findingsUrl: options.findingsUrl!,
+            ...(options.workflowId === undefined
+              ? {}
+              : { workflowId: options.workflowId }),
+            dryRun: options.dryRun,
+            signal: controller.signal,
+            ...(selectedScans[0]?.scanId === undefined
+              ? {}
+              : { expectedScanId: selectedScans[0].scanId }),
+          });
+          controller.signal.throwIfAborted();
+          return { ...result };
+        }
+
         const progress = new PublicationProgressPresenter(
           errorOutput,
           dependencies,
@@ -2732,6 +2797,11 @@ export async function main(
       }),
       options: z
         .object({
+          workflowId: optionValue("--workflow-id")
+            .optional()
+            .describe(
+              "Reuse completed work in the named local findings workflow.",
+            ),
           auth: z
             .enum(SCAN_AUTH_MODES)
             .default("auto")
@@ -2921,6 +2991,7 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            workflowId: options.workflowId,
             safetyIdentifier: options.safetyIdentifier,
             verbose: options.verbose,
             repository: args.repository,
@@ -3052,6 +3123,93 @@ export async function main(
     .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
+    .command("dedupe", {
+      description:
+        "Review a saved scan with local Codex and save duplicate groups to the findings API.",
+      destructive: true,
+      mcp: false,
+      options: z.object({
+        workflowId: optionValue("--workflow-id")
+          .optional()
+          .describe(
+            "Resume the named local findings workflow; reuses its saved scan.",
+          ),
+        scan: optionValue("--scan")
+          .optional()
+          .describe("Saved scan ID, unique prefix, or latest."),
+        allRepositories: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Search all repositories instead of only the saved scan's repository.",
+          ),
+        findingsUrl: z
+          .string()
+          .url()
+          .describe(
+            "Findings API base URL; the scan's findings must already be indexed.",
+          ),
+      }),
+      output: z
+        .object({
+          scanId: z.string(),
+          uniqueFindingIds: z.array(z.string()),
+          duplicateGroups: z.array(z.array(z.string())),
+          deduplicationStatus: z.literal("completed"),
+        })
+        .optional(),
+      async run({ options }) {
+        const controller = new AbortController();
+        const onInterrupt = () => controller.abort("SIGINT");
+        const onTerminate = () => controller.abort("SIGTERM");
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        try {
+          const scanId =
+            options.scan ??
+            (options.workflowId === undefined
+              ? undefined
+              : (await resolveWorkflowScan(options.workflowId, dependencies))
+                  .scanId);
+          if (scanId === undefined)
+            throw new CodexSecurityError(
+              "Deduplication requires --scan or --workflow-id.",
+            );
+          return await (
+            dependencies.deduplicateScan ?? deduplicateScanInternal
+          )(
+            scanId,
+            {
+              findingsUrl: options.findingsUrl,
+              ...(options.workflowId === undefined
+                ? {}
+                : { workflowId: options.workflowId }),
+              allRepositories: options.allRepositories,
+              signal: controller.signal,
+            },
+            {
+              environment: dependencies.environment,
+              currentDirectory: dependencies.currentDirectory,
+              runWorkbench: dependencies.runWorkbench,
+            },
+          );
+        } catch (error) {
+          const signal = controller.signal.reason;
+          errorOutput.write(
+            `codex-security: ${
+              signal === "SIGINT" || signal === "SIGTERM"
+                ? "Deduplication canceled. Findings are unchanged."
+                : safeErrorMessage(error)
+            }\n`,
+          );
+          exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
+          return undefined;
+        } finally {
+          dependencies.removeSignalListener("SIGINT", onInterrupt);
+          dependencies.removeSignalListener("SIGTERM", onTerminate);
+        }
+      },
+    })
     .command(imports)
     .command("scan-components", {
       description:
@@ -4745,71 +4903,6 @@ async function* workbenchFindings(
   } while (offset !== undefined);
 }
 
-async function resolvePublicationScan(
-  requestedId: string,
-  dependencies: CliDependencies,
-): Promise<SavedScan> {
-  let scanId = requestedId;
-  if (scanId === "latest") {
-    const history = await dependencies.runWorkbench([
-      "list-scans",
-      "--repository",
-      resolve(dependencies.currentDirectory()),
-      "--status",
-      "complete",
-    ]);
-    const scans = history["scans"];
-    const latest = Array.isArray(scans) ? scans[0] : undefined;
-    if (
-      latest === undefined ||
-      !isJsonObject(latest) ||
-      typeof latest["scanId"] !== "string"
-    ) {
-      throw new CodexSecurityError(
-        "No completed saved scan was found for this repository.",
-      );
-    }
-    scanId = latest["scanId"];
-  }
-  const context = await dependencies.runWorkbench([
-    "get-scan",
-    "--scan-id",
-    scanId,
-  ]);
-  const scan = context["scan"];
-  if (
-    scan === undefined ||
-    !isJsonObject(scan) ||
-    typeof scan["scanId"] !== "string"
-  ) {
-    throw new CodexSecurityError(`Could not read saved scan ${scanId}.`);
-  }
-  scanId = scan["scanId"];
-  const progress = scan["progress"];
-  if (
-    progress === undefined ||
-    !isJsonObject(progress) ||
-    progress["status"] !== "complete"
-  ) {
-    throw new CodexSecurityError(`Scan ${scanId} is not complete.`);
-  }
-  const storedDirectory = scan["scanDir"];
-  const scanDir =
-    typeof storedDirectory === "string" && storedDirectory.length > 0
-      ? resolveCliPath(dependencies.currentDirectory(), storedDirectory)
-      : undefined;
-  const metadata =
-    scanDir === undefined
-      ? undefined
-      : await lstat(scanDir).catch(() => undefined);
-  if (scanDir === undefined || metadata?.isDirectory() !== true) {
-    throw new CodexSecurityError(
-      `Artifacts for scan ${scanId} are unavailable. Restore the completed scan artifacts or run a new scan.`,
-    );
-  }
-  return { ...scan, scanId, scanDir };
-}
-
 async function selectSavedFindings(
   identifiers: readonly string[],
   requestedScanId: string | undefined,
@@ -6414,6 +6507,9 @@ async function executeScan(
     }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
+      ...(arguments_.workflowId === undefined
+        ? {}
+        : { workflowId: arguments_.workflowId }),
       auth,
       safetyIdentifier: arguments_.safetyIdentifier,
       target,

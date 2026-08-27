@@ -67,6 +67,7 @@ import {
   preparedRuntime,
 } from "./support/api-events.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { FindingWorkflow } from "../src/finding-workflow.js";
 
 type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
@@ -77,6 +78,112 @@ const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
 afterEach(cleanup);
+
+test.each(["completed", "receipt-lost", "scan-interrupted"])(
+  "durable scan workflow resumes after %s without rerunning completed work",
+  async (scenario) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(scanDir, { mode: 0o700 });
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    };
+    const workflowId = "durable-scan";
+    let modelCalls = 0;
+    let completed = false;
+    let loseReceipt = scenario === "receipt-lost";
+    const makeClient = async (attempt: number) => {
+      const codexHome = join(root, `codex-home-${attempt}`);
+      await mkdir(codexHome);
+      return new TestClient(
+        {},
+        {
+          environment,
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (options, args, input) => {
+            if (args[0] === "finding-workflow") {
+              const payload = JSON.parse(input!);
+              if (
+                loseReceipt &&
+                payload.action === "complete" &&
+                payload.stage === "scan"
+              ) {
+                loseReceipt = false;
+                throw new Error("Synthetic receipt write failure");
+              }
+              return await runWorkbench(options, args, input);
+            }
+            if (args[0] === "get-scan")
+              return {
+                scan: {
+                  progress: { status: completed ? "complete" : "failed" },
+                  continuationThreadId: "thread-1",
+                },
+              };
+            if (args[0] === "register-cli-scan") {
+              expect(JSON.parse(input!).workflowId).toBe(workflowId);
+              const registration = mockScanRegistration(args, input);
+              await new FindingWorkflow(workflowId, environment).bind({
+                scanId: registration["scanId"] as string,
+                scanDir,
+              });
+              return registration;
+            }
+            if (args[0] === "complete-scan") completed = true;
+            return mockWorkbench(args, input);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: "thread-1",
+              async runStreamed() {
+                modelCalls++;
+                if (scenario === "scan-interrupted" && modelCalls === 1)
+                  throw new Error("Synthetic interrupted scan");
+                await copyCompletedScan(root);
+                return { events: completedEvents() };
+              },
+            }),
+          }),
+        },
+      );
+    };
+    const first = await makeClient(1);
+    let original: Record<string, unknown> | undefined;
+    try {
+      if (scenario === "completed")
+        original = (await first.run(repository, { workflowId })).toJSON();
+      else
+        await expect(first.run(repository, { workflowId })).rejects.toThrow(
+          "Synthetic",
+        );
+    } finally {
+      await first.close();
+    }
+    const resumed = await makeClient(2);
+    try {
+      const result = await resumed.run(repository, { workflowId });
+      expect(result.manifest.scan.id).toBe("scan_example_001");
+      if (original) expect(result.toJSON()).toEqual(original);
+      expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
+      expect(
+        (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
+          .status,
+      ).toBe("completed");
+      await expect(
+        resumed.run(repository, { workflowId, mode: "deep" }),
+      ).rejects.toThrow("already bound to a different");
+    } finally {
+      await resumed.close();
+    }
+  },
+);
 
 const EXTERNAL_PROVIDER_CASES = [
   [

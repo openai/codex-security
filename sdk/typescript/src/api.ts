@@ -11,7 +11,15 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -83,10 +91,12 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
+import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
   ScanResult,
   type RepositoryFinding,
   type TurnResultMetadata,
+  type ScanResultOptions,
 } from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
@@ -106,6 +116,7 @@ import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
+  bundledPluginRoot,
   cleanupSdkDirectory,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
@@ -209,6 +220,8 @@ export interface DeepScanOptions {
 }
 
 export interface ScanOptions extends DeepScanOptions {
+  /** Opt into a durable scan -> custom publication -> dedupe workflow. */
+  workflowId?: string;
   auth?: ScanAuthMode;
   /** Stable, privacy-preserving end-user ID for this scan's model requests. */
   safetyIdentifier?: string;
@@ -436,8 +449,113 @@ export class CodexSecurity {
     options: ScanOptions = {},
   ): Promise<ScanResult> {
     return await this.#trackOperation(() =>
-      this.#run(repository, { ...options }),
+      options.workflowId === undefined
+        ? this.#run(repository, { ...options })
+        : this.#runWorkflow(repository, { ...options }, options.workflowId),
     );
+  }
+
+  async #runWorkflow(
+    repository: string,
+    options: ScanOptions,
+    workflowId: string,
+  ): Promise<ScanResult> {
+    this.#requireOpen();
+    const signal = AbortSignal.any([
+      this.#abortController.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    const local = await this.#validateLocalInputs(
+      repository,
+      { ...options, outputDir: undefined, archiveExisting: false },
+      signal,
+    );
+    const workflow = new FindingWorkflow(
+      workflowId,
+      this.#dependencies.environment,
+      this.#dependencies.runWorkbench,
+      this.config.pythonPath,
+    );
+    if (options.outputDir !== undefined)
+      await workflow.protectArtifacts(options.outputDir);
+    const state = await workflow.bind({
+      repositoryPath: local.repository,
+      scanRequestDigest: workflowDigest({
+        config: this.config,
+        options: {
+          ...options,
+          target: options.target ?? "repository",
+          mode: options.mode ?? "standard",
+          outputDir:
+            options.outputDir === undefined
+              ? undefined
+              : resolve(expandHome(options.outputDir)),
+          workflowId: undefined,
+          signal: undefined,
+          auth: undefined,
+          archiveExisting: undefined,
+        },
+      }),
+    });
+    type ScanMetadata = Pick<
+      ScanResultOptions,
+      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+    >;
+    if (state.scanId && state.scanDir) {
+      await workflow.protectArtifacts(state.scanDir);
+      let metadata = state.stages.scan.result as ScanMetadata | undefined;
+      let completed = state.stages.scan.status === "completed";
+      if (!completed) {
+        const scan = await workflow.registeredScan(state.scanId);
+        completed =
+          (scan["progress"] as JsonObject | undefined)?.["status"] ===
+          "complete";
+        if (completed)
+          metadata = {
+            threadId: (scan["continuationThreadId"] as string) ?? "",
+            turnResult: { status: "completed" },
+          };
+      }
+      if (completed) {
+        const contract = await loadContract(state.scanDir, {
+          pluginRoot: await bundledPluginRoot(),
+          expectedScanId: state.scanId,
+          signal,
+        });
+        await workflow.bind({ artifactDigest: workflowDigest(contract) });
+        metadata ??= { threadId: "", turnResult: { status: "completed" } };
+        await workflow.complete("scan", metadata);
+        return new ScanResult({
+          ...contract,
+          scanDir: state.scanDir,
+          ...metadata,
+        });
+      }
+    }
+    await workflow.begin("scan");
+    try {
+      const result = await this.#run(repository, options);
+      await workflow.protectArtifacts(result.scanDir);
+      await workflow.bind({
+        scanId: result.manifest.scan.id,
+        scanDir: result.scanDir,
+        artifactDigest: workflowDigest({
+          manifest: result.manifest,
+          findings: result.findings,
+          coverage: result.coverage,
+        }),
+      });
+      await workflow.complete("scan", {
+        threadId: result.threadId,
+        turnResult: result.turnResult,
+        sarifPath: result.sarifPath,
+        repositoryFindings: result.repositoryFindings,
+      } satisfies ScanMetadata);
+      return result;
+    } catch (error) {
+      await workflow.fail("scan", error);
+      throw error;
+    }
   }
 
   public async validate(options: ValidationOptions): Promise<ValidationResult> {
@@ -949,7 +1067,13 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        JSON.stringify({ recipe, userContext: options.scanPrompt }),
+        JSON.stringify({
+          recipe,
+          userContext: options.scanPrompt,
+          ...(options.workflowId === undefined
+            ? {}
+            : { workflowId: options.workflowId }),
+        }),
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];

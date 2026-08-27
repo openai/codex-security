@@ -65,6 +65,8 @@
     "scripts/workbench_db.py",
     "scripts/workbench_feedback.py",
     "scripts/workbench_finding_index.py",
+    "scripts/workbench_finding_workflows.py",
+    "scripts/workbench_dashboard.py",
     "scripts/workbench_findings.py",
     "scripts/workbench_native_indexes.py",
     "scripts/workbench_progress.py",

@@ -1,8 +1,17 @@
 // Assert persisted findings and embeddings in the smoke-test container.
 import assert from "node:assert/strict";
+import { chmodSync, cpSync, mkdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import type { ScanManifest } from "../../src/models.js";
 
-const expectedIds = (JSON.parse(process.argv[2]!) as string[]).sort();
+const importedIds = JSON.parse(process.argv[2]!) as string[];
+const expectedIds = importedIds.toSorted();
+const { scan } = JSON.parse(
+  readFileSync(
+    "_bundled_plugin/examples/completed-scan/scan-manifest.json",
+    "utf8",
+  ),
+) as ScanManifest;
 const db = new DatabaseSync("/state/workbench.sqlite3");
 try {
   db.exec("PRAGMA busy_timeout = 5000");
@@ -35,6 +44,109 @@ try {
       row["finding_id"] as string,
     );
     assert.equal(vector.length, 1536, row["finding_id"] as string);
+  }
+  const associations = db
+    .prepare(
+      "SELECT repository_id, finding_id FROM finding_repositories ORDER BY repository_id, finding_id",
+    )
+    .all()
+    .map((row) => [row["repository_id"], row["finding_id"]]);
+  assert.deepEqual(
+    associations,
+    [
+      ...importedIds.slice(0, 3).map((id) => [scan.target.targetId, id]),
+      ["synthetic-other", importedIds[3]!],
+    ].sort(),
+  );
+
+  if (process.argv.includes("--expect-groups")) {
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM finding_dedupe_groups").get()![
+        "count"
+      ],
+      1,
+    );
+    const members = db
+      .prepare(
+        "SELECT finding_id FROM finding_dedupe_group_members ORDER BY finding_id",
+      )
+      .all();
+    assert.deepEqual(
+      members.map((row) => row["finding_id"]),
+      importedIds.slice(0, 3).sort(),
+    );
+    const workflows = db
+      .prepare("SELECT dedupe_status, results_json FROM finding_workflows")
+      .all();
+    assert.equal(workflows.length, 2);
+    for (const row of workflows) {
+      const results = JSON.parse(row["results_json"] as string);
+      assert.equal(row["dedupe_status"], "completed");
+      assert.deepEqual(results.dedupe.duplicateGroups, [
+        importedIds.slice(0, 3),
+      ]);
+      assert.ok(!("dedupePendingWrite" in results));
+    }
+    const reviews = db
+      .prepare(
+        "SELECT model, source_content_digest, prompt_digest, contract_digest, result_json FROM finding_workflow_reviews",
+      )
+      .all();
+    const models = new Set<string>();
+    const decisions = new Set<string>();
+    for (const row of reviews) {
+      const result = JSON.parse(row["result_json"] as string);
+      models.add(row["model"] as string);
+      assert.ok(row["source_content_digest"]);
+      assert.ok(row["prompt_digest"] && row["contract_digest"]);
+      for (const decision of "decisions" in result
+        ? result.decisions
+        : [result]) {
+        decisions.add(decision.decision);
+        if (decision.decision === "SAME") {
+          assert.equal(typeof decision.canonicalFindingId, "string");
+          assert.equal(
+            decision.mergedFinding.findingId,
+            decision.canonicalFindingId,
+          );
+          assert.ok(
+            decision.mergedFinding.extensions.mergedOriginals.length > 0,
+          );
+        }
+      }
+    }
+    assert.deepEqual(models, new Set(["gpt-5.6-luna", "gpt-5.6-sol"]));
+    assert.deepEqual(decisions, new Set(["SAME", "DISTINCT"]));
+  }
+
+  if (process.argv.includes("--prepare-scan")) {
+    const sourceDir = "/state/smoke-source";
+    mkdirSync(sourceDir, { recursive: true });
+    const scanDir = "/state/smoke-scan";
+    cpSync("_bundled_plugin/examples/completed-scan", scanDir, {
+      recursive: true,
+    });
+    chmodSync(scanDir, 0o700);
+    const timestamp = scan.completedAt!;
+    db.exec("BEGIN");
+    db.prepare(
+      "INSERT OR IGNORE INTO workspaces (id, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000001', ?, ?)",
+    ).run(timestamp, timestamp);
+    db.prepare(
+      "INSERT OR IGNORE INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, '00000000-0000-4000-8000-000000000001', ?, 'revision', '.', 'standard', ?, 'complete', 'reporting', ?, ?, ?, ?)",
+    ).run(
+      scan.id,
+      sourceDir,
+      scanDir,
+      timestamp,
+      timestamp,
+      timestamp,
+      timestamp,
+    );
+    db.prepare(
+      "INSERT OR IGNORE INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
+    ).run(scan.id, timestamp);
+    db.exec("COMMIT");
   }
 } finally {
   db.close();
