@@ -10,6 +10,7 @@ on:
       - compose.yaml
       - compose.apparmor.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   push:
     tags:

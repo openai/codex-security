@@ -54,7 +54,6 @@ are currently stubs; they do not insert findings or run deduplication.
 
 ## Other providers
 
-
 To use another inference provider, set its API key and select a model:
 
 ```bash

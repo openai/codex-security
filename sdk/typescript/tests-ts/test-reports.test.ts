@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,21 +95,24 @@ describe("JUnit inventory comparison", () => {
     const summary = join(fixture.root, "summary.md");
     for (const failedReport of ["", expected[0]!]) {
       await writeFile(summary, "");
-      const result = spawnSync(
-        bash,
-        ["-e", "-o", "pipefail", "-c", `${mock}\n${script}`],
-        {
-          cwd: fixture.root,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            GITHUB_STEP_SUMMARY: "summary.md",
-            CODEX_SECURITY_TEST_FAIL_REPORT: failedReport,
-          },
-          timeout: 10_000,
+      const child = Bun.spawn({
+        cmd: [bash, "-e", "-o", "pipefail", "-c", `${mock}\n${script}`],
+        cwd: fixture.root,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          GITHUB_STEP_SUMMARY: "summary.md",
+          CODEX_SECURITY_TEST_FAIL_REPORT: failedReport,
         },
-      );
-      expect(result.status, result.stderr).toBe(failedReport === "" ? 0 : 1);
+        timeout: 10_000,
+      });
+      const [status, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+      ]);
+      expect(status, stderr).toBe(failedReport === "" ? 0 : 1);
       expect((await readFile(summary, "utf8")).trim().split(/\r?\n/u)).toEqual(
         expected,
       );
