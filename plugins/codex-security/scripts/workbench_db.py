@@ -3293,6 +3293,7 @@ def scan_result(
         progress_result["independentReviews"] = {
             "active": independent_reviews["active"],
             "completed": independent_reviews["completed"],
+            "maximum": independent_reviews["maximum"],
             "consolidating": independent_reviews["consolidating"],
         }
     return {

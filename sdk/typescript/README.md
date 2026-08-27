@@ -152,7 +152,10 @@ Options for `security.run(repository, options)` and
 | `signal`                | `AbortSignal` to cancel a scan.                                                |
 
 Follow scans with `onWorkerStatus` and `onReconnect`. `onSessionEvent` receives
-saved events with thread IDs and worker numbers; `ScanOptions` lists all callbacks.
+saved events with thread IDs and worker numbers. Deep scans can additionally use
+`onDeepProgress` for durable independent-review counts: `completed`, `active`,
+and `maximum`. The maximum is a configured cap, not a percentage denominator.
+`ScanOptions` lists all callbacks.
 
 `preflight` and CLI `--dry-run` check local inputs without starting Codex or
 using the network. They don't authenticate, verify model access, resolve Python,
