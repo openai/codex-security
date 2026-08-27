@@ -361,6 +361,14 @@ test("accepts complete canonical and merged reviews and rejects invalid assignme
     { ...result, canonicalFindingId: null },
     { ...result, mergedFinding: undefined },
     { ...result, mergedFinding: null },
+    { ...result, mergedFinding: {} },
+    {
+      ...result,
+      mergedFinding: {
+        ...result.mergedFinding,
+        findingId: findings[1]!.findingId,
+      },
+    },
     { ...result, canonicalFindingId: "outside" },
     {
       ...result,

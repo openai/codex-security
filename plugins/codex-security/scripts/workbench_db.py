@@ -81,6 +81,7 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
+from workbench_dashboard import dashboard
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_findings import (
@@ -4038,6 +4039,8 @@ def main() -> None:
             result = {"databasePath": str(database_path())}
         elif args.command == "finding-workflow":
             result = finding_workflow(connection, json.load(sys.stdin), now())
+        elif args.command == "dashboard":
+            result = dashboard(connection, json.load(sys.stdin))
         elif args.command == "store-findings":
             payload = json.load(sys.stdin)
             result = store_findings(connection, payload["entries"], now(), payload.get("repositoryId"))

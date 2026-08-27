@@ -771,7 +771,20 @@ MIGRATIONS = (
         );
         """,
     ),
-    # Version 37 is the stacked dedupe-review checkpoint migration.
+    (
+        37,
+        "checkpoint validated dedupe reviews",
+        """
+        CREATE TABLE finding_workflow_reviews (
+            workflow_id TEXT NOT NULL REFERENCES finding_workflows(id) ON DELETE CASCADE,
+            review_key TEXT NOT NULL,
+            binding_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, review_key)
+        );
+        """,
+    ),
     (
         38,
         "store findings workflow metadata in columns",
@@ -793,7 +806,49 @@ MIGRATIONS = (
         ALTER TABLE finding_workflows ADD COLUMN dedupe_error TEXT;
         """,
     ),
+    (
+        39,
+        "store dedupe checkpoint bindings in columns",
+        """
+        ALTER TABLE finding_workflow_reviews RENAME COLUMN binding_json TO prompt_digest;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN review_contract_version INTEGER;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN codex_version TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN source_repository_path TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN source_revision TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN source_refs_digest TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN source_content_digest TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN scope_repository_id TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN scope_all_repositories INTEGER;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN model TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN effort TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN settings_digest TEXT;
+        ALTER TABLE finding_workflow_reviews ADD COLUMN contract_digest TEXT;
+        """,
+    ),
 )
+
+
+def migrate_finding_workflow_review_columns(connection: sqlite3.Connection) -> None:
+    for row in connection.execute(
+        "SELECT workflow_id, review_key, prompt_digest FROM finding_workflow_reviews"
+    ).fetchall():
+        binding = json.loads(row["prompt_digest"])
+        source = binding["source"]
+        scope = binding["scope"]
+        connection.execute(
+            """UPDATE finding_workflow_reviews SET review_contract_version = ?, codex_version = ?,
+            source_repository_path = ?, source_revision = ?, source_refs_digest = ?,
+            source_content_digest = ?, scope_repository_id = ?, scope_all_repositories = ?,
+            model = ?, effort = ?, settings_digest = ?, prompt_digest = ?, contract_digest = ?
+            WHERE workflow_id = ? AND review_key = ?""",
+            (
+                binding["version"], binding["codexVersion"], source["repository"],
+                source["revision"], source["refsDigest"], source["content"],
+                scope.get("repositoryId"), scope.get("allRepositories"), binding["model"],
+                binding["effort"], binding.get("settingsDigest"), binding["promptDigest"],
+                binding["contractDigest"], row["workflow_id"], row["review_key"],
+            ),
+        )
 
 
 def migrate_finding_workflow_columns(connection: sqlite3.Connection) -> None:
@@ -905,6 +960,8 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_columns(connection)
+                elif version == 39:
+                    migrate_finding_workflow_review_columns(connection)
             connection.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (version, name, now()),

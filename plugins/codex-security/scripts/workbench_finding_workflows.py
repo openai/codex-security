@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_target import directory_content_digest, git_output, git_revision
 
 WORKFLOW_BINDINGS = {
     "repositoryPath": "repository_path",
@@ -114,6 +120,42 @@ def finding_workflow(
         raise SystemExit("workflowId must be a nonempty string.")
     if payload["action"] == "get":
         return {"workflow": read_workflow(connection, workflow_id)}
+    if payload["action"] == "source":
+        target = Path(payload["repository"]).resolve(strict=True)
+        return {"source": {
+            "repository": str(target),
+            "revision": git_revision(target),
+            "refsDigest": hashlib.sha256((git_output(target, "show-ref") or "").encode()).hexdigest(),
+            "content": directory_content_digest(target, include_ignored=True),
+        }}
+    if payload["action"] == "get-review":
+        row = connection.execute(
+            "SELECT result_json FROM finding_workflow_reviews WHERE workflow_id = ? AND review_key = ?",
+            (workflow_id, payload["key"]),
+        ).fetchone()
+        return {"review": json.loads(row["result_json"]) if row is not None else None}
+    if payload["action"] == "save-review":
+        binding = payload["binding"]
+        source = binding["source"]
+        scope = binding["scope"]
+        with connection:
+            connection.execute(
+                """INSERT INTO finding_workflow_reviews
+                (workflow_id, review_key, review_contract_version, codex_version,
+                 source_repository_path, source_revision, source_refs_digest, source_content_digest,
+                 scope_repository_id, scope_all_repositories, model, effort, settings_digest,
+                 prompt_digest, contract_digest, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workflow_id, review_key) DO NOTHING""",
+                (
+                    workflow_id, payload["key"], binding["version"], binding["codexVersion"],
+                    source["repository"], source["revision"], source["refsDigest"], source["content"],
+                    scope.get("repositoryId"), scope.get("allRepositories"), binding["model"],
+                    binding["effort"], binding.get("settingsDigest"), binding["promptDigest"],
+                    binding["contractDigest"], json.dumps(payload["result"], allow_nan=False), timestamp,
+                ),
+            )
+        return {}
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         state = read_workflow(connection, workflow_id)
@@ -136,6 +178,8 @@ def finding_workflow(
                     state["stages"][stage] = {"status": "completed", "result": payload["result"]}
                 elif action == "fail":
                     current.update(status="failed", error=payload["error"])
+                elif action == "prepare-dedupe":
+                    current.update(result=payload["result"], pendingWrite=payload["pendingWrite"])
                 else:
                     raise SystemExit("Unknown workflow action.")
         save_workflow(connection, state, timestamp)

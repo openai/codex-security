@@ -414,14 +414,31 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     return sorted(set(paths))
 
 
-def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -> str:
+def source_directory_snapshot_paths(target: Path) -> list[Path]:
+    paths: list[Path] = []
+    pending = [target]
+    while pending:
+        for path in pending.pop().iterdir():
+            if path.name == ".git":
+                continue
+            paths.append(path)
+            metadata = path.lstat()
+            # Name-surrogate reparse points include Windows directory junctions.
+            if stat.S_ISDIR(metadata.st_mode) and not getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+                pending.append(path)
+    return sorted(paths)
+
+
+def directory_content_digest(
+    target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
+) -> str:
     excluded_relative = []
     for path in excluded:
         try:
             excluded_relative.append(path.relative_to(target))
         except ValueError:
             continue
-    paths = git_directory_snapshot_paths(target)
+    paths = source_directory_snapshot_paths(target) if include_ignored else git_directory_snapshot_paths(target)
     if paths is None:
         paths = sorted(target.rglob("*"))
     digest = hashlib.sha256()
@@ -440,7 +457,9 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
         raw_path = os.fsencode(relative_path.as_posix())
         update_digest_field(digest, b"path", raw_path)
         update_digest_field(digest, b"mode", str(stat.S_IMODE(metadata.st_mode)).encode())
-        if stat.S_ISLNK(metadata.st_mode):
+        if stat.S_ISLNK(metadata.st_mode) or (
+            include_ignored and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+        ):
             update_digest_field(digest, b"kind", b"symlink")
             update_digest_field(digest, b"content", os.fsencode(os.readlink(path)))
         elif stat.S_ISDIR(metadata.st_mode):
