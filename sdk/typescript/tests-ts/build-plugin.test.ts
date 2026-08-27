@@ -104,6 +104,55 @@ describe("bundled plugin build", () => {
     expect(await files(destination)).toContain("server.mjs");
   });
 
+  test("builds from a source snapshot without Git metadata", async () => {
+    const root = await temporaryDirectory();
+    const packageRoot = join(root, "sdk", "typescript");
+    const source = join(root, "plugins", "codex-security");
+
+    await writeFixture(
+      packageRoot,
+      "package.json",
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    await writeFixture(
+      packageRoot,
+      "scripts/build-plugin.mjs",
+      await readFile(
+        new URL("../scripts/build-plugin.mjs", import.meta.url),
+        "utf8",
+      ),
+    );
+    await writeFixture(
+      packageRoot,
+      "scripts/check-plugin-source.mjs",
+      await readFile(
+        new URL("../scripts/check-plugin-source.mjs", import.meta.url),
+        "utf8",
+      ),
+    );
+    await writeFixture(
+      packageRoot,
+      "plugin-files.json",
+      `${JSON.stringify({
+        externalOwnedExact: [".codex-plugin/plugin.json"],
+        shippedExact: ["scripts/launch"],
+      })}\n`,
+    );
+    await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
+    await writeFixture(source, "scripts/launch", "#!/bin/sh\nexit 0\n");
+
+    await execFileAsync(process.execPath, ["--run", "build:plugin"], {
+      cwd: packageRoot,
+    });
+
+    expect(
+      await readFile(
+        join(packageRoot, "_bundled_plugin", "scripts", "launch"),
+        "utf8",
+      ),
+    ).toBe("#!/bin/sh\nexit 0\n");
+  });
+
   test("stages only declared runtime files from the canonical plugin source", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "plugins", "codex-security");

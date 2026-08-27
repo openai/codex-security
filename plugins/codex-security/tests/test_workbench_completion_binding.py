@@ -408,59 +408,61 @@ def test_completion_populates_workbench_owned_unsealed_envelope(tmp_path: Path) 
     assert sealed_coverage["excludePaths"] == []
 
 
-def test_completion_keeps_scan_contract_validation_strict_while_preserving_findings(
+def test_completion_keeps_invalid_prewrite_drafts_resumable(
     tmp_path: Path,
 ) -> None:
-    def wrong_target_kind(
-        manifest: dict[str, Any], findings: dict[str, Any], coverage: dict[str, Any]
-    ) -> None:
-        manifest["scan"]["target"]["kind"] = "git_worktree"
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    target_kind = manifest["scan"]["target"]["kind"]
+    manifest["scan"]["target"]["kind"] = "git_worktree"
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
 
-    def invalid_inventory_strategy(
-        manifest: dict[str, Any], findings: dict[str, Any], coverage: dict[str, Any]
-    ) -> None:
-        coverage["inventoryStrategy"] = ""
+    failed = run_workbench(
+        state_dir,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        check=False,
+    )
 
-    cases = [
-        ("target-kind", wrong_target_kind, "target.kind"),
-        ("inventory-strategy", invalid_inventory_strategy, "inventoryStrategy"),
-    ]
-    for case_name, mutate, expected_error in cases:
-        case_dir = tmp_path / case_name
-        case_dir.mkdir()
-        state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(case_dir)
-        manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-        findings = json.loads((scan_dir / "findings.json").read_text())
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
-        mutate(manifest, findings, coverage)
-        (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
-        (scan_dir / "findings.json").write_text(json.dumps(findings))
-        (scan_dir / "coverage.json").write_text(json.dumps(coverage))
-        failed = run_workbench(
-            state_dir,
-            "complete-scan",
-            "--scan-id",
-            scan_id,
-            check=False,
-        )
+    assert failed["returncode"] != 0
+    assert "target.kind" in str(failed["stderr"])
+    pending = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert pending["progress"]["status"] == "running"
+    manifest["scan"]["target"]["kind"] = target_kind
+    (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
 
-        assert failed["returncode"] != 0, case_name
-        assert expected_error in str(failed["stderr"]), case_name
-        recorded = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-        assert recorded["progress"]["status"] == "failed", case_name
-        assert expected_error in recorded["failureMessage"], case_name
-        preserved_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
-        preserved_findings = json.loads((scan_dir / "findings.json").read_text())
-        preserved_coverage = json.loads((scan_dir / "coverage.json").read_text())
-        assert preserved_manifest["scan"]["status"] == "failed", case_name
-        assert [
-            (finding["ruleId"], finding["locations"])
-            for finding in preserved_findings["findings"]
-        ] == [
-            (finding["ruleId"], finding["locations"])
-            for finding in findings["findings"]
-        ], case_name
-        assert preserved_coverage["completeness"] == "partial", case_name
+
+def test_completion_keeps_recoverable_prewrite_failures_resumable(
+    tmp_path: Path,
+) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    inventory_strategy = coverage["inventoryStrategy"]
+    coverage["inventoryStrategy"] = ""
+    coverage_path.write_text(json.dumps(coverage))
+
+    failed = run_workbench(
+        state_dir,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        check=False,
+    )
+
+    assert failed["returncode"] != 0
+    assert "inventoryStrategy" in str(failed["stderr"])
+    pending = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert pending["progress"]["status"] == "running"
+    coverage["inventoryStrategy"] = inventory_strategy
+    coverage_path.write_text(json.dumps(coverage))
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 1
 
 
 def test_deep_completion_recovers_malformed_inventory_without_dropping_findings(

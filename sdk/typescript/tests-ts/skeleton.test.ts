@@ -308,7 +308,7 @@ describe("TypeScript package skeleton", () => {
       "node --run clean && tsc -p tsconfig.build.json",
     );
     expect(packageJson.scripts["build:plugin"]).toBe(
-      "node --run check:plugin-source && node scripts/build-plugin.mjs",
+      "node scripts/build-plugin.mjs",
     );
     expect(packageJson.scripts["check:plugin-source"]).toBe(
       "node scripts/check-plugin-source.mjs",
@@ -316,6 +316,7 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts.prepack).toBe(
       "node --run build:plugin && node --run build",
     );
+    expect(packageJson.scripts.types).not.toContain("check:plugin-source");
     expect(packageJson.scripts["audit:prod"]).toBe(
       "pnpm audit --prod --audit-level high",
     );

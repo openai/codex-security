@@ -1542,7 +1542,9 @@ def complete_scan_locked(
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
-        if scan["mode"] != "deep" or wrote or not isinstance(exc, RecoverableContractError):
+        if wrote or (
+            scan["mode"] == "deep" and not isinstance(exc, RecoverableContractError)
+        ):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
             fail_scan_locked(connection, args)
