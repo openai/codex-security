@@ -6,10 +6,8 @@ maintainers.
 
 ## How this repository works
 
-Most Codex Security code is developed in OpenAI's canonical repository and
-published here through a one-way mirror. The plugin source under
-`plugins/codex-security/` is the exception: this repository is its canonical
-source, and it is mirrored one way into OpenAI's internal repository.
+`plugins/codex-security/` is the canonical source for the Codex Security
+plugin. Make plugin changes there.
 
 The npm runtime under `sdk/typescript/_bundled_plugin/` is generated from the
 plugin source by `pnpm run build:plugin` and automatically during `prepack` for
@@ -18,10 +16,8 @@ packages and releases. Do not edit or commit files in that directory. See the
 commands.
 
 Search [existing issues](https://github.com/openai/codex-security/issues)
-before opening a new one. We can't import pull requests that change mirrored
-code back into its canonical source. Maintainers can carry accepted changes
-into that source or invite a focused pull request for a path maintained in this
-repository.
+before opening a new one. Maintainers may invite a focused pull request for a
+path maintained in this repository.
 
 ## Support for open-source projects
 
@@ -52,11 +48,10 @@ project's maintainers through their security policy.
 
 ## Dependency and release maintenance
 
-Maintainers update package dependencies and committed lockfiles alongside
-their canonical source. The public release workflow installs those locked
-graphs, tests the package, and publishes a verified artifact with npm
-provenance. GitHub Actions dependencies are maintained separately in this
-repository.
+Maintainers update package dependencies and committed lockfiles with the
+affected source. The public release workflow installs those locked graphs,
+tests the package, and publishes a verified artifact with npm provenance.
+GitHub Actions dependencies are maintained separately in this repository.
 
 [GitHub Releases](https://github.com/openai/codex-security/releases) is the
 canonical changelog. Maintainers should follow [RELEASING.md](RELEASING.md) to
