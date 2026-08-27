@@ -62,7 +62,6 @@ opts into the broader scope.
 
 ## Other providers
 
-
 To use another inference provider, set its API key and select a model:
 
 ```bash
