@@ -3306,14 +3306,14 @@ try {
     prematureCompletion.result.content[0].text,
     /scan-manifest\.json/,
   );
-  const failedScan = await requestAndWait(9404, "tools/call", {
+  const resumableScan = await requestAndWait(9404, "tools/call", {
     name: "get_codex_security_scan",
     arguments: { scanId: invalidScanId },
   });
-  assertNoError(failedScan);
+  assertNoError(resumableScan);
   assert.equal(
-    failedScan.result.structuredContent.scan.progress.status,
-    "failed",
+    resumableScan.result.structuredContent.scan.progress.status,
+    "running",
   );
 
   assert.equal(
