@@ -1428,13 +1428,14 @@ merge, or change stored findings, and are not saved as durable group assignments
    explicit all-repository scope. Use the complete stored anchor and
    candidates returned by that request.
 2. Screen each nonempty neighborhood with `gpt-5.6-luna` at `xhigh` reasoning
-   effort. The review covers every anchor-neighbor pair and can nominate
-   additional duplicate pairs among the supplied neighbors.
-3. Independently review each nominated pair once with `gpt-5.6-sol` at `ultra`
-   reasoning effort. Only accepted pairs contribute to candidate groups.
-4. Independently review every connected group larger than two with the same
-   Sol settings. A rejected group is kept entirely separate; the workflow does
-   not infer smaller groups from a rejected transitive chain.
+   effort. The review covers every anchor-neighbor pair; nominations between
+   neighbors are rejected.
+3. Independently review each nominated pair once with `gpt-5.6-sol` at `xhigh`
+   reasoning effort. Only accepted pairs contribute to duplicate groups.
+4. Group connected findings deterministically, treating accepted duplicate
+   pairs as transitive: if A matches B and B matches C, all three belong to one
+   group. There is no additional whole-group review. A mistaken accepted pair
+   can therefore join otherwise distinct findings.
 
 Each review uses a fresh, ephemeral Codex app-server thread with the complete
 original finding records, not earlier model rationales, vector scores, or
