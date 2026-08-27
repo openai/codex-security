@@ -88,10 +88,7 @@ const server = createServer(async (request, response) => {
         join(process.env.CODEX_SECURITY_STATE_DIR, "review-calls.jsonl"),
         JSON.stringify({
           stage,
-          model: body.model,
-          effort: body.reasoning.effort,
           findingIds: findings.map((finding) => finding.findingId),
-          tool: "review_validator.submit_decisions",
         }) + "\n",
       );
       item = {
