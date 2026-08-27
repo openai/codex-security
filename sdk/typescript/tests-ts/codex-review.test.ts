@@ -20,6 +20,7 @@ for (const scenario of [
 ]) {
   test(`Codex review transport: ${scenario}`, async () => {
     const modelHome = await mkdtemp(join(tmpdir(), "codex-review-test-"));
+    const checkout = await mkdtemp(join(tmpdir(), "codex-review-source-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
     let directory: string | undefined;
@@ -41,7 +42,8 @@ for (const scenario of [
         },
         (_command, commandArgs, options) => {
           args = commandArgs;
-          directory = String(options.cwd);
+          directory = options.env!["CODEX_SQLITE_HOME"];
+          expect(options.cwd).toBe(checkout);
           child = spawn(
             process.execPath,
             [fixture, scenario, transcript],
@@ -54,6 +56,7 @@ for (const scenario of [
           return child;
         },
         controller.signal,
+        checkout,
       );
       let validations = 0;
       const result = runner.run({
@@ -99,8 +102,10 @@ for (const scenario of [
       expect(existsSync(join(modelHome, "auth.json"))).toBe(false);
       expect(child!.exitCode !== null || child!.signalCode !== null).toBe(true);
       expect(existsSync(directory!)).toBe(false);
+      expect(existsSync(checkout)).toBe(true);
     } finally {
       await rm(modelHome, { recursive: true, force: true });
+      await rm(checkout, { recursive: true, force: true });
     }
   });
 }

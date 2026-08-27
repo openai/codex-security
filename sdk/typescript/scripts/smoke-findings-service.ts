@@ -226,6 +226,7 @@ function checkReviews(): void {
           model: string;
           effort: string;
           findingIds: string[];
+          tool: string;
         },
     );
   for (const stage of ["screen", "pair", "group"]) {
@@ -233,6 +234,9 @@ function checkReviews(): void {
       calls.some((call) => call.stage === stage),
       `${stage} review must run through Codex`,
     );
+  }
+  for (const call of calls) {
+    assert.equal(call.tool, "review_validator.submit_decisions");
   }
   for (const count of [3, 4])
     assert.ok(

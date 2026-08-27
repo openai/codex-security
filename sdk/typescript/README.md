@@ -1437,12 +1437,25 @@ merge, or change stored findings, and are not saved as durable group assignments
    Sol settings. A rejected group is kept entirely separate; the workflow does
    not infer smaller groups from a rejected transitive chain.
 
-Each review uses a fresh, ephemeral Codex app-server thread without environment
-access, with the complete original finding records, not earlier model rationales, vector scores, or
-summaries. Decisions must arrive through the validated `submit_decisions` tool;
-invalid submissions can be corrected in the same session. A final text answer
-alone is insufficient. Reviews have no shell, web, plugin, or MCP access and
-do not open source paths or links from finding content.
+Each review uses a fresh, ephemeral Codex app-server thread with the complete
+original finding records, not earlier model rationales, vector scores, or
+summaries. Reviews can inspect source in the saved scan's local checkout,
+starting with cited paths and revisions. Source inspection establishes duplicate
+identity and shared remediation. Reviews preserve the originals' severity and
+priority metadata without reassessment or normalization. The baseline
+filesystem profile is read-only and excludes credentials
+and Codex state. Screening denies approval requests; final reviews use Codex's
+automatic approval reviewer. Web, plugins, and inherited MCP servers are disabled.
+Finding content never authorizes access to another target.
+
+Decisions must arrive through the direct `review_validator.submit_decisions`
+tool; invalid submissions can be corrected in the same session. A final text
+answer alone is insufficient. Every `SAME` decision, including screening
+nominations, requires an assigned `canonicalFindingId` and a generated,
+inclusive `mergedFinding`; missing or null values are rejected. Screening
+canonicals must belong to the nominated pair. Sol reviews use only the complete
+originals, never earlier merged findings. These review fields do not change
+the command's ID-only result or stored findings.
 
 Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
 `OPENAI_API_KEY`/`CODEX_API_KEY`, with access to the configured models. Model

@@ -6,6 +6,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let sequence = 0;
+function sameDecision(findings) {
+  return {
+    decision: "SAME",
+    rationale: "Synthetic shared correction for the complete original reports.",
+    canonicalFindingId: findings[0].findingId,
+    mergedFinding: {
+      ...findings[0],
+      title: findings.map((finding) => finding.title).join("; "),
+      extensions: { ...findings[0].extensions, mergedOriginals: findings },
+    },
+  };
+}
 const server = createServer(async (request, response) => {
   try {
     assert.equal(request.method, "POST");
@@ -15,7 +27,7 @@ const server = createServer(async (request, response) => {
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     const responseId = `response_${++sequence}`;
     let item;
-    if (body.input.some((entry) => entry.type === "custom_tool_call_output")) {
+    if (body.input.some((entry) => entry.type === "function_call_output")) {
       item = {
         type: "message",
         id: `message_${sequence}`,
@@ -34,9 +46,9 @@ const server = createServer(async (request, response) => {
       const { findings } = JSON.parse(
         prompt.slice(prompt.lastIndexOf("\n\n") + 2),
       );
-      const stage = prompt.startsWith("Screen")
+      const stage = prompt.startsWith("Review the complete assigned")
         ? "screen"
-        : prompt.startsWith("Review all")
+        : prompt.startsWith("Independently validate the entire")
           ? "group"
           : "pair";
       assert.equal(
@@ -48,40 +60,30 @@ const server = createServer(async (request, response) => {
       const tools = body.input
         .filter((entry) => entry.type === "additional_tools")
         .flatMap((entry) => entry.tools);
-      const functions = tools.flatMap((tool) =>
-        tool.type === "namespace" ? tool.tools : [tool],
+      const validator = tools.find((tool) => tool.name === "review_validator");
+      assert.equal(validator?.type, "namespace");
+      assert.equal(validator.tools[0].name, "submit_decisions");
+      assert.equal(validator.tools[0].type, "function");
+      const functions = tools.find((tool) => tool.name === "functions").tools;
+      const execute = functions.find((tool) => tool.name === "exec");
+      assert.match(execute.description, /### `exec_command`/);
+      const same = findings.every(
+        (finding) => finding.extensions.smokeGroup === "duplicate",
       );
-      // The pinned models wrap nested tools in code mode. No environment tools
-      // or additional model workers should be exposed to these reviews.
-      assert.deepEqual(
-        functions.map((tool) => tool.name),
-        ["exec", "wait"],
-      );
-      const nestedTools = [
-        ...functions[0].description.matchAll(/^### `([^`]+)`/gm),
-      ].map((match) => match[1]);
-      assert.deepEqual(nestedTools, [
-        "submit_decisions",
-        "skills__list",
-        "skills__read",
-      ]);
       const result =
         stage === "screen"
           ? {
               decisions: findings.slice(1).map((finding) => ({
                 findingIds: [findings[0].findingId, finding.findingId],
-                decision: "SAME",
-                rationale: "Synthetic candidate for independent review.",
+                ...sameDecision([findings[0], finding]),
               })),
             }
-          : {
-              decision: findings.every(
-                (finding) => finding.extensions.smokeGroup === "duplicate",
-              )
-                ? "SAME"
-                : "DISTINCT",
-              rationale: "Synthetic review of the original reports.",
-            };
+          : same
+            ? sameDecision(findings)
+            : {
+                decision: "DISTINCT",
+                rationale: "Synthetic review of the original reports.",
+              };
       await appendFile(
         join(process.env.CODEX_SECURITY_STATE_DIR, "review-calls.jsonl"),
         JSON.stringify({
@@ -89,15 +91,16 @@ const server = createServer(async (request, response) => {
           model: body.model,
           effort: body.reasoning.effort,
           findingIds: findings.map((finding) => finding.findingId),
+          tool: "review_validator.submit_decisions",
         }) + "\n",
       );
       item = {
-        type: "custom_tool_call",
+        type: "function_call",
         id: `item_${sequence}`,
         call_id: `call_${sequence}`,
-        name: "exec",
-        namespace: "functions",
-        input: `text(await tools.submit_decisions(${JSON.stringify(result)}));`,
+        name: "submit_decisions",
+        namespace: "review_validator",
+        arguments: JSON.stringify(result),
         status: "completed",
       };
     }

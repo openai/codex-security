@@ -12,7 +12,7 @@ const submit = (id, arguments_, overrides = {}) =>
       threadId: "review-thread",
       turnId: "review-turn",
       tool: "submit_decisions",
-      namespace: null,
+      namespace: "review_validator",
       arguments: arguments_,
       ...overrides,
     },
@@ -38,10 +38,20 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
     assert.equal(message.params.ephemeral, true);
-    assert.equal(message.params.sandbox, "read-only");
+    assert.equal(message.params.permissions, "codex_security_review");
+    assert.equal(message.params.approvalPolicy, "on-request");
+    assert.equal(message.params.approvalsReviewer, "auto_review");
     assert.equal(message.params.config.mcp_servers.synthetic.enabled, false);
-    assert.deepEqual(message.params.environments, []);
-    assert.equal(message.params.dynamicTools[0].name, "submit_decisions");
+    assert.deepEqual(
+      message.params.config.features.code_mode.direct_only_tool_namespaces,
+      ["review_validator"],
+    );
+    assert.equal(message.params.cwd, process.cwd());
+    assert.equal(message.params.dynamicTools[0].name, "review_validator");
+    assert.equal(
+      message.params.dynamicTools[0].tools[0].name,
+      "submit_decisions",
+    );
     send({
       id: message.id,
       result: {
@@ -68,11 +78,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     } else if (scenario === "correction") {
       submit("wrong-thread", { decision: "SAME" }, { threadId: "other" });
       submit("wrong-tool", { decision: "SAME" }, { tool: "other" });
+      submit("wrong-namespace", { decision: "SAME" }, { namespace: null });
       submit("invalid", { decision: "UNKNOWN" });
     } else {
       submit("valid", { decision: "SAME" });
     }
-  } else if (["wrong-thread", "wrong-tool"].includes(message.id)) {
+  } else if (
+    ["wrong-thread", "wrong-tool", "wrong-namespace"].includes(message.id)
+  ) {
     assert.equal(message.error.code, -32601);
   } else if (message.id === "invalid") {
     assert.equal(message.result.success, false);

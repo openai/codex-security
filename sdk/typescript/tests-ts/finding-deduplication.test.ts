@@ -2,12 +2,14 @@ import { chmod, cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
 import {
   CodexDeduplicationReviewer,
   pairKey,
+  validateReview,
   validateScreening,
   type DeduplicationReviewer,
   type DuplicateDecision,
@@ -50,10 +52,20 @@ function candidates(findings: Finding[]) {
   };
 }
 
-const same: DuplicateDecision = {
-  decision: "SAME",
-  rationale: "One existing control corrects every path.",
-};
+function same(
+  findings: readonly Finding[],
+): Extract<DuplicateDecision, { decision: "SAME" }> {
+  return {
+    decision: "SAME",
+    rationale: "One existing control corrects every path.",
+    canonicalFindingId: findings[0]!.findingId,
+    mergedFinding: {
+      ...findings[0],
+      title: findings.map((finding) => finding.title).join("; "),
+      extensions: { ...findings[0]!.extensions, mergedOriginals: findings },
+    },
+  };
+}
 const distinct: DuplicateDecision = {
   decision: "DISTINCT",
   rationale: "Independent controls require different corrections.",
@@ -71,7 +83,9 @@ function screening(
       ];
       return {
         findingIds,
-        ...(nominated.has(pairKey(findingIds)) ? same : distinct),
+        ...(nominated.has(pairKey(findingIds))
+          ? same([findings[0]!, finding])
+          : distinct),
       };
     }),
   };
@@ -104,12 +118,12 @@ test("reviews nominated pairs once and judges the complete group before selectin
       reviewedPairs.push(key);
       return findings.some((finding) => finding.findingId === ids[3])
         ? distinct
-        : same;
+        : same(findings);
     },
     async reviewGroup(findings) {
       phases.push("group");
       expect(findings).toEqual([entries[1]!, entries[0]!, entries[2]!]);
-      return same;
+      return same(findings);
     },
   };
   const service = new FindingDeduplicator(candidates(entries), reviewer);
@@ -142,8 +156,8 @@ test("whole-group rejection keeps a transitive chain separate", async () => {
         new Set([pairKey([ids[0]!, ids[1]!]), pairKey([ids[1]!, ids[2]!])]),
       );
     },
-    async reviewPair() {
-      return same;
+    async reviewPair(findings) {
+      return same(findings);
     },
     async reviewGroup() {
       return distinct;
@@ -165,8 +179,8 @@ test("matches an import to an existing canonical without judging a two-finding g
     async screen(findings) {
       return screening(findings, new Set([pairKey(ids)]));
     },
-    async reviewPair() {
-      return same;
+    async reviewPair(findings) {
+      return same(findings);
     },
     async reviewGroup() {
       throw new Error("Two-finding groups do not need another review");
@@ -212,20 +226,23 @@ test("validates complete screening assignments including off-edge nominations", 
   const findings = [entry(1), entry(2), entry(3)];
   const ids = findings.map((finding) => finding.findingId);
   const result = screening(findings, new Set([pairKey([ids[0]!, ids[1]!])]));
-  result.decisions.push({ findingIds: [ids[1]!, ids[2]!], ...same });
+  result.decisions.push({
+    findingIds: [ids[1]!, ids[2]!],
+    ...same(findings.slice(1)),
+  });
   expect(validateScreening(result, findings)).toEqual(result);
   for (const invalid of [
     { decisions: result.decisions.slice(1) },
     {
       decisions: [
         ...result.decisions,
-        { findingIds: [ids[1], ids[0]], ...same },
+        { findingIds: [ids[1], ids[0]], ...same(findings.slice(0, 2)) },
       ],
     },
     {
       decisions: [
         ...result.decisions.slice(0, 2),
-        { findingIds: [ids[1], "outside"], ...same },
+        { findingIds: [ids[1], "outside"], ...same(findings.slice(1)) },
       ],
     },
     {
@@ -240,28 +257,61 @@ test("validates complete screening assignments including off-edge nominations", 
         rationale: " ",
       })),
     },
+    {
+      decisions: result.decisions.map((value) =>
+        value.decision === "SAME"
+          ? { ...value, canonicalFindingId: ids[2] }
+          : value,
+      ),
+    },
   ])
     expect(() => validateScreening(invalid, findings)).toThrow();
 });
 
-test("uses independent model assignments and complete originals without earlier rationales", async () => {
+test("requires complete SAME tool outputs and keeps reviews independent", async () => {
   const findings = [entry(1), entry(2), entry(3)];
   const calls: CodexReview<unknown>[] = [];
   const reviewer = new CodexDeduplicationReviewer({
     async run<T>(review: CodexReview<T>): Promise<T> {
       calls.push(review);
-      return review.validate(
-        calls.length === 1
-          ? {
-              decisions: screening(findings, new Set()).decisions.map(
-                (value) => ({
-                  ...value,
-                  rationale: "SCREENING_ONLY_RATIONALE",
-                }),
-              ),
-            }
-          : { ...same, rationale: "PAIR_ONLY_RATIONALE" },
+      let result: ScreeningResult | DuplicateDecision;
+      if (calls.length === 1) {
+        result = screening(
+          findings,
+          new Set([
+            pairKey(findings.slice(0, 2).map((finding) => finding.findingId)),
+          ]),
+        );
+        for (const decision of result.decisions) {
+          decision.rationale = "SCREENING_ONLY_RATIONALE";
+          if (decision.decision === "SAME")
+            decision.mergedFinding["title"] = "SCREENING_ONLY_MERGED";
+        }
+      } else {
+        result = same(calls.length === 2 ? findings.slice(0, 2) : findings);
+        result.rationale = "PAIR_ONLY_RATIONALE";
+        result.mergedFinding["title"] = "PAIR_ONLY_MERGED";
+      }
+      const validateSchema = new Ajv2020({ strict: false }).compile(
+        review.schema as object,
       );
+      expect(validateSchema(result)).toBe(true);
+      for (const field of ["canonicalFindingId", "mergedFinding"] as const) {
+        for (const value of [undefined, null]) {
+          const invalid =
+            "decisions" in result
+              ? {
+                  decisions: result.decisions.map((decision) =>
+                    decision.decision === "SAME"
+                      ? { ...decision, [field]: value }
+                      : decision,
+                  ),
+                }
+              : { ...result, [field]: value };
+          expect(validateSchema(invalid)).toBe(false);
+        }
+      }
+      return review.validate(result);
     },
   });
   await reviewer.screen(findings);
@@ -283,9 +333,63 @@ test("uses independent model assignments and complete originals without earlier 
       .every(
         ({ prompt }) =>
           !prompt.includes("SCREENING_ONLY_RATIONALE") &&
-          !prompt.includes("PAIR_ONLY_RATIONALE"),
+          !prompt.includes("PAIR_ONLY_RATIONALE") &&
+          !prompt.includes("SCREENING_ONLY_MERGED") &&
+          !prompt.includes("PAIR_ONLY_MERGED"),
       ),
   ).toBe(true);
+});
+
+test("accepts complete canonical and merged reviews and rejects invalid assignments", () => {
+  const findings = [entry(1), entry(2)];
+  const result = {
+    ...same(findings),
+    mergedFinding: {
+      ...findings[0],
+      extensions: { preserved: "complete original evidence" },
+    },
+  };
+  expect(validateReview(result, findings)).toEqual(result);
+  expect(validateReview(distinct, findings)).toEqual(distinct);
+  expect(
+    validateReview(
+      { ...distinct, canonicalFindingId: null, mergedFinding: null },
+      findings,
+    ),
+  ).toEqual({
+    ...distinct,
+    canonicalFindingId: null,
+    mergedFinding: null,
+  });
+  for (const invalid of [
+    { decision: "SAME", rationale: "Missing canonical and merged finding." },
+    { ...result, canonicalFindingId: undefined },
+    { ...result, canonicalFindingId: null },
+    { ...result, mergedFinding: undefined },
+    { ...result, mergedFinding: null },
+    { ...result, canonicalFindingId: "outside" },
+    {
+      ...result,
+      canonicalFindingId: undefined,
+      canonicalIssueId: result.canonicalFindingId,
+    },
+    { ...result, decision: "DISTINCT" },
+  ]) {
+    expect(() => validateReview(invalid, findings)).toThrow();
+    expect(() =>
+      validateScreening(
+        {
+          decisions: [
+            {
+              ...invalid,
+              findingIds: findings.map((finding) => finding.findingId),
+            },
+          ],
+        },
+        findings,
+      ),
+    ).toThrow();
+  }
 });
 
 test("resolves a saved scan and retrieves its IDs without uploading or modifying artifacts", async () => {

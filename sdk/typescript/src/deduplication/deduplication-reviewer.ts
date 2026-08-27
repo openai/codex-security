@@ -8,21 +8,33 @@ import {
 } from "./deduplication-prompts.js";
 
 const rationale = z.string().refine((value) => value.trim().length > 0);
-const decision = z.enum(["SAME", "DISTINCT"]);
+const sameSchema = z.object({
+  decision: z.literal("SAME"),
+  rationale,
+  canonicalFindingId: z.string(),
+  mergedFinding: z.record(z.string(), z.unknown()),
+});
+const distinctSchema = z.object({
+  decision: z.literal("DISTINCT"),
+  rationale,
+  canonicalFindingId: z.null().optional(),
+  mergedFinding: z.null().optional(),
+});
+const reviewSchema = z.discriminatedUnion("decision", [
+  sameSchema,
+  distinctSchema,
+]);
+const findingIds = z.tuple([z.string(), z.string()]);
 const screeningSchema = z
   .object({
     decisions: z.array(
-      z
-        .object({
-          findingIds: z.tuple([z.string(), z.string()]),
-          decision,
-          rationale,
-        })
-        .strict(),
+      z.discriminatedUnion("decision", [
+        sameSchema.extend({ findingIds }).strict(),
+        distinctSchema.extend({ findingIds }).strict(),
+      ]),
     ),
   })
   .strict();
-const reviewSchema = z.object({ decision, rationale }).strict();
 
 export type ScreeningResult = z.infer<typeof screeningSchema>;
 export type DuplicateDecision = z.infer<typeof reviewSchema>;
@@ -35,6 +47,22 @@ export interface DeduplicationReviewer {
 
 export function pairKey(ids: readonly string[]): string {
   return JSON.stringify([...ids].sort());
+}
+
+export function validateReview(
+  value: unknown,
+  findings: readonly Finding[],
+): DuplicateDecision {
+  const result = reviewSchema.parse(value);
+  if (
+    result.decision === "SAME" &&
+    !findings.some((finding) => finding.findingId === result.canonicalFindingId)
+  ) {
+    throw new Error(
+      "The canonical finding must belong to the assigned findings.",
+    );
+  }
+  return result;
 }
 
 export function validateScreening(
@@ -59,6 +87,14 @@ export function validateScreening(
     ) {
       throw new Error(
         "Submit each assigned pair once; additional SAME pairs must use supplied findings.",
+      );
+    }
+    if (
+      recommendation.decision === "SAME" &&
+      !pair.includes(recommendation.canonicalFindingId)
+    ) {
+      throw new Error(
+        "The canonical finding must belong to its assigned pair.",
       );
     }
     seen.add(key);
@@ -90,20 +126,26 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
   }
 
   async reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision> {
-    return await this.review(pairReviewPrompt(findings));
+    return await this.review(pairReviewPrompt(findings), findings);
   }
 
   async reviewGroup(findings: readonly Finding[]): Promise<DuplicateDecision> {
-    return await this.review(groupReviewPrompt(findings));
+    return await this.review(groupReviewPrompt(findings), findings);
   }
 
-  private async review(prompt: string): Promise<DuplicateDecision> {
+  private async review(
+    prompt: string,
+    findings: readonly Finding[],
+  ): Promise<DuplicateDecision> {
     return await this.runner.run({
       model: "gpt-5.6-sol",
       effort: "ultra",
       prompt,
-      schema: z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),
-      validate: (value) => reviewSchema.parse(value),
+      schema: {
+        type: "object",
+        ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),
+      },
+      validate: (value) => validateReview(value, findings),
     });
   }
 }

@@ -92,7 +92,12 @@ export async function deduplicateScanInternal(
     ),
     dependencies.reviewer ??
       new CodexDeduplicationReviewer(
-        new CodexReviewRunner(environment, undefined, options.signal),
+        new CodexReviewRunner(
+          environment,
+          undefined,
+          options.signal,
+          scan["targetPath"] as string,
+        ),
       ),
     options.signal,
   );

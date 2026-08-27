@@ -30,6 +30,8 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
     )
 
     if "--prepare-scan" in sys.argv:
+        source_dir = Path("/state/smoke-source")
+        source_dir.mkdir(exist_ok=True)
         scan_dir = Path("/state/smoke-scan")
         shutil.copytree("_bundled_plugin/examples/completed-scan", scan_dir, dirs_exist_ok=True)
         scan_dir.chmod(0o700)
@@ -39,8 +41,8 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
             (timestamp, timestamp),
         )
         db.execute(
-            "INSERT OR IGNORE INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, '00000000-0000-4000-8000-000000000001', '/synthetic/repository', 'revision', '.', 'standard', ?, 'complete', 'reporting', ?, ?, ?, ?)",
-            (scan["id"], str(scan_dir), timestamp, timestamp, timestamp, timestamp),
+            "INSERT OR IGNORE INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, '00000000-0000-4000-8000-000000000001', ?, 'revision', '.', 'standard', ?, 'complete', 'reporting', ?, ?, ?, ?)",
+            (scan["id"], str(source_dir), str(scan_dir), timestamp, timestamp, timestamp, timestamp),
         )
         db.execute(
             "INSERT OR IGNORE INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
