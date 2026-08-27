@@ -36,7 +36,10 @@
     "README.md"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "executableFiles": [
+      "_bundled_plugin/scripts/launch_codex_security_mcp"
+    ]
   },
   "scripts": {
     "audit:prod": "pnpm audit --prod --audit-level high",
