@@ -956,7 +956,7 @@ For example, with the API key configured before starting Compose:
 ```bash
 curl http://127.0.0.1:3000/v1/bulk/findings \
   -H 'Content-Type: application/json' \
-  --data-binary @sdk/typescript/_bundled_plugin/examples/completed-scan/findings.json
+  --data-binary @plugins/codex-security/examples/completed-scan/findings.json
 ```
 
 ```json
