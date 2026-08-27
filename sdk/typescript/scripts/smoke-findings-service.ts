@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -9,9 +10,22 @@ import type { DeduplicateScanResult } from "../src/deduplication/scan.js";
 import type { FindingsPage } from "../src/server/storage.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
-const container = "findings-ci";
+const container = `findings-ci-${process.pid}`;
 const image = process.argv[2] ?? "codex-security-findings:local";
+const runnerImage =
+  process.env["CODEX_SECURITY_IMAGE"] ?? "codex-security:runner-smoke";
 const compose = ["compose", "-p", container, "-f", "compose.findings.yaml"];
+const runnerRoot = await mkdtemp(join(tmpdir(), "codex-security-runner-"));
+const runnerCompose = [
+  "compose",
+  "-p",
+  `${container}-runner`,
+  "-f",
+  "compose.runner.yaml",
+  "-f",
+  join(runnerRoot, "network.json"),
+];
+const runner = [...runnerCompose, "run", "--rm", "-T"];
 let base: string;
 const document: FindingsDocument = JSON.parse(
   await readFile(
@@ -58,12 +72,24 @@ const findings: Finding[] = [
 ];
 const ids = findings.map((finding) => finding.findingId);
 
-function docker(args: string[], { check = true } = {}): string {
+function docker(args: string[], { check = true, status = 0 } = {}): string {
   const result = spawnSync("docker", args, {
     cwd: repositoryRoot,
     env: {
       ...process.env,
       CODEX_SECURITY_FINDINGS_IMAGE: image,
+      CODEX_SECURITY_IMAGE: runnerImage,
+      CODEX_SECURITY_USER: `${process.getuid!()}:${process.getgid!()}`,
+      CODEX_SECURITY_RESULTS: join(runnerRoot, "results"),
+      CODEX_SECURITY_STATE: join(runnerRoot, "state"),
+      CODEX_SECURITY_SECCOMP: join(
+        repositoryRoot,
+        "docker/codex-security-seccomp.json",
+      ),
+      OPENAI_API_KEY: "synthetic-container-key",
+      CODEX_API_KEY: "",
+      GH_TOKEN: "",
+      GITHUB_TOKEN: "",
     },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
@@ -71,7 +97,11 @@ function docker(args: string[], { check = true } = {}): string {
   if (result.stdout) process.stdout.write(result.stdout);
   if (check) {
     if (result.error) throw result.error;
-    assert.equal(result.status, 0, `docker ${args.join(" ")} failed`);
+    assert.equal(
+      result.status,
+      status,
+      `docker ${args.join(" ")} returned an unexpected exit code`,
+    );
   }
   return result.stdout?.trim() ?? "";
 }
@@ -81,6 +111,7 @@ async function startService(): Promise<void> {
     ...compose,
     "run",
     "--detach",
+    "--use-aliases",
     "--publish",
     "127.0.0.1::3000",
     "--name",
@@ -91,8 +122,6 @@ async function startService(): Promise<void> {
     "NODE_OPTIONS=--import=/test/mock-embeddings.mjs",
     "--volume",
     `${join(repositoryRoot, "docker/fixtures/mock-embeddings.mjs")}:/test/mock-embeddings.mjs:ro`,
-    "--volume",
-    `${join(repositoryRoot, "docker/fixtures/mock-reviews.mjs")}:/test/mock-reviews.mjs:ro`,
     "--volume",
     `${fileURLToPath(new URL("fixtures/findings-service-sqlite.py", import.meta.url))}:/test/findings-service-sqlite.py:ro`,
     "findings",
@@ -157,30 +186,20 @@ async function checkCandidates(): Promise<void> {
 }
 
 function checkCliDeduplication(): void {
-  docker([
-    "exec",
-    container,
-    "python3",
-    "/test/findings-service-sqlite.py",
-    JSON.stringify(ids),
-    "--prepare-scan",
-  ]);
   for (const allRepositories of [false, true]) {
     const actual: unknown = JSON.parse(
       docker([
-        "exec",
+        ...runner,
         "--env",
-        "NODE_OPTIONS=",
-        container,
-        "node",
-        "--import",
-        "/test/mock-reviews.mjs",
-        "dist/cli.js",
+        "NODE_OPTIONS=--import=/test/mock-reviews.mjs",
+        "--volume",
+        `${join(repositoryRoot, "docker/fixtures/mock-reviews.mjs")}:/test/mock-reviews.mjs:ro`,
+        "codex-security",
         "dedupe",
         "--scan",
         "scan_example_001",
         "--findings-url",
-        "http://127.0.0.1:3000",
+        "http://findings:3000",
         "--json",
         ...(allRepositories ? ["--all-repositories"] : []),
       ]),
@@ -222,8 +241,14 @@ function checkStorage(): void {
   ]);
 }
 
-function checkReviews(): void {
-  const calls = docker(["exec", container, "cat", "/state/review-calls.jsonl"])
+async function checkReviews(): Promise<void> {
+  const calls = (
+    await readFile(
+      join(runnerRoot, "results/.codex-security-state/review-calls.jsonl"),
+      "utf8",
+    )
+  )
+    .trim()
     .split("\n")
     .map(
       (line) =>
@@ -268,26 +293,79 @@ function stopService(): void {
 
 let passed = false;
 try {
+  for (const directory of ["results", "state"])
+    await mkdir(join(runnerRoot, directory), { mode: 0o700 });
+  await writeFile(
+    join(runnerRoot, "network.json"),
+    JSON.stringify({
+      networks: { default: { external: true, name: `${container}_default` } },
+    }),
+  );
   if (!process.argv[2])
     docker(["build", "--target", "findings-service", "--tag", image, "."]);
+  if (!process.env["CODEX_SECURITY_IMAGE"])
+    docker(["build", "--target", "scanner", "--tag", runnerImage, "."]);
   await startService();
+  docker([...runnerCompose, "config", "--quiet"]);
+  docker([
+    ...runnerCompose,
+    "-f",
+    "compose.apparmor.yaml",
+    "config",
+    "--quiet",
+  ]);
+  docker([...runner, "codex-security", "dedupe", "--help"]);
+  docker([
+    ...runner,
+    "--entrypoint",
+    "python3",
+    "--volume",
+    `${fileURLToPath(new URL("fixtures/prepare-runner-scan.py", import.meta.url))}:/test/prepare-runner-scan.py:ro`,
+    "codex-security",
+    "/test/prepare-runner-scan.py",
+  ]);
+  assert.equal(
+    docker(
+      [
+        ...runner,
+        "codex-security",
+        "dedupe",
+        "--scan",
+        "missing-scan",
+        "--findings-url",
+        "http://findings:3000",
+        "--json",
+      ],
+      { status: 2 },
+    ),
+    "",
+  );
   await checkInsertions();
   await checkCandidates();
   await checkPages();
   checkStorage();
   checkCliDeduplication();
-  checkReviews();
+  await checkReviews();
   stopService();
   docker(["rm", container]);
   await startService();
   checkStorage();
   await checkPages();
   await checkCandidates();
+  checkCliDeduplication();
+  await checkReviews();
   stopService();
+  assert.equal(
+    await readFile(join(runnerRoot, "state/runner-marker"), "utf8"),
+    "synthetic runner state\n",
+  );
   passed = true;
-  console.log("Findings service Docker smoke test passed.");
+  console.log(
+    "Findings service and separate scanner runner Docker smoke test passed.",
+  );
 } finally {
   if (!passed) docker(["logs", container], { check: false });
   docker(["rm", "--force", container], { check: false });
   docker([...compose, "down", "--volumes"], { check: passed });
+  await rm(runnerRoot, { recursive: true, force: true });
 }

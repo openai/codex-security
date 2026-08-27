@@ -10,6 +10,7 @@ on:
       - compose.yaml
       - compose.apparmor.yaml
       - compose.findings.yaml
+      - compose.runner.yaml
       - docker/**
       - sdk/typescript/**
   push:

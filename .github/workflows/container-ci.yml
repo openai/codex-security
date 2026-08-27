@@ -11,6 +11,7 @@ on:
       - compose.yaml
       - compose.apparmor.yaml
       - compose.findings.yaml
+      - compose.runner.yaml
       - docker/**
       - sdk/typescript/**
   pull_request:
@@ -22,6 +23,7 @@ on:
       - compose.yaml
       - compose.apparmor.yaml
       - compose.findings.yaml
+      - compose.runner.yaml
       - docker/**
       - sdk/typescript/**
   workflow_dispatch:
@@ -107,6 +109,8 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Verify findings service and persistent SQLite storage
+        env:
+          CODEX_SECURITY_IMAGE: codex-security:ci
         run: bun sdk/typescript/scripts/smoke-findings-service.ts
 
       - name: Validate hardened customer Compose configuration
