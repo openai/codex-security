@@ -245,6 +245,23 @@ def test_deep_preflight_compatibility_profile_has_no_runtime_requirements(tmp_pa
     assert payload["remediation"].get("patches", []) == []
 
 
+def test_deep_preflight_ignores_unrelated_bridge_backend_configuration(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[multiagent_config]\nmax_concurrency = 4\n")
+
+    result = run_preflight(
+        "--profile",
+        "deep_security_scan",
+        "--config",
+        str(config_path),
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["status"] == "ready"
+    assert payload["results"] == []
+
+
 def test_deep_scan_preflight_accepts_native_v1_with_legacy_thread_limits(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text("[agents]\nmax_threads = 8\n")
@@ -405,7 +422,7 @@ def test_preflight_rejects_multi_agent_mode_override() -> None:
     assert "unrecognized arguments: --multi-agent-mode v1" in result.stderr
 
 
-def test_preflight_reports_unknown_runtime_checks(tmp_path: Path) -> None:
+def test_preflight_keeps_unknown_warning_capabilities_advisory(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text("")
 
@@ -419,9 +436,29 @@ def test_preflight_reports_unknown_runtime_checks(tmp_path: Path) -> None:
     )
 
     payload = json.loads(result.stdout)
-    assert result.returncode == 2
-    assert payload["status"] == "incomplete"
+    assert result.returncode == 0
+    assert payload["status"] == "ready"
     assert {item["check"] for item in payload["unknown"]} == {"delegation_available"}
+
+
+def test_preflight_keeps_unknown_suggested_capabilities_advisory(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("")
+
+    result = run_preflight(
+        "--profile",
+        "security_diff_scan",
+        "--config",
+        str(config_path),
+        "--runtime-check",
+        "delegation_available=true",
+        *standalone_v1(),
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["status"] == "ready"
+    assert {item["check"] for item in payload["unknown"]} == {"goal_tools_available"}
 
 
 def test_preflight_uses_enabled_goals_default(tmp_path: Path) -> None:

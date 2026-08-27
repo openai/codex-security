@@ -10,7 +10,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildBundledPlugin } from "../scripts/build-plugin.mjs";
@@ -68,6 +69,41 @@ afterEach(async () => {
 });
 
 describe("bundled plugin build", () => {
+  test("builds the MCP runtime without invoking an npm launcher", async () => {
+    const root = await temporaryDirectory();
+    const bin = join(root, "bin");
+    const launcher = process.platform === "win32" ? "npm.cmd" : "npm";
+    await writeFixture(
+      bin,
+      launcher,
+      process.platform === "win32" ? "@exit /b 91\r\n" : "#!/bin/sh\nexit 91\n",
+    );
+    if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
+
+    const destination = join(root, "mcp");
+    await execFileAsync(
+      "node",
+      [
+        fileURLToPath(
+          new URL(
+            "../../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs",
+            import.meta.url,
+          ),
+        ),
+        "--output",
+        destination,
+      ],
+      {
+        env: {
+          ...process.env,
+          PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
+        },
+      },
+    );
+
+    expect(await files(destination)).toContain("server.mjs");
+  });
+
   test("stages only declared runtime files from the canonical plugin source", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "plugins", "codex-security");

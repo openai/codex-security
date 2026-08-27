@@ -136,7 +136,7 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("rejects invalid runtime settings for every security profile", async () => {
+  test("rejects invalid runtime settings only for relevant security profiles", async () => {
     const root = await temporaryDirectory();
     const config = join(root, "empty.toml");
     await writeFile(config, "");
@@ -149,19 +149,17 @@ describe("CodexSecurity preflight configuration", () => {
           "agents.max_threads=8",
         ],
         error: "agents.max_threads cannot be set",
+        profiles: ["deep_security_scan", "security_diff_scan", "security_scan"],
       },
       {
         args: ["--effective-config", "multiagent_config.max_concurrency=8"],
         error: "does not prove bridge ownership",
+        profiles: ["security_scan"],
       },
     ];
 
-    for (const { args, error } of settings) {
-      for (const profile of [
-        "deep_security_scan",
-        "security_diff_scan",
-        "security_scan",
-      ]) {
+    for (const { args, error, profiles } of settings) {
+      for (const profile of profiles) {
         const result = runPreflight(config, profile, args);
         expect(result.status).toBe(2);
         expect(result.payload).toMatchObject({
@@ -169,6 +167,15 @@ describe("CodexSecurity preflight configuration", () => {
           status: "error",
         });
       }
+    }
+
+    for (const profile of ["deep_security_scan", "security_diff_scan"]) {
+      expect(
+        runPreflight(config, profile, [
+          "--effective-config",
+          "multiagent_config.max_concurrency=8",
+        ]),
+      ).toMatchObject({ status: 0, payload: { status: "ready" } });
     }
   });
 
@@ -300,8 +307,8 @@ describe("CodexSecurity preflight configuration", () => {
           "multiagent_config.max_concurrency=8",
         ]),
       ).toMatchObject({
-        status: 2,
-        payload: { error: expect.stringContaining("bridge ownership") },
+        status: 0,
+        payload: { status: "ready" },
       });
     }
 

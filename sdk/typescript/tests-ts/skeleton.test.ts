@@ -153,6 +153,29 @@ describe("TypeScript package skeleton", () => {
     );
   });
 
+  test("generates the bundled plugin before Windows test shards", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const steps = jobs["windows-test"]!.steps;
+    const dependencyInstallation = steps.findIndex(
+      (step) => step.name === "Install dependencies",
+    );
+    const pluginGeneration = steps.findIndex(
+      (step) => step.name === "Generate bundled plugin",
+    );
+    const shard = steps.findIndex(
+      (step) => step.name === "Test shard ${{ matrix.shard }}",
+    );
+
+    expect(steps[dependencyInstallation]?.run).toContain(
+      "npm ci --prefix plugins/codex-security/mcp-app",
+    );
+    expect(steps[pluginGeneration]?.run).toBe(
+      "pnpm --dir sdk/typescript run build:plugin",
+    );
+    expect(dependencyInstallation).toBeLessThan(pluginGeneration);
+    expect(pluginGeneration).toBeLessThan(shard);
+  });
+
   test("runs shared static checks once and keeps report upload non-blocking", async () => {
     const { jobs } = await workflow("node-ci.yml");
     const steps = Object.values(jobs).flatMap((job) => job.steps);

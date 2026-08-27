@@ -291,8 +291,12 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Install dependencies
-        working-directory: sdk/typescript
-        run: pnpm install --frozen-lockfile
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          npm ci --prefix plugins/codex-security/mcp-app --no-audit --no-fund
+
+      - name: Generate bundled plugin
+        run: pnpm --dir sdk/typescript run build:plugin
 
       - name: Prepare private Windows test root
         id: windows-temp

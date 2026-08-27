@@ -11,9 +11,11 @@ const maxChunkBytes = 140_000;
 
 export async function buildMcpApp({ output }) {
   const mcpDir = resolve(output);
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
-  execFileSync(npm, ["run", "build"], { cwd: root, stdio: "inherit" });
+  execFileSync(process.execPath, ["--run", "build"], {
+    cwd: root,
+    stdio: "inherit"
+  });
   await rm(mcpDir, { recursive: true, force: true });
   await mkdir(mcpDir, { recursive: true });
 

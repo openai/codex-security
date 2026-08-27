@@ -455,6 +455,7 @@ def resolve_multi_agent_context(
     runtime_version: str | None,
     runtime_session_cap: int | None,
     runtime_provenance: str | None,
+    validate_multi_agent_config: bool,
 ) -> dict[str, Any]:
     runtime_facts_supplied = any(
         value is not None for value in (runtime_owner, runtime_version, runtime_session_cap)
@@ -514,7 +515,11 @@ def resolve_multi_agent_context(
         effective_config=effective_config,
         config_profile=config_profile,
     )
-    if bridge_cap_found and owner != "codex-bridge":
+    if (
+        bridge_cap_found
+        and owner != "codex-bridge"
+        and (validate_multi_agent_config or runtime_facts_supplied)
+    ):
         raise ValueError(
             "multiagent_config.max_concurrency does not prove bridge ownership; "
             "pass --multi-agent-runtime-owner codex-bridge only when the active runtime "
@@ -777,6 +782,29 @@ def validate_registry(registry: dict[str, Any]) -> None:
                 )
 
 
+def profile_requires_multi_agent_config(
+    profile: dict[str, Any], capabilities: dict[str, dict[str, Any]]
+) -> bool:
+    def is_runtime_path(path: Any) -> bool:
+        return isinstance(path, str) and (
+            path in {"agents", "features", "features.multi_agent_v2", "multiagent_config"}
+            or path.startswith(("agents.", "multiagent_config.", "features.multi_agent_v2."))
+        )
+
+    for requirement in profile["requirements"]:
+        capability = capabilities[requirement["capability"]]
+        if (
+            capability["kind"] in {"multi_agent_capacity", "multi_agent_mode"}
+            or requirement.get("modes")
+            or is_runtime_path(capability.get("path"))
+        ):
+            return True
+    remediation = profile.get("remediation", {})
+    return bool(remediation.get("variants")) or any(
+        is_runtime_path(patch.get("path")) for patch in remediation.get("patches", [])
+    )
+
+
 def resolve_remediation(
     profile: dict[str, Any], *, multi_agent_context: dict[str, Any]
 ) -> dict[str, Any]:
@@ -857,6 +885,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         runtime_version=args.multi_agent_runtime_version,
         runtime_session_cap=args.multi_agent_session_cap,
         runtime_provenance=args.multi_agent_runtime_provenance,
+        validate_multi_agent_config=profile_requires_multi_agent_config(
+            profile, registry["capabilities"]
+        ),
     )
     results = [
         evaluate_requirement(
@@ -877,7 +908,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     unknown = [result for result in results if result["status"] == "unknown"]
     if any(result["severity"] == "block" for result in failed):
         status = "blocked"
-    elif unknown:
+    elif any(result["severity"] == "block" for result in unknown):
         status = "incomplete"
     else:
         status = "ready"
