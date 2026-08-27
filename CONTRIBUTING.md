@@ -16,8 +16,7 @@ packages and releases. Do not edit or commit files in that directory. See the
 commands.
 
 Search [existing issues](https://github.com/openai/codex-security/issues)
-before opening a new one. Maintainers may invite a focused pull request for a
-path maintained in this repository.
+before opening a new one.
 
 ## Support for open-source projects
 
