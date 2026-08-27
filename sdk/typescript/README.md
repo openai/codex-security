@@ -1495,6 +1495,46 @@ embeddings, or external tickets. They do not require an embedding API key or
 trigger model calls. Review-generated merged findings remain review outputs;
 they do not replace stored documents.
 
+### Resuming a local findings workflow
+
+Add `--workflow-id` to opt into durable state shared by `scan`, `publish scan
+--to custom`, and `dedupe`. The SDK equivalents are the optional `workflowId`
+fields on `ScanOptions`, `PublishScanToCustomOptions`, and `DeduplicateScanOptions`.
+Without a workflow ID, existing command behavior and output shapes are unchanged.
+
+```bash
+codex-security scan /path/to/repository --workflow-id run-001
+codex-security publish scan --workflow-id run-001 --to custom --findings-url http://localhost:3000
+codex-security dedupe --workflow-id run-001 --findings-url http://localhost:3000 --json
+```
+
+Repeat this sequence with the same ID after a process stops. Completed scans and
+acknowledged publications are reused; unfinished stages run again. If the scan
+completed before the workflow recorded its receipt, recovery verifies the saved
+scan and its sealed artifacts instead of scanning again. Scan IDs and artifact
+locations are recorded in the scan-registration transaction. This resumes between
+completed steps; it does not resume individual model turns inside an unfinished
+scan. Existing output-directory and archive safeguards still apply to scan retries.
+
+Publication and dedupe can use the workflow ID in place of `--scan`; an explicit
+scan selector must identify that same scan. A workflow can also begin at custom
+publication of a completed scan. Dedupe still requires local scan history to locate
+the approved source checkout. For a workflow, dedupe first completes publication
+if its receipt is missing. `--all-repositories` retains its existing default of
+false. Changing a workflow's scan, destination, or bound scope is an error: choose
+a different workflow ID. Use one coordinating process per workflow.
+
+Workflow metadata, stage statuses, errors, publication receipts, and results live
+in the local workbench SQLite database under `CODEX_SECURITY_STATE_DIR`, outside
+the sealed scan artifacts. Successful empty results are stored as completed
+results, not treated as missing work. An empty scan can complete workflow
+publication with an empty receipt. Dry-run never advances a workflow stage.
+
+A completed `dedupe --workflow-id` returns its saved result without repeating
+reviews or group writes. An interrupted dedupe stage currently runs its reviews
+again; per-review checkpoints are a separate follow-up. A publication whose
+acknowledgement was lost is retried using the service's existing idempotent upsert.
+
 ### Deduplication workflow
 
 1. For each distinct finding ID in the scan, request

@@ -11,6 +11,56 @@ const args = [
   "--json",
 ];
 
+test("dedupe resolves a workflow's pinned scan and passes the workflow ID to the SDK", async () => {
+  const deps = dependencies();
+  deps.runWorkbench = async (args, input) => {
+    expect(args).toEqual(["finding-workflow"]);
+    expect(JSON.parse(input!)).toEqual({
+      id: "workflow-example",
+      action: "get",
+    });
+    return {
+      workflow: {
+        id: "workflow-example",
+        scanId: "exact-scan",
+        scanDir: "/synthetic/artifacts",
+      },
+    };
+  };
+  deps.deduplicateScan = async (scanId, options) => {
+    expect(scanId).toBe("exact-scan");
+    expect(options.workflowId).toBe("workflow-example");
+    return {
+      scanId,
+      uniqueFindingIds: [],
+      duplicateGroups: [],
+      deduplicationStatus: "completed",
+    };
+  };
+  const stdout = capture();
+  expect(
+    await main(
+      [
+        "dedupe",
+        "--workflow-id",
+        "workflow-example",
+        "--findings-url",
+        "http://localhost:3000",
+        "--json",
+      ],
+      stdout.stream,
+      capture().stream,
+      deps,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toEqual({
+    scanId: "exact-scan",
+    uniqueFindingIds: [],
+    duplicateGroups: [],
+    deduplicationStatus: "completed",
+  });
+});
+
 test.each([false, true])(
   "dedupe passes the scan selector, URL, and all-repository scope %s to the SDK",
   async (allRepositories) => {

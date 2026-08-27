@@ -57,7 +57,11 @@ import {
 import { accountStatus } from "./auth.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
-import { resolveCompletedScan, type SavedScan } from "./saved-scan.js";
+import {
+  resolveCompletedScan,
+  resolveWorkflowScan,
+  type SavedScan,
+} from "./saved-scan.js";
 import {
   publishFindingsCsvToCloud,
   publishScanToCloud,
@@ -228,6 +232,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
   sarif: "results.sarif",
 } as const;
 const VALUE_OPTIONS = new Set([
+  "--workflow-id",
   "--auth",
   "--safety-identifier",
   "--path",
@@ -954,6 +959,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  workflowId?: string;
   auth?: ScanAuthMode;
   safetyIdentifier?: string;
   verbose?: boolean;
@@ -2038,6 +2044,11 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: PUBLICATION_DESTINATION_OPTIONS.extend({
+      workflowId: optionValue("--workflow-id")
+        .optional()
+        .describe(
+          "Resume the named local scan, custom publication, and dedupe workflow.",
+        ),
       scan: z
         .array(optionValue("--scan"))
         .default([])
@@ -2212,6 +2223,11 @@ export async function main(
             "--findings-url is only supported with --to custom.",
           );
         }
+        if (options.workflowId !== undefined && options.to !== "custom") {
+          throw new CodexSecurityError(
+            "--workflow-id is only supported with --to custom.",
+          );
+        }
         const destination =
           options.to === "linear"
             ? publicationDestination(
@@ -2242,6 +2258,11 @@ export async function main(
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
             selectedScans.push(scan);
           }
+        }
+        if (options.workflowId !== undefined && selectedScans.length === 0) {
+          selectedScans.push(
+            await resolveWorkflowScan(options.workflowId, dependencies),
+          );
         }
         let scanDir = selectedScans[0]?.scanDir;
         let publicationRepository =
@@ -2513,6 +2534,9 @@ export async function main(
             dependencies.publishScanToCustom ?? publishScanToCustom
           )(resolveCliPath(currentDirectory, scanDir), {
             findingsUrl: options.findingsUrl!,
+            ...(options.workflowId === undefined
+              ? {}
+              : { workflowId: options.workflowId }),
             dryRun: options.dryRun,
             signal: controller.signal,
             ...(selectedScans[0]?.scanId === undefined
@@ -2735,6 +2759,11 @@ export async function main(
       }),
       options: z
         .object({
+          workflowId: optionValue("--workflow-id")
+            .optional()
+            .describe(
+              "Reuse completed work in the named local findings workflow.",
+            ),
           auth: z
             .enum(SCAN_AUTH_MODES)
             .default("auto")
@@ -2924,6 +2953,7 @@ export async function main(
         const outcome = await runScan(
           {
             auth: options.auth,
+            workflowId: options.workflowId,
             safetyIdentifier: options.safetyIdentifier,
             verbose: options.verbose,
             repository: args.repository,
@@ -3061,9 +3091,14 @@ export async function main(
       destructive: true,
       mcp: false,
       options: z.object({
-        scan: optionValue("--scan").describe(
-          "Saved scan ID, unique prefix, or latest.",
-        ),
+        workflowId: optionValue("--workflow-id")
+          .optional()
+          .describe(
+            "Resume the named local findings workflow; reuses its saved scan.",
+          ),
+        scan: optionValue("--scan")
+          .optional()
+          .describe("Saved scan ID, unique prefix, or latest."),
         allRepositories: z
           .boolean()
           .default(false)
@@ -3092,12 +3127,25 @@ export async function main(
         dependencies.addSignalListener("SIGINT", onInterrupt);
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
+          const scanId =
+            options.scan ??
+            (options.workflowId === undefined
+              ? undefined
+              : (await resolveWorkflowScan(options.workflowId, dependencies))
+                  .scanId);
+          if (scanId === undefined)
+            throw new CodexSecurityError(
+              "Deduplication requires --scan or --workflow-id.",
+            );
           return await (
             dependencies.deduplicateScan ?? deduplicateScanInternal
           )(
-            options.scan,
+            scanId,
             {
               findingsUrl: options.findingsUrl,
+              ...(options.workflowId === undefined
+                ? {}
+                : { workflowId: options.workflowId }),
               allRepositories: options.allRepositories,
               signal: controller.signal,
             },
@@ -6069,6 +6117,9 @@ async function executeScan(
     }
     security = dependencies.createSecurity(config);
     const options: ScanOptions = {
+      ...(arguments_.workflowId === undefined
+        ? {}
+        : { workflowId: arguments_.workflowId }),
       auth,
       safetyIdentifier: arguments_.safetyIdentifier,
       target,

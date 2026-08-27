@@ -200,6 +200,7 @@ const distFiles = new Set(
     "deduplication/codex-review",
     "deduplication/deduplication",
     "finding-retrieval",
+    "finding-workflow",
     "findings-client",
     "finding-dedupe-groups",
     "deduplication/deduplication-prompts",

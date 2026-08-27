@@ -68,7 +68,7 @@ const server = createServer(async (request, response) => {
       const execute = functions.find((tool) => tool.name === "exec");
       assert.match(execute.description, /### `exec_command`/);
       const same = findings.every(
-        (finding) => finding.extensions.smokeGroup === "duplicate",
+        (finding) => finding.extensions?.smokeGroup !== "distinct",
       );
       const result =
         stage === "screen"

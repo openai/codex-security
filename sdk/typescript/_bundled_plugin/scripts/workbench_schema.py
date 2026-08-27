@@ -758,6 +758,18 @@ MIGRATIONS = (
         ON finding_dedupe_group_members(finding_id, group_id);
         """,
     ),
+    (
+        36,
+        "persist local findings workflows",
+        """
+        CREATE TABLE finding_workflows (
+            id TEXT PRIMARY KEY,
+            state_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """,
+    ),
 )
 
 

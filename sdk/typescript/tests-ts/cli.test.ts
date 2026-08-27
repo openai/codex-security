@@ -1758,6 +1758,31 @@ describe("CLI", () => {
     },
   );
 
+  test("passes the workflow ID to scans without changing their JSON output", async () => {
+    const deps = dependencies();
+    const result = fakeResult();
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        expect(options?.workflowId).toBe("scan-workflow");
+        return result;
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--workflow-id", "scan-workflow", "--json"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      scanDir: result.scanDir,
+    });
+  });
+
   test("keeps verbose diagnostics separate from interactive progress", async () => {
     const stdout = capture();
     const stderr = capture(true);

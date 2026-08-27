@@ -1,4 +1,4 @@
-import { loadContract } from "../contract.js";
+import { loadContractWithScanDirectory } from "../contract.js";
 import {
   bundledPluginRoot,
   codexSecurityStateDirectory,
@@ -20,8 +20,16 @@ import {
 } from "./deduplication-reviewer.js";
 import { FindingsClient, type FindingsRequest } from "../findings-client.js";
 import type { FindingSearchScope } from "../finding-retrieval.js";
+import {
+  FindingWorkflow,
+  workflowDestination,
+  workflowDigest,
+} from "../finding-workflow.js";
+import { publishScanToCustomInternal } from "../custom-publish.js";
 
 export interface DeduplicateScanOptions {
+  /** Resume the named local findings workflow, including custom publication. */
+  workflowId?: string;
   /** Findings API base URL. The scan's findings must already be indexed there. */
   findingsUrl: string;
   /** Search all repositories instead of the saved scan's targetId. Defaults to false. */
@@ -77,11 +85,14 @@ export async function deduplicateScanInternal(
         );
       }),
   });
-  const contract = await loadContract(scan.scanDir, {
-    pluginRoot,
-    expectedScanId: scan.scanId,
-    signal: options.signal,
-  });
+  const { contract, scanDirectory } = await loadContractWithScanDirectory(
+    scan.scanDir,
+    {
+      pluginRoot,
+      expectedScanId: scan.scanId,
+      signal: options.signal,
+    },
+  );
   const client = new FindingsClient(
     options.findingsUrl,
     options.signal,
@@ -91,29 +102,72 @@ export async function deduplicateScanInternal(
     options.allRepositories === true
       ? { allRepositories: true }
       : { repositoryId: contract.manifest.scan.target.targetId };
-  const deduplicator = new FindingDeduplicator(
-    {
-      potentialDuplicates: (findingId) =>
-        client.potentialDuplicates(findingId, scope),
-    },
-    dependencies.reviewer ??
-      new CodexDeduplicationReviewer(
-        new CodexReviewRunner(
+  const workflow =
+    options.workflowId === undefined
+      ? undefined
+      : new FindingWorkflow(
+          options.workflowId,
           environment,
-          undefined,
-          options.signal,
-          scan["targetPath"] as string,
+          dependencies.runWorkbench === undefined
+            ? undefined
+            : (_options, args, input) =>
+                dependencies.runWorkbench!(args, input),
+        );
+  if (workflow) {
+    await workflow.protectArtifacts(scanDirectory);
+    await workflow.bind({
+      scanId: scan.scanId,
+      scanDir: scanDirectory,
+      artifactDigest: workflowDigest(contract),
+      destination: workflowDestination(options.findingsUrl),
+      scope,
+    });
+    await workflow.complete("scan", null);
+    await publishScanToCustomInternal(
+      scanDirectory,
+      {
+        findingsUrl: options.findingsUrl,
+        workflowId: options.workflowId,
+        expectedScanId: scan.scanId,
+        signal: options.signal,
+      },
+      {
+        environment,
+        fetch: dependencies.fetch,
+        runWorkbench:
+          dependencies.runWorkbench === undefined
+            ? undefined
+            : (_options, args, input) =>
+                dependencies.runWorkbench!(args, input),
+      },
+    );
+  }
+  const dedupe = async (): Promise<DeduplicateScanResult> => {
+    const deduplicator = new FindingDeduplicator(
+      {
+        potentialDuplicates: (findingId) =>
+          client.potentialDuplicates(findingId, scope),
+      },
+      dependencies.reviewer ??
+        new CodexDeduplicationReviewer(
+          new CodexReviewRunner(
+            environment,
+            undefined,
+            options.signal,
+            scan["targetPath"] as string,
+          ),
         ),
-      ),
-    options.signal,
-  );
-  const result = await deduplicator.run(
-    contract.findings.findings.map((finding) => finding.findingId),
-  );
-  options.signal?.throwIfAborted();
-  await client.storeDedupeGroups(result.duplicateGroups);
-  return {
-    scanId: scan.scanId,
-    ...result,
+      options.signal,
+    );
+    const result = await deduplicator.run(
+      contract.findings.findings.map((finding) => finding.findingId),
+    );
+    options.signal?.throwIfAborted();
+    await client.storeDedupeGroups(result.duplicateGroups);
+    return {
+      scanId: scan.scanId,
+      ...result,
+    };
   };
+  return workflow ? await workflow.run("dedupe", dedupe) : await dedupe();
 }

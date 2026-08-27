@@ -75,6 +75,53 @@ function publicationResult(
 }
 
 describe("publish scan to custom", () => {
+  test("uses a workflow's exact scan without changing the publication receipt", async () => {
+    const [scanDir] = await publicationScanDirectories(1);
+    const deps = dependencies({
+      onWorkbench: (args) => {
+        expect(args).toEqual(["finding-workflow"]);
+        return {
+          workflow: {
+            id: "publication-workflow",
+            scanId: "exact-scan",
+            scanDir: scanDir!,
+          },
+        };
+      },
+    });
+    const receipt = {
+      scanId: "exact-scan",
+      repositoryId: "repository",
+      findingIds: ["finding"],
+      findingCount: 1,
+    };
+    deps.publishScanToCustom = async (directory, options) => {
+      expect(directory).toBe(scanDir!);
+      expect(options.workflowId).toBe("publication-workflow");
+      expect(options.expectedScanId).toBe("exact-scan");
+      return receipt;
+    };
+    const stdout = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--workflow-id",
+          "publication-workflow",
+          "--to",
+          "custom",
+          "--findings-url",
+          "http://localhost:3000",
+          "--json",
+        ],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(receipt);
+  });
   test.each([false, true])(
     "publishes a selected saved scan with dry-run=%s",
     async (dryRun) => {

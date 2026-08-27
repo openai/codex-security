@@ -221,31 +221,44 @@ function checkCliDeduplication(): void {
     "--prepare-scan",
   ]);
   for (const allRepositories of [false, true]) {
-    const actual: unknown = JSON.parse(
-      docker([
-        "exec",
-        container,
-        "node",
-        "--import",
-        "/test/mock-reviews.mjs",
-        "dist/cli.js",
-        "dedupe",
-        "--scan",
-        "scan_example_001",
-        "--findings-url",
-        "http://127.0.0.1:3000",
-        "--json",
-        ...(allRepositories ? ["--all-repositories"] : []),
-      ]),
-    );
+    const command = [
+      "exec",
+      container,
+      "node",
+      "--import",
+      "/test/mock-reviews.mjs",
+      "dist/cli.js",
+      "dedupe",
+      "--scan",
+      manifest.scan.id,
+      "--workflow-id",
+      allRepositories ? "smoke-all" : "smoke-repository",
+      "--findings-url",
+      "http://127.0.0.1:3000",
+      "--json",
+      ...(allRepositories ? ["--all-repositories"] : []),
+    ];
+    const actual: unknown = JSON.parse(docker(command));
     const expected: DeduplicateScanResult = {
-      scanId: "scan_example_001",
+      scanId: manifest.scan.id,
       uniqueFindingIds: [ids[0]!],
       duplicateGroups: [ids.slice(0, 3)],
       deduplicationStatus: "completed",
     };
     assert.deepEqual(actual, expected);
+    const calls = docker([
+      "exec",
+      container,
+      "cat",
+      "/state/review-calls.jsonl",
+    ]);
+    assert.deepEqual(JSON.parse(docker(command)), expected);
+    assert.equal(
+      docker(["exec", container, "cat", "/state/review-calls.jsonl"]),
+      calls,
+    );
   }
+  findings[0] = example!;
 }
 
 async function checkPages(): Promise<void> {
