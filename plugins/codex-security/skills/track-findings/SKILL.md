@@ -132,9 +132,7 @@ Treat failed requests, incomplete exact-identifier searches, unread plausible ma
 
 ### 4. Preview The Exact Writes
 
-Before drafting issue text, read the Writing Rules in `../../references/finding-detail-fields.md`. Apply them to the validated canonical facts without changing the sealed scan. Lead with the user-facing problem and a short reproduction summary, then explain why the code causes that behavior, the proposed fix, and what was checked or remains unverified. Distinguish source-predicted behavior from an executed reproduction. If the scan does not establish the product path, say what is missing instead of inventing it.
-
-Write a coherent explanation, not a field dump. Fold dataflow and reachability facts into the reproduction and root-cause narrative; do not turn individual fields into numbered prose labels or repeat the same limitation under several headings. Keep necessary evidence and access requirements. Put source locations, scan identifiers, fingerprints, and generator attribution at the end, after the explanation. Preserve the audience restrictions below.
+Follow the Writing Rules in `../../references/finding-detail-fields.md`. Explain the problem, how to reproduce it, the cause, the proposed fix, and validation. Put source locations and scan identifiers last.
 
 Present a compact review before any mutation. For every finding show:
 
