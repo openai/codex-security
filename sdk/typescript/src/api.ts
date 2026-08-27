@@ -681,7 +681,7 @@ export class CodexSecurity {
       checkOpen();
 
       const session = await this.#prepareSession(
-        { protectedRoot, stateDirectory },
+        { protectedRoot },
         options,
         signal,
         temporaryRoot,
@@ -1614,15 +1614,8 @@ export class CodexSecurity {
       } catch (error) {
         warnCleanupFailed(options, error);
       } finally {
-        // The startup lock is normally released before workbench registration and Codex
-        // execution. This fallback covers failures during runtime preparation or
-        // authentication. The release only marks itself done once the lock directory is
-        // gone, so a failure leaves an owner.json naming this still-running process;
-        // recoverStaleCredentialHomeLock then refuses to reclaim it because that pid is
-        // alive, and later scans in this process wait on a lock nothing frees. Reporting
-        // success while leaving the client in that state is worse than failing, so the
-        // failure is only downgraded to a warning when the scan already failed and that
-        // error is the one worth keeping.
+        // Release any remaining startup lock, but preserve the scan's error if both
+        // the scan and lock cleanup fail.
         try {
           await releaseCredentialHome?.();
         } catch (error) {
@@ -1884,10 +1877,7 @@ export class CodexSecurity {
   }
 
   async #prepareSession(
-    {
-      protectedRoot,
-      stateDirectory,
-    }: { protectedRoot: string; stateDirectory: string },
+    { protectedRoot }: { protectedRoot: string },
     options: Pick<
       ScanOptions,
       | "auth"
@@ -1972,7 +1962,6 @@ export class CodexSecurity {
       requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
-        stateDirectory,
         runtimeHome,
       );
       if (
@@ -2148,11 +2137,7 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const config = await preserveCodexSecurityPluginRegistration(
       runtime.codexHome,
-      sharedCredentialCodexConfig(
-        mergedConfig,
-        codexSecurityStateDirectory(environment),
-        runtime.codexHome,
-      ),
+      sharedCredentialCodexConfig(mergedConfig, runtime.codexHome),
     );
     await writeCodexConfig(join(runtime.codexHome, "config.toml"), config);
     runtime.plugin = await bootstrapPlugin(
@@ -2306,11 +2291,7 @@ export class CodexSecurity {
         requestedConfig ?? (await mergedCodexConfig(this.config));
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
-        sharedCredentialCodexConfig(
-          mergedConfig,
-          codexSecurityStateDirectory(processEnvironment),
-          codexHome,
-        ),
+        sharedCredentialCodexConfig(mergedConfig, codexHome),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
       const configPath = join(bootstrapWorkspace, "config-preflight.toml");
@@ -3328,7 +3309,6 @@ export function classifyConnectionFailure(
 
 export function scanRuntimeCodexConfig(
   config: JsonObject,
-  stateDirectory: string,
   protectedCredentialHome?: string,
 ): JsonObject {
   const approvalPolicy = scanApprovalPolicy(config);
@@ -3361,7 +3341,6 @@ export function scanRuntimeCodexConfig(
         filesystem: {
           ":root": "read",
           ":workspace_roots": "write",
-          [stateDirectory]: "write",
           ...(protectedCredentialHome === undefined
             ? {}
             : { [protectedCredentialHome]: "read" }),
@@ -3373,7 +3352,6 @@ export function scanRuntimeCodexConfig(
 
 function sharedCredentialCodexConfig(
   config: JsonObject,
-  stateDirectory: string,
   credentialHome: string,
 ): JsonObject {
   const shared: JsonObject = {
@@ -3397,7 +3375,7 @@ function sharedCredentialCodexConfig(
       };
     }
   }
-  return scanRuntimeCodexConfig(shared, stateDirectory, credentialHome);
+  return scanRuntimeCodexConfig(shared, credentialHome);
 }
 
 export function scanPreflightCodexConfig(config: JsonObject): JsonObject {

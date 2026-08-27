@@ -30,7 +30,7 @@ let base: string;
 const document: FindingsDocument = JSON.parse(
   await readFile(
     new URL(
-      "../_bundled_plugin/examples/completed-scan/findings.json",
+      "../../../plugins/codex-security/examples/completed-scan/findings.json",
       import.meta.url,
     ),
     "utf8",
@@ -39,7 +39,7 @@ const document: FindingsDocument = JSON.parse(
 const manifest: ScanManifest = JSON.parse(
   await readFile(
     new URL(
-      "../_bundled_plugin/examples/completed-scan/scan-manifest.json",
+      "../../../plugins/codex-security/examples/completed-scan/scan-manifest.json",
       import.meta.url,
     ),
     "utf8",
@@ -254,7 +254,7 @@ async function checkReviews(): Promise<void> {
           findingIds: string[];
         },
     );
-  for (const stage of ["screen", "pair", "group"]) {
+  for (const stage of ["screen", "pair"]) {
     assert.ok(
       calls.some((call) => call.stage === stage),
       `${stage} review must run through Codex`,
@@ -267,8 +267,10 @@ async function checkReviews(): Promise<void> {
       ),
     );
   assert.ok(
-    calls.some(
-      (call) => call.stage === "group" && call.findingIds.length === 3,
+    calls.every(
+      (call) =>
+        call.stage === "screen" ||
+        (call.stage === "pair" && call.findingIds.length === 2),
     ),
   );
 }

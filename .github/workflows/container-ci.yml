@@ -13,6 +13,7 @@ on:
       - compose.findings.yaml
       - compose.runner.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   pull_request:
     paths:
@@ -25,6 +26,7 @@ on:
       - compose.findings.yaml
       - compose.runner.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   workflow_dispatch:
 

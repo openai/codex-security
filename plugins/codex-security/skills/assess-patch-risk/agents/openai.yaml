@@ -1,0 +1,4 @@
+interface:
+  display_name: "Assess Patch Risk"
+  short_description: "Assess patch impact and merge risk"
+  default_prompt: "Use $assess-patch-risk to trace this exact patch's program impact, regression protection, counterexamples, recoverability, and merge recommendation."

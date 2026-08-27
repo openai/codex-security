@@ -136,7 +136,7 @@ describe("CodexSecurity preflight configuration", () => {
     },
   );
 
-  test("ignores unrelated runtime settings for profiles without parent-runtime requirements", async () => {
+  test("rejects invalid runtime settings only for relevant security profiles", async () => {
     const root = await temporaryDirectory();
     const config = join(root, "empty.toml");
     await writeFile(config, "");
@@ -148,30 +148,34 @@ describe("CodexSecurity preflight configuration", () => {
           "--effective-config",
           "agents.max_threads=8",
         ],
-        context: { owner: "native", version: "v2", agent_max_threads: 8 },
         error: "agents.max_threads cannot be set",
+        profiles: ["deep_security_scan", "security_diff_scan", "security_scan"],
       },
       {
         args: ["--effective-config", "multiagent_config.max_concurrency=8"],
-        context: { owner: "unknown", version: "unknown" },
         error: "does not prove bridge ownership",
+        profiles: ["security_scan"],
       },
     ];
 
-    for (const { args, context, error } of settings) {
-      for (const profile of ["deep_security_scan", "security_diff_scan"]) {
+    for (const { args, error, profiles } of settings) {
+      for (const profile of profiles) {
         const result = runPreflight(config, profile, args);
-        expect(result.status).toBe(0);
+        expect(result.status).toBe(2);
         expect(result.payload).toMatchObject({
-          multi_agent_context: context,
-          profile,
-          status: "ready",
+          error: expect.stringContaining(error),
+          status: "error",
         });
       }
+    }
 
-      const required = runPreflight(config, "security_scan", args);
-      expect(required.status).toBe(2);
-      expect(required.payload["error"]).toContain(error);
+    for (const profile of ["deep_security_scan", "security_diff_scan"]) {
+      expect(
+        runPreflight(config, profile, [
+          "--effective-config",
+          "multiagent_config.max_concurrency=8",
+        ]),
+      ).toMatchObject({ status: 0, payload: { status: "ready" } });
     }
   });
 
@@ -260,8 +264,8 @@ describe("CodexSecurity preflight configuration", () => {
     ];
 
     expect(runPreflight(config, "available", conflictingNative)).toMatchObject({
-      status: 0,
-      payload: { status: "ready" },
+      status: 2,
+      payload: { error: expect.stringContaining("agents.max_threads") },
     });
     for (const profile of ["mode", "root_agents", "root_features"]) {
       expect(runPreflight(config, profile, conflictingNative)).toMatchObject({
@@ -302,7 +306,10 @@ describe("CodexSecurity preflight configuration", () => {
           "--effective-config",
           "multiagent_config.max_concurrency=8",
         ]),
-      ).toMatchObject({ status: 0, payload: { status: "ready" } });
+      ).toMatchObject({
+        status: 0,
+        payload: { status: "ready" },
+      });
     }
 
     for (const [version, additional] of [
@@ -324,10 +331,17 @@ describe("CodexSecurity preflight configuration", () => {
           ...additional,
         ],
       );
-      expect(conflictingNativeRuntime.status).toBe(2);
-      expect(conflictingNativeRuntime.payload["error"]).toContain(
-        "agents.max_threads",
-      );
+      if (version === "v2") {
+        expect(conflictingNativeRuntime).toMatchObject({
+          status: 0,
+          payload: { status: "ready" },
+        });
+      } else {
+        expect(conflictingNativeRuntime.status).toBe(2);
+        expect(conflictingNativeRuntime.payload["error"]).toContain(
+          "agents.max_threads",
+        );
+      }
     }
 
     const forged = runPreflight(config, "deep_security_scan", [
@@ -357,8 +371,7 @@ describe("CodexSecurity preflight configuration", () => {
     );
   });
 
-  test("uses a root-read filesystem profile with writable workspace and workbench state", () => {
-    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
+  test("uses a root-read filesystem profile with only writable workspaces", () => {
     const original = {
       approval_policy: "on-request",
       approvals_reviewer: "user",
@@ -374,7 +387,7 @@ describe("CodexSecurity preflight configuration", () => {
       },
     };
 
-    expect(scanRuntimeCodexConfig(original, stateDirectory)).toEqual({
+    expect(scanRuntimeCodexConfig(original)).toEqual({
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
       allow_login_shell: false,
@@ -385,7 +398,6 @@ describe("CodexSecurity preflight configuration", () => {
           filesystem: {
             ":root": "read",
             ":workspace_roots": "write",
-            [stateDirectory]: "write",
           },
         },
       },
@@ -399,33 +411,28 @@ describe("CodexSecurity preflight configuration", () => {
     });
   });
 
-  test("keeps persistent credentials read-only within writable scan state", () => {
+  test("keeps persistent credentials and their ancestry read-only", () => {
     const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const credentialHome = join(stateDirectory, "codex-home");
-    const config = scanRuntimeCodexConfig({}, stateDirectory, credentialHome);
+    const config = scanRuntimeCodexConfig({}, credentialHome);
 
-    expect(config).toMatchObject({
-      permissions: {
-        codex_security_scan: {
-          filesystem: {
-            ":root": "read",
-            ":workspace_roots": "write",
-            [stateDirectory]: "write",
-            [credentialHome]: "read",
-          },
+    expect(config["permissions"]).toEqual({
+      codex_security_scan: {
+        filesystem: {
+          ":root": "read",
+          ":workspace_roots": "write",
+          [credentialHome]: "read",
         },
       },
     });
   });
 
   test("preserves an explicitly requested strict approval policy", () => {
-    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
-
     expect(
-      scanRuntimeCodexConfig(
-        { approval_policy: "never", approvals_reviewer: "user" },
-        stateDirectory,
-      ),
+      scanRuntimeCodexConfig({
+        approval_policy: "never",
+        approvals_reviewer: "user",
+      }),
     ).toMatchObject({
       approval_policy: "never",
       approvals_reviewer: "auto_review",
@@ -434,7 +441,6 @@ describe("CodexSecurity preflight configuration", () => {
   });
 
   test("preserves a strict approval policy from the selected profile", () => {
-    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const config = {
       approval_policy: "on-request",
       profile: "strict",
@@ -444,7 +450,7 @@ describe("CodexSecurity preflight configuration", () => {
       },
     };
 
-    expect(scanRuntimeCodexConfig(config, stateDirectory)).toMatchObject({
+    expect(scanRuntimeCodexConfig(config)).toMatchObject({
       approval_policy: "never",
       approvals_reviewer: "auto_review",
       profiles: { strict: { model: "profile-model" }, other: {} },
@@ -453,7 +459,6 @@ describe("CodexSecurity preflight configuration", () => {
   });
 
   test("removes execution and permission overrides from every configured profile", () => {
-    const stateDirectory = join(tmpdir(), "codex-security-persistent-state");
     const original = {
       profile: "selected",
       profiles: {
@@ -476,7 +481,7 @@ describe("CodexSecurity preflight configuration", () => {
       },
     };
 
-    const hardened = scanRuntimeCodexConfig(original, stateDirectory);
+    const hardened = scanRuntimeCodexConfig(original);
     expect(hardened).toMatchObject({
       approval_policy: "on-request",
       approvals_reviewer: "auto_review",
@@ -505,7 +510,6 @@ describe("CodexSecurity preflight configuration", () => {
           request_trace: "preserve-configured-metadata",
         },
       },
-      stateDirectory,
       credentialHome,
     );
 

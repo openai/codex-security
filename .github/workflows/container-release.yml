@@ -12,6 +12,7 @@ on:
       - compose.findings.yaml
       - compose.runner.yaml
       - docker/**
+      - plugins/codex-security/**
       - sdk/typescript/**
   push:
     tags:
