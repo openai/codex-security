@@ -24,7 +24,7 @@ const document: FindingsDocument = JSON.parse(
 const manifest: ScanManifest = JSON.parse(
   await readFile(
     new URL(
-      "../_bundled_plugin/examples/completed-scan/scan-manifest.json",
+      "../../../plugins/codex-security/examples/completed-scan/scan-manifest.json",
       import.meta.url,
     ),
     "utf8",
