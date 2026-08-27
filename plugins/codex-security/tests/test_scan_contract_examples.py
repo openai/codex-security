@@ -281,6 +281,14 @@ class ScanContractExamplesTest(unittest.TestCase):
 
     def test_findings_accept_code_evidence_call_stack_role(self) -> None:
         schema = read_json(SCHEMA_DIR / "findings.schema.json")
+        common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
+        draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
+        registry = Registry().with_resource(
+            common_schema["$id"], Resource.from_contents(common_schema)
+        )
+        draft_validator = Draft202012Validator(
+            draft_schema, registry=registry, format_checker=FormatChecker()
+        )
         findings = copy.deepcopy(self.findings)
         findings["findings"][0]["codeEvidence"] = [
             {
@@ -294,6 +302,36 @@ class ScanContractExamplesTest(unittest.TestCase):
             }
         ]
         validate_schema_node(findings, schema, "findings")
+        draft_finding = {
+            key: value
+            for key, value in findings["findings"][0].items()
+            if key not in {"findingId", "occurrenceId", "fingerprints"}
+        }
+        draft = {
+            "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
+            "findings": [draft_finding],
+            "coverage": {
+                "completeness": "complete",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [],
+            },
+        }
+        draft_validator.validate(draft)
+
+        for field, replacement in (("code", "snippet"), ("explanation", None)):
+            with self.subTest(missing=field):
+                invalid_findings = copy.deepcopy(findings)
+                evidence = invalid_findings["findings"][0]["codeEvidence"][0]
+                value = evidence.pop(field)
+                if replacement is not None:
+                    evidence[replacement] = value
+                with self.assertRaisesRegex(AssertionError, f"'{field}' is a required property"):
+                    validate_schema_node(invalid_findings, schema, "findings")
+
+                invalid_draft = copy.deepcopy(draft)
+                invalid_draft["findings"][0]["codeEvidence"][0] = evidence
+                self.assertFalse(draft_validator.is_valid(invalid_draft))
 
         findings["findings"][0]["codeEvidence"][0]["role"] = ""
         with self.assertRaisesRegex(AssertionError, "should be non-empty"):
