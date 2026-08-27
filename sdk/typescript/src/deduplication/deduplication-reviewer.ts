@@ -1,6 +1,6 @@
 import { z } from "incur";
 import type { Finding } from "../models.js";
-import { CodexReviewRunner } from "./codex-review.js";
+import type { CodexReviewRunner } from "./codex-review.js";
 import {
   groupReviewPrompt,
   pairReviewPrompt,
@@ -108,12 +108,7 @@ export function validateScreening(
 }
 
 export class CodexDeduplicationReviewer implements DeduplicationReviewer {
-  constructor(
-    private readonly runner: Pick<
-      CodexReviewRunner,
-      "run"
-    > = new CodexReviewRunner(),
-  ) {}
+  constructor(private readonly runner: Pick<CodexReviewRunner, "run">) {}
 
   async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
     return await this.runner.run({
