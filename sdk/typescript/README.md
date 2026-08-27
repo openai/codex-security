@@ -848,7 +848,9 @@ Add `--assess-patch-risk` to a `patch` command to run the bundled patch-risk
 assessment skill once on the completed patch. The assessment is advisory and
 does not change the patch or its merge state. Human-readable commands print the
 report after the patch results; saved-finding JSON output returns it as
-`patchRisk.report` in the same result object.
+`patchRisk.report` in the same result object. When combined with `--create-pr`,
+the draft pull request body includes only the concise Markdown summary from the
+assessment; the validated JSON remains in the command result.
 
 ```bash
 npx @openai/codex-security validate "Possible SQL injection" --effort high

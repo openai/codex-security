@@ -1095,8 +1095,12 @@ interface PatchRiskRequest {
   effort: ScanReasoningEffort | undefined;
 }
 
-interface PatchRiskAssessment {
+interface PatchRiskReport {
   report: string;
+}
+
+interface PatchRiskAssessment extends PatchRiskReport {
+  summary: string;
 }
 
 interface CliDependencies {
@@ -1145,7 +1149,7 @@ interface CliDependencies {
     repository: string,
     options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
   ): Promise<string>;
-  assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskAssessment>;
+  assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
   bulkScan?: BulkScanDiscoveryDependencies;
   planComponents?: typeof planComponents;
   linearClient?: LinearClientFactory;
@@ -3951,6 +3955,7 @@ export async function main(
                     patches,
                     errorOutput,
                     dependencies,
+                    patchRisk?.summary,
                   )
                 : undefined;
             if (format === "json" || format === "jsonl") {
@@ -3958,7 +3963,9 @@ export async function main(
                 scanId: selected.scanId,
                 repository: selected.repository,
                 patches,
-                ...(patchRisk === undefined ? {} : { patchRisk }),
+                ...(patchRisk === undefined
+                  ? {}
+                  : { patchRisk: { report: patchRisk.report } }),
                 ...(pullRequest === undefined ? {} : { pullRequest }),
               };
             }
@@ -4906,14 +4913,33 @@ function patchExitCode(patches: readonly FindingPatch[]): number {
 
 const PATCH_PR_TITLE = "fix: patch verified security findings";
 const PATCH_PR_BODY = "Applies verified security fixes from a completed scan.";
+const PATCH_RISK_SUMMARY_START =
+  "<!-- codex-security:patch-risk-summary:start -->";
+const PATCH_RISK_SUMMARY_END = "<!-- codex-security:patch-risk-summary:end -->";
 
 function patchCommitKey(branch: string): string {
   return `branch.${branch}.codexSecurityPatchCommit`;
 }
 
+function patchPullRequestBodyKey(branch: string): string {
+  return `branch.${branch}.codexSecurityPatchPullRequestBody`;
+}
+
+function patchPullRequestBody(patchRiskSummary?: string): string {
+  if (patchRiskSummary === undefined) return PATCH_PR_BODY;
+  const summary = safePatchReport(patchRiskSummary);
+  if (!summary) {
+    throw new CodexSecurityError(
+      "Patch risk assessment returned an empty pull request summary.",
+    );
+  }
+  return `${PATCH_PR_BODY}\n\n## Patch risk assessment\n\n${summary}`;
+}
+
 async function publishPatchBranch(
   repository: string,
   branch: string,
+  body: string,
   stderr: Writable,
   dependencies: CliDependencies,
 ): Promise<{ branch: string; url: string }> {
@@ -4943,7 +4969,7 @@ async function publishPatchBranch(
         "--title",
         PATCH_PR_TITLE,
         "--body",
-        PATCH_PR_BODY,
+        body,
       ]);
     }
     stderr.write(`Pull request: ${safePatchText(url)}\n`);
@@ -4983,7 +5009,15 @@ async function resumePatchPullRequest(
       "The patch branch has changed since verification. Review it before publishing.",
     );
   }
-  return publishPatchBranch(repository, branch, stderr, dependencies);
+  const body = await run([
+    "config",
+    "--local",
+    "--get",
+    "--default",
+    PATCH_PR_BODY,
+    patchPullRequestBodyKey(branch),
+  ]);
+  return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
 
 function verifiedPatchFiles(
@@ -5015,6 +5049,7 @@ async function createPatchPullRequest(
   patches: readonly FindingPatch[],
   stderr: Writable,
   dependencies: CliDependencies,
+  patchRiskSummary?: string,
 ): Promise<{ branch: string; url: string } | undefined> {
   const files = verifiedPatchFiles(selected, patches);
   if (files.length === 0) {
@@ -5023,6 +5058,7 @@ async function createPatchPullRequest(
   }
 
   const branch = `codex-security/patch-${selected.scanId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
+  const body = patchPullRequestBody(patchRiskSummary);
   const run = (command: "git" | "gh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, selected.repository);
   stderr.write(
@@ -5041,7 +5077,19 @@ async function createPatchPullRequest(
   ]);
   const commit = await run("git", ["rev-parse", "HEAD"]);
   await run("git", ["config", "--local", patchCommitKey(branch), commit]);
-  return publishPatchBranch(selected.repository, branch, stderr, dependencies);
+  await run("git", [
+    "config",
+    "--local",
+    patchPullRequestBodyKey(branch),
+    body,
+  ]);
+  return publishPatchBranch(
+    selected.repository,
+    branch,
+    body,
+    stderr,
+    dependencies,
+  );
 }
 
 function safePatchText(value: string): string {
@@ -5053,6 +5101,35 @@ function safePatchText(value: string): string {
 
 function safePatchReport(value: string): string {
   return value.split(/\r?\n/gu).map(safePatchText).join("\n").trim();
+}
+
+function parsePatchRiskReport(report: string): PatchRiskAssessment {
+  const start = report.indexOf(PATCH_RISK_SUMMARY_START);
+  const end = report.indexOf(
+    PATCH_RISK_SUMMARY_END,
+    start + PATCH_RISK_SUMMARY_START.length,
+  );
+  if (start < 0 || end < 0) {
+    throw new CodexSecurityError(
+      "Patch risk assessment returned no marked summary.",
+    );
+  }
+  const summary = safePatchReport(
+    report.slice(start + PATCH_RISK_SUMMARY_START.length, end),
+  );
+  if (!summary) {
+    throw new CodexSecurityError(
+      "Patch risk assessment returned an empty marked summary.",
+    );
+  }
+  const cleanReport = [
+    report.slice(0, start).trim(),
+    report.slice(start + PATCH_RISK_SUMMARY_START.length, end).trim(),
+    report.slice(end + PATCH_RISK_SUMMARY_END.length).trim(),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return { report: cleanReport, summary };
 }
 
 async function runPatchRiskAssessment(
@@ -5068,15 +5145,18 @@ async function runPatchRiskAssessment(
   if (!result.report.trim()) {
     throw new CodexSecurityError("Patch risk assessment returned no report.");
   }
-  stderr.write(`Patch risk assessment:\n${safePatchReport(result.report)}\n`);
-  return result;
+  const assessment = parsePatchRiskReport(result.report);
+  stderr.write(
+    `Patch risk assessment:\n${safePatchReport(assessment.report)}\n`,
+  );
+  return assessment;
 }
 
 async function assessPatchRisk(
   request: PatchRiskRequest,
   stderr: Writable,
   dependencies: CliDependencies,
-): Promise<PatchRiskAssessment> {
+): Promise<PatchRiskReport> {
   const run = (
     args: string[],
     options?: { trim?: boolean; environment?: NodeJS.ProcessEnv },
@@ -5431,7 +5511,10 @@ async function runSkill(
       "Assess the immutable patch artifact described by this JSON object:",
       JSON.stringify(options.patchArtifact),
       `Validate the JSON assessment with ${JSON.stringify(join(plugin, "skills", skill, "scripts", "validate_patch_risk_assessment.py"))} as required by the skill.`,
-      "Return the concise Markdown report followed by the validated JSON object. Use only repository-relative source paths in the report; do not include the local repository or artifact path.",
+      "Wrap only the concise Markdown report between these exact marker lines:",
+      PATCH_RISK_SUMMARY_START,
+      PATCH_RISK_SUMMARY_END,
+      "Start the marked report at heading level 3. Return the validated JSON object after the end marker. Use only repository-relative source paths in the report; do not include the local repository or artifact path.",
     ].join("\n");
   }
   const patch = skill === "fix-finding";

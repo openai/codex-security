@@ -63,10 +63,40 @@ function completePatches(
   return findings;
 }
 
+function patchRiskSummary() {
+  return [
+    "### Recommendation: human review required",
+    "",
+    "The patch has moderate impact and low regression likelihood.",
+    "",
+    "- Protection: focused tests passed",
+    "- Recovery: revert the patch commit",
+  ].join("\n");
+}
+
 function patchRiskAssessment() {
+  const summary = patchRiskSummary();
   return {
-    report: "## Patch risk\n\nThe synthetic patch needs human review.",
+    report: [
+      "<!-- codex-security:patch-risk-summary:start -->",
+      summary,
+      "<!-- codex-security:patch-risk-summary:end -->",
+      "",
+      "```json",
+      '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
+      "```",
+    ].join("\n"),
   };
+}
+
+function patchRiskReport() {
+  return [
+    patchRiskSummary(),
+    "",
+    "```json",
+    '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
+    "```",
+  ].join("\n");
 }
 
 async function runWorkflow(
@@ -137,7 +167,9 @@ describe("scan and patch workflow", () => {
       const resultBody = JSON.parse(outcome.stdout) as JsonObject;
       expect("patchRisk" in resultBody).toBe(enabled);
       if (enabled) {
-        expect(resultBody["patchRisk"]).toEqual(patchRiskAssessment());
+        expect(resultBody["patchRisk"]).toEqual({
+          report: patchRiskReport(),
+        });
       }
     }
   });
@@ -468,6 +500,13 @@ describe("scan and patch workflow", () => {
     const url = "https://github.example.test/example/repository/pull/15";
     const result = resultWithFindings(["high", "medium"]);
     result.findings.findings[0]!.title = "Synthetic private finding";
+    const expectedPullRequestBody = [
+      "Applies verified security fixes from a completed scan.",
+      "",
+      "## Patch risk assessment",
+      "",
+      patchRiskSummary(),
+    ].join("\n");
     let pullRequestArguments: readonly string[] = [];
     const githubCommands: string[][] = [];
     await mkdir(join(repository, "src"), { recursive: true });
@@ -522,6 +561,12 @@ describe("scan and patch workflow", () => {
             ) {
               expect(output.command).toBe("patch");
               expect(output.appServer?.sandbox).toBe("read-only");
+              expect(output.appServer?.prompt).toContain(
+                "<!-- codex-security:patch-risk-summary:start -->",
+              );
+              expect(output.appServer?.prompt).toContain(
+                "<!-- codex-security:patch-risk-summary:end -->",
+              );
               const artifact = JSON.parse(
                 output
                   .appServer!.prompt.split("\n")
@@ -591,16 +636,28 @@ describe("scan and patch workflow", () => {
         "--title",
         "fix: patch verified security findings",
         "--body",
-        "Applies verified security fixes from a completed scan.",
+        expectedPullRequestBody,
       ]);
+      expect(
+        git(
+          "config",
+          "--get",
+          "branch.codex-security/patch-scan.codexSecurityPatchPullRequestBody",
+        ),
+      ).toBe(expectedPullRequestBody);
+      expect(pullRequestArguments.at(-1)).not.toContain("schemaVersion");
+      expect(pullRequestArguments.at(-1)).not.toContain(
+        "codex-security:patch-risk-summary",
+      );
       expect(JSON.stringify(pullRequestArguments)).not.toContain(
         "Synthetic private finding",
       );
       expect(githubCommands.some((args) => args[1] === "comment")).toBe(false);
       expect(JSON.parse(outcome.stdout)).toMatchObject({
         pullRequest: { branch: "codex-security/patch-scan", url },
-        patchRisk: patchRiskAssessment(),
+        patchRisk: { report: patchRiskReport() },
       });
+      expect(outcome.stdout).not.toContain("codex-security:patch-risk-summary");
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
