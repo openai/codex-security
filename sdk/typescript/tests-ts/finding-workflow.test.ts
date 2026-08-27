@@ -773,6 +773,11 @@ test("source snapshots include revisions and ignored content without following d
   git("init", "--quiet");
   await writeFile(join(repository, ".gitignore"), "ignored.txt\n");
   await writeFile(join(repository, "tracked.txt"), "original");
+  await mkdir(join(repository, "tracked-directory"));
+  await writeFile(
+    join(repository, "tracked-directory", "source.txt"),
+    "tracked source",
+  );
   git("add", ".");
   git(
     "-c",
@@ -821,6 +826,16 @@ test("source snapshots include revisions and ignored content without following d
   const linked = await workflow.sourceSnapshot(repository);
   await writeFile(join(outside, "private.txt"), "changed outside content");
   expect(await workflow.sourceSnapshot(repository)).toEqual(linked);
+  await rm(join(repository, "tracked-directory"), { recursive: true });
+  await writeFile(join(outside, "source.txt"), "synthetic outside source");
+  await symlink(
+    outside,
+    join(repository, "tracked-directory"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const replaced = await workflow.sourceSnapshot(repository);
+  await writeFile(join(outside, "source.txt"), "changed outside source");
+  expect(await workflow.sourceSnapshot(repository)).toEqual(replaced);
 });
 
 test("does not checkpoint a review when source changes during its execution", async () => {

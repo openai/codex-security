@@ -369,7 +369,7 @@ def clean_worktree_content_digest() -> str:
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def git_directory_snapshot_paths(target: Path, *, include_ignored: bool = False) -> list[Path] | None:
+def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
         return None
@@ -379,7 +379,7 @@ def git_directory_snapshot_paths(target: Path, *, include_ignored: bool = False)
         "ls-files",
         "--cached",
         "--others",
-        *([] if include_ignored else ["--exclude-standard"]),
+        "--exclude-standard",
         "-z",
         "--",
         pathspec,
@@ -402,7 +402,7 @@ def git_directory_snapshot_paths(target: Path, *, include_ignored: bool = False)
             nested_repository_root is not None
             and Path(nested_repository_root).resolve() == path.resolve()
         ):
-            nested_paths = git_directory_snapshot_paths(path, include_ignored=include_ignored)
+            nested_paths = git_directory_snapshot_paths(path)
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
@@ -414,6 +414,21 @@ def git_directory_snapshot_paths(target: Path, *, include_ignored: bool = False)
     return sorted(set(paths))
 
 
+def source_directory_snapshot_paths(target: Path) -> list[Path]:
+    paths: list[Path] = []
+    pending = [target]
+    while pending:
+        for path in pending.pop().iterdir():
+            if path.name == ".git":
+                continue
+            paths.append(path)
+            metadata = path.lstat()
+            # Name-surrogate reparse points include Windows directory junctions.
+            if stat.S_ISDIR(metadata.st_mode) and not getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+                pending.append(path)
+    return sorted(paths)
+
+
 def directory_content_digest(
     target: Path, *, excluded: tuple[Path, ...] = (), include_ignored: bool = False
 ) -> str:
@@ -423,7 +438,7 @@ def directory_content_digest(
             excluded_relative.append(path.relative_to(target))
         except ValueError:
             continue
-    paths = git_directory_snapshot_paths(target, include_ignored=include_ignored)
+    paths = source_directory_snapshot_paths(target) if include_ignored else git_directory_snapshot_paths(target)
     if paths is None:
         paths = sorted(target.rglob("*"))
     digest = hashlib.sha256()
@@ -442,7 +457,9 @@ def directory_content_digest(
         raw_path = os.fsencode(relative_path.as_posix())
         update_digest_field(digest, b"path", raw_path)
         update_digest_field(digest, b"mode", str(stat.S_IMODE(metadata.st_mode)).encode())
-        if stat.S_ISLNK(metadata.st_mode):
+        if stat.S_ISLNK(metadata.st_mode) or (
+            include_ignored and getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+        ):
             update_digest_field(digest, b"kind", b"symlink")
             update_digest_field(digest, b"content", os.fsencode(os.readlink(path)))
         elif stat.S_ISDIR(metadata.st_mode):
