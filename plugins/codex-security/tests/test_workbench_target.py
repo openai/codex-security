@@ -49,19 +49,17 @@ def test_git_metadata_preserves_unicode_commit_subject(
     ) == f"{subject}\n".encode("utf-8")
 
 
-def test_git_metadata_preserves_native_ref_encoding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("encoding", ["cp932", "cp949"])
+def test_git_output_decodes_repository_paths_as_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoding: str
 ) -> None:
-    target = tmp_path / "target"
-    revision = initialize_git_repository(target)
-    branch = b"caf\xe9"
-    (target / ".git" / "packed-refs").write_bytes(
-        revision.encode("ascii") + b" refs/heads/" + branch + b"\n"
-    )
-    (target / ".git" / "HEAD").write_bytes(b"ref: refs/heads/" + branch + b"\n")
-    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "latin-1")
+    target = tmp_path / "Jos\u00e9-\u65e5\u672c\u8a9e-\ud55c\uad6d\uc5b4"
+    initialize_git_repository(target)
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: encoding)
 
-    assert WORKBENCH_TARGET["git_target_metadata"](target)["branch"] == "caf\u00e9"
+    assert WORKBENCH_TARGET["git_output"](target, "rev-parse", "--show-toplevel") == str(
+        target
+    )
 
 
 def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:

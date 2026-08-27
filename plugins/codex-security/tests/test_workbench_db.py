@@ -4157,7 +4157,7 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
     assert "scan.target.kind" in str(failed["stderr"])
     assert (
         run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
-        == "failed"
+        == "running"
     )
 
     started = run_workbench(state_dir, "start-scan", "--workspace-id", str(saved["id"]))

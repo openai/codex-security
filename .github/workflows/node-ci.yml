@@ -233,6 +233,11 @@ jobs:
       - name: Install Python test dependencies
         run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
 
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
       - name: Test Python source contracts
         run: python -m pytest plugins/codex-security/tests -q
 
