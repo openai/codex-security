@@ -930,6 +930,47 @@ packaged `start:server` script, without invoking the CLI. Docker runs Node
 directly so stop signals reach the server. The existing default Docker target
 and bulk-scan Compose configuration are unchanged.
 
+### Read-only dashboard
+
+Open `http://localhost:3000/dashboard` on the running findings service. The UI
+uses the public OpenAI Apps SDK UI design system, follows the browser's light
+or dark preference, and polls the service every five seconds. It never starts,
+cancels, resumes, publishes, edits, or deduplicates anything.
+
+The dashboard opens on Findings, followed by Duplicate groups. Both views
+support search, repository filtering, sorting, pagination, and record details.
+Findings show stored content and links to their duplicate groups. Groups link
+back to their member findings, preserving separate overlapping groups and the
+original finding records.
+
+The dashboard reads only findings, repository associations, and duplicate groups
+stored in the service's configured database. It does not display scans or
+workflows: publication sends findings, not remote scan or workflow history. It
+does not read report or source paths from stored records. The UI retains the last
+successful data on a refresh failure and shows a connection warning until polling
+succeeds.
+
+`GET /v1/dashboard` returns a consistent read snapshot with overview counts,
+repository choices, a page of records, and optional selected-record details:
+
+- `view`: `findings` (default) or `groups`.
+- `query`, `repository`: optional search text and exact repository ID.
+- `sort`: `activity` (default; most recently updated first) or `newest`.
+- `limit`, `offset`: existing pagination conventions, defaulting to 50 and 0.
+- `id`: optional exact record ID to include in `detail`; unknown IDs return
+  `detail: null` without hiding the list.
+
+Overview counts are service-wide, not filtered page totals. Responses and UI
+assets are served by the same Node process; no separate frontend server, CDN,
+model credentials, or new CLI flags are needed to view the dashboard. Compiled
+HTML, JavaScript, and CSS are included in the npm package and container. Frontend
+source, build tools, and tests are not shipped as runtime dependencies.
+
+The existing preview access boundary is unchanged. The dashboard contains
+sensitive finding content: keep the service on a trusted local endpoint or behind
+an authenticated proxy. It does not add authentication or broaden the default
+network binding.
+
 ### API
 
 `POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
