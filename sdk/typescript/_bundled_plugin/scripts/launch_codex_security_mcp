@@ -4,7 +4,11 @@ set -eu
 PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export PATH
 
-launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+case $0 in
+  */*) launcher_dir=${0%/*} ;;
+  *) launcher_dir=. ;;
+esac
+launcher_dir=$(CDPATH= cd "$launcher_dir" && pwd)
 server_path=$launcher_dir/../mcp/server.mjs
 cache_root=${XDG_CACHE_HOME:-${HOME:-}/.cache}
 codex_resources=

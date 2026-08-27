@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-test("starts the packaged MCP server with managed Node and an empty PATH", async () => {
+test("starts the packaged MCP server without running PATH utilities", async () => {
   const node = Bun.which("node");
   if (node === null)
     throw new Error("Node is required for the MCP smoke test.");
@@ -30,6 +30,7 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
     expect(config.env_vars).toContain("CODEX_MCP_NODE_PATH");
     let managedNode = node;
     const marker = join(root, "managed-node-used");
+    const dirnameMarker = join(root, "dirname-used");
     if (process.platform !== "win32") {
       managedNode = join(root, "managed-node");
       const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -38,6 +39,12 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
         `#!/bin/sh\nprintf used > ${quote(marker)}\nexec ${quote(node)} "$@"\n`,
       );
       await chmod(managedNode, 0o700);
+      const dirname = join(root, "dirname");
+      await writeFile(
+        dirname,
+        `#!/bin/sh\nprintf used > ${quote(dirnameMarker)}\n`,
+      );
+      await chmod(dirname, 0o700);
     }
     const launcher = join(PLUGIN_ROOT, config.command);
     const windows = process.platform === "win32";
@@ -49,7 +56,7 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
       {
         cwd: PLUGIN_ROOT,
         env: {
-          PATH: "",
+          PATH: windows ? "" : root,
           HOME: root,
           USERPROFILE: root,
           LOCALAPPDATA: root,
@@ -82,7 +89,10 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
     expect(JSON.parse(result.stdout).result.serverInfo.name).toBe(
       "codex-security",
     );
-    if (!windows) expect(await readFile(marker, "utf8")).toBe("used");
+    if (!windows) {
+      expect(await readFile(marker, "utf8")).toBe("used");
+      expect(await Bun.file(dirnameMarker).exists()).toBe(false);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
