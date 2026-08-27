@@ -178,7 +178,7 @@ describe("TypeScript package skeleton", () => {
 
   test("installs ripgrep before the MCP app tests", async () => {
     const { jobs } = await workflow("node-ci.yml");
-    const steps = jobs.test!.steps;
+    const steps = jobs["test"]!.steps;
     const ripgrepInstallation = steps.findIndex(
       (step) => step.name === "Install ripgrep",
     );
