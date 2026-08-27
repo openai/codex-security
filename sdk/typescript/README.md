@@ -1303,7 +1303,7 @@ and bulk-scan Compose configuration are unchanged.
 
 ### API
 
-Both POST endpoints accept `{"findings": [...]}`, using the existing SDK
+`POST /v1/bulk/findings` accepts `{"findings": [...]}`, using the existing SDK
 `Finding` model, including `findingId`, `occurrenceId`, and `fingerprints`.
 A complete exported `findings.json` document is also accepted; only its
 `findings` array is imported. No files or source paths referenced by the
@@ -1312,7 +1312,6 @@ findings are opened. Only the supplied JSON is processed.
 | Method | Path                             | Response                                                       |
 | ------ | -------------------------------- | -------------------------------------------------------------- |
 | `POST` | `/v1/bulk/findings`              | HTTP 201 with an array of stored finding IDs, in request order |
-| `POST` | `/v1/bulk/findings/dedupe`       | HTTP 201 with the workflow result shown below                  |
 | `GET`  | `/v1/findings?limit=50&offset=0` | HTTP 200 with a page of complete findings                      |
 
 Bulk insertion generates embeddings and then writes the findings and vectors
@@ -1334,22 +1333,6 @@ curl http://127.0.0.1:3000/v1/bulk/findings \
 ```json
 ["csf_852f90d6e1177502ff113d4a"]
 ```
-
-The dedupe endpoint performs the same insertion, then awaits
-`DeduplicationService.run`. That service currently only logs its invocation
-and returns a **mock result**:
-
-```json
-{
-  "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
-  "duplicateGroups": [],
-  "deduplicationStatus": "not_implemented"
-}
-```
-
-The unique IDs are provisional: no comparison or duplicate judgment has run.
-Do not treat this response as evidence that findings are distinct. The next
-stage will implement retrieval and model reviews inside the workflow service.
 
 Listing defaults to `limit=50` and `offset=0`; `limit` must be a positive
 integer and `offset` a non-negative integer. Records are ordered by their first
@@ -1438,9 +1421,7 @@ input order. `OpenAiFindingEmbedder` handles tokenization, batching, API calls,
 and vector normalization; it does not access storage. The `FindingsStore`
 interface separately stores findings and vectors without exposing SQL or
 workbench details to the service. The server entrypoint selects the concrete
-embedder and store, so either can be replaced independently. The deduplication
-service is separate from both routing and storage; model-driven deduplication
-remains unimplemented in this preview.
+embedder and store, so either can be replaced independently.
 
 ## Containerized bulk scans
 

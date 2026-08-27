@@ -196,7 +196,6 @@ const distFiles = new Set(
     "scan-logs",
     "scan-sessions",
     "server/index",
-    "server/deduplication",
     "server/embeddings",
     "server/errors",
     "server/findings-service",

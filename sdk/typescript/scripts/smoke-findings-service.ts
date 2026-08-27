@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { Finding, FindingsDocument } from "../src/models.js";
-import type { DeduplicationResult } from "../src/server/deduplication.js";
 import type { FindingsPage } from "../src/server/storage.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -87,24 +86,13 @@ async function startService(): Promise<void> {
 }
 
 async function checkInsertions(): Promise<void> {
-  const deduplication: DeduplicationResult = {
-    uniqueFindingIds: ids,
-    duplicateGroups: [],
-    deduplicationStatus: "not_implemented",
-  };
-  for (const [path, expected] of [
-    ["/v1/bulk/findings", ids],
-    ["/v1/bulk/findings/dedupe", deduplication],
-  ] as const) {
-    const response = await fetch(`${base}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ findings }),
-    });
-    assert.equal(response.status, 201, path);
-    const actual: unknown = await response.json();
-    assert.deepEqual(actual, expected, path);
-  }
+  const response = await fetch(`${base}/v1/bulk/findings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ findings }),
+  });
+  assert.equal(response.status, 201);
+  assert.deepEqual(await response.json(), ids);
 }
 
 async function checkPages(): Promise<void> {

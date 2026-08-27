@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
-import { DeduplicationService } from "../src/server/deduplication.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
 import { startFindingsServer } from "../src/server/server.js";
@@ -72,12 +71,10 @@ async function fixture() {
 async function start(
   store: SqliteFindingsStore,
   embeddings = embedder,
-  deduplication?: DeduplicationService,
 ): Promise<string> {
   const server = await startFindingsServer({
     store,
     embeddings,
-    deduplication,
     host: "127.0.0.1",
     port: 0,
   });
@@ -88,8 +85,8 @@ async function start(
   return `http://127.0.0.1:${address.port}`;
 }
 
-function insert(base: string, findings: Finding[], path = "/v1/bulk/findings") {
-  return fetch(`${base}${path}`, {
+function insert(base: string, findings: Finding[]) {
+  return fetch(`${base}/v1/bulk/findings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ findings }),
@@ -247,39 +244,6 @@ test("upserts retries and rolls back the entire batch on identity conflicts", as
   ).toEqual([[0, 0.5]]);
 });
 
-test("dedupe endpoint awaits the workflow after persistence and returns its result", async () => {
-  const { store } = await fixture();
-  const findings = [finding(1), finding(2)];
-  const stub = new DeduplicationService();
-  const workflow: DeduplicationService = {
-    async run(ids) {
-      expect((await store.list({ limit: 50, offset: 0 })).findings).toEqual(
-        findings,
-      );
-      await Promise.resolve();
-      return await stub.run(ids);
-    },
-  };
-  const run = spyOn(workflow, "run");
-  try {
-    const base = await start(store, embedder, workflow);
-    const response = await insert(base, findings, "/v1/bulk/findings/dedupe");
-    expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({
-      uniqueFindingIds: findings.map((finding) => finding.findingId),
-      duplicateGroups: [],
-      deduplicationStatus: "not_implemented",
-    });
-    expect(run).toHaveBeenCalledWith(
-      findings.map((finding) => finding.findingId),
-    );
-    expect((await insert(base, findings)).status).toBe(201);
-    expect(run).toHaveBeenCalledTimes(1);
-  } finally {
-    run.mockRestore();
-  }
-});
-
 test("rejects invalid requests before embedding and preserves unknown-route behavior", async () => {
   const { store } = await fixture();
   let calls = 0;
@@ -316,6 +280,7 @@ test("rejects invalid requests before embedding and preserves unknown-route beha
     ["GET", "/unknown"],
     ["POST", "/v1/findings"],
     ["GET", "/v1/bulk/findings"],
+    ["POST", "/v1/bulk/findings/dedupe"],
   ]) {
     const response = await fetch(`${base}${path}`, { method });
     expect(response.status).toBe(404);
@@ -334,7 +299,7 @@ test("embedding failure leaves no partial findings or vectors", async () => {
       );
     },
   });
-  const response = await insert(base, [finding()], "/v1/bulk/findings/dedupe");
+  const response = await insert(base, [finding()]);
   expect(response.status).toBe(502);
   expect(await response.json()).toMatchObject({ error: "embedding_failed" });
   expect((await store.list({ limit: 50, offset: 0 })).total).toBe(0);
