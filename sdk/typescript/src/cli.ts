@@ -55,6 +55,7 @@ import {
   type ScanPreflight,
 } from "./api.js";
 import { accountStatus } from "./auth.js";
+import { publishScanToCustom } from "./custom-publish.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { resolveCompletedScan, type SavedScan } from "./saved-scan.js";
 import {
@@ -277,6 +278,7 @@ const VALUE_OPTIONS = new Set([
   "--scan-root",
   "--reason",
   "--to",
+  "--findings-url",
   "--linear-team",
   "--linear-api-key",
   "--project",
@@ -1086,6 +1088,7 @@ interface CliDependencies {
   deduplicateScan?: typeof deduplicateScanInternal;
   publishFindingsCsvToCloud?: typeof publishFindingsCsvToCloud;
   publishScanToCloud?: typeof publishScanToCloud;
+  publishScanToCustom?: typeof publishScanToCustom;
   confirmPatchReview?: (question: string) => Promise<boolean>;
   patchEditor?: (
     repository: string,
@@ -2039,21 +2042,32 @@ export async function main(
         .array(optionValue("--scan"))
         .default([])
         .describe(
-          "Saved scan ID, unique prefix, or latest; repeat for multiple scans (Linear accepts one).",
+          "Saved scan ID, unique prefix, or latest; Linear and custom accept one scan.",
         ),
       scanDir: z
         .array(optionValue("--scan-dir"))
         .default([])
         .describe(
-          "External completed scan directory; repeat for multiple scans (Linear accepts one).",
+          "External completed scan directory; Linear and custom accept one scan.",
         ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
         .string()
-        .refine((value) => value === "linear" || value === "cloud", {
-          message: "Unsupported publication destination. Use --to linear.",
-        })
-        .describe("Publication destination (linear)."),
+        .refine(
+          (value) =>
+            value === "linear" || value === "cloud" || value === "custom",
+          {
+            message:
+              "Unsupported publication destination. Use --to linear or --to custom.",
+          },
+        )
+        .describe("Publication destination (linear or custom)."),
+      findingsUrl: optionValue("--findings-url")
+        .url()
+        .optional()
+        .describe(
+          "Findings API base URL; required with --to custom (for example http://localhost:3000).",
+        ),
       dryRun: z
         .boolean()
         .default(false)
@@ -2174,7 +2188,7 @@ export async function main(
           );
         }
         if (
-          options.to === "cloud" &&
+          options.to !== "linear" &&
           (options.skipExisting ||
             [
               options.linearTeam,
@@ -2185,7 +2199,17 @@ export async function main(
             ].some((value) => value !== undefined))
         ) {
           throw new CodexSecurityError(
-            "Cloud publication cannot be combined with Linear options.",
+            `${options.to === "cloud" ? "Cloud" : "Custom"} publication cannot be combined with Linear options.`,
+          );
+        }
+        if (options.to === "custom" && options.findingsUrl === undefined) {
+          throw new CodexSecurityError(
+            "Custom publication requires --findings-url, for example http://localhost:3000.",
+          );
+        }
+        if (options.to !== "custom" && options.findingsUrl !== undefined) {
+          throw new CodexSecurityError(
+            "--findings-url is only supported with --to custom.",
           );
         }
         const destination =
@@ -2195,7 +2219,7 @@ export async function main(
                 dependencies.environment,
               )
             : undefined;
-        if (options.to === "cloud") {
+        if (options.to !== "linear") {
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
@@ -2481,6 +2505,21 @@ export async function main(
               ? {}
               : { expectedScanId: selectedScans[0].scanId }),
           });
+          return { ...result };
+        }
+
+        if (options.to === "custom") {
+          const result = await (
+            dependencies.publishScanToCustom ?? publishScanToCustom
+          )(resolveCliPath(currentDirectory, scanDir), {
+            findingsUrl: options.findingsUrl!,
+            dryRun: options.dryRun,
+            signal: controller.signal,
+            ...(selectedScans[0]?.scanId === undefined
+              ? {}
+              : { expectedScanId: selectedScans[0].scanId }),
+          });
+          controller.signal.throwIfAborted();
           return { ...result };
         }
 
@@ -3018,7 +3057,7 @@ export async function main(
     .command(publication)
     .command("dedupe", {
       description:
-        "Review a saved scan for duplicates using the findings API and local Codex.",
+        "Review a saved scan with local Codex and save duplicate groups to the findings API.",
       destructive: true,
       mcp: false,
       options: z.object({

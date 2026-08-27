@@ -1,4 +1,5 @@
 import type { Finding } from "../models.js";
+import type { FindingDedupeGroup } from "../finding-dedupe-groups.js";
 import type {
   FindingNeighborhood,
   FindingSearchScope,
@@ -29,6 +30,8 @@ export interface FindingsStore {
     repositoryId?: string,
   ): Promise<string[]>;
   list(page: { limit: number; offset: number }): Promise<FindingsPage>;
+  storeDedupeGroups(groups: readonly string[][]): Promise<FindingDedupeGroup[]>;
+  listDedupeGroups(findingId: string): Promise<FindingDedupeGroup[]>;
   findPotentialDuplicates(
     findingId: string,
     scope: FindingSearchScope,

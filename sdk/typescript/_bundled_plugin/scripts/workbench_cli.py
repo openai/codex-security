@@ -340,6 +340,9 @@ def parse_args(description: str) -> argparse.Namespace:
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("store-findings")
+    subparsers.add_parser("store-dedupe-groups")
+    dedupe_groups = subparsers.add_parser("list-dedupe-groups")
+    dedupe_groups.add_argument("--finding-id", required=True)
     potential_duplicates = subparsers.add_parser("find-potential-duplicates")
     potential_duplicates.add_argument("--finding-id", required=True)
     scope = potential_duplicates.add_mutually_exclusive_group(required=True)

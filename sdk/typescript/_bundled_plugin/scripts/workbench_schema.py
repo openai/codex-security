@@ -739,6 +739,25 @@ MIGRATIONS = (
         WHERE scans.target_id IS NOT NULL;
         """,
     ),
+    (
+        35,
+        "persist finding dedupe groups",
+        """
+        CREATE TABLE finding_dedupe_groups (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE finding_dedupe_group_members (
+            group_id TEXT NOT NULL REFERENCES finding_dedupe_groups(id) ON DELETE CASCADE,
+            finding_id TEXT NOT NULL REFERENCES findings(id),
+            PRIMARY KEY (group_id, finding_id)
+        );
+
+        CREATE INDEX finding_dedupe_groups_by_finding
+        ON finding_dedupe_group_members(finding_id, group_id);
+        """,
+    ),
 )
 
 

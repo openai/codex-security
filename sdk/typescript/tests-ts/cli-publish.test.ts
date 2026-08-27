@@ -74,6 +74,142 @@ function publicationResult(
   };
 }
 
+describe("publish scan to custom", () => {
+  test.each([false, true])(
+    "publishes a selected saved scan with dry-run=%s",
+    async (dryRun) => {
+      const [scanDir] = await publicationScanDirectories(1);
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies({
+        onWorkbench: () => ({
+          scan: {
+            scanId: "scan-example",
+            scanDir: scanDir!,
+            progress: { status: "complete" },
+          },
+        }),
+      });
+      const receipt = {
+        scanId: "scan-example",
+        repositoryId: "repository-example",
+        findingIds: ["finding-1"],
+        findingCount: 1,
+      };
+      let calls = 0;
+      deps.publishScanToCustom = async (directory, options) => {
+        calls++;
+        expect(directory).toBe(scanDir!);
+        expect(options).toEqual({
+          findingsUrl: "http://localhost:3000",
+          dryRun,
+          expectedScanId: "scan-example",
+          signal: expect.any(AbortSignal),
+        });
+        return receipt;
+      };
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "--scan",
+            "scan-example",
+            "--to",
+            "custom",
+            "--findings-url",
+            "http://localhost:3000",
+            "--json",
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(calls).toBe(1);
+      expect(JSON.parse(stdout.text())).toEqual(receipt);
+      expect(stderr.text()).toBe("");
+    },
+  );
+
+  test.each([
+    [["--to", "custom"], "requires --findings-url"],
+    [["--to", "custom", "--findings-url", "--dry-run"], "--findings-url"],
+    [["--to", "custom", "--findings-url", "not-a-url"], "URL"],
+    [
+      [
+        "--to",
+        "custom",
+        "--findings-url",
+        "http://localhost:3000",
+        "--skip-existing",
+      ],
+      "cannot be combined with Linear options",
+    ],
+    [
+      [...DESTINATION_OPTIONS, "--findings-url", "http://localhost:3000"],
+      "only supported with --to custom",
+    ],
+  ])(
+    "rejects incompatible custom publication inputs %j",
+    async (flags, message) => {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.publishScanToCustom = async () => {
+        throw new Error("must not publish");
+      };
+      expect(
+        await main(
+          ["publish", "scan", "completed-scan", ...flags, "--json"],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(message);
+      expect(stdout.text().trim()).toBe("");
+    },
+  );
+
+  test("forwards cancellation for an external scan and does not report success", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.publishScanToCustom = async (directory, options) => {
+      expect(directory).toBe(resolve(deps.currentDirectory(), "external-scan"));
+      expect(options.expectedScanId).toBeUndefined();
+      signals.emit("SIGINT");
+      options.signal!.throwIfAborted();
+      throw new Error("unreachable");
+    };
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "--scan-dir",
+          "external-scan",
+          "--to",
+          "custom",
+          "--findings-url",
+          "http://localhost:3000",
+          "--json",
+        ],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(130);
+    expect(stderr.text()).toContain("Publication canceled");
+    expect(stdout.text().trim()).toBe("");
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+  });
+});
+
 describe("publish check", () => {
   test("resolves the shared destination options without invoking publication", async () => {
     const stdout = capture();

@@ -18,7 +18,8 @@ import {
   CodexDeduplicationReviewer,
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
-import { FindingsClient, type FindingsRequest } from "./findings-client.js";
+import { FindingsClient, type FindingsRequest } from "../findings-client.js";
+import type { FindingSearchScope } from "../finding-retrieval.js";
 
 export interface DeduplicateScanOptions {
   /** Findings API base URL. The scan's findings must already be indexed there. */
@@ -32,7 +33,7 @@ export interface DeduplicateScanResult extends DeduplicationResult {
   scanId: string;
 }
 
-/** Review a saved scan against embedding candidates, without changing findings. */
+/** Review a saved scan against embedding candidates and persist accepted duplicate groups. */
 export async function deduplicateScan(
   scanId: string,
   options: DeduplicateScanOptions,
@@ -81,15 +82,20 @@ export async function deduplicateScanInternal(
     expectedScanId: scan.scanId,
     signal: options.signal,
   });
+  const client = new FindingsClient(
+    options.findingsUrl,
+    options.signal,
+    dependencies.fetch,
+  );
+  const scope: FindingSearchScope =
+    options.allRepositories === true
+      ? { allRepositories: true }
+      : { repositoryId: contract.manifest.scan.target.targetId };
   const deduplicator = new FindingDeduplicator(
-    new FindingsClient(
-      options.findingsUrl,
-      options.allRepositories === true
-        ? { allRepositories: true }
-        : { repositoryId: contract.manifest.scan.target.targetId },
-      options.signal,
-      dependencies.fetch,
-    ),
+    {
+      potentialDuplicates: (findingId) =>
+        client.potentialDuplicates(findingId, scope),
+    },
     dependencies.reviewer ??
       new CodexDeduplicationReviewer(
         new CodexReviewRunner(
@@ -101,10 +107,13 @@ export async function deduplicateScanInternal(
       ),
     options.signal,
   );
+  const result = await deduplicator.run(
+    contract.findings.findings.map((finding) => finding.findingId),
+  );
+  options.signal?.throwIfAborted();
+  await client.storeDedupeGroups(result.duplicateGroups);
   return {
     scanId: scan.scanId,
-    ...(await deduplicator.run(
-      contract.findings.findings.map((finding) => finding.findingId),
-    )),
+    ...result,
   };
 }
