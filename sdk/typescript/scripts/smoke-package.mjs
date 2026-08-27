@@ -203,6 +203,50 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
     "The installed plugin must propagate the bundled Codex path into nested workers.",
   );
 
+  const pluginRoot = join(installedRoot, "_bundled_plugin");
+  const mcpLauncher = join(pluginRoot, "scripts", "launch_codex_security_mcp");
+  const windows = process.platform === "win32";
+  const initialized = spawnSync(
+    windows
+      ? process.env.ComSpec ??
+          join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+      : mcpLauncher,
+    windows
+      ? ["/d", "/s", "/c", "call", `${mcpLauncher}.cmd`, "--stdio"]
+      : ["--stdio"],
+    {
+      cwd: pluginRoot,
+      encoding: "utf8",
+      env: { ...workerEnvironment, CODEX_MCP_NODE_PATH: process.execPath },
+      input: `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: {
+            name: "codex-security-package-smoke",
+            version: "0.1.0",
+          },
+        },
+      })}\n`,
+      timeout: PACKAGE_SMOKE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  if (initialized.error !== undefined) {
+    throw new Error("Installed MCP launcher did not start.", {
+      cause: initialized.error,
+    });
+  }
+  assert.equal(initialized.status, 0, initialized.stderr);
+  assert.equal(
+    JSON.parse(initialized.stdout.trim()).result.serverInfo.name,
+    "codex-security",
+    "The installed MCP launcher must initialize the bundled security server.",
+  );
+
   const globalCodex = spawnSync("codex", ["--version"], {
     cwd: consumer,
     encoding: "utf8",
@@ -569,7 +613,7 @@ try {
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, credential locking, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, credential locking, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {
