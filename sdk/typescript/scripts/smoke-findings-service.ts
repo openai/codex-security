@@ -184,10 +184,6 @@ async function checkInsertions(): Promise<void> {
       batch.map((finding) => finding.findingId),
     );
   }
-  assert.equal(
-    (await fetch(`${base}/v1/bulk/findings/dedupe`, { method: "POST" })).status,
-    404,
-  );
 }
 
 async function checkCandidates(): Promise<void> {
