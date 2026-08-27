@@ -1,4 +1,6 @@
 import { execFile, spawnSync } from "node:child_process";
+import * as childProcess from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -29,6 +31,8 @@ import {
   relative,
   sep,
 } from "node:path";
+import { PassThrough } from "node:stream";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
@@ -75,7 +79,6 @@ import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
-  verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -97,6 +100,10 @@ async function temporaryDirectory(
   const path = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   temporaryDirectories.push(path);
   return path;
+}
+
+function windowsCredentialAclOutput(descriptors: readonly string[]): string {
+  return `${descriptors.join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`;
 }
 
 async function plantCredentialHomeLock(
@@ -2704,178 +2711,49 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow("private Windows credential home");
   });
 
-  test("retries Windows credential descendant verification after concurrent changes", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const temporary = join(home, ".auth-temporary");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    await writeFile(temporary, "temporary credential\n");
-    let attempts = 0;
+  test.each(["created", "removed"] as const)(
+    "inspects Windows credentials once while private descendants are %s",
+    async (change) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const inspectionCount = join(root, "inspection-count");
+      const temporary = join(home, ".auth-temporary");
+      await mkdir(home);
+      await writeFile(join(home, "auth.json"), "credential\n");
+      if (change === "removed") await writeFile(temporary, "temporary\n");
+      const sid = "S-1-5-21-111-222-333-1001";
+      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+      const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+      const ancestors: string[] = [];
+      for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+        ancestors.push(directory);
+        if (ancestor === dirname(ancestor)) break;
+      }
+      const script = [
+        'const fs = require("node:fs")',
+        `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+        change === "created"
+          ? `fs.writeFileSync(${JSON.stringify(temporary)}, "temporary")`
+          : `fs.rmSync(${JSON.stringify(temporary)})`,
+        `const descriptors = [...${JSON.stringify([...ancestors, directory])}, ...fs.readdirSync(${JSON.stringify(home)}).map(() => ${JSON.stringify(file)})]`,
+        'process.stdout.write(descriptors.join("\\n") + "\\nCODEX_SECURITY_ACL_COMPLETE:" + descriptors.length + "\\n")',
+      ].join("; ");
 
-    await verifyStableWindowsCredentialDescendants(home, async () => {
-      attempts += 1;
-      if (attempts === 1) await rm(temporary);
-      return 1;
-    });
-
-    expect(attempts).toBe(2);
-  });
-
-  test("retries Windows credential verification when a descendant disappears", async () => {
-    if (
-      runTestInSubprocess(
-        import.meta.path,
-        "retries Windows credential verification when a descendant disappears",
-      )
-    ) {
-      return;
-    }
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const temporary = join(home, ".auth-temporary");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    await writeFile(temporary, "temporary credential\n");
-    const originalLstat = fsPromises.lstat;
-    let removed = false;
-    let inspections = 0;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
-      lstat: async (path: Parameters<typeof lstat>[0]) => {
-        if (path === temporary && !removed) {
-          removed = true;
-          await rm(temporary);
-        }
-        return originalLstat(path);
-      },
-    }));
-
-    try {
-      await verifyStableWindowsCredentialDescendants(home, async () => {
-        inspections += 1;
-        return 1;
+      const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: ["--eval", script],
       });
-    } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        lstat: originalLstat,
-      }));
-    }
 
-    expect(removed).toBe(true);
-    expect(inspections).toBe(1);
-  });
-
-  test("rejects Windows credential descendants that repeatedly disappear", async () => {
-    if (
-      runTestInSubprocess(
-        import.meta.path,
-        "rejects Windows credential descendants that repeatedly disappear",
-      )
-    ) {
-      return;
-    }
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const credential = join(home, "auth.json");
-    await mkdir(home);
-    await writeFile(credential, "credential\n");
-    const originalLstat = fsPromises.lstat;
-    let attempts = 0;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
-      lstat: async (path: Parameters<typeof lstat>[0]) => {
-        if (path === credential) {
-          attempts += 1;
-          throw Object.assign(new Error("credential disappeared"), {
-            code: "ENOENT",
-            path,
-          });
-        }
-        return originalLstat(path);
-      },
-    }));
-
-    try {
-      await expect(
-        verifyStableWindowsCredentialDescendants(home, async () => 1),
-      ).rejects.toThrow("Windows credential descendants could not be verified");
-    } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        lstat: originalLstat,
-      }));
-    }
-
-    expect(attempts).toBe(3);
-  });
-
-  test("does not retry a missing Windows credential home", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "missing-home");
-    let inspections = 0;
-
-    await expect(
-      verifyStableWindowsCredentialDescendants(home, async () => {
-        inspections += 1;
-        return 0;
-      }),
-    ).rejects.toMatchObject({ code: "ENOENT", path: home });
-
-    expect(inspections).toBe(0);
-  });
-
-  test("rejects Windows credential descendants that never stabilize", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    let attempts = 0;
-
-    await expect(
-      verifyStableWindowsCredentialDescendants(home, async () => {
-        attempts += 1;
-        return 0;
-      }),
-    ).rejects.toThrow("Windows credential descendants could not be verified");
-    expect(attempts).toBe(3);
-  });
-
-  test("inspects Windows credential ancestry, home, and descendants in one subprocess", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const inspectionCount = join(root, "inspection-count");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-    const ancestors: string[] = [];
-    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-      ancestors.push(directory);
-      if (ancestor === dirname(ancestor)) break;
-    }
-    const descriptors = [...ancestors, directory, file];
-    const script = [
-      `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-      `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
-    ].join("; ");
-
-    const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
-      command: process.execPath,
-      args: ["--eval", script],
-    });
-
-    expect(snapshot.home).toMatchObject({
-      owner: sid,
-      protected: true,
-      grantsCurrentUserAccess: true,
-      untrustedPrincipals: [],
-    });
-    expect(snapshot.descendantsArePrivate).toBe(true);
-    expect(await readFile(inspectionCount, "utf8")).toBe("inspection\n");
-  });
+      expect(snapshot.home).toMatchObject({
+        owner: sid,
+        protected: true,
+        grantsCurrentUserAccess: true,
+        untrustedPrincipals: [],
+      });
+      expect(snapshot.descendantsArePrivate).toBe(true);
+      expect(await readFile(inspectionCount, "utf8")).toBe("inspection\n");
+    },
+  );
 
   test("inspects Windows credential ancestry and the home even without descendants", async () => {
     const root = await temporaryDirectory();
@@ -2895,7 +2773,7 @@ describe("runtime directories and plugin Python boundary", () => {
         command: process.execPath,
         args: [
           "--eval",
-          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
         ],
       }),
     ).resolves.toMatchObject({
@@ -2903,6 +2781,204 @@ describe("runtime directories and plugin Python boundary", () => {
       descendantsArePrivate: true,
     });
   });
+
+  test("retries interrupted Windows credential ACL enumeration", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const inspectionCount = join(root, "inspection-count");
+    const temporary = join(home, ".auth-temporary");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    await writeFile(temporary, "temporary credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const descriptors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      descriptors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    descriptors.push(directory, file);
+    const script = [
+      'const fs = require("node:fs")',
+      `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+      `const interrupted = fs.existsSync(${JSON.stringify(temporary)})`,
+      `if (interrupted) fs.unlinkSync(${JSON.stringify(temporary)})`,
+      `process.stdout.write(interrupted ? ${JSON.stringify(`${descriptors.join("\n")}\n`)} : ${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
+      "process.exitCode = interrupted ? 2 : 0",
+    ].join("; ");
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: ["--eval", script],
+      }),
+    ).resolves.toMatchObject({
+      home: { owner: sid, protected: true },
+      descendantsArePrivate: true,
+    });
+    expect(await readFile(inspectionCount, "utf8")).toBe(
+      "inspection\ninspection\n",
+    );
+  });
+
+  test.each([
+    [2, 3, "Windows credential descendants could not be verified"],
+    [1, 1, "Windows credential ACL inspection failed with exit code 1"],
+  ] as const)(
+    "rejects Windows ACL subprocess exit %i after %i attempts",
+    async (exitCode, attempts, message) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const inspectionCount = join(root, "inspection-count");
+      await mkdir(home);
+      const script = [
+        `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+        `process.exitCode = ${exitCode}`,
+      ].join("; ");
+
+      await expect(
+        inspectWindowsCredentialAclSnapshot(home, "S-1-5-21-111-222-333-1001", {
+          command: process.execPath,
+          args: ["--eval", script],
+        }),
+      ).rejects.toThrow(message);
+      expect(await readFile(inspectionCount, "utf8")).toBe(
+        "inspection\n".repeat(attempts),
+      );
+    },
+  );
+
+  test.each(["safe", "unsafe"] as const)(
+    "drains Windows credential callbacks before retrying %s snapshots",
+    async (kind) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `drains Windows credential callbacks before retrying ${kind} snapshots`,
+        )
+      ) {
+        return;
+      }
+      const home = join(await temporaryDirectory(), "home");
+      const sid = "S-1-5-21-111-222-333-1001";
+      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+      const descriptors: string[] = [];
+      for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+        descriptors.push(directory);
+        if (ancestor === dirname(ancestor)) break;
+      }
+      descriptors.push(directory);
+      const firstDescriptors = [...descriptors];
+      if (kind === "unsafe") {
+        firstDescriptors[0] = `${directory}(A;OICI;FA;;;WD)`;
+      }
+
+      const makeChild = () =>
+        Object.assign(new EventEmitter(), {
+          stdout: new PassThrough(),
+          stderr: new PassThrough(),
+          exitCode: null as number | null,
+          signalCode: null,
+          kill: () => true,
+        });
+      const first = makeChild();
+      let enterCallback!: () => void;
+      const callbackEntered = new Promise<void>((resolve) => {
+        enterCallback = resolve;
+      });
+      let releaseCallback!: () => void;
+      const callbackReleased = new Promise<void>((resolve) => {
+        releaseCallback = resolve;
+      });
+      let paused = false;
+      let callbackFinished = false;
+      let attempts = 0;
+      const originalSpawn = childProcess.spawn;
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: () => {
+          attempts += 1;
+          if (attempts === 1) return first;
+          expect(attempts).toBe(2);
+          expect(callbackFinished).toBe(true);
+          const child = makeChild();
+          queueMicrotask(() => {
+            child.stdout.end(windowsCredentialAclOutput(descriptors));
+            child.stderr.end();
+            child.exitCode = 0;
+            child.emit("close", 0, null);
+          });
+          return child;
+        },
+      }));
+      let settled = false;
+      const outcome = inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: "synthetic-credential-inspector",
+        args: [],
+        resolveDescriptorAliases: async () => {
+          if (paused) return;
+          paused = true;
+          enterCallback();
+          await callbackReleased;
+          callbackFinished = true;
+        },
+      }).then(
+        (value) => {
+          settled = true;
+          return { value, error: undefined };
+        },
+        (error: unknown) => {
+          settled = true;
+          return { value: undefined, error };
+        },
+      );
+      try {
+        first.stdout.write(`${firstDescriptors.join("\n")}\n`);
+        await Promise.race([
+          callbackEntered,
+          outcome.then(() => {
+            throw new Error(
+              "Credential inspection settled before its callback",
+            );
+          }),
+        ]);
+        const ended = once(first.stdout, "end");
+        first.stdout.end();
+        first.stderr.end();
+        await ended;
+        first.exitCode = 2;
+        first.emit("close", 2, null);
+        await nextTurn();
+        expect(settled).toBe(false);
+        expect(attempts).toBe(1);
+        releaseCallback();
+        const result = await outcome;
+        if (kind === "unsafe") {
+          expect(result.error).toMatchObject({
+            message:
+              "Windows credential-home ancestor allows another identity to replace the directory",
+          });
+          expect(attempts).toBe(1);
+        } else {
+          expect(result.error).toBeUndefined();
+          expect(result.value).toMatchObject({
+            home: { owner: sid, protected: true },
+            descendantsArePrivate: true,
+          });
+          expect(attempts).toBe(2);
+        }
+      } finally {
+        releaseCallback();
+        first.stdout.destroy();
+        first.stderr.destroy();
+        mock.module("node:child_process", () => ({
+          ...childProcess,
+          spawn: originalSpawn,
+        }));
+      }
+    },
+  );
 
   test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
     const root = await temporaryDirectory();
@@ -2942,6 +3018,54 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow("Windows credential-home ancestry could not be verified");
   });
 
+  test("rejects incomplete or failed Windows credential descendant streams", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const descriptors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      descriptors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    descriptors.push(directory, file);
+    const complete = windowsCredentialAclOutput(descriptors);
+    for (const { output, exitCode, error } of [
+      {
+        output: `${descriptors.join("\n")}\n`,
+        exitCode: 0,
+        error: "Windows credential descendants could not be verified",
+      },
+      {
+        output: `${descriptors.slice(0, -1).join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`,
+        exitCode: 0,
+        error: "Windows credential descendants could not be verified",
+      },
+      {
+        output: `${complete}${file}\n`,
+        exitCode: 0,
+        error: "Windows credential ACL inspection continued after completion",
+      },
+      {
+        output: complete,
+        exitCode: 1,
+        error: "Windows credential ACL inspection failed",
+      },
+    ]) {
+      await expect(
+        inspectWindowsCredentialAclSnapshot(home, sid, {
+          command: process.execPath,
+          args: [
+            "--eval",
+            `process.stdout.write(${JSON.stringify(output)}); process.exitCode = ${exitCode}`,
+          ],
+        }),
+      ).rejects.toThrow(error);
+    }
+  });
+
   test("detects unsafe descendants during combined Windows credential ACL inspections", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -2962,7 +3086,7 @@ describe("runtime directories and plugin Python boundary", () => {
         command: process.execPath,
         args: [
           "--eval",
-          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
         ],
       }),
     ).resolves.toMatchObject({ descendantsArePrivate: false });
@@ -3508,6 +3632,32 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("private Windows credential home");
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects Windows credential-home junctions even if their targets disappear",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const outside = join(root, "outside");
+      await mkdir(outside);
+      const credential = join(outside, "auth.json");
+      await writeFile(credential, "synthetic outside credential\n");
+      await symlink(outside, join(home, "linked-cache"), "junction");
+
+      await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+        "Windows credential home contains a symbolic link or junction",
+      );
+      expect(await readFile(credential, "utf8")).toBe(
+        "synthetic outside credential\n",
+      );
+      await rename(outside, join(root, "moved-outside"));
+      await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+        "Windows credential home contains a symbolic link or junction",
+      );
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "creates credential homes with a verified managed-compatible Windows ACL",

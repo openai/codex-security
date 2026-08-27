@@ -24,6 +24,7 @@ def assessment() -> dict[str, Any]:
             "sourceType": "pull_request_diff",
             "base": "a" * 40,
             "head": "b" * 40,
+            "changedFiles": ["src/request.ts"],
             "sha256": "c" * 64,
         },
         "recommendation": "merge",
@@ -214,6 +215,7 @@ def test_raw_worktree_is_not_a_supported_patch_source(tmp_path: Path) -> None:
 def test_non_merge_recommendation_requires_matching_workflow_label(tmp_path: Path) -> None:
     payload = assessment()
     payload["recommendation"] = "revise"
+    payload["validation"][0]["status"] = "failed"
 
     assert validate(tmp_path, payload).returncode != 0
 

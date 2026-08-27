@@ -2,16 +2,29 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
-
-from jsonschema import Draft202012Validator
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_PATH = PLUGIN_ROOT / "schemas" / "patch-risk-assessment.schema.json"
 NON_APPLICABLE = {"no_live_effect", "wrong_owner", "duplicate", "superseded"}
+
+
+def load_scan_contract_validator() -> ModuleType:
+    script = PLUGIN_ROOT / "scripts" / "finalize_scan_contract.py"
+    spec = importlib.util.spec_from_file_location("codex_security_scan_contract", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load scan contract validator: {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SCAN_CONTRACT = load_scan_contract_validator()
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,10 +33,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        value[key] = item
+    return value
+
+
 def read_object(path: str) -> dict[str, Any]:
     try:
         text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
-        value = json.loads(text)
+        value = json.loads(text, object_pairs_hook=reject_duplicate_keys)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read assessment: {error}") from error
     if not isinstance(value, dict):
@@ -32,13 +54,11 @@ def read_object(path: str) -> dict[str, Any]:
 
 
 def schema_errors(value: dict[str, Any]) -> list[str]:
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    validator = Draft202012Validator(schema)
-    errors: list[str] = []
-    for error in sorted(validator.iter_errors(value), key=lambda item: list(item.absolute_path)):
-        path = ".".join(str(part) for part in error.absolute_path) or "$"
-        errors.append(f"{path}: {error.message}")
-    return errors
+    try:
+        SCAN_CONTRACT.validate_against_schema(value, SCHEMA_PATH)
+    except (OSError, ValueError, RecursionError) as error:
+        return [str(error)]
+    return []
 
 
 def semantic_errors(value: dict[str, Any]) -> list[str]:
@@ -47,6 +67,12 @@ def semantic_errors(value: dict[str, Any]) -> list[str]:
     unknowns = value["unknowns"]
     evidence_plan = value["evidencePlan"]
     boundaries = value["materialBoundaries"]
+    applicability_status = value["applicability"]["status"]
+    affirmative_failure = (
+        value["regressionLikelihood"]["rating"] == "critical"
+        or any(item["result"] == "contradicted" for item in boundaries)
+        or any(item["status"] == "failed" for item in value["validation"])
+    )
     errors: list[str] = []
 
     if recommendation == "merge":
@@ -58,6 +84,8 @@ def semantic_errors(value: dict[str, Any]) -> list[str]:
             errors.append("merge cannot retain a decision-critical unknown")
         if any(item["result"] != "supported" for item in boundaries):
             errors.append("merge requires every material boundary to be supported")
+        if any(item["status"] == "failed" for item in value["validation"]):
+            errors.append("merge cannot retain a failed validation")
         if evidence_plan:
             errors.append("merge cannot retain an evidence plan")
     elif workflow_label != recommendation:
@@ -68,14 +96,22 @@ def semantic_errors(value: dict[str, Any]) -> list[str]:
             errors.append("hold_for_evidence requires a decision-critical unknown")
         if not evidence_plan:
             errors.append("hold_for_evidence requires a bounded evidence plan")
+        if affirmative_failure:
+            errors.append("hold_for_evidence cannot defer an established defect")
     elif evidence_plan:
         errors.append("only hold_for_evidence may include an evidence plan")
 
     if recommendation == "no_op":
-        if value["applicability"]["status"] not in NON_APPLICABLE:
+        if applicability_status not in NON_APPLICABLE:
             errors.append("no_op requires an established non-applicable disposition")
         if any(item["decisionCritical"] for item in unknowns):
             errors.append("no_op cannot retain a decision-critical unknown")
+    elif applicability_status in NON_APPLICABLE:
+        errors.append("an established non-applicable disposition requires no_op")
+
+    if recommendation in {"revise", "block"}:
+        if not affirmative_failure:
+            errors.append(f"{recommendation} requires affirmative failure evidence")
 
     if workflow_label == "auto_merge_candidate":
         auto_merge_requirements = {

@@ -17,7 +17,6 @@ import {
   mkdir,
   mkdtemp,
   open,
-  opendir,
   readFile,
   readdir,
   realpath,
@@ -82,6 +81,8 @@ const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
+const WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX = "CODEX_SECURITY_ACL_COMPLETE:";
+const WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE = 2;
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -416,6 +417,8 @@ class RepairableWindowsCredentialOwnerError extends Error {
   }
 }
 
+class WindowsCredentialDescendantsChangedError extends Error {}
+
 /** Inspect a Windows DACL without translating locale-specific account names. */
 export function inspectWindowsCredentialAcl(
   descriptor: string,
@@ -615,48 +618,6 @@ function windowsAceAllowsAncestorReplacement(
   return false;
 }
 
-export async function verifyStableWindowsCredentialDescendants(
-  path: string,
-  inspectDescriptors: () => Promise<number>,
-  options: { inspectEmpty?: boolean } = {},
-): Promise<void> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let descendants = 0;
-    const pending = [path];
-    try {
-      while (pending.length !== 0) {
-        const current = pending.pop()!;
-        const directory = await opendir(current);
-        for await (const entry of directory) {
-          const child = join(current, entry.name);
-          const metadata = await lstat(child);
-          if (metadata.isSymbolicLink()) {
-            throw new Error(
-              "Windows credential home contains a symbolic link or junction",
-            );
-          }
-          if (!metadata.isDirectory() && !metadata.isFile()) {
-            throw new Error("Windows credential home contains an unsafe entry");
-          }
-          descendants += 1;
-          if (metadata.isDirectory()) pending.push(child);
-        }
-      }
-    } catch (error) {
-      const failure = error as NodeJS.ErrnoException;
-      if (failure.code === "ENOENT" && failure.path !== path) {
-        continue;
-      }
-      throw error;
-    }
-    if (descendants === 0 && options.inspectEmpty !== true) return;
-
-    if ((await inspectDescriptors()) === descendants) return;
-  }
-
-  throw new Error("Windows credential descendants could not be verified");
-}
-
 export async function streamWindowsCredentialAclDescriptors(
   command: string,
   args: readonly string[],
@@ -675,10 +636,16 @@ export async function streamWindowsCredentialAclDescriptors(
     if (remaining > 0) stderr += chunk.slice(0, remaining);
   });
 
+  let descendantsChanged = false;
   const completion = new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
       if (code === 0) {
+        resolve();
+        return;
+      }
+      if (code === WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE) {
+        descendantsChanged = true;
         resolve();
         return;
       }
@@ -713,6 +680,12 @@ export async function streamWindowsCredentialAclDescriptors(
     throw error;
   }
 
+  if (descendantsChanged) {
+    // Finish descriptor callbacks before allowing another snapshot attempt.
+    throw new WindowsCredentialDescendantsChangedError(
+      "Windows credential descendants changed during ACL inspection",
+    );
+  }
   return descriptors;
 }
 
@@ -736,18 +709,33 @@ export async function inspectWindowsCredentialAclSnapshot(
     if (ancestor === dirname(ancestor)) break;
   }
 
-  let home: WindowsCredentialAcl | undefined;
-  let descendantsArePrivate = true;
-  await verifyStableWindowsCredentialDescendants(
-    path,
-    async () => {
-      home = undefined;
-      descendantsArePrivate = true;
-      let inspected = 0;
-      const descriptors = await streamWindowsCredentialAclDescriptors(
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let home: WindowsCredentialAcl | undefined;
+    let descendantsArePrivate = true;
+    let inspected = 0;
+    let completed = false;
+    try {
+      await streamWindowsCredentialAclDescriptors(
         options.command,
         options.args,
         async (descriptor) => {
+          if (completed) {
+            throw new Error(
+              "Windows credential ACL inspection continued after completion",
+            );
+          }
+          if (descriptor.startsWith(WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX)) {
+            if (
+              descriptor !==
+              `${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}${inspected}`
+            ) {
+              throw new Error(
+                "Windows credential descendants could not be verified",
+              );
+            }
+            completed = true;
+            return;
+          }
           const index = inspected;
           inspected += 1;
           await options.resolveDescriptorAliases?.(descriptor);
@@ -800,20 +788,22 @@ export async function inspectWindowsCredentialAclSnapshot(
         },
         { environment: options.environment },
       );
-      if (descriptors <= ancestors) {
-        throw new Error(
-          "Windows credential-home ancestry could not be verified",
-        );
-      }
-      return descriptors - ancestors - 1;
-    },
-    { inspectEmpty: true },
-  );
-
-  if (home === undefined) {
-    throw new Error("Windows credential ACL could not be verified");
+    } catch (error) {
+      if (error instanceof WindowsCredentialDescendantsChangedError) continue;
+      throw error;
+    }
+    if (inspected <= ancestors) {
+      throw new Error("Windows credential-home ancestry could not be verified");
+    }
+    if (!completed) {
+      throw new Error("Windows credential descendants could not be verified");
+    }
+    if (home === undefined) {
+      throw new Error("Windows credential ACL could not be verified");
+    }
+    return { home, descendantsArePrivate };
   }
-  return { home, descendantsArePrivate };
+  throw new Error("Windows credential descendants could not be verified");
 }
 
 async function secureWindowsCredentialHome(path: string): Promise<void> {
@@ -859,15 +849,33 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
 
   // Signed built-in cmdlets remain available under ConstrainedLanguage;
   // arbitrary .NET constructors, static methods, and SID translation do not.
+  // Enumerate and count ACLs in the same process: parallel startup can create
+  // or remove private cache and lock files while this traversal is running.
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    "$script:descriptorCount = 0",
+    "function Write-CredentialAcl($path) { $descriptor = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $path | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; if (-not $descriptor) { throw 'Windows credential ACL could not be verified' }; $script:descriptorCount += 1; $descriptor }",
+    "function Read-CredentialDescendants($path) {",
+    "  try { $entries = @(Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $path -Force) } catch {",
+    // A child can disappear while an existing directory is being enumerated.
+    // Retry that incomplete listing before accepting a vanished descendant.
+    `    if ($_.FullyQualifiedErrorId -eq 'System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetChildItemCommand') { exit ${WINDOWS_CREDENTIAL_DESCENDANTS_CHANGED_EXIT_CODE} }`,
+    "    if ($path -ne $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -and $_.CategoryInfo.Category -eq 'ObjectNotFound') { return }",
+    "    throw",
+    "  }",
+    "  foreach ($entry in $entries) {",
+    "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
+    "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
+    "    try { Write-CredentialAcl $entry.FullName } catch { if ($_.FullyQualifiedErrorId -like 'GetAcl_PathNotFound,*') { continue }; throw }",
+    "    if ($entry.PSIsContainer) { Read-CredentialDescendants $entry.FullName }",
+    "  }",
+    "}",
     "$path = $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
-    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $parent | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl; $path = $parent }",
-    "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-    // A temporary descendant can disappear after enumeration. Its missing
-    // descriptor reduces the count and retries the stable snapshot.
-    "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH -Recurse -Force | Microsoft.PowerShell.Core\\ForEach-Object { try { Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $_.FullName | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl } catch { if ($_.FullyQualifiedErrorId -notlike 'GetAcl_PathNotFound,*') { throw } } }",
-  ].join("; ");
+    "while ($true) { $parent = Microsoft.PowerShell.Management\\Split-Path -Path $path -Parent; if (-not $parent -or $parent -eq $path) { break }; Write-CredentialAcl $parent; $path = $parent }",
+    "Write-CredentialAcl $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    "Read-CredentialDescendants $env:CODEX_SECURITY_CREDENTIAL_ACL_PATH",
+    `"${WINDOWS_CREDENTIAL_ACL_COMPLETE_PREFIX}$script:descriptorCount"`,
+  ].join("\n");
   const resolvePrincipalScript = [
     "$ErrorActionPreference = 'Stop'",
     "$descriptor = 'O:' + $env:CODEX_SECURITY_CREDENTIAL_PRINCIPAL + 'G:SYD:(A;;GA;;;SY)'",

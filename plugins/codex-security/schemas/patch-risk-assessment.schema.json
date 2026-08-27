@@ -30,7 +30,14 @@
     "patch": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "sourceType", "base", "head", "sha256"],
+      "required": [
+        "repository",
+        "sourceType",
+        "base",
+        "head",
+        "changedFiles",
+        "sha256"
+      ],
       "properties": {
         "repository": {"$ref": "#/$defs/nonEmptyString"},
         "sourceType": {
@@ -38,6 +45,7 @@
         },
         "base": {"$ref": "#/$defs/nonEmptyString"},
         "head": {"$ref": "#/$defs/nonEmptyString"},
+        "changedFiles": {"$ref": "#/$defs/stringList"},
         "sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
