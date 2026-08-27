@@ -85,15 +85,6 @@ export class FindingDeduplicator {
             severityOrder[findings.get(right)!.severity.level] ||
           (left < right ? -1 : left > right ? 1 : 0),
       );
-      if (
-        members.length > 2 &&
-        (
-          await this.reviewer.reviewGroup(
-            members.map((member) => findings.get(member)!),
-          )
-        ).decision !== "SAME"
-      )
-        continue;
       duplicateGroups.push(members);
       for (const member of members) canonical.set(member, members[0]!);
     }

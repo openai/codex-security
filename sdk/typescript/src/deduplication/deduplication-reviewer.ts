@@ -3,11 +3,7 @@ import { readFileSync } from "node:fs";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
-import {
-  groupReviewPrompt,
-  pairReviewPrompt,
-  screeningPrompt,
-} from "./deduplication-prompts.js";
+import { pairReviewPrompt, screeningPrompt } from "./deduplication-prompts.js";
 
 const rationale = z.string().refine((value) => value.trim().length > 0);
 const sameSchema = z.object({
@@ -71,7 +67,6 @@ export type DuplicateDecision = z.infer<typeof reviewSchema>;
 export interface DeduplicationReviewer {
   screen(findings: readonly Finding[]): Promise<ScreeningResult>;
   reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision>;
-  reviewGroup(findings: readonly Finding[]): Promise<DuplicateDecision>;
 }
 
 export function pairKey(ids: readonly string[]): string {
@@ -101,7 +96,6 @@ export function validateScreening(
 ): ScreeningResult {
   const result = screeningSchema.parse(value);
   const anchor = findings[0]!.findingId;
-  const allowed = new Set(findings.map((finding) => finding.findingId));
   const required = new Set(
     findings.slice(1).map((finding) => pairKey([anchor, finding.findingId])),
   );
@@ -110,14 +104,9 @@ export function validateScreening(
     requireMergedFinding(recommendation);
     const pair = recommendation.findingIds;
     const key = pairKey(pair);
-    if (
-      pair[0] === pair[1] ||
-      pair.some((id) => !allowed.has(id)) ||
-      seen.has(key) ||
-      (!required.has(key) && recommendation.decision !== "SAME")
-    ) {
+    if (pair[0] === pair[1] || !required.has(key) || seen.has(key)) {
       throw new Error(
-        "Submit each assigned pair once; additional SAME pairs must use supplied findings.",
+        "Submit each assigned anchor-neighbor pair exactly once.",
       );
     }
     if (
@@ -152,21 +141,10 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
   }
 
   async reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision> {
-    return await this.review(pairReviewPrompt(findings), findings);
-  }
-
-  async reviewGroup(findings: readonly Finding[]): Promise<DuplicateDecision> {
-    return await this.review(groupReviewPrompt(findings), findings);
-  }
-
-  private async review(
-    prompt: string,
-    findings: readonly Finding[],
-  ): Promise<DuplicateDecision> {
     return await this.runner.run({
       model: "gpt-5.6-sol",
-      effort: "ultra",
-      prompt,
+      effort: "xhigh",
+      prompt: pairReviewPrompt(findings),
       schema: {
         type: "object",
         ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),

@@ -252,7 +252,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
   expect(result.status, result.stderr).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual({
     firstFailed: true,
-    frozenAfterFailure: null,
+    frozenAfterFailure: "{}",
     retryPublished: true,
     frozenAfterSuccess: {},
     status: "failed",

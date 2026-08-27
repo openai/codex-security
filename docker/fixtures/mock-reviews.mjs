@@ -48,15 +48,13 @@ const server = createServer(async (request, response) => {
       );
       const stage = prompt.startsWith("Review the complete assigned")
         ? "screen"
-        : prompt.startsWith("Independently validate the entire")
-          ? "group"
-          : "pair";
+        : "pair";
+      if (stage === "pair") assert.equal(findings.length, 2);
       assert.equal(
         body.model,
         stage === "screen" ? "gpt-5.6-luna" : "gpt-5.6-sol",
       );
-      // App-server serializes ultra effort as max in Responses requests.
-      assert.equal(body.reasoning.effort, stage === "screen" ? "xhigh" : "max");
+      assert.equal(body.reasoning.effort, "xhigh");
       const tools = body.input
         .filter((entry) => entry.type === "additional_tools")
         .flatMap((entry) => entry.tools);

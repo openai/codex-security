@@ -1,8 +1,11 @@
 import { execFile, spawnSync } from "node:child_process";
+import * as childProcess from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -28,8 +31,10 @@ import {
   relative,
   sep,
 } from "node:path";
+import { PassThrough } from "node:stream";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
-import * as timersPromises from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
@@ -74,7 +79,6 @@ import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
-  verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -96,6 +100,10 @@ async function temporaryDirectory(
   const path = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   temporaryDirectories.push(path);
   return path;
+}
+
+function windowsCredentialAclOutput(descriptors: readonly string[]): string {
+  return `${descriptors.join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`;
 }
 
 async function plantCredentialHomeLock(
@@ -131,69 +139,6 @@ async function acquireCredentialHomeLockWithTimeout(
   } finally {
     clearTimeout(timeout);
   }
-}
-
-function abortCredentialLockWaitWhenOwnerIsInspected(
-  controller: AbortController,
-): ReturnType<typeof spyOn> {
-  const killProcess = process.kill.bind(process);
-  return spyOn(process, "kill").mockImplementation(((
-    pid: number,
-    signal: number,
-  ) => {
-    const result = killProcess(pid, signal);
-    controller.abort(new DOMException("canceled", "AbortError"));
-    return result;
-  }) as typeof process.kill);
-}
-
-function captureCredentialLockHeartbeatTimer() {
-  const realSetInterval = globalThis.setInterval.bind(globalThis);
-  const realClearInterval = globalThis.clearInterval.bind(globalThis);
-  const unref = mock(() => undefined);
-  const interval = { unref } as unknown as NodeJS.Timeout;
-  let callback: (() => Promise<void>) | undefined;
-  let milliseconds: number | undefined;
-  let cleared = false;
-  const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
-    candidate: (...args: unknown[]) => void,
-    delay?: number,
-    ...args: unknown[]
-  ) => {
-    if (delay === 5_000 && callback === undefined) {
-      callback = candidate as () => Promise<void>;
-      milliseconds = delay;
-      return interval;
-    }
-    return realSetInterval(candidate, delay, ...args);
-  }) as typeof setInterval);
-  const clearIntervalSpy = spyOn(
-    globalThis,
-    "clearInterval",
-  ).mockImplementation(((timer: NodeJS.Timeout) => {
-    if (timer === interval) {
-      cleared = true;
-      return;
-    }
-    realClearInterval(timer);
-  }) as typeof clearInterval);
-
-  return {
-    get callback() {
-      return callback;
-    },
-    get cleared() {
-      return cleared;
-    },
-    get milliseconds() {
-      return milliseconds;
-    },
-    restore() {
-      clearIntervalSpy.mockRestore();
-      setIntervalSpy.mockRestore();
-    },
-    unref,
-  };
 }
 
 async function plugin(root: string, version = "1.2.3"): Promise<string> {
@@ -466,12 +411,6 @@ describe("plugin runtime preparation", () => {
 
   test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
-      const generator = await readFile(
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "utf8",
-      );
-      expect(generator).toContain('"--no-ignore"');
-      expect(generator).toContain('"--path-separator"');
       return;
     }
 
@@ -2315,6 +2254,9 @@ describe("runtime directories and plugin Python boundary", () => {
       await mkdir(home, { recursive: true, mode: 0o700 });
       await chmod(home, 0o700);
       await expect(release()).rejects.toThrow("credential home was replaced");
+      const releaseRecovered =
+        await acquireCredentialHomeLockWithTimeout(stolen);
+      await releaseRecovered();
     },
   );
 
@@ -2388,6 +2330,8 @@ describe("runtime directories and plugin Python boundary", () => {
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     });
     const releaseFirst = await acquireCodexSecurityCredentialHomeLock(home);
+    const database = join(home, ".codex-security-scan.sqlite3");
+    const original = await stat(database);
     let secondAcquired = false;
     const second = acquireCodexSecurityCredentialHomeLock(home).then(
       (release) => {
@@ -2403,7 +2347,96 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(secondAcquired).toBe(true);
     await releaseSecond();
     expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
+    // Removing this file would let waiters lock different inodes.
+    expect((await stat(database)).ino).toBe(original.ino);
   });
+
+  testPosix(
+    "initializes the credential-lock database without a descriptor or permission race",
+    async () => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          "initializes the credential-lock database without a descriptor or permission race",
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const database = join(home, ".codex-security-scan.sqlite3");
+      const originalLstat = fsPromises.lstat;
+      const originalWriteFile = fsPromises.writeFile;
+      let separateDatabaseCreates = 0;
+      let observedMode: number | undefined;
+      let paused = false;
+      let reportPaused!: () => void;
+      let resumeCreator!: () => void;
+      const creatorPaused = new Promise<void>((resolve) => {
+        reportPaused = resolve;
+      });
+      const creatorResumed = new Promise<void>((resolve) => {
+        resumeCreator = resolve;
+      });
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: async (...args: Parameters<typeof originalLstat>) => {
+          const metadata = await originalLstat(...args);
+          if (args[0] === database && !paused) {
+            paused = true;
+            observedMode = Number(metadata.mode) & 0o777;
+            reportPaused();
+            await creatorResumed;
+          }
+          return metadata;
+        },
+        writeFile: async (...args: Parameters<typeof originalWriteFile>) => {
+          if (args[0] === database) separateDatabaseCreates += 1;
+          return await originalWriteFile(...args);
+        },
+      }));
+
+      let first: Promise<() => Promise<void>> | undefined;
+      let releaseSecond: (() => Promise<void>) | undefined;
+      try {
+        first = acquireCredentialHomeLockWithTimeout(home);
+        await Promise.race([
+          creatorPaused,
+          first.then(() => {
+            throw new Error("Credential-lock initialization did not pause");
+          }),
+        ]);
+
+        // Pause the creator at its first post-open inspection. A contender must
+        // see the final mode and acquire normally instead of rejecting it.
+        releaseSecond = await acquireCredentialHomeLockWithTimeout(home);
+        await releaseSecond();
+        releaseSecond = undefined;
+        resumeCreator();
+        const releaseFirst = await first;
+        await releaseFirst();
+        first = undefined;
+      } finally {
+        resumeCreator();
+        await releaseSecond?.();
+        const pendingRelease = await first?.catch(() => undefined);
+        await pendingRelease?.();
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+          writeFile: originalWriteFile,
+        }));
+      }
+
+      // Closing another descriptor for this inode can release SQLite's
+      // process-owned POSIX lock, so SQLite must create its own guard file.
+      expect(separateDatabaseCreates).toBe(0);
+      expect(observedMode).toBe(0o600);
+      expect((await stat(database)).mode & 0o777).toBe(0o600);
+    },
+  );
 
   test("keeps a fresh live credential-home lock and cancels the waiter", async () => {
     const root = await temporaryDirectory();
@@ -2412,8 +2445,7 @@ describe("runtime directories and plugin Python boundary", () => {
     });
     const release = await acquireCodexSecurityCredentialHomeLock(home);
     const controller = new AbortController();
-    const inspectOwner =
-      abortCredentialLockWaitWhenOwnerIsInspected(controller);
+    const timeout = setTimeout(() => controller.abort(), 100);
 
     try {
       const waiting = acquireCodexSecurityCredentialHomeLock(
@@ -2421,54 +2453,44 @@ describe("runtime directories and plugin Python boundary", () => {
         controller.signal,
       );
       await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
-      expect(inspectOwner).toHaveBeenCalledWith(process.pid, 0);
       expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(true);
     } finally {
-      inspectOwner.mockRestore();
+      clearTimeout(timeout);
       await release();
     }
     expect(existsSync(join(home, ".codex-security-scan.lock"))).toBe(false);
+    const releaseAgain = await acquireCredentialHomeLockWithTimeout(home);
+    await releaseAgain();
   });
 
-  test("heartbeats a held credential-home lock across the stale horizon", async () => {
+  test("releases the native credential lock when legacy-lock inspection fails", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     });
     const lock = join(home, ".codex-security-scan.lock");
-    const heartbeatTimer = captureCredentialLockHeartbeatTimer();
-    let release: (() => Promise<void>) | undefined;
-    let inspectOwner: ReturnType<typeof spyOn> | undefined;
+    await writeFile(lock, "not a directory", { mode: 0o600 });
+    await expect(acquireCodexSecurityCredentialHomeLock(home)).rejects.toThrow(
+      "not a directory",
+    );
+    await rm(lock);
+    const release = await acquireCredentialHomeLockWithTimeout(home);
+    await release();
+  });
 
-    try {
-      release = await acquireCodexSecurityCredentialHomeLock(home);
-      expect(heartbeatTimer.milliseconds).toBe(5_000);
-      expect(heartbeatTimer.unref).toHaveBeenCalledTimes(1);
-      expect(heartbeatTimer.callback).toBeDefined();
-
-      const stale = new Date(Date.now() - 60_000);
-      await utimes(lock, stale, stale);
-      await heartbeatTimer.callback!();
-      expect(Date.now() - (await stat(lock)).mtimeMs).toBeLessThan(30_000);
-
-      const controller = new AbortController();
-      inspectOwner = abortCredentialLockWaitWhenOwnerIsInspected(controller);
-      const waiting = acquireCodexSecurityCredentialHomeLock(
-        home,
-        controller.signal,
-      );
-      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
-      expect(existsSync(lock)).toBe(true);
-    } finally {
-      inspectOwner?.mockRestore();
-      try {
-        if (release !== undefined) await release();
-      } finally {
-        heartbeatTimer.restore();
-      }
-    }
-    expect(heartbeatTimer.cleared).toBe(true);
-    expect(existsSync(lock)).toBe(false);
+  test("protects active and stalled credential-lock owners and recovers after a crash with a reused PID", async () => {
+    const root = await temporaryDirectory();
+    await promisify(execFile)(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("../scripts/fixtures/credential-lock.mjs", import.meta.url),
+        ),
+        new URL("../src/runtime.ts", import.meta.url).href,
+        join(root, "state"),
+      ],
+      { timeout: 25_000, windowsHide: true },
+    );
   });
 
   test("does not rewrite Windows credential ACLs while polling a held lock", async () => {
@@ -2533,117 +2555,89 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
-  test("recovers a stale credential-home lock naming a live process", async () => {
+  test("preserves a legacy live owner beyond the stale-heartbeat grace period", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     });
     const stale = new Date(Date.now() - 10 * 60_000);
     const lock = await plantCredentialHomeLock(home, process.pid, stale);
+    const owner = await readFile(join(lock, "owner.json"), "utf8");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6_000);
     let release: (() => Promise<void>) | undefined;
 
     try {
-      release = await acquireCredentialHomeLockWithTimeout(home);
-      expect(existsSync(lock)).toBe(true);
+      await expect(
+        (async () => {
+          release = await acquireCodexSecurityCredentialHomeLock(
+            home,
+            controller.signal,
+          );
+        })(),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(await readFile(join(lock, "owner.json"), "utf8")).toBe(owner);
     } finally {
+      clearTimeout(timeout);
       if (release !== undefined) await release();
     }
-    expect(existsSync(lock)).toBe(false);
   });
 
-  test("recovers a stale credential-home lock when PID inspection is denied", async () => {
+  test("preserves a legacy owner when PID inspection is denied", async () => {
     const root = await temporaryDirectory();
     const home = await prepareCodexSecurityCredentialHome({
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
     });
     const stale = new Date(Date.now() - 10 * 60_000);
     const lock = await plantCredentialHomeLock(home, process.pid, stale);
+    const controller = new AbortController();
     const inspectOwner = spyOn(process, "kill").mockImplementation((() => {
+      controller.abort();
       const error = new Error(
         "operation not permitted",
       ) as NodeJS.ErrnoException;
       error.code = "EPERM";
       throw error;
     }) as typeof process.kill);
-    let release: (() => Promise<void>) | undefined;
 
     try {
-      release = await acquireCredentialHomeLockWithTimeout(home);
+      await expect(
+        acquireCodexSecurityCredentialHomeLock(home, controller.signal),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(inspectOwner).toHaveBeenCalledWith(process.pid, 0);
       expect(existsSync(lock)).toBe(true);
     } finally {
       inspectOwner.mockRestore();
-      if (release !== undefined) await release();
     }
-    expect(existsSync(lock)).toBe(false);
   });
 
-  test("abandons stale recovery when the owner heartbeat advances", async () => {
-    if (
-      runTestInSubprocess(
-        import.meta.path,
-        "abandons stale recovery when the owner heartbeat advances",
-      )
-    ) {
-      return;
-    }
-    const root = await temporaryDirectory();
-    const home = await prepareCodexSecurityCredentialHome({
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    });
-    const lock = join(home, ".codex-security-scan.lock");
-    const controller = new AbortController();
-    const heartbeatTimer = captureCredentialLockHeartbeatTimer();
-    const realDelay = timersPromises.setTimeout;
-    let waitedForHeartbeat = false;
-    let observedDelaySignal: AbortSignal | undefined;
-    mock.module("node:timers/promises", () => ({
-      ...timersPromises,
-      setTimeout: (async (
-        milliseconds: number,
-        value?: unknown,
-        options?: { signal?: AbortSignal },
-      ) => {
-        observedDelaySignal = options?.signal;
-        if (milliseconds === 5_000) {
-          waitedForHeartbeat = true;
-          await heartbeatTimer.callback!();
-          return value;
-        }
-        controller.abort(new DOMException("canceled", "AbortError"));
-        return await realDelay(0, value, { signal: controller.signal });
-      }) as typeof timersPromises.setTimeout,
-    }));
-    let release: (() => Promise<void>) | undefined;
-
-    try {
-      release = await acquireCodexSecurityCredentialHomeLock(home);
-      expect(heartbeatTimer.milliseconds).toBe(5_000);
-      expect(heartbeatTimer.unref).toHaveBeenCalledTimes(1);
-      expect(heartbeatTimer.callback).toBeDefined();
-      const stale = new Date(Date.now() - 10 * 60_000);
-      await utimes(lock, stale, stale);
-
-      const waiting = acquireCodexSecurityCredentialHomeLock(
-        home,
-        controller.signal,
-      );
-      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
-      expect(waitedForHeartbeat).toBe(true);
-      expect(observedDelaySignal).toBe(controller.signal);
-      expect(Date.now() - (await stat(lock)).mtimeMs).toBeLessThan(30_000);
-      expect(existsSync(lock)).toBe(true);
-    } finally {
-      mock.module("node:timers/promises", () => ({
-        ...timersPromises,
-        setTimeout: realDelay,
-      }));
-      try {
-        if (release !== undefined) await release();
-      } finally {
-        heartbeatTimer.restore();
+  testPosix(
+    "rejects linked and repairs non-private credential-lock database files",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const database = join(home, ".codex-security-scan.sqlite3");
+      const target = join(home, "target");
+      await writeFile(target, "unchanged", { mode: 0o600 });
+      for (const createLink of [symlink, link]) {
+        await createLink(target, database);
+        await expect(
+          acquireCodexSecurityCredentialHomeLock(home),
+        ).rejects.toThrow("regular file");
+        expect(await readFile(target, "utf8")).toBe("unchanged");
+        await rm(database);
       }
-    }
-  });
+      // Recover the state left if a creator exits after SQLite opens the guard
+      // but before it tightens the default mode.
+      await writeFile(database, "", { mode: 0o600 });
+      await chmod(database, 0o644);
+      const release = await acquireCodexSecurityCredentialHomeLock(home);
+      await release();
+      expect((await stat(database)).mode & 0o777).toBe(0o600);
+    },
+  );
 
   test("recovers credential-home locks whose owner names no process", async () => {
     const root = await temporaryDirectory();
@@ -2711,178 +2705,49 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow("private Windows credential home");
   });
 
-  test("retries Windows credential descendant verification after concurrent changes", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const temporary = join(home, ".auth-temporary");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    await writeFile(temporary, "temporary credential\n");
-    let attempts = 0;
+  test.each(["created", "removed"] as const)(
+    "inspects Windows credentials once while private descendants are %s",
+    async (change) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const inspectionCount = join(root, "inspection-count");
+      const temporary = join(home, ".auth-temporary");
+      await mkdir(home);
+      await writeFile(join(home, "auth.json"), "credential\n");
+      if (change === "removed") await writeFile(temporary, "temporary\n");
+      const sid = "S-1-5-21-111-222-333-1001";
+      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+      const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+      const ancestors: string[] = [];
+      for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+        ancestors.push(directory);
+        if (ancestor === dirname(ancestor)) break;
+      }
+      const script = [
+        'const fs = require("node:fs")',
+        `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+        change === "created"
+          ? `fs.writeFileSync(${JSON.stringify(temporary)}, "temporary")`
+          : `fs.rmSync(${JSON.stringify(temporary)})`,
+        `const descriptors = [...${JSON.stringify([...ancestors, directory])}, ...fs.readdirSync(${JSON.stringify(home)}).map(() => ${JSON.stringify(file)})]`,
+        'process.stdout.write(descriptors.join("\\n") + "\\nCODEX_SECURITY_ACL_COMPLETE:" + descriptors.length + "\\n")',
+      ].join("; ");
 
-    await verifyStableWindowsCredentialDescendants(home, async () => {
-      attempts += 1;
-      if (attempts === 1) await rm(temporary);
-      return 1;
-    });
-
-    expect(attempts).toBe(2);
-  });
-
-  test("retries Windows credential verification when a descendant disappears", async () => {
-    if (
-      runTestInSubprocess(
-        import.meta.path,
-        "retries Windows credential verification when a descendant disappears",
-      )
-    ) {
-      return;
-    }
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const temporary = join(home, ".auth-temporary");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    await writeFile(temporary, "temporary credential\n");
-    const originalLstat = fsPromises.lstat;
-    let removed = false;
-    let inspections = 0;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
-      lstat: async (path: Parameters<typeof lstat>[0]) => {
-        if (path === temporary && !removed) {
-          removed = true;
-          await rm(temporary);
-        }
-        return originalLstat(path);
-      },
-    }));
-
-    try {
-      await verifyStableWindowsCredentialDescendants(home, async () => {
-        inspections += 1;
-        return 1;
+      const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: ["--eval", script],
       });
-    } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        lstat: originalLstat,
-      }));
-    }
 
-    expect(removed).toBe(true);
-    expect(inspections).toBe(1);
-  });
-
-  test("rejects Windows credential descendants that repeatedly disappear", async () => {
-    if (
-      runTestInSubprocess(
-        import.meta.path,
-        "rejects Windows credential descendants that repeatedly disappear",
-      )
-    ) {
-      return;
-    }
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const credential = join(home, "auth.json");
-    await mkdir(home);
-    await writeFile(credential, "credential\n");
-    const originalLstat = fsPromises.lstat;
-    let attempts = 0;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
-      lstat: async (path: Parameters<typeof lstat>[0]) => {
-        if (path === credential) {
-          attempts += 1;
-          throw Object.assign(new Error("credential disappeared"), {
-            code: "ENOENT",
-            path,
-          });
-        }
-        return originalLstat(path);
-      },
-    }));
-
-    try {
-      await expect(
-        verifyStableWindowsCredentialDescendants(home, async () => 1),
-      ).rejects.toThrow("Windows credential descendants could not be verified");
-    } finally {
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        lstat: originalLstat,
-      }));
-    }
-
-    expect(attempts).toBe(3);
-  });
-
-  test("does not retry a missing Windows credential home", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "missing-home");
-    let inspections = 0;
-
-    await expect(
-      verifyStableWindowsCredentialDescendants(home, async () => {
-        inspections += 1;
-        return 0;
-      }),
-    ).rejects.toMatchObject({ code: "ENOENT", path: home });
-
-    expect(inspections).toBe(0);
-  });
-
-  test("rejects Windows credential descendants that never stabilize", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    let attempts = 0;
-
-    await expect(
-      verifyStableWindowsCredentialDescendants(home, async () => {
-        attempts += 1;
-        return 0;
-      }),
-    ).rejects.toThrow("Windows credential descendants could not be verified");
-    expect(attempts).toBe(3);
-  });
-
-  test("inspects Windows credential ancestry, home, and descendants in one subprocess", async () => {
-    const root = await temporaryDirectory();
-    const home = join(root, "home");
-    const inspectionCount = join(root, "inspection-count");
-    await mkdir(home);
-    await writeFile(join(home, "auth.json"), "credential\n");
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-    const ancestors: string[] = [];
-    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
-      ancestors.push(directory);
-      if (ancestor === dirname(ancestor)) break;
-    }
-    const descriptors = [...ancestors, directory, file];
-    const script = [
-      `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-      `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
-    ].join("; ");
-
-    const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
-      command: process.execPath,
-      args: ["--eval", script],
-    });
-
-    expect(snapshot.home).toMatchObject({
-      owner: sid,
-      protected: true,
-      grantsCurrentUserAccess: true,
-      untrustedPrincipals: [],
-    });
-    expect(snapshot.descendantsArePrivate).toBe(true);
-    expect(await readFile(inspectionCount, "utf8")).toBe("inspection\n");
-  });
+      expect(snapshot.home).toMatchObject({
+        owner: sid,
+        protected: true,
+        grantsCurrentUserAccess: true,
+        untrustedPrincipals: [],
+      });
+      expect(snapshot.descendantsArePrivate).toBe(true);
+      expect(await readFile(inspectionCount, "utf8")).toBe("inspection\n");
+    },
+  );
 
   test("inspects Windows credential ancestry and the home even without descendants", async () => {
     const root = await temporaryDirectory();
@@ -2902,7 +2767,7 @@ describe("runtime directories and plugin Python boundary", () => {
         command: process.execPath,
         args: [
           "--eval",
-          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
         ],
       }),
     ).resolves.toMatchObject({
@@ -2910,6 +2775,204 @@ describe("runtime directories and plugin Python boundary", () => {
       descendantsArePrivate: true,
     });
   });
+
+  test("retries interrupted Windows credential ACL enumeration", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const inspectionCount = join(root, "inspection-count");
+    const temporary = join(home, ".auth-temporary");
+    await mkdir(home);
+    await writeFile(join(home, "auth.json"), "credential\n");
+    await writeFile(temporary, "temporary credential\n");
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const descriptors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      descriptors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    descriptors.push(directory, file);
+    const script = [
+      'const fs = require("node:fs")',
+      `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+      `const interrupted = fs.existsSync(${JSON.stringify(temporary)})`,
+      `if (interrupted) fs.unlinkSync(${JSON.stringify(temporary)})`,
+      `process.stdout.write(interrupted ? ${JSON.stringify(`${descriptors.join("\n")}\n`)} : ${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
+      "process.exitCode = interrupted ? 2 : 0",
+    ].join("; ");
+
+    await expect(
+      inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: process.execPath,
+        args: ["--eval", script],
+      }),
+    ).resolves.toMatchObject({
+      home: { owner: sid, protected: true },
+      descendantsArePrivate: true,
+    });
+    expect(await readFile(inspectionCount, "utf8")).toBe(
+      "inspection\ninspection\n",
+    );
+  });
+
+  test.each([
+    [2, 3, "Windows credential descendants could not be verified"],
+    [1, 1, "Windows credential ACL inspection failed with exit code 1"],
+  ] as const)(
+    "rejects Windows ACL subprocess exit %i after %i attempts",
+    async (exitCode, attempts, message) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const inspectionCount = join(root, "inspection-count");
+      await mkdir(home);
+      const script = [
+        `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
+        `process.exitCode = ${exitCode}`,
+      ].join("; ");
+
+      await expect(
+        inspectWindowsCredentialAclSnapshot(home, "S-1-5-21-111-222-333-1001", {
+          command: process.execPath,
+          args: ["--eval", script],
+        }),
+      ).rejects.toThrow(message);
+      expect(await readFile(inspectionCount, "utf8")).toBe(
+        "inspection\n".repeat(attempts),
+      );
+    },
+  );
+
+  test.each(["safe", "unsafe"] as const)(
+    "drains Windows credential callbacks before retrying %s snapshots",
+    async (kind) => {
+      if (
+        runTestInSubprocess(
+          import.meta.path,
+          `drains Windows credential callbacks before retrying ${kind} snapshots`,
+        )
+      ) {
+        return;
+      }
+      const home = join(await temporaryDirectory(), "home");
+      const sid = "S-1-5-21-111-222-333-1001";
+      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+      const descriptors: string[] = [];
+      for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+        descriptors.push(directory);
+        if (ancestor === dirname(ancestor)) break;
+      }
+      descriptors.push(directory);
+      const firstDescriptors = [...descriptors];
+      if (kind === "unsafe") {
+        firstDescriptors[0] = `${directory}(A;OICI;FA;;;WD)`;
+      }
+
+      const makeChild = () =>
+        Object.assign(new EventEmitter(), {
+          stdout: new PassThrough(),
+          stderr: new PassThrough(),
+          exitCode: null as number | null,
+          signalCode: null,
+          kill: () => true,
+        });
+      const first = makeChild();
+      let enterCallback!: () => void;
+      const callbackEntered = new Promise<void>((resolve) => {
+        enterCallback = resolve;
+      });
+      let releaseCallback!: () => void;
+      const callbackReleased = new Promise<void>((resolve) => {
+        releaseCallback = resolve;
+      });
+      let paused = false;
+      let callbackFinished = false;
+      let attempts = 0;
+      const originalSpawn = childProcess.spawn;
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: () => {
+          attempts += 1;
+          if (attempts === 1) return first;
+          expect(attempts).toBe(2);
+          expect(callbackFinished).toBe(true);
+          const child = makeChild();
+          queueMicrotask(() => {
+            child.stdout.end(windowsCredentialAclOutput(descriptors));
+            child.stderr.end();
+            child.exitCode = 0;
+            child.emit("close", 0, null);
+          });
+          return child;
+        },
+      }));
+      let settled = false;
+      const outcome = inspectWindowsCredentialAclSnapshot(home, sid, {
+        command: "synthetic-credential-inspector",
+        args: [],
+        resolveDescriptorAliases: async () => {
+          if (paused) return;
+          paused = true;
+          enterCallback();
+          await callbackReleased;
+          callbackFinished = true;
+        },
+      }).then(
+        (value) => {
+          settled = true;
+          return { value, error: undefined };
+        },
+        (error: unknown) => {
+          settled = true;
+          return { value: undefined, error };
+        },
+      );
+      try {
+        first.stdout.write(`${firstDescriptors.join("\n")}\n`);
+        await Promise.race([
+          callbackEntered,
+          outcome.then(() => {
+            throw new Error(
+              "Credential inspection settled before its callback",
+            );
+          }),
+        ]);
+        const ended = once(first.stdout, "end");
+        first.stdout.end();
+        first.stderr.end();
+        await ended;
+        first.exitCode = 2;
+        first.emit("close", 2, null);
+        await nextTurn();
+        expect(settled).toBe(false);
+        expect(attempts).toBe(1);
+        releaseCallback();
+        const result = await outcome;
+        if (kind === "unsafe") {
+          expect(result.error).toMatchObject({
+            message:
+              "Windows credential-home ancestor allows another identity to replace the directory",
+          });
+          expect(attempts).toBe(1);
+        } else {
+          expect(result.error).toBeUndefined();
+          expect(result.value).toMatchObject({
+            home: { owner: sid, protected: true },
+            descendantsArePrivate: true,
+          });
+          expect(attempts).toBe(2);
+        }
+      } finally {
+        releaseCallback();
+        first.stdout.destroy();
+        first.stderr.destroy();
+        mock.module("node:child_process", () => ({
+          ...childProcess,
+          spawn: originalSpawn,
+        }));
+      }
+    },
+  );
 
   test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
     const root = await temporaryDirectory();
@@ -2949,6 +3012,54 @@ describe("runtime directories and plugin Python boundary", () => {
     ).rejects.toThrow("Windows credential-home ancestry could not be verified");
   });
 
+  test("rejects incomplete or failed Windows credential descendant streams", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const sid = "S-1-5-21-111-222-333-1001";
+    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+    const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
+    const descriptors: string[] = [];
+    for (let ancestor = dirname(home); ; ancestor = dirname(ancestor)) {
+      descriptors.push(directory);
+      if (ancestor === dirname(ancestor)) break;
+    }
+    descriptors.push(directory, file);
+    const complete = windowsCredentialAclOutput(descriptors);
+    for (const { output, exitCode, error } of [
+      {
+        output: `${descriptors.join("\n")}\n`,
+        exitCode: 0,
+        error: "Windows credential descendants could not be verified",
+      },
+      {
+        output: `${descriptors.slice(0, -1).join("\n")}\nCODEX_SECURITY_ACL_COMPLETE:${descriptors.length}\n`,
+        exitCode: 0,
+        error: "Windows credential descendants could not be verified",
+      },
+      {
+        output: `${complete}${file}\n`,
+        exitCode: 0,
+        error: "Windows credential ACL inspection continued after completion",
+      },
+      {
+        output: complete,
+        exitCode: 1,
+        error: "Windows credential ACL inspection failed",
+      },
+    ]) {
+      await expect(
+        inspectWindowsCredentialAclSnapshot(home, sid, {
+          command: process.execPath,
+          args: [
+            "--eval",
+            `process.stdout.write(${JSON.stringify(output)}); process.exitCode = ${exitCode}`,
+          ],
+        }),
+      ).rejects.toThrow(error);
+    }
+  });
+
   test("detects unsafe descendants during combined Windows credential ACL inspections", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
@@ -2969,7 +3080,7 @@ describe("runtime directories and plugin Python boundary", () => {
         command: process.execPath,
         args: [
           "--eval",
-          `process.stdout.write(${JSON.stringify(`${descriptors.join("\n")}\n`)})`,
+          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
         ],
       }),
     ).resolves.toMatchObject({ descendantsArePrivate: false });
@@ -3515,6 +3626,32 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow("private Windows credential home");
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects Windows credential-home junctions even if their targets disappear",
+    async () => {
+      const root = await temporaryDirectory();
+      const home = await prepareCodexSecurityCredentialHome({
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      });
+      const outside = join(root, "outside");
+      await mkdir(outside);
+      const credential = join(outside, "auth.json");
+      await writeFile(credential, "synthetic outside credential\n");
+      await symlink(outside, join(home, "linked-cache"), "junction");
+
+      await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+        "Windows credential home contains a symbolic link or junction",
+      );
+      expect(await readFile(credential, "utf8")).toBe(
+        "synthetic outside credential\n",
+      );
+      await rename(outside, join(root, "moved-outside"));
+      await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+        "Windows credential home contains a symbolic link or junction",
+      );
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "creates credential homes with a verified managed-compatible Windows ACL",
