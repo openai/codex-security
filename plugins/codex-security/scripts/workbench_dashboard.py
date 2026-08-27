@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
+import sys
+from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_findings import list_dedupe_groups
 
 
@@ -105,3 +109,7 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
             "nextOffset": next_offset if next_offset < total else None,
             "detail": detail(connection, view, item(selected)) if selected is not None else None,
         }
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
