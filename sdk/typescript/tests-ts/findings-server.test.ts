@@ -264,6 +264,8 @@ with db:
         db.execute("INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)", (scan_id, created, created))
         db.execute("INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, canceled_at) VALUES (?, ?, ?, 'revision', 'src', 'standard', ?, ?, 'discovery', ?, ?, ?, ?)", (scan_id, scan_id, path, '/unavailable/artifacts/' + scan_id, status, created, created, created, canceled))
     db.execute("INSERT INTO scan_progress (scan_id, review_items_completed, review_items_total, reportable_findings_count, updated_at) VALUES ('standalone', 3, 10, 2, '2026-01-04T00:00:00Z')")
+    db.execute("UPDATE scans SET mode = 'deep' WHERE id = 'standalone'")
+    db.execute("INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at) VALUES ('standalone', 1, 'synthetic', 'running', 'discovery', 1, 0, 1, 1, '2026-01-01T00:00:00Z', '2026-01-05T00:00:00Z')")
 print('null')`,
   );
   const before = await database(
@@ -290,8 +292,9 @@ print('null')`,
     progress: { reviewed: 3, total: 10, reportable: 2, deepPass: null },
     workflowIds: [],
     findingIds: [],
-    updatedAt: "2026-01-04T00:00:00Z",
+    updatedAt: "2026-01-05T00:00:00Z",
   });
+  expect(result.items[0]!.updatedAt).toBe("2026-01-05T00:00:00Z");
   expect(
     (await dashboard(base, { status: "canceled" })).items.map(
       (item) => item.id,

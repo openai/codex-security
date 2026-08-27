@@ -17,11 +17,13 @@ SELECT scans.id, scans.target_path AS title,
     CASE WHEN scans.canceled_at IS NOT NULL THEN 'canceled'
          WHEN scans.status = 'complete' THEN 'completed' ELSE scans.status END AS status,
     'scan' AS stage, scans.started_at AS createdAt,
-    MAX(scans.updated_at, COALESCE(progress.updated_at, scans.updated_at)) AS updatedAt,
+    MAX(scans.updated_at, COALESCE(progress.updated_at, scans.updated_at),
+        COALESCE(deep.updated_at, scans.updated_at)) AS updatedAt,
     CASE WHEN scans.status = 'complete' THEN
         (SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = scans.id)
         ELSE progress.reportable_findings_count END AS findingCount
 FROM scans LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
+LEFT JOIN deep_scan_runs AS deep ON deep.scan_id = scans.id
 """
 
 WORKFLOW_RECORDS = """
@@ -90,8 +92,10 @@ def scan_detail(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any] 
     row = connection.execute(
         """SELECT scans.*, progress.review_items_completed, progress.review_items_total,
         progress.reportable_findings_count, progress.deep_review_pass,
-        MAX(scans.updated_at, COALESCE(progress.updated_at, scans.updated_at)) AS last_update
+        MAX(scans.updated_at, COALESCE(progress.updated_at, scans.updated_at),
+            COALESCE(deep.updated_at, scans.updated_at)) AS last_update
         FROM scans LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        LEFT JOIN deep_scan_runs AS deep ON deep.scan_id = scans.id
         WHERE scans.id = ?""", (scan_id,),
     ).fetchone()
     if row is None:
