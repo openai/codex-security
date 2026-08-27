@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import hashlib
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workbench_target import directory_content_digest, git_output, git_revision
 
 WORKFLOW_BINDINGS = {
@@ -181,3 +184,7 @@ def finding_workflow(
                     raise SystemExit("Unknown workflow action.")
         save_workflow(connection, state, timestamp)
         return {"workflow": state}
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()

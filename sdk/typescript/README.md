@@ -1208,7 +1208,7 @@ A completed `dedupe --workflow-id` returns its saved result without repeating
 reviews or group writes. A publication whose acknowledgement was lost is retried
 using the service's existing idempotent upsert.
 
-Each validated screening, pair review, and group review is checkpointed locally,
+Each validated screening and pair review is checkpointed locally,
 including DISTINCT decisions. Every SAME checkpoint retains its required
 `canonicalFindingId` and generated `mergedFinding`. The merged record must satisfy
 the Finding schema and preserve the canonical finding ID. Validation still happens
