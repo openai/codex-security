@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { Finding, FindingsDocument } from "../src/models.js";
+import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
 import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
 import type { FindingEmbedder } from "../src/server/embeddings.js";
 import { FindingsError } from "../src/server/errors.js";
@@ -105,6 +106,23 @@ function insert(
   });
 }
 
+function storeGroups(base: string, groups: unknown) {
+  return fetch(`${base}/v1/dedupe-groups`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ groups }),
+  });
+}
+
+async function getGroups(
+  base: string,
+  findingId: string,
+): Promise<FindingDedupeGroup[]> {
+  const response = await fetch(`${base}/v1/finding/${findingId}/dedupe-groups`);
+  expect(response.status).toBe(200);
+  return (await response.json()) as FindingDedupeGroup[];
+}
+
 async function database(
   environment: NodeJS.ProcessEnv,
   script: string,
@@ -188,6 +206,116 @@ test("bulk insert preserves complete findings and embeddings without creating sc
   expect((await reopened.list({ limit: 50, offset: 0 })).findings).toEqual(
     findings,
   );
+});
+
+test("persists overlapping dedupe groups idempotently without changing findings or embeddings", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store);
+  const entries = [embedded(1), embedded(2), embedded(3)];
+  await store.insert(entries);
+  const [a, b, c] = entries.map((entry) => entry.finding.findingId) as [
+    string,
+    string,
+    string,
+  ];
+  const groups = [
+    [a, b],
+    [b, c],
+    [c, a],
+  ];
+  const response = await storeGroups(base, groups);
+  expect(response.status).toBe(201);
+  const stored = (await response.json()) as FindingDedupeGroup[];
+  expect(stored.map((group) => group.findingIds)).toEqual(
+    groups.map((group) => [...group].sort()),
+  );
+  expect(new Set(stored.map((group) => group.groupId)).size).toBe(3);
+  for (const id of [a, b, c]) {
+    expect(
+      (await getGroups(base, id)).map((group) => group.groupId).sort(),
+    ).toEqual(
+      stored
+        .filter((group) => group.findingIds.includes(id))
+        .map((group) => group.groupId)
+        .sort(),
+    );
+  }
+  const retried = await storeGroups(
+    base,
+    groups.map((group) => [...group].reverse()),
+  );
+  expect(await retried.json()).toEqual(stored);
+  const reopened = new SqliteFindingsStore(environment);
+  await reopened.initialize();
+  expect(await reopened.listDedupeGroups(b)).toEqual(await getGroups(base, b));
+  expect((await reopened.list({ limit: 50, offset: 0 })).findings).toEqual(
+    entries.map((entry) => entry.finding),
+  );
+  expect(
+    await database(
+      environment,
+      `print(json.dumps({
+    "memberships": db.execute("SELECT COUNT(*) FROM finding_dedupe_group_members").fetchone()[0],
+    "embeddings": [list(row) for row in db.execute("SELECT finding_id, model, vector_json FROM finding_embeddings ORDER BY finding_id")]
+}))`,
+    ),
+  ).toEqual({
+    memberships: 6,
+    embeddings: entries.map((entry) => [
+      entry.finding.findingId,
+      "synthetic",
+      "[1, 0]",
+    ]),
+  });
+  expect(await getGroups(base, "missing-finding")).toEqual([]);
+});
+
+test("rolls back the entire dedupe batch if a finding is missing and rejects invalid groups", async () => {
+  const { store, environment } = await fixture();
+  const base = await start(store, {
+    embed: async () => {
+      throw new Error("Grouping must not embed");
+    },
+  });
+  await store.insert([embedded(1), embedded(2), embedded(3)]);
+  const [a, b, c] = [1, 2, 3].map((index) => finding(index).findingId) as [
+    string,
+    string,
+    string,
+  ];
+  const original = (await (
+    await storeGroups(base, [[a, b]])
+  ).json()) as FindingDedupeGroup[];
+  const response = await storeGroups(base, [
+    [b, c],
+    [a, "missing-finding"],
+  ]);
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ error: "finding_conflict" });
+  expect(await getGroups(base, c)).toEqual([]);
+  expect(await getGroups(base, a)).toEqual(original);
+  expect(
+    await database(
+      environment,
+      `print(json.dumps({
+    "groups": db.execute("SELECT COUNT(*) FROM finding_dedupe_groups").fetchone()[0],
+    "memberships": db.execute("SELECT COUNT(*) FROM finding_dedupe_group_members").fetchone()[0]
+}))`,
+    ),
+  ).toEqual({ groups: 1, memberships: 2 });
+  for (const groups of [
+    null,
+    {},
+    [a, b],
+    [[]],
+    [[a]],
+    [[a, a]],
+    [[a, 1]],
+    [[a, ""]],
+  ]) {
+    expect((await storeGroups(base, groups)).status).toBe(400);
+  }
+  expect(await (await storeGroups(base, [])).json()).toEqual([]);
 });
 
 test("lists stable pages of 50 by default and supports limit and offset", async () => {

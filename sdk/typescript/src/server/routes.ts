@@ -5,6 +5,7 @@ import type { FindingsService } from "./findings-service.js";
 import {
   findingSearchScope,
   pagination,
+  validateDedupeGroups,
   type FindingsRequest,
 } from "./validation.js";
 
@@ -35,6 +36,26 @@ export async function handleFindingsRequest(
           findingSearchScope(url.searchParams),
         ),
       );
+      return;
+    }
+    const dedupeGroups = /^\/v1\/finding\/([^/]+)\/dedupe-groups$/.exec(
+      url.pathname,
+    );
+    if (request.method === "GET" && dedupeGroups) {
+      console.log("GET /v1/finding/:id/dedupe-groups");
+      json(response, 200, await service.listDedupeGroups(dedupeGroups[1]!));
+      return;
+    }
+    if (route === "POST /v1/dedupe-groups") {
+      console.log(route);
+      const input = await readJson(request);
+      if (!validateDedupeGroups(input)) {
+        throw new FindingsError(
+          "invalid_request",
+          "Expected {groups: [[findingId, ...], ...]} with at least two distinct finding IDs per group.",
+        );
+      }
+      json(response, 201, await service.storeDedupeGroups(input.groups));
       return;
     }
     if (route === "POST /v1/bulk/findings") {

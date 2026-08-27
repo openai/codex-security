@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import type { DeduplicateScanResult } from "../src/deduplication/scan.js";
 import type { FindingsPage } from "../src/server/storage.js";
+import type { FindingDedupeGroup } from "../src/finding-dedupe-groups.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const container = "findings-ci";
 const compose = ["compose", "-p", container, "-f", "compose.findings.yaml"];
+const localRoot = await mkdtemp(join(tmpdir(), "findings-host-publish-"));
 let base: string;
 const document: FindingsDocument = JSON.parse(
   await readFile(
@@ -107,6 +110,62 @@ async function startService(): Promise<void> {
       await setTimeout(100);
     }
   }
+}
+
+async function checkHostPublication(): Promise<void> {
+  const installed = join(localRoot, "package");
+  docker([
+    "cp",
+    `${container}:/usr/local/lib/node_modules/@openai/codex-security`,
+    installed,
+  ]);
+  const scanDir = join(localRoot, "completed-scan");
+  await cp(
+    join(installed, "_bundled_plugin/examples/completed-scan"),
+    scanDir,
+    { recursive: true },
+  );
+  if (process.platform !== "win32") await chmod(scanDir, 0o700);
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(installed, "bin/codex-security.mjs"),
+      "publish",
+      "scan",
+      "--scan-dir",
+      scanDir,
+      "--to",
+      "custom",
+      "--findings-url",
+      base,
+      "--json",
+    ],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...process.env, CODEX_SECURITY_NO_UPDATE_NOTICE: "1" },
+    },
+  );
+  if (result.error) throw result.error;
+  assert.equal(
+    result.status,
+    0,
+    "The installed CLI must publish from the host to Docker",
+  );
+  assert.deepEqual(JSON.parse(result.stdout), {
+    scanId: manifest.scan.id,
+    repositoryId,
+    findingIds: [ids[0]],
+    findingCount: 1,
+  });
+  const response = await fetch(
+    `${base}/v1/finding/${ids[0]}/potential-duplicates?repositoryId=${repositoryId}`,
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    finding: example,
+    potentialDuplicates: [],
+  });
 }
 
 async function checkInsertions(): Promise<void> {
@@ -206,14 +265,32 @@ async function checkPages(): Promise<void> {
   }
 }
 
-function checkStorage(): void {
+function checkStorage(expectGroups = false): void {
   docker([
     "exec",
     container,
     "python3",
     "/test/findings-service-sqlite.py",
     JSON.stringify(ids),
+    ...(expectGroups ? ["--expect-groups"] : []),
   ]);
+}
+
+async function checkStoredGroups(): Promise<FindingDedupeGroup[]> {
+  let stored: FindingDedupeGroup[] = [];
+  for (const [index, id] of ids.entries()) {
+    const response = await fetch(`${base}/v1/finding/${id}/dedupe-groups`);
+    assert.equal(response.status, 200);
+    const groups = (await response.json()) as FindingDedupeGroup[];
+    if (index === 0) {
+      assert.equal(groups.length, 1, "Repeated dedupe must reuse the group");
+      assert.deepEqual(groups[0]!.findingIds, ids.slice(0, 3).sort());
+      stored = groups;
+    } else {
+      assert.deepEqual(groups, index < 3 ? stored : []);
+    }
+  }
+  return stored;
 }
 
 function checkReviews(): void {
@@ -264,16 +341,20 @@ let passed = false;
 try {
   docker([...compose, "build"]);
   await startService();
+  await checkHostPublication();
   await checkInsertions();
   await checkCandidates();
   await checkPages();
   checkStorage();
   checkCliDeduplication();
+  checkStorage(true);
+  const storedGroups = await checkStoredGroups();
   checkReviews();
   stopService();
   docker(["rm", container]);
   await startService();
-  checkStorage();
+  checkStorage(true);
+  assert.deepEqual(await checkStoredGroups(), storedGroups);
   await checkPages();
   await checkCandidates();
   stopService();
@@ -283,4 +364,5 @@ try {
   if (!passed) docker(["logs", container], { check: false });
   docker(["rm", "--force", container], { check: false });
   docker([...compose, "down", "--volumes"], { check: passed });
+  await rm(localRoot, { recursive: true, force: true });
 }

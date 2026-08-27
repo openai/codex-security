@@ -4,9 +4,11 @@ import {
   deduplicateScan,
   estimateScanCost,
   planComponents,
+  publishScanToCustom,
   runComponentScans,
   type ComponentScanOptions,
   type DeduplicateScanResult,
+  type CustomPublicationResult,
   type Finding,
   type ScanCost,
   type ScanOptions,
@@ -15,6 +17,16 @@ import {
   type ValidationOptions,
   type ValidationResult,
 } from "@openai/codex-security";
+
+export async function publishCustom(
+  scanDir: string,
+  signal: AbortSignal,
+): Promise<CustomPublicationResult> {
+  return await publishScanToCustom(scanDir, {
+    findingsUrl: "http://127.0.0.1:3000",
+    signal,
+  });
+}
 
 export async function dedupe(
   scanId: string,

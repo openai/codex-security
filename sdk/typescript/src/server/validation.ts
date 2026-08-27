@@ -8,6 +8,24 @@ import { FindingsError } from "./errors.js";
 
 export type FindingsRequest = { findings: Finding[]; repositoryId?: string };
 
+export const validateDedupeGroups = new Ajv2020().compile<{
+  groups: string[][];
+}>({
+  type: "object",
+  required: ["groups"],
+  properties: {
+    groups: {
+      type: "array",
+      items: {
+        type: "array",
+        minItems: 2,
+        uniqueItems: true,
+        items: { type: "string", minLength: 1 },
+      },
+    },
+  },
+});
+
 export async function findingsRequestValidator(): Promise<
   ValidateFunction<FindingsRequest>
 > {

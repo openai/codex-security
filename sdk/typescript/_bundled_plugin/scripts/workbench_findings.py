@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -139,6 +140,65 @@ def find_potential_duplicates(
             "finding": documents[finding_id],
             "potentialDuplicates": [documents[id] for id in selected_ids[1:]],
         }
+
+
+def store_dedupe_groups(
+    connection: sqlite3.Connection, groups: list[list[str]], timestamp: str
+) -> dict[str, Any]:
+    """Persist reviewed sets independently, including overlapping groups, in one transaction."""
+    stored: dict[str, dict[str, Any]] = {}
+    try:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for group in groups:
+                members = sorted(set(group))
+                # Membership, not input order, identifies a group on retries.
+                group_id = "fdg_" + hashlib.sha256(
+                    json.dumps(members, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                connection.execute(
+                    "INSERT INTO finding_dedupe_groups (id, created_at) VALUES (?, ?) "
+                    "ON CONFLICT(id) DO NOTHING",
+                    (group_id, timestamp),
+                )
+                connection.executemany(
+                    "INSERT INTO finding_dedupe_group_members (group_id, finding_id) VALUES (?, ?) "
+                    "ON CONFLICT(group_id, finding_id) DO NOTHING",
+                    ((group_id, finding_id) for finding_id in members),
+                )
+                created_at = connection.execute(
+                    "SELECT created_at FROM finding_dedupe_groups WHERE id = ?", (group_id,)
+                ).fetchone()[0]
+                stored[group_id] = {
+                    "groupId": group_id,
+                    "findingIds": members,
+                    "createdAt": created_at,
+                }
+    except sqlite3.IntegrityError:
+        return {"error": "finding_conflict"}
+    return {"groups": list(stored.values())}
+
+
+def list_dedupe_groups(connection: sqlite3.Connection, finding_id: str) -> dict[str, Any]:
+    groups: dict[str, dict[str, Any]] = {}
+    rows = connection.execute(
+        """
+        SELECT groups.id, groups.created_at, members.finding_id
+        FROM finding_dedupe_group_members AS matched
+        JOIN finding_dedupe_groups AS groups ON groups.id = matched.group_id
+        JOIN finding_dedupe_group_members AS members ON members.group_id = groups.id
+        WHERE matched.finding_id = ?
+        ORDER BY groups.created_at, groups.id, members.finding_id
+        """,
+        (finding_id,),
+    )
+    for row in rows:
+        group = groups.setdefault(
+            row["id"],
+            {"groupId": row["id"], "findingIds": [], "createdAt": row["created_at"]},
+        )
+        group["findingIds"].append(row["finding_id"])
+    return {"groups": list(groups.values())}
 
 
 def normalized_vector(vector: list[float]) -> list[float]:

@@ -27,6 +27,14 @@ export class FindingsService {
     return await this.store.findPotentialDuplicates(findingId, scope);
   }
 
+  async storeDedupeGroups(groups: readonly string[][]) {
+    return await this.store.storeDedupeGroups(groups);
+  }
+
+  async listDedupeGroups(findingId: string) {
+    return await this.store.listDedupeGroups(findingId);
+  }
+
   async list(page: { limit: number; offset: number }): Promise<FindingsPage> {
     return await this.store.list(page);
   }

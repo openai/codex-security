@@ -1322,6 +1322,8 @@ only available to explicit all-repository retrieval until imported with an ID.
 | `POST` | `/v1/bulk/findings`                     | HTTP 201 with an array of stored finding IDs, in request order                      |
 | `GET`  | `/v1/findings?limit=50&offset=0`        | HTTP 200 with a page of complete findings                                           |
 | `GET`  | `/v1/finding/{id}/potential-duplicates` | HTTP 200 with the stored finding and up to 50 potential duplicates, without vectors |
+| `POST` | `/v1/dedupe-groups`                     | HTTP 201 with the persisted duplicate groups                                        |
+| `GET`  | `/v1/finding/{id}/dedupe-groups`        | HTTP 200 with every stored group containing this finding                            |
 
 Bulk insertion generates embeddings and then writes the findings and vectors
 in one SQLite transaction. If embedding generation fails or a finding identity
@@ -1370,12 +1372,49 @@ loads complete documents only for the anchor and the selected top 50 candidates,
 all within the same read transaction.
 The API does not run Codex or decide whether candidates are duplicates.
 
+### Publishing to a custom findings service
+
+Publish a completed scan directly from the local CLI to the Docker service:
+
+```bash
+codex-security publish scan --scan SCAN_ID --to custom \
+  --findings-url http://localhost:3000 --json
+```
+
+`--findings-url` is required for `--to custom`, with no default. It is the
+service base URL, including `http://` or `https://`; the client appends
+`/v1/bulk/findings`, preserving any base path. A different endpoint must
+implement that API and return the stored finding IDs. The command sends the
+complete sealed findings and their manifest's `scan.target.targetId` as
+`repositoryId`, without changing scan artifacts or forwarding model credentials.
+The service creates embeddings and commits the batch before acknowledging it.
+
+The existing saved-scan selector, external `--scan-dir`, and interactive picker
+work with custom publication. Custom publication accepts one scan, not CSV
+input or Linear options. Add `--dry-run` to validate and preview the payload
+without making an HTTP request. Existing Linear and Cloud destinations are
+unchanged. Upload failures and incomplete receipts fail the command; uploads
+are not automatically retried because a lost response may have been committed.
+
+```typescript
+import { publishScanToCustom } from "@openai/codex-security";
+
+const receipt = await publishScanToCustom("/path/to/completed-scan", {
+  findingsUrl: "http://localhost:3000",
+  // dryRun: true,
+  // signal: controller.signal,
+});
+console.log(receipt.repositoryId, receipt.findingIds);
+```
+
 ### Deduplication from the SDK and CLI
 
-Import the scan's findings with their `repositoryId` through the bulk API before deduplicating. The
+Publish the scan with `--to custom` (or import it through the bulk API with its
+`repositoryId`) before deduplicating. The
 workflow reads a completed saved scan, queries candidates by finding ID, and
-runs Luna and Sol in the calling SDK/CLI process. It does not upload findings,
-change scan artifacts, or write grouping results to the service.
+runs Luna and Sol in the calling SDK/CLI process. Once all reviews succeed,
+it posts accepted groups to the service. It does not re-upload findings or
+change scan artifacts.
 
 ```bash
 codex-security dedupe --scan SCAN_ID --findings-url http://127.0.0.1:3000 --json
@@ -1420,7 +1459,41 @@ accepted duplicate groups are collapsed. A representative can be an existing
 stored finding outside the scan. Each `duplicateGroups` entry contains all
 members of an accepted group, with its canonical finding first. The canonical
 has the highest reported severity; ties use finding ID. Results do not delete,
-merge, or change stored findings, and are not saved as durable group assignments.
+merge, or change stored finding documents. Accepted groups are saved as durable
+associations in the service before `deduplicationStatus` becomes `completed`.
+
+### Stored duplicate groups
+
+`POST /v1/dedupe-groups` accepts a batch of explicitly reviewed member sets:
+
+```json
+{
+  "groups": [
+    ["csf_000000000000000000000001", "csf_000000000000000000000002"],
+    ["csf_000000000000000000000002", "csf_000000000000000000000003"]
+  ]
+}
+```
+
+Each group must contain at least two distinct, existing finding IDs. The entire
+batch is committed in one transaction; a missing finding returns HTTP 409 and
+writes none of the batch. A response contains `groupId`, `findingIds`, and
+`createdAt` for each group. Group identity depends on membership, not member
+order, so submitting the same set again returns its original ID and timestamp.
+
+SQLite stores groups in `finding_dedupe_groups` and memberships in
+`finding_dedupe_group_members`. A finding may belong to multiple groups:
+`[A, B]`, `[B, C]`, and `[C, A]` are three separate reviewed sets. Overlapping
+groups are not automatically united or promoted into an unreviewed larger
+group. Stored members are sorted by ID; their order does not designate a
+canonical. The CLI result retains its existing canonical-first ordering.
+
+`GET /v1/finding/{id}/dedupe-groups` returns every group containing that finding,
+including each group's full membership, or `[]` if it has no groups. These
+associations do not rewrite original findings, fingerprints, scan artifacts,
+embeddings, or external tickets. They do not require an embedding API key or
+trigger model calls. Review-generated merged findings remain review outputs;
+they do not replace stored documents.
 
 ### Deduplication workflow
 
@@ -1436,6 +1509,8 @@ merge, or change stored findings, and are not saved as durable group assignments
 4. Independently review every connected group larger than two with the same
    Sol settings. A rejected group is kept entirely separate; the workflow does
    not infer smaller groups from a rejected transitive chain.
+5. Post all accepted groups to `/v1/dedupe-groups`. Return a completed result
+   only after the service accepts the write. An empty result requires no write.
 
 Each review uses a fresh, ephemeral Codex app-server thread with the complete
 original finding records, not earlier model rationales, vector scores, or
@@ -1462,10 +1537,12 @@ Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
 credentials are not sent to the findings API. Larger scans can take time and
 incur multiple model calls per finding. Empty scans and findings without
 eligible neighbors do not invoke review models. `completed` means this
-retrieval and review process completed, not that every possible pair in the
-database was compared or that model decisions are infallible. An API or review
+retrieval, review, and group persistence completed, not that every possible pair in the
+database was compared or that model decisions are infallible. An API, review, or write-back
 failure fails the command without claiming a completed result. Retry after
-fixing the failure; stored findings remain unchanged. The CLI supports Ctrl-C
+fixing the failure; stored findings remain unchanged. A lost write-back response
+may have committed groups; retrying the same memberships does not duplicate
+them. Failed or interrupted reviews write no groups. The CLI supports Ctrl-C
 and SIGTERM, and the SDK accepts an `AbortSignal`.
 
 ### Listing and errors
@@ -1490,8 +1567,8 @@ without embedding vectors. Legacy identities without a complete document are
 not included. Pagination reflects current database contents, not a snapshot
 held between HTTP requests.
 
-Malformed JSON, invalid finding objects, repository metadata, scopes, and pagination return HTTP
-400 (`invalid_request`). Identity conflicts return 409 (`finding_conflict`),
+Malformed JSON, invalid finding objects, repository metadata, groups, scopes, and pagination return HTTP
+400 (`invalid_request`). Identity conflicts or missing dedupe group members return 409 (`finding_conflict`),
 embedding provider failures or unusable vectors return 502 (`embedding_failed`),
 and missing embedding credentials return 503 (`embedding_unavailable`). A
 potential-duplicates query without a current embedding returns 404

@@ -29,6 +29,13 @@ with sqlite3.connect("/state/workbench.sqlite3") as db:
         + [("synthetic-other", imported_ids[3])]
     )
 
+    if "--expect-groups" in sys.argv:
+        assert db.execute("SELECT COUNT(*) FROM finding_dedupe_groups").fetchone()[0] == 1
+        members = db.execute(
+            "SELECT finding_id FROM finding_dedupe_group_members ORDER BY finding_id"
+        ).fetchall()
+        assert [row[0] for row in members] == sorted(imported_ids[:3])
+
     if "--prepare-scan" in sys.argv:
         source_dir = Path("/state/smoke-source")
         source_dir.mkdir(exist_ok=True)
