@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
+import type { LinearClientFactory } from "../src/linear.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
 const CURRENT_REPOSITORY = resolve("/current/repository");
@@ -239,6 +240,150 @@ describe("scan and patch workflow", () => {
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(outcome.stderr).toContain("Patch risk assessment:");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("creates a draft pull request with the Linear patch-risk summary", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-linear-patch-pr-"),
+    );
+    const repository = join(directory, "repository");
+    const remote = join(directory, "remote.git");
+    const url = "https://github.example.test/example/repository/pull/17";
+    const expectedBody = [
+      "Applies a security fix generated for SEC-123.",
+      "",
+      "## Patch risk assessment",
+      "",
+      patchRiskSummary(),
+    ].join("\n");
+    let pullRequestArguments: readonly string[] = [];
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repository,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+
+    try {
+      await mkdir(join(repository, "src"), { recursive: true });
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("config", "commit.gpgsign", "false");
+      await writeFile(join(repository, "src", "checkout-hook.sh"), "unsafe\n");
+      git("add", "--", ".");
+      git("commit", "-m", "Initial synthetic checkout");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      git("push", "--set-upstream", "origin", "main");
+
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "--linear-issue",
+          "SEC-123",
+          "--linear-api-key",
+          "lin_api_SYNTHETIC",
+          "--assess-patch-risk",
+          "--create-pr",
+        ],
+        {
+          currentDirectory: repository,
+          linearClient: () =>
+            ({
+              issue: async () => ({
+                identifier: "SEC-123",
+                title: "Synthetic checkout hook issue",
+                description:
+                  "The trusted checkout hook resolves an untrusted module.",
+                url: "https://linear.app/example/issue/SEC-123",
+                comments: async () => ({
+                  nodes: [],
+                  pageInfo: { hasNextPage: false },
+                  fetchNext: async () => undefined,
+                }),
+              }),
+            }) as unknown as ReturnType<LinearClientFactory>,
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              ) as { changedFiles: string[]; path: string };
+              expect(artifact.changedFiles).toEqual(["src/checkout-hook.sh"]);
+              expect(await readFile(artifact.path, "utf8")).toContain("+safe");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            expect(output?.appServer?.prompt).toContain("SEC-123");
+            await writeFile(
+              join(repository, "src", "checkout-hook.sh"),
+              "safe\n",
+            );
+            output?.stdout.write("Patch complete.");
+            return 0;
+          },
+          onRepositoryCommand: (
+            command,
+            args,
+            workingDirectory,
+            commandOptions,
+          ) => {
+            expect(workingDirectory).toBe(repository);
+            if (command === "git") {
+              const result = execFileSync("git", args, {
+                cwd: repository,
+                encoding: "utf8",
+                env: { ...process.env, ...commandOptions?.environment },
+                stdio: ["ignore", "pipe", "pipe"],
+              });
+              return commandOptions?.trim === false ? result : result.trim();
+            }
+            if (args[1] === "list") return "";
+            pullRequestArguments = args;
+            return url;
+          },
+        },
+      );
+
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(git("branch", "--show-current")).toBe(
+        "codex-security/patch-SEC-123",
+      );
+      expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
+        "src/checkout-hook.sh",
+      );
+      expect(git("rev-parse", "HEAD")).toBe(
+        git("rev-parse", "origin/codex-security/patch-SEC-123"),
+      );
+      expect(pullRequestArguments).toEqual([
+        "pr",
+        "create",
+        "--draft",
+        "--head",
+        "codex-security/patch-SEC-123",
+        "--title",
+        "fix: patch verified security findings",
+        "--body",
+        expectedBody,
+      ]);
+      expect(outcome.stderr).toContain("Patch risk assessment:");
+      expect(outcome.stderr).toContain(`Pull request: ${url}`);
+      expect(pullRequestArguments.at(-1)).not.toContain("schemaVersion");
+      expect(pullRequestArguments.at(-1)).not.toContain(
+        "codex-security:patch-risk-summary",
+      );
+      expect(pullRequestArguments.at(-1)).not.toContain(
+        "trusted checkout hook",
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -1369,19 +1514,54 @@ describe("scan and patch workflow", () => {
     expect(outcome.stderr).toContain("--patch-severity requires --patch");
   });
 
-  test("requires verified patching before creating a pull request", async () => {
+  test("requires patching and a clean supplied-issue checkout before creating a pull request", async () => {
     const scan = await runWorkflow(["scan", "--create-pr"]);
     expect(scan.exitCode).toBe(2);
     expect(scan.stderr).toContain("--create-pr requires --patch");
 
-    const literal = await runWorkflow([
-      "patch",
-      "Synthetic security issue",
-      "--create-pr",
-    ]);
-    expect(literal.exitCode).toBe(2);
-    expect(literal.stderr).toContain(
-      "--create-pr requires a saved finding identifier or --scan",
-    );
+    const directory = await mkdtemp(join(tmpdir(), "codex-security-dirty-pr-"));
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: directory,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    try {
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(directory, "app.ts"), "original\n");
+      git("add", "--", "app.ts");
+      git("commit", "-m", "Initial synthetic checkout");
+      await writeFile(join(directory, "app.ts"), "user change\n");
+      let started = false;
+      const literal = await runWorkflow(
+        ["patch", "Synthetic security issue", "--create-pr"],
+        {
+          currentDirectory: directory,
+          onCodex: () => {
+            started = true;
+            return 0;
+          },
+          onRepositoryCommand: (command, args, workingDirectory, options) => {
+            expect(command).toBe("git");
+            const result = execFileSync("git", args, {
+              cwd: workingDirectory,
+              encoding: "utf8",
+              env: { ...process.env, ...options?.environment },
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            return options?.trim === false ? result : result.trim();
+          },
+        },
+      );
+      expect(literal.exitCode).toBe(2);
+      expect(literal.stderr).toContain(
+        "Pull request creation for supplied issues requires a clean working tree.",
+      );
+      expect(started).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

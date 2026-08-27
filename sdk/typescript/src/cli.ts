@@ -103,6 +103,7 @@ import {
 } from "./github.js";
 import {
   importLinearIssues,
+  isLinearIssueIdentifier,
   resolveLinearApiKey,
   type ImportedIssue,
   type LinearClientFactory,
@@ -3951,8 +3952,9 @@ export async function main(
             const pullRequest =
               options.createPr && exitCode === 0
                 ? await createPatchPullRequest(
-                    selected,
-                    patches,
+                    selected.repository,
+                    selected.scanId,
+                    verifiedPatchFiles(selected, patches),
                     errorOutput,
                     dependencies,
                     patchRisk?.summary,
@@ -3979,11 +3981,6 @@ export async function main(
           if (options.severity !== undefined) {
             throw new CodexSecurityError(
               "--severity requires a saved finding identifier or --scan.",
-            );
-          }
-          if (options.createPr) {
-            throw new CodexSecurityError(
-              "--create-pr requires a saved finding identifier or --scan.",
             );
           }
           if (format === "json" || format === "jsonl") {
@@ -4014,9 +4011,17 @@ export async function main(
                   ),
                 );
           const repository = dependencies.currentDirectory();
-          const patchRiskBase = options.assessPatchRisk
-            ? await snapshotPatchTree(repository, dependencies)
-            : undefined;
+          const patchBase =
+            options.assessPatchRisk || options.createPr
+              ? await snapshotPatchTree(repository, dependencies)
+              : undefined;
+          if (options.createPr) {
+            await requireCleanPatchPullRequestBase(
+              repository,
+              patchBase!,
+              dependencies,
+            );
+          }
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
@@ -4027,17 +4032,39 @@ export async function main(
             dependencies,
             { environment },
           );
-          if (options.assessPatchRisk && exitCode === 0) {
-            await runPatchRiskAssessment(
-              {
-                repository,
-                base: patchRiskBase!,
-                codexOverrides: options.codex,
-                effort: options.effort,
-              },
-              errorOutput,
+          if (patchBase !== undefined && exitCode === 0) {
+            const files = await changedPatchFiles(
+              repository,
+              patchBase,
               dependencies,
             );
+            const patchRisk = options.assessPatchRisk
+              ? await runPatchRiskAssessment(
+                  {
+                    repository,
+                    base: patchBase,
+                    files,
+                    codexOverrides: options.codex,
+                    effort: options.effort,
+                  },
+                  errorOutput,
+                  dependencies,
+                )
+              : undefined;
+            if (options.createPr) {
+              const identifier = directPatchIdentifier(positionals, imports);
+              await createPatchPullRequest(
+                repository,
+                identifier ?? directPatchDigest(positionals, imports),
+                files,
+                errorOutput,
+                dependencies,
+                patchRisk?.summary,
+                identifier === undefined
+                  ? "Applies a security fix generated from supplied issue data."
+                  : `Applies a security fix generated for ${identifier}.`,
+              );
+            }
           }
         } catch (error) {
           exitCode = 2;
@@ -4925,15 +4952,38 @@ function patchPullRequestBodyKey(branch: string): string {
   return `branch.${branch}.codexSecurityPatchPullRequestBody`;
 }
 
-function patchPullRequestBody(patchRiskSummary?: string): string {
-  if (patchRiskSummary === undefined) return PATCH_PR_BODY;
+function patchPullRequestBody(
+  patchRiskSummary?: string,
+  introduction = PATCH_PR_BODY,
+): string {
+  if (patchRiskSummary === undefined) return introduction;
   const summary = safePatchReport(patchRiskSummary);
   if (!summary) {
     throw new CodexSecurityError(
       "Patch risk assessment returned an empty pull request summary.",
     );
   }
-  return `${PATCH_PR_BODY}\n\n## Patch risk assessment\n\n${summary}`;
+  return `${introduction}\n\n## Patch risk assessment\n\n${summary}`;
+}
+
+function directPatchIdentifier(
+  positionals: readonly string[],
+  imports: readonly ImportedIssue[],
+): string | undefined {
+  if (imports.length === 1) return imports[0]!.id;
+  if (imports.length > 1 || positionals.length !== 1) return;
+  const candidate = parse(positionals[0]!).name;
+  return isLinearIssueIdentifier(candidate) ? candidate : undefined;
+}
+
+function directPatchDigest(
+  positionals: readonly string[],
+  imports: readonly ImportedIssue[],
+): string {
+  return `issues-${createHash("sha256")
+    .update(JSON.stringify([...positionals, ...imports.map(({ id }) => id)]))
+    .digest("hex")
+    .slice(0, 12)}`;
 }
 
 async function publishPatchBranch(
@@ -5045,22 +5095,23 @@ function verifiedPatchFiles(
 }
 
 async function createPatchPullRequest(
-  selected: SelectedFindings,
-  patches: readonly FindingPatch[],
+  repository: string,
+  patchId: string,
+  files: readonly string[],
   stderr: Writable,
   dependencies: CliDependencies,
   patchRiskSummary?: string,
+  introduction = PATCH_PR_BODY,
 ): Promise<{ branch: string; url: string } | undefined> {
-  const files = verifiedPatchFiles(selected, patches);
   if (files.length === 0) {
     stderr.write("No verified patch changes to publish.\n");
     return;
   }
 
-  const branch = `codex-security/patch-${selected.scanId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
-  const body = patchPullRequestBody(patchRiskSummary);
+  const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
+  const body = patchPullRequestBody(patchRiskSummary, introduction);
   const run = (command: "git" | "gh", args: string[]) =>
-    dependencies.runRepositoryCommand(command, args, selected.repository);
+    dependencies.runRepositoryCommand(command, args, repository);
   stderr.write(
     "Creating a draft GitHub pull request for verified patches...\n",
   );
@@ -5083,13 +5134,39 @@ async function createPatchPullRequest(
     patchPullRequestBodyKey(branch),
     body,
   ]);
-  return publishPatchBranch(
-    selected.repository,
-    branch,
-    body,
-    stderr,
-    dependencies,
+  return publishPatchBranch(repository, branch, body, stderr, dependencies);
+}
+
+async function requireCleanPatchPullRequestBase(
+  repository: string,
+  base: string,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const head = await dependencies.runRepositoryCommand(
+    "git",
+    ["rev-parse", "HEAD^{tree}"],
+    repository,
   );
+  if (base !== head) {
+    throw new CodexSecurityError(
+      "Pull request creation for supplied issues requires a clean working tree.",
+    );
+  }
+}
+
+async function changedPatchFiles(
+  repository: string,
+  base: string,
+  dependencies: CliDependencies,
+): Promise<string[]> {
+  const head = await snapshotPatchTree(repository, dependencies);
+  const output = await dependencies.runRepositoryCommand(
+    "git",
+    ["--literal-pathspecs", "diff", "--name-only", "-z", base, head],
+    repository,
+    { trim: false },
+  );
+  return output.split("\0").filter(Boolean);
 }
 
 function safePatchText(value: string): string {
@@ -6818,8 +6895,9 @@ async function executeScan(
         patchExitCode(patches) === 0
       ) {
         const pullRequest = await createPatchPullRequest(
-          selected,
-          patches,
+          selected.repository,
+          selected.scanId,
+          verifiedPatchFiles(selected, patches),
           errorOutput,
           dependencies,
         );
