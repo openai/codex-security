@@ -12,9 +12,10 @@ published here through a one-way mirror. The plugin source under
 source, and it is mirrored one way into OpenAI's internal repository.
 
 The npm runtime under `sdk/typescript/_bundled_plugin/` is generated from the
-plugin source during build and release. Do not edit or commit files in that
-directory. See the [SDK testing guide](sdk/typescript/TESTING.md) for the
-generation and validation commands.
+plugin source by `pnpm run build:plugin` and automatically during `prepack` for
+packages and releases. Do not edit or commit files in that directory. See the
+[SDK testing guide](sdk/typescript/TESTING.md) for the generation and validation
+commands.
 
 Search [existing issues](https://github.com/openai/codex-security/issues)
 before opening a new one. We can't import pull requests that change mirrored
