@@ -1,7 +1,5 @@
 import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 
-export const POLL_INTERVAL_MS = 5_000;
-
 /** Poll immediately and every five seconds, without overlapping requests. */
 export function pollDashboard(
   read: (signal: AbortSignal) => Promise<DashboardSnapshot>,
@@ -24,7 +22,7 @@ export function pollDashboard(
     }
   }
   void refresh();
-  const timer = clock.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+  const timer = clock.setInterval(() => void refresh(), 5_000);
   return () => {
     controller.abort();
     clock.clearInterval(timer);

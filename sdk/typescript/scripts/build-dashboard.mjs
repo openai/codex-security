@@ -33,18 +33,14 @@ const built = await build({
         builder.onLoad(
           { filter: /dashboard[/\\]styles\.css$/ },
           async ({ path }) => {
-            const css = await postcss([
-              tailwindcss({ base: root }),
-              {
-                postcssPlugin: "local-dashboard-fonts",
-                // The dashboard uses system fonts, not the design system's remote math fonts.
-                OnceExit(root) {
-                  root.walkAtRules("font-face", (rule) => rule.remove());
-                },
-              },
-            ]).process(await readFile(path, "utf8"), { from: path });
+            const css = await postcss([tailwindcss({ base: root })]).process(
+              await readFile(path, "utf8"),
+              { from: path },
+            );
+            // Use system fonts instead of the design system's remote math fonts.
+            css.root.walkAtRules("font-face", (rule) => rule.remove());
             return {
-              contents: css.css,
+              contents: css.root.toString(),
               loader: "css",
               resolveDir: dirname(path),
             };

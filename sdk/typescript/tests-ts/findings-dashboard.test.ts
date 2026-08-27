@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { pollDashboard, POLL_INTERVAL_MS } from "../dashboard/polling.js";
+import { pollDashboard } from "../dashboard/polling.js";
 import type { DashboardSnapshot } from "../src/server/dashboard-types.js";
 
 const snapshot: DashboardSnapshot = {
@@ -55,7 +55,6 @@ test("dashboard polls immediately and every five seconds without overlapping req
   try {
     expect(calls).toHaveLength(1);
     expect(timer.interval()).toBe(5_000);
-    expect(POLL_INTERVAL_MS).toBe(5_000);
     timer.tick();
     expect(calls).toHaveLength(1);
     resolve(snapshot);
@@ -73,7 +72,7 @@ test("dashboard polls immediately and every five seconds without overlapping req
   expect(received).toHaveLength(1);
 });
 
-test("dashboard preserves prior data on errors and retries on the next polling tick", async () => {
+test("dashboard reports refresh errors and retries on the next polling tick", async () => {
   const timer = clock();
   const received: DashboardSnapshot[] = [];
   const errors: unknown[] = [];

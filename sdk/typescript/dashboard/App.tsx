@@ -423,26 +423,16 @@ function Inspector({
           </section>
           {(
             [
-              "writeup",
-              "codeEvidence",
-              "remediation",
-              "validation",
-              "attackPath",
+              ["writeup", "Writeup"],
+              ["codeEvidence", "Code evidence"],
+              ["remediation", "Remediation"],
+              ["validation", "Validation"],
+              ["attackPath", "Attack path"],
             ] as const
-          ).map((key) =>
+          ).map(([key, title]) =>
             finding[key] != null ? (
               <section className="detail-section" key={key}>
-                <h3>
-                  {
-                    {
-                      writeup: "Writeup",
-                      codeEvidence: "Code evidence",
-                      remediation: "Remediation",
-                      validation: "Validation",
-                      attackPath: "Attack path",
-                    }[key]
-                  }
-                </h3>
+                <h3>{title}</h3>
                 <FindingContent value={finding[key]} />
               </section>
             ) : null,

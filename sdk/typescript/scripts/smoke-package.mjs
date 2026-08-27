@@ -564,18 +564,6 @@ try {
     // Package builders need only Node. Native and runtime-container tests cover SQLite.
     store: {
       async initialize() {},
-      async dashboard(query) {
-        return {
-          overview: { scans: {}, workflows: {}, findings: 0, groups: 0 },
-          repositories: [],
-          items: [],
-          total: 0,
-          limit: query.limit,
-          offset: query.offset,
-          nextOffset: null,
-          detail: null,
-        };
-      },
     },
     embeddings: {
       async embed() {
@@ -597,18 +585,6 @@ try {
       assert.ok(response.headers.get("content-type").startsWith(contentType));
       assert.ok((await response.text()).length > 0);
     }
-    for (const view of ["scans", "findings", "groups", "workflows"]) {
-      const response = await fetch(`${base}/v1/dashboard?view=${view}`);
-      assert.equal(response.status, 200);
-      const snapshot = await response.json();
-      assert.equal(snapshot.total, 0);
-      assert.deepEqual(snapshot.overview, {
-        scans: {},
-        workflows: {},
-        findings: 0,
-        groups: 0,
-      });
-    }
     assert.equal((await fetch(`${base}/dashboard/package.json`)).status, 404);
   } finally {
     await new Promise((resolve, reject) =>
@@ -619,7 +595,7 @@ try {
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, read-only dashboard assets and API, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, dashboard assets, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {

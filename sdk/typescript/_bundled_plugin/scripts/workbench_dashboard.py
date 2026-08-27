@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from workbench_findings import list_dedupe_groups
+from workbench_finding_workflows import read_workflow
 
 
 SCAN_RECORDS = """
@@ -25,24 +26,24 @@ FROM scans LEFT JOIN scan_progress AS progress ON progress.scan_id = scans.id
 
 WORKFLOW_RECORDS = """
 SELECT workflows.id, workflows.id AS title,
-    CASE WHEN COALESCE(scans.target_id, json_extract(state_json, '$.scope.repositoryId'),
-                       scans.target_path, json_extract(state_json, '$.repositoryPath')) IS NULL
+    CASE WHEN COALESCE(scans.target_id, workflows.scope_repository_id,
+                       scans.target_path, workflows.repository_path) IS NULL
          THEN '[]' ELSE json_array(COALESCE(scans.target_id,
-             json_extract(state_json, '$.scope.repositoryId'), scans.target_path,
-             json_extract(state_json, '$.repositoryPath'))) END AS repositoryIds,
-    COALESCE(scans.target_path, json_extract(state_json, '$.repositoryPath')) AS repositoryPath,
-    json_extract(state_json, '$.scanId') AS scanId, scans.mode,
-    json_extract(state_json, '$.stages.' || stage || '.status') AS status, stage,
+             workflows.scope_repository_id, scans.target_path, workflows.repository_path)) END AS repositoryIds,
+    COALESCE(scans.target_path, workflows.repository_path) AS repositoryPath,
+    workflows.scan_id AS scanId, scans.mode,
+    CASE stage WHEN 'scan' THEN scan_status WHEN 'publish' THEN publish_status
+         ELSE dedupe_status END AS status, stage,
     workflows.created_at AS createdAt, workflows.updated_at AS updatedAt,
     CASE WHEN scans.id IS NOT NULL AND scans.status = 'complete' THEN
         (SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = scans.id) END AS findingCount,
-    json_extract(state_json, '$.stages.publish.result.findingCount') AS publishedCount,
-    json_array_length(json_extract(state_json, '$.stages.dedupe.result.uniqueFindingIds')) AS uniqueCount
+    json_extract(results_json, '$.publish.findingCount') AS publishedCount,
+    json_array_length(json_extract(results_json, '$.dedupe.uniqueFindingIds')) AS uniqueCount
 FROM (
-    SELECT *, CASE WHEN json_extract(state_json, '$.stages.scan.status') != 'completed' THEN 'scan'
-        WHEN json_extract(state_json, '$.stages.publish.status') != 'completed' THEN 'publish'
+    SELECT *, CASE WHEN scan_status != 'completed' THEN 'scan'
+        WHEN publish_status != 'completed' THEN 'publish'
         ELSE 'dedupe' END AS stage FROM finding_workflows
-) AS workflows LEFT JOIN scans ON scans.id = json_extract(state_json, '$.scanId')
+) AS workflows LEFT JOIN scans ON scans.id = workflows.scan_id
 """
 
 FINDING_RECORDS = """
@@ -107,7 +108,7 @@ def scan_detail(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any] 
             (scan_id,),
         )],
         "workflowIds": [r[0] for r in connection.execute(
-            "SELECT id FROM finding_workflows WHERE json_extract(state_json, '$.scanId') = ? ORDER BY id",
+            "SELECT id FROM finding_workflows WHERE scan_id = ? ORDER BY id",
             (scan_id,),
         )],
     }
@@ -119,9 +120,7 @@ def detail(connection: sqlite3.Connection, view: str, selected: dict[str, Any]) 
     if view == "scans":
         result["scan"] = scan_detail(connection, selected_id)
     elif view == "workflows":
-        state = json.loads(connection.execute(
-            "SELECT state_json FROM finding_workflows WHERE id = ?", (selected_id,),
-        ).fetchone()[0])
+        state = read_workflow(connection, selected_id)
         result["workflow"] = state
         scan = scan_detail(connection, state["scanId"]) if state.get("scanId") else None
         if scan is not None:
@@ -184,10 +183,8 @@ def dashboard(connection: sqlite3.Connection, query: dict[str, Any]) -> dict[str
                 SELECT repository_id, COALESCE(targets.display_name, repository_id)
                 FROM finding_repositories LEFT JOIN security_targets AS targets ON targets.id = repository_id
                 UNION ALL
-                SELECT COALESCE(json_extract(state_json, '$.scope.repositoryId'),
-                                json_extract(state_json, '$.repositoryPath')),
-                       COALESCE(json_extract(state_json, '$.repositoryPath'),
-                                json_extract(state_json, '$.scope.repositoryId'))
+                SELECT COALESCE(scope_repository_id, repository_path),
+                       COALESCE(repository_path, scope_repository_id)
                 FROM finding_workflows
             ) WHERE id IS NOT NULL GROUP BY id ORDER BY label, id
         """).fetchall()
